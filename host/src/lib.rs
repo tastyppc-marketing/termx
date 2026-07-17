@@ -1,8 +1,8 @@
-pub mod paths;
 pub mod config;
-pub mod ring;
-pub mod protocol;
+pub mod paths;
 pub mod profiles;
-pub mod session;
+pub mod protocol;
 pub mod registry;
+pub mod ring;
 pub mod server;
+pub mod session;

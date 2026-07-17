@@ -10,14 +10,34 @@ pub type SessionId = u32;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
-    Auth { token: String },
-    CreateSession { profile: Option<String>, cwd: Option<String>, cols: u16, rows: u16 },
-    Attach { session_id: SessionId, replay: bool },
-    Detach { session_id: SessionId },
-    Resize { session_id: SessionId, cols: u16, rows: u16 },
-    CloseSession { session_id: SessionId },
+    Auth {
+        token: String,
+    },
+    CreateSession {
+        profile: Option<String>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
+    Attach {
+        session_id: SessionId,
+        replay: bool,
+    },
+    Detach {
+        session_id: SessionId,
+    },
+    Resize {
+        session_id: SessionId,
+        cols: u16,
+        rows: u16,
+    },
+    CloseSession {
+        session_id: SessionId,
+    },
     ListSessions,
-    SetLayout { layout: serde_json::Value },
+    SetLayout {
+        layout: serde_json::Value,
+    },
     GetState,
     Shutdown,
 }
@@ -25,15 +45,39 @@ pub enum ClientMsg {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostMsg {
-    AuthOk { version: String, sessions: Vec<SessionInfo> },
-    AuthErr { reason: String },
-    SessionCreated { info: SessionInfo },
-    Replay { session_id: SessionId, start_offset: u64, data_b64: String },
-    SessionExited { session_id: SessionId, exit_code: Option<u32> },
-    SessionClosed { session_id: SessionId },
-    Sessions { sessions: Vec<SessionInfo> },
-    State { layout: serde_json::Value, sessions: Vec<SessionInfo> },
-    Error { context: String, message: String },
+    AuthOk {
+        version: String,
+        sessions: Vec<SessionInfo>,
+    },
+    AuthErr {
+        reason: String,
+    },
+    SessionCreated {
+        info: SessionInfo,
+    },
+    Replay {
+        session_id: SessionId,
+        start_offset: u64,
+        data_b64: String,
+    },
+    SessionExited {
+        session_id: SessionId,
+        exit_code: Option<u32>,
+    },
+    SessionClosed {
+        session_id: SessionId,
+    },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+    },
+    State {
+        layout: serde_json::Value,
+        sessions: Vec<SessionInfo>,
+    },
+    Error {
+        context: String,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,8 +92,15 @@ pub struct SessionInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Frame {
-    Output { session_id: SessionId, offset: u64, data: Vec<u8> },
-    Input { session_id: SessionId, data: Vec<u8> },
+    Output {
+        session_id: SessionId,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Input {
+        session_id: SessionId,
+        data: Vec<u8>,
+    },
 }
 
 const TAG_OUTPUT: u8 = 1;
@@ -57,7 +108,11 @@ const TAG_INPUT: u8 = 2;
 
 pub fn encode_frame(f: &Frame) -> Vec<u8> {
     match f {
-        Frame::Output { session_id, offset, data } => {
+        Frame::Output {
+            session_id,
+            offset,
+            data,
+        } => {
             let mut buf = Vec::with_capacity(13 + data.len());
             buf.push(TAG_OUTPUT);
             buf.extend_from_slice(&session_id.to_le_bytes());
@@ -116,10 +171,18 @@ mod tests {
             rows: 30,
         };
         let text = serde_json::to_string(&m).unwrap();
-        assert!(text.contains(r#""type":"create_session""#), "tagged snake_case: {text}");
+        assert!(
+            text.contains(r#""type":"create_session""#),
+            "tagged snake_case: {text}"
+        );
         let back: ClientMsg = serde_json::from_str(&text).unwrap();
         match back {
-            ClientMsg::CreateSession { profile, cols, rows, cwd } => {
+            ClientMsg::CreateSession {
+                profile,
+                cols,
+                rows,
+                cwd,
+            } => {
                 assert_eq!(profile.as_deref(), Some("powershell"));
                 assert_eq!((cols, rows), (120, 30));
                 assert!(cwd.is_none());
@@ -130,11 +193,17 @@ mod tests {
 
     #[test]
     fn host_msg_json_round_trip() {
-        let m = HostMsg::SessionExited { session_id: 7, exit_code: Some(0) };
+        let m = HostMsg::SessionExited {
+            session_id: 7,
+            exit_code: Some(0),
+        };
         let text = serde_json::to_string(&m).unwrap();
         let back: HostMsg = serde_json::from_str(&text).unwrap();
         match back {
-            HostMsg::SessionExited { session_id, exit_code } => {
+            HostMsg::SessionExited {
+                session_id,
+                exit_code,
+            } => {
                 assert_eq!(session_id, 7);
                 assert_eq!(exit_code, Some(0));
             }
@@ -144,11 +213,19 @@ mod tests {
 
     #[test]
     fn output_frame_round_trip() {
-        let f = Frame::Output { session_id: 42, offset: 1_000_000, data: b"hi\r\n".to_vec() };
+        let f = Frame::Output {
+            session_id: 42,
+            offset: 1_000_000,
+            data: b"hi\r\n".to_vec(),
+        };
         let buf = encode_frame(&f);
         assert_eq!(buf[0], 1);
         match decode_frame(&buf).unwrap() {
-            Frame::Output { session_id, offset, data } => {
+            Frame::Output {
+                session_id,
+                offset,
+                data,
+            } => {
                 assert_eq!(session_id, 42);
                 assert_eq!(offset, 1_000_000);
                 assert_eq!(data, b"hi\r\n");
@@ -159,7 +236,10 @@ mod tests {
 
     #[test]
     fn input_frame_round_trip() {
-        let f = Frame::Input { session_id: 3, data: b"dir\r".to_vec() };
+        let f = Frame::Input {
+            session_id: 3,
+            data: b"dir\r".to_vec(),
+        };
         let buf = encode_frame(&f);
         assert_eq!(buf[0], 2);
         match decode_frame(&buf).unwrap() {

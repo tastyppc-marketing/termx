@@ -13,13 +13,21 @@ pub struct RingBuffer {
 impl RingBuffer {
     pub fn new(cap: usize) -> Self {
         assert!(cap > 0, "ring cap must be positive");
-        Self { buf: VecDeque::with_capacity(cap.min(64 * 1024)), cap, total_written: 0 }
+        Self {
+            buf: VecDeque::with_capacity(cap.min(64 * 1024)),
+            cap,
+            total_written: 0,
+        }
     }
 
     pub fn push(&mut self, data: &[u8]) {
         self.total_written += data.len() as u64;
         // Only the last `cap` bytes of `data` can survive; skip the rest cheaply.
-        let keep = if data.len() > self.cap { &data[data.len() - self.cap..] } else { data };
+        let keep = if data.len() > self.cap {
+            &data[data.len() - self.cap..]
+        } else {
+            data
+        };
         let overflow = (self.buf.len() + keep.len()).saturating_sub(self.cap);
         self.buf.drain(..overflow);
         self.buf.extend(keep);

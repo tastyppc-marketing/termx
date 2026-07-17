@@ -46,7 +46,12 @@ impl Session {
     ) -> Result<Session> {
         let pty = native_pty_system();
         let pair = pty
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .context("openpty")?;
 
         let mut cmd = CommandBuilder::new(profile.command.as_os_str());
@@ -145,7 +150,12 @@ impl Session {
         self.master
             .lock()
             .unwrap()
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .context("pty resize")
     }
 
@@ -183,7 +193,10 @@ mod tests {
     use crate::profiles;
 
     fn collect_output_until_exit(s: &Session) -> String {
-        assert!(s.wait_exit_blocking(Duration::from_secs(30)), "session should exit");
+        assert!(
+            s.wait_exit_blocking(Duration::from_secs(30)),
+            "session should exit"
+        );
         // Ring holds everything (tests stay under cap): decode lossily.
         let (_, bytes) = s.snapshot();
         String::from_utf8_lossy(&bytes).to_string()
@@ -208,7 +221,12 @@ mod tests {
         p.args = vec!["/c".into(), "cd".into()]; // `cd` with no args prints cwd
         let s = Session::spawn(&p, Some(tmp.path()), 80, 25, 1024 * 1024).unwrap();
         let out = collect_output_until_exit(&s);
-        let tail = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let tail = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert!(out.contains(&tail), "cwd dir name '{tail}' not in: {out:?}");
     }
 
@@ -231,7 +249,10 @@ mod tests {
                 Err(broadcast::error::TryRecvError::Closed) => break,
             }
         }
-        assert!(seen.contains("in_band_marker"), "echo not observed; saw: {seen:?}");
+        assert!(
+            seen.contains("in_band_marker"),
+            "echo not observed; saw: {seen:?}"
+        );
         s.kill();
         assert!(s.wait_exit_blocking(Duration::from_secs(10)));
     }
@@ -242,6 +263,9 @@ mod tests {
         let s = Session::spawn(&profile, None, 80, 25, 1024 * 1024).unwrap();
         assert!(s.exited().is_none(), "fresh interactive session is alive");
         s.kill();
-        assert!(s.wait_exit_blocking(Duration::from_secs(10)), "killed session must exit");
+        assert!(
+            s.wait_exit_blocking(Duration::from_secs(10)),
+            "killed session must exit"
+        );
     }
 }

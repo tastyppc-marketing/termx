@@ -62,7 +62,11 @@ mod tests {
     #[test]
     fn reads_existing_and_fills_missing_keys() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("config.json"), r#"{ "scrollback_bytes": 1024 }"#).unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{ "scrollback_bytes": 1024 }"#,
+        )
+        .unwrap();
         let cfg = load_or_create(tmp.path()).unwrap();
         assert_eq!(cfg.scrollback_bytes, 1024);
         assert_eq!(cfg.default_profile, "powershell", "missing key -> default");
@@ -72,6 +76,9 @@ mod tests {
     fn malformed_json_is_an_error_not_a_silent_reset() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("config.json"), "{ not json").unwrap();
-        assert!(load_or_create(tmp.path()).is_err(), "never clobber a user's broken edit");
+        assert!(
+            load_or_create(tmp.path()).is_err(),
+            "never clobber a user's broken edit"
+        );
     }
 }

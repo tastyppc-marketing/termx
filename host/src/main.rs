@@ -29,7 +29,10 @@ fn main() -> Result<()> {
     let data_dir = paths::resolve_data_dir(override_dir.as_deref())?;
 
     if let Some(info) = already_running(&data_dir) {
-        println!("termx-host already running (pid {}, port {})", info.pid, info.port);
+        println!(
+            "termx-host already running (pid {}, port {})",
+            info.pid, info.port
+        );
         return Ok(());
     }
 
@@ -45,7 +48,11 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(tracing_subscriber::fmt::layer().with_writer(file_writer).with_ansi(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(file_writer)
+                .with_ansi(false),
+        )
         .init();
 
     let cfg = config::load_or_create(&data_dir)?;

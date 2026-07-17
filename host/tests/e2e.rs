@@ -37,7 +37,10 @@ async fn full_lifecycle_against_real_binary() {
             if let Some(v) = read_runtime(tmp.path()) {
                 break v;
             }
-            assert!(std::time::Instant::now() < deadline, "host never wrote runtime.json");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "host never wrote runtime.json"
+            );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     };
@@ -130,9 +133,11 @@ async fn full_lifecycle_against_real_binary() {
     );
 
     // Clean shutdown: host must exit and remove runtime.json.
-    ws.send(Message::Text(serde_json::json!({"type": "shutdown"}).to_string()))
-        .await
-        .unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({"type": "shutdown"}).to_string(),
+    ))
+    .await
+    .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         match host.try_wait().unwrap() {
@@ -141,10 +146,16 @@ async fn full_lifecycle_against_real_binary() {
                 break;
             }
             None => {
-                assert!(std::time::Instant::now() < deadline, "host did not exit on Shutdown");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "host did not exit on Shutdown"
+                );
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
     }
-    assert!(!tmp.path().join("runtime.json").exists(), "runtime.json must be cleaned up");
+    assert!(
+        !tmp.path().join("runtime.json").exists(),
+        "runtime.json must be cleaned up"
+    );
 }

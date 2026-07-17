@@ -30,7 +30,9 @@ pub async fn run(
     let token: String = {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        (0..32).map(|_| format!("{:x}", rng.gen_range(0..16u8))).collect()
+        (0..32)
+            .map(|_| format!("{:x}", rng.gen_range(0..16u8)))
+            .collect()
     };
     let info = RuntimeInfo {
         port,
@@ -74,7 +76,9 @@ async fn handle_conn(
     token: String,
     shutdown: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
-    let ws = tokio_tungstenite::accept_async(stream).await.context("ws accept")?;
+    let ws = tokio_tungstenite::accept_async(stream)
+        .await
+        .context("ws accept")?;
     let (mut tx, mut rx) = ws.split();
 
     // ---- Auth gate: first message, 5s budget ----
@@ -141,7 +145,12 @@ async fn handle_conn(
                 };
                 match parsed {
                     ClientMsg::Auth { .. } => {} // already authed; ignore
-                    ClientMsg::CreateSession { profile, cwd, cols, rows } => {
+                    ClientMsg::CreateSession {
+                        profile,
+                        cwd,
+                        cols,
+                        rows,
+                    } => {
                         let result = registry.create_session(
                             profile.as_deref(),
                             cwd.as_deref().map(std::path::Path::new),
@@ -155,7 +164,9 @@ async fn handle_conn(
                                 message: format!("{e:#}"),
                             },
                         };
-                        let _ = out_tx.send(Message::Text(serde_json::to_string(&reply)?)).await;
+                        let _ = out_tx
+                            .send(Message::Text(serde_json::to_string(&reply)?))
+                            .await;
                     }
                     ClientMsg::Attach { session_id, replay } => {
                         let Some(session) = registry.get(session_id) else {
@@ -228,7 +239,11 @@ async fn handle_conn(
                             handle.abort();
                         }
                     }
-                    ClientMsg::Resize { session_id, cols, rows } => {
+                    ClientMsg::Resize {
+                        session_id,
+                        cols,
+                        rows,
+                    } => {
                         if let Some(session) = registry.get(session_id) {
                             let _ = session.resize(cols, rows);
                         }
@@ -239,9 +254,9 @@ async fn handle_conn(
                         }
                         registry.close_session(session_id);
                         let _ = out_tx
-                            .send(Message::Text(serde_json::to_string(&HostMsg::SessionClosed {
-                                session_id,
-                            })?))
+                            .send(Message::Text(serde_json::to_string(
+                                &HostMsg::SessionClosed { session_id },
+                            )?))
                             .await;
                     }
                     ClientMsg::ListSessions => {
@@ -344,7 +359,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
-        send_json(&mut ws, &ClientMsg::Auth { token: "wrong".into() }).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Auth {
+                token: "wrong".into(),
+            },
+        )
+        .await;
         match next_json(&mut ws).await {
             HostMsg::AuthErr { .. } => {}
             other => panic!("expected AuthErr, got {other:?}"),
@@ -356,12 +377,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
-        send_json(&mut ws, &ClientMsg::Auth { token: rt.token.clone() }).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Auth {
+                token: rt.token.clone(),
+            },
+        )
+        .await;
         assert!(matches!(next_json(&mut ws).await, HostMsg::AuthOk { .. }));
 
         send_json(
             &mut ws,
-            &ClientMsg::CreateSession { profile: Some("cmd".into()), cwd: None, cols: 100, rows: 30 },
+            &ClientMsg::CreateSession {
+                profile: Some("cmd".into()),
+                cwd: None,
+                cols: 100,
+                rows: 30,
+            },
         )
         .await;
         let id: SessionId = match next_json(&mut ws).await {
@@ -369,7 +401,14 @@ mod tests {
             other => panic!("expected SessionCreated, got {other:?}"),
         };
 
-        send_json(&mut ws, &ClientMsg::Attach { session_id: id, replay: false }).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: false,
+            },
+        )
+        .await;
         ws.send(Message::Binary(protocol::encode_frame(&Frame::Input {
             session_id: id,
             data: b"echo ws_marker_42\r\n".to_vec(),
@@ -383,7 +422,10 @@ mod tests {
         while std::time::Instant::now() < deadline && !seen.contains("ws_marker_42") {
             match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
                 Ok(Some(Ok(Message::Binary(buf)))) => {
-                    if let Ok(Frame::Output { session_id, data, .. }) = protocol::decode_frame(&buf) {
+                    if let Ok(Frame::Output {
+                        session_id, data, ..
+                    }) = protocol::decode_frame(&buf)
+                    {
                         assert_eq!(session_id, id);
                         seen.push_str(&String::from_utf8_lossy(&data));
                     }
@@ -392,7 +434,10 @@ mod tests {
                 _ => break,
             }
         }
-        assert!(seen.contains("ws_marker_42"), "no echo over WS; saw: {seen:?}");
+        assert!(
+            seen.contains("ws_marker_42"),
+            "no echo over WS; saw: {seen:?}"
+        );
 
         send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
         loop {
@@ -411,11 +456,22 @@ mod tests {
         // Client A: create a session, write a marker, then DIE without cleanup.
         let id: SessionId = {
             let mut ws_a = connect(&rt).await;
-            send_json(&mut ws_a, &ClientMsg::Auth { token: rt.token.clone() }).await;
+            send_json(
+                &mut ws_a,
+                &ClientMsg::Auth {
+                    token: rt.token.clone(),
+                },
+            )
+            .await;
             assert!(matches!(next_json(&mut ws_a).await, HostMsg::AuthOk { .. }));
             send_json(
                 &mut ws_a,
-                &ClientMsg::CreateSession { profile: Some("cmd".into()), cwd: None, cols: 100, rows: 30 },
+                &ClientMsg::CreateSession {
+                    profile: Some("cmd".into()),
+                    cwd: None,
+                    cols: 100,
+                    rows: 30,
+                },
             )
             .await;
             let id = match next_json(&mut ws_a).await {
@@ -436,7 +492,13 @@ mod tests {
 
         // Client B: fresh connection, attach with replay, expect the marker.
         let mut ws_b = connect(&rt).await;
-        send_json(&mut ws_b, &ClientMsg::Auth { token: rt.token.clone() }).await;
+        send_json(
+            &mut ws_b,
+            &ClientMsg::Auth {
+                token: rt.token.clone(),
+            },
+        )
+        .await;
         let sessions = match next_json(&mut ws_b).await {
             HostMsg::AuthOk { sessions, .. } => sessions,
             other => panic!("expected AuthOk, got {other:?}"),
@@ -445,13 +507,26 @@ mod tests {
             sessions.iter().any(|s| s.id == id && s.alive),
             "session must still be alive after client A died: {sessions:?}"
         );
-        send_json(&mut ws_b, &ClientMsg::Attach { session_id: id, replay: true }).await;
+        send_json(
+            &mut ws_b,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+            },
+        )
+        .await;
         let replayed = loop {
             match next_json(&mut ws_b).await {
-                HostMsg::Replay { session_id, data_b64, .. } => {
+                HostMsg::Replay {
+                    session_id,
+                    data_b64,
+                    ..
+                } => {
                     assert_eq!(session_id, id);
                     break String::from_utf8_lossy(
-                        &base64::engine::general_purpose::STANDARD.decode(data_b64).unwrap(),
+                        &base64::engine::general_purpose::STANDARD
+                            .decode(data_b64)
+                            .unwrap(),
                     )
                     .to_string();
                 }

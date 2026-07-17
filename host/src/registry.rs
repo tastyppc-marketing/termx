@@ -67,14 +67,21 @@ impl Registry {
         };
         self.entries.lock().unwrap().insert(
             id,
-            Entry { session: Arc::clone(&session), info: info.clone() },
+            Entry {
+                session: Arc::clone(&session),
+                info: info.clone(),
+            },
         );
         let _ = self.persist();
         Ok((info, session))
     }
 
     pub fn get(&self, id: SessionId) -> Option<Arc<Session>> {
-        self.entries.lock().unwrap().get(&id).map(|e| Arc::clone(&e.session))
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|e| Arc::clone(&e.session))
     }
 
     pub fn close_session(&self, id: SessionId) -> bool {

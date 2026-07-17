@@ -19,8 +19,8 @@ pub fn resolve(name: &str) -> Result<Profile> {
 pub fn resolve_with_env(name: &str, get_env: &dyn Fn(&str) -> Option<String>) -> Result<Profile> {
     match name {
         "powershell" => {
-            let root = get_env("SystemRoot")
-                .ok_or_else(|| anyhow::anyhow!("SystemRoot not set"))?;
+            let root =
+                get_env("SystemRoot").ok_or_else(|| anyhow::anyhow!("SystemRoot not set"))?;
             Ok(Profile {
                 name: name.into(),
                 command: PathBuf::from(root)
@@ -29,9 +29,12 @@ pub fn resolve_with_env(name: &str, get_env: &dyn Fn(&str) -> Option<String>) ->
             })
         }
         "cmd" => {
-            let comspec = get_env("ComSpec")
-                .ok_or_else(|| anyhow::anyhow!("ComSpec not set"))?;
-            Ok(Profile { name: name.into(), command: PathBuf::from(comspec), args: vec![] })
+            let comspec = get_env("ComSpec").ok_or_else(|| anyhow::anyhow!("ComSpec not set"))?;
+            Ok(Profile {
+                name: name.into(),
+                command: PathBuf::from(comspec),
+                args: vec![],
+            })
         }
         other => bail!("unknown profile '{other}' — known profiles: powershell, cmd"),
     }
@@ -69,12 +72,19 @@ mod tests {
     #[test]
     fn unknown_profile_lists_known_ones() {
         let err = resolve_with_env("zsh", &fake_env).unwrap_err().to_string();
-        assert!(err.contains("powershell") && err.contains("cmd"), "helpful error: {err}");
+        assert!(
+            err.contains("powershell") && err.contains("cmd"),
+            "helpful error: {err}"
+        );
     }
 
     #[test]
     fn real_env_resolves_powershell_on_this_machine() {
         let p = resolve("powershell").unwrap();
-        assert!(p.command.is_file(), "should exist on any Windows box: {:?}", p.command);
+        assert!(
+            p.command.is_file(),
+            "should exist on any Windows box: {:?}",
+            p.command
+        );
     }
 }
