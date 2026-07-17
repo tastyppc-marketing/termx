@@ -71,7 +71,16 @@ fn main() -> Result<()> {
         ));
         match ready_rx.await {
             Ok(info) => tracing::info!("listening on 127.0.0.1:{}", info.port),
-            Err(_) => anyhow::bail!("server failed before ready"),
+            Err(_) => {
+                // Surface the ACTUAL failure (bind error, runtime.json write...)
+                // instead of a generic "failed before ready".
+                let cause = match server_task.await {
+                    Ok(Err(e)) => format!("{e:#}"),
+                    Ok(Ok(())) => "server exited before signaling ready".to_string(),
+                    Err(join_err) => format!("server task panicked: {join_err}"),
+                };
+                anyhow::bail!("server failed to start: {cause}");
+            }
         }
         // Wait for shutdown-flag flip (server exits its accept loop itself).
         while !*shutdown_rx.borrow() {

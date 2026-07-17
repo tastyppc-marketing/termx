@@ -7,25 +7,36 @@ use std::path::{Path, PathBuf};
 /// Resolution order: explicit override -> portable.flag beside the exe -> %APPDATA%\TermX.
 /// Creates the directory (and parents) before returning it.
 pub fn resolve_data_dir(override_dir: Option<&Path>) -> Result<PathBuf> {
-    let dir = if let Some(d) = override_dir {
-        d.to_path_buf()
-    } else if let Some(portable) = portable_data_dir() {
-        portable
-    } else {
-        let appdata = std::env::var("APPDATA").context("APPDATA not set")?;
-        PathBuf::from(appdata).join("TermX")
-    };
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()));
+    let appdata = std::env::var("APPDATA").ok();
+    let dir = choose_data_dir(override_dir, exe_dir.as_deref(), appdata.as_deref())?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating data dir {}", dir.display()))?;
     Ok(dir)
 }
 
-/// Some(<exe dir>/data) iff a `portable.flag` file sits beside the running exe.
-fn portable_data_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    if dir.join("portable.flag").is_file() {
-        Some(dir.join("data"))
+/// Pure resolution logic, testable without faking the running exe's location.
+fn choose_data_dir(
+    override_dir: Option<&Path>,
+    exe_dir: Option<&Path>,
+    appdata: Option<&str>,
+) -> Result<PathBuf> {
+    if let Some(d) = override_dir {
+        return Ok(d.to_path_buf());
+    }
+    if let Some(portable) = exe_dir.and_then(portable_data_dir) {
+        return Ok(portable);
+    }
+    let appdata = appdata.context("APPDATA not set")?;
+    Ok(PathBuf::from(appdata).join("TermX"))
+}
+
+/// Some(<exe dir>/data) iff a `portable.flag` file sits in `exe_dir`.
+fn portable_data_dir(exe_dir: &Path) -> Option<PathBuf> {
+    if exe_dir.join("portable.flag").is_file() {
+        Some(exe_dir.join("data"))
     } else {
         None
     }
@@ -60,6 +71,30 @@ mod tests {
         let got = resolve_data_dir(None).unwrap();
         assert_eq!(got, Path::new(&appdata).join("TermX"));
         assert!(got.is_dir());
+    }
+
+    #[test]
+    fn portable_flag_beside_exe_wins_over_appdata() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("portable.flag"), "").unwrap();
+        let got = choose_data_dir(None, Some(tmp.path()), Some(r"X:\FakeAppData")).unwrap();
+        assert_eq!(got, tmp.path().join("data"));
+    }
+
+    #[test]
+    fn no_flag_falls_through_to_appdata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = choose_data_dir(None, Some(tmp.path()), Some(r"X:\FakeAppData")).unwrap();
+        assert_eq!(got, Path::new(r"X:\FakeAppData").join("TermX"));
+    }
+
+    #[test]
+    fn override_beats_portable_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("portable.flag"), "").unwrap();
+        let want = tmp.path().join("explicit");
+        let got = choose_data_dir(Some(&want), Some(tmp.path()), None).unwrap();
+        assert_eq!(got, want);
     }
 
     #[test]

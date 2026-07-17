@@ -35,8 +35,13 @@ pub fn load_or_create(data_dir: &Path) -> Result<Config> {
     if path.is_file() {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Config = serde_json::from_str(&text)
+        let mut cfg: Config = serde_json::from_str(&text)
             .with_context(|| format!("parsing {} — fix or delete it", path.display()))?;
+        if cfg.scrollback_bytes == 0 {
+            // 0 would panic RingBuffer::new on every session create.
+            tracing::warn!("scrollback_bytes: 0 is invalid; using default");
+            cfg.scrollback_bytes = default_scrollback_bytes();
+        }
         Ok(cfg)
     } else {
         let cfg = Config::default();
@@ -70,6 +75,22 @@ mod tests {
         let cfg = load_or_create(tmp.path()).unwrap();
         assert_eq!(cfg.scrollback_bytes, 1024);
         assert_eq!(cfg.default_profile, "powershell", "missing key -> default");
+    }
+
+    #[test]
+    fn zero_scrollback_is_replaced_with_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{ "scrollback_bytes": 0 }"#,
+        )
+        .unwrap();
+        let cfg = load_or_create(tmp.path()).unwrap();
+        assert_eq!(
+            cfg.scrollback_bytes,
+            4 * 1024 * 1024,
+            "0 would panic ring construction"
+        );
     }
 
     #[test]

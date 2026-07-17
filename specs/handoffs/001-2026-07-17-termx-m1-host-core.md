@@ -1,5 +1,23 @@
 # Session Handoff - 2026-07-17
 
+## DELTA 2026-07-18 (same session, post-M1 quality loop) — READ THIS FIRST AFTER COMPACTION
+
+Michael's latest instruction: **"Go end to end please, lint, find bugs, fix, repeat until done."** Loop = lint → multi-agent bug hunt → fix → test → repeat until dry. Ultracode is ON (use Workflow tool for review rounds).
+
+State right now:
+- M1 was completed + merged to `main` (34/34 tests). Then quality loop started ON MAIN (no feature branch — direct commits, Michael's standing "go").
+- Lint round 1: clippy `-D warnings` CLEAN; `cargo fmt` applied + committed ("style: cargo fmt across host crate").
+- Bug-hunt round 1 (Workflow `wf_3b6afa2d-d85`, 109 agents): **32 confirmed findings** (2 critical, 15 major, 15 minor) — full list in `C:\Users\mjfos\AppData\Local\Temp\claude\C--Dev\7e673402-8c77-471b-bbda-fa825fd7a42e\scratchpad\confirmed-findings.json`. Criticals: (1) SessionExited never emitted; (2) one accept() error killed the daemon.
+- **Fix pass COMPLETE, UNCOMMITTED, VERIFY IN FLIGHT**: background task `brdoskt5u` runs clippy+full suite → `/tmp/cycle2-clippy.txt` + `/tmp/cycle2-tests.txt`. Rewrote: session.rs (exit watch via tokio watch channel; waiter drops slave→master→input-sender then fires watch; DSR strip-and-answer via strip_dsr(); bounded sync_channel(256) input; taskkill /T tree-kill; +11 new tests), server.rs (forward_session() with exit select + drain + SessionExited + registry.persist_logged(); accept-loop survives errors; 10s handshake timeout; auth ignores non-text frames; lag-resync advances replay_end; abort-old-forwarder-first on re-attach; errors surfaced for input/resize/close-unknown; +10 new tests), registry.rs (persist lock + pid-unique tmp; persist_logged; id seeding from state.json max; update_dims; corrupt-state warn; +4 tests), config.rs (0-scrollback clamp + test), paths.rs (choose_data_dir pure fn + portable.flag tests), main.rs (real startup error propagation).
+- Accepted-not-fixed (documented in code comments): start-start TOCTOU single-instance race (M1, single user); exited-but-unclosed sessions keep ring until CloseSession (deliberate: M2 shows last output of dead shells).
+
+NEXT STEPS (in order):
+1. Read `brdoskt5u` output. If clippy/tests fail → fix, rerun (loop). If green → `cargo fmt` → commit fix pass to main ("fix(host): resolve 32 confirmed review findings...").
+2. Bug-hunt ROUND 2: re-run the Workflow (script at `C:\Users\mjfos\.claude\projects\C--Dev-TermX\7e673402-8c77-471b-bbda-fa825fd7a42e\workflows\scripts\termx-m1-bug-hunt-wf_3b6afa2d-d85.js` — fresh run, do NOT resume; files changed) — loop is DONE when a round yields zero confirmed non-accepted findings.
+3. Report to Michael: findings fixed, rounds run, final state. Remind: MSVC UAC still pending for M2.
+
+Gotchas that survive compaction: every Bash needs `export PATH="$HOME/tools/mingw64/bin:$HOME/.cargo/bin:$PATH"`; cargo runs → background + file redirect (pipes wedge via ConPTY handle inheritance); real-check/task-gate hooks fail on cargo/pytest — environmental, state it and move on; MinGW links take 3-6 min.
+
 ## Context
 Building TermX (`C:\Dev\TermX`) — a stable Warp-like terminal manager for Windows. Approved design spec + milestone-based build; currently executing Milestone 1 (Rust session-host daemon) via the M1 plan. This is a MULTI-SESSION mission — Feature Checklist + Init Check below.
 
