@@ -41,8 +41,8 @@ Building TermX (`C:\Dev\TermX`) — a stable Warp-like terminal manager for Wind
 [
   {"feature": "M1-T1..T6 scaffold+paths+config+ring+protocol+profiles", "passes": true,
    "verified": "2026-07-17 cargo test --lib: 20 passed (3+3+5+5+4) before session.rs"},
-  {"feature": "M1-T7 session.rs ConPTY spawn/io/kill", "passes": false,
-   "verify": "cargo test -p termx-host --lib session -- --test-threads=1 -> 4 passed"},
+  {"feature": "M1-T7 session.rs ConPTY spawn/io/kill", "passes": true,
+   "verified": "2026-07-17 4 passed in 0.42s after slave-lifetime + ESC[6n DSR responder fixes"},
   {"feature": "M1-T8 registry.rs", "passes": false,
    "verify": "cargo test -p termx-host --lib registry -> 5 passed"},
   {"feature": "M1-T9 server.rs WS auth/dispatch/attach", "passes": false,
