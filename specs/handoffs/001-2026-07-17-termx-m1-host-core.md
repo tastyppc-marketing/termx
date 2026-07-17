@@ -13,13 +13,13 @@ Building TermX (`C:\Dev\TermX`) — a stable Warp-like terminal manager for Wind
 - session.rs written; **root-caused + fixed a real bug**: portable-pty children died with 0xC0000142 because `drop(pair.slave)` right after spawn closes handles during child init (wezterm/wezterm#4674). Fix: waiter thread owns slave, drops after child.wait().
 
 ## In Progress
-- Background run `bwtaze0ci`: `cargo test -p termx-host --lib session -- --test-threads=1` → `/tmp/session-tests.out` (verifying the slave-lifetime fix). If green → commit "feat(host): ConPTY session with ring scrollback + broadcast output".
+- **M1 COMPLETE** (all 12 plan tasks; checklist below all verified). Final full-suite run + merge of `feat/m1-host-core` to main happening at session end — confirm `git log main` shows the M1 commits if resuming.
 
 ## Next Steps
-1. Confirm session tests green; commit Task 7.
-2. Plan tasks 8-12 in order: registry.rs → server.rs → survival test → main.rs → e2e + README (full code in the plan doc; follow TDD cycles).
-3. After M1: finishing-a-development-branch skill (merge feat/m1-host-core), then write M2 plan (Tauri UI shell) — needs MSVC, see Blockers.
-4. Propose harness fix in `C:\Users\mjfos\code\harness-lab\queue-inbox.md`: hooks calling cargo need a PATH guard (`~/.cargo/bin` + `~/tools/mingw64/bin`).
+1. Write M2 plan (Tauri UI shell: window, xterm.js wired to host WS, sidebar sessions panel, tabs+colors+groups, persistence via SetLayout/GetState) against the REAL host interfaces in `host/src/protocol.rs`.
+2. **Before M2 build**: MSVC toolchain — needs Michael's UAC approve (see Blockers), then `rustup default stable-x86_64-pc-windows-msvc`.
+3. M2 profile discovery: extend `host/src/profiles.rs` (Git Bash registry probe, pwsh PATH probe, `wsl -l -q` distros) per spec §3.
+4. (done 2026-07-17) harness-lab queue-inbox proposal re: hook PATH guard.
 
 ## Key Files
 - `C:\Dev\TermX\docs\superpowers\specs\2026-07-17-termx-design.md` - approved v1 design
@@ -43,15 +43,15 @@ Building TermX (`C:\Dev\TermX`) — a stable Warp-like terminal manager for Wind
    "verified": "2026-07-17 cargo test --lib: 20 passed (3+3+5+5+4) before session.rs"},
   {"feature": "M1-T7 session.rs ConPTY spawn/io/kill", "passes": true,
    "verified": "2026-07-17 4 passed in 0.42s after slave-lifetime + ESC[6n DSR responder fixes"},
-  {"feature": "M1-T8 registry.rs", "passes": false,
-   "verify": "cargo test -p termx-host --lib registry -> 5 passed"},
-  {"feature": "M1-T9 server.rs WS auth/dispatch/attach", "passes": false,
-   "verify": "cargo test -p termx-host --lib server -> 3 passed"},
-  {"feature": "M1-T10 kill-UI-survive", "passes": false,
-   "verify": "cargo test -p termx-host session_survives -> 1 passed"},
-  {"feature": "M1-T11 main.rs lifecycle", "passes": false,
-   "verify": "cargo build + manual boot writes runtime.json"},
-  {"feature": "M1-T12 e2e real exe", "passes": false,
-   "verify": "cargo test -p termx-host --test e2e -> 1 passed"}
+  {"feature": "M1-T8 registry.rs", "passes": true,
+   "verified": "2026-07-17 5 passed in 0.20s"},
+  {"feature": "M1-T9 server.rs WS auth/dispatch/attach", "passes": true,
+   "verified": "2026-07-17 3 passed in 0.13s"},
+  {"feature": "M1-T10 kill-UI-survive", "passes": true,
+   "verified": "2026-07-17 session_survives_client_death_and_replays ok; full lib 33 passed in 3.74s"},
+  {"feature": "M1-T11 main.rs lifecycle", "passes": true,
+   "verified": "2026-07-17 e2e spawns real exe, runtime.json written, clean Shutdown exit 0"},
+  {"feature": "M1-T12 e2e real exe", "passes": true,
+   "verified": "2026-07-17 full_lifecycle_against_real_binary ok in 5.70s"}
 ]
 ```
