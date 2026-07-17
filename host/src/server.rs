@@ -404,6 +404,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_survives_client_death_and_replays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+
+        // Client A: create a session, write a marker, then DIE without cleanup.
+        let id: SessionId = {
+            let mut ws_a = connect(&rt).await;
+            send_json(&mut ws_a, &ClientMsg::Auth { token: rt.token.clone() }).await;
+            assert!(matches!(next_json(&mut ws_a).await, HostMsg::AuthOk { .. }));
+            send_json(
+                &mut ws_a,
+                &ClientMsg::CreateSession { profile: Some("cmd".into()), cwd: None, cols: 100, rows: 30 },
+            )
+            .await;
+            let id = match next_json(&mut ws_a).await {
+                HostMsg::SessionCreated { info } => info.id,
+                other => panic!("expected SessionCreated, got {other:?}"),
+            };
+            ws_a.send(Message::Binary(protocol::encode_frame(&Frame::Input {
+                session_id: id,
+                data: b"echo survive_marker_99\r\n".to_vec(),
+            })))
+            .await
+            .unwrap();
+            // Give the shell a moment to execute so the marker lands in the ring.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            id
+            // ws_a dropped HERE without Detach/Close — simulates a UI crash.
+        };
+
+        // Client B: fresh connection, attach with replay, expect the marker.
+        let mut ws_b = connect(&rt).await;
+        send_json(&mut ws_b, &ClientMsg::Auth { token: rt.token.clone() }).await;
+        let sessions = match next_json(&mut ws_b).await {
+            HostMsg::AuthOk { sessions, .. } => sessions,
+            other => panic!("expected AuthOk, got {other:?}"),
+        };
+        assert!(
+            sessions.iter().any(|s| s.id == id && s.alive),
+            "session must still be alive after client A died: {sessions:?}"
+        );
+        send_json(&mut ws_b, &ClientMsg::Attach { session_id: id, replay: true }).await;
+        let replayed = loop {
+            match next_json(&mut ws_b).await {
+                HostMsg::Replay { session_id, data_b64, .. } => {
+                    assert_eq!(session_id, id);
+                    break String::from_utf8_lossy(
+                        &base64::engine::general_purpose::STANDARD.decode(data_b64).unwrap(),
+                    )
+                    .to_string();
+                }
+                _ => continue,
+            }
+        };
+        assert!(
+            replayed.contains("survive_marker_99"),
+            "replay must contain pre-crash output; got: {replayed:?}"
+        );
+        send_json(&mut ws_b, &ClientMsg::CloseSession { session_id: id }).await;
+    }
+
+    #[tokio::test]
     async fn runtime_json_is_written_and_valid() {
         let tmp = tempfile::tempdir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
