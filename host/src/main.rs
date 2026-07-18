@@ -26,8 +26,10 @@ fn parse_args_from(mut args: impl Iterator<Item = String>) -> Result<Option<std:
 /// reused by ANY process, and a stale runtime.json would then brick startup
 /// forever ("already running" against a stranger's socket).
 fn pid_is_termx_host(pid: u32) -> Option<bool> {
+    use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: headless daemon
         .output()
         .ok()?;
     if !out.status.success() {
@@ -114,6 +116,15 @@ fn main() -> Result<()> {
         )
         .init();
 
+    // Panics in session threads (reader/writer/waiter) or detached tasks
+    // otherwise vanish — stderr is discarded when the UI spawns the daemon.
+    // Log them before the default handler runs.
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("panic: {info}");
+        default_panic(info);
+    }));
+
     let cfg = config::load_or_create(&data_dir)?;
     tracing::info!("termx-host starting; data dir {}", data_dir.display());
 
@@ -121,6 +132,7 @@ fn main() -> Result<()> {
     runtime.block_on(async {
         let reg = Arc::new(Registry::new(data_dir.clone(), cfg));
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_for_signals = shutdown_tx.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let server_task = tokio::spawn(server::run(
             Arc::clone(&reg),
@@ -141,10 +153,36 @@ fn main() -> Result<()> {
                 anyhow::bail!("server failed to start: {cause}");
             }
         }
-        // Wait for shutdown-flag flip (server exits its accept loop itself).
-        while !*shutdown_rx.borrow() {
-            if shutdown_rx.changed().await.is_err() {
-                break;
+        // Wait for the shutdown-flag flip (client Shutdown) OR a console
+        // control event. Ctrl+C, window close, logoff, and system shutdown
+        // must run the SAME teardown as a client Shutdown — skipping
+        // shutdown_all orphans OpenConsole processes that spin at 100% CPU.
+        // Windows grants close/logoff handlers ~5s, matching shutdown_all's
+        // bounded wait; the session teardown runs first, cosmetics last.
+        let console_shutdown = |why: &str| {
+            tracing::info!("console control event ({why}); tearing sessions down");
+            reg.shutdown_all();
+            let _ = shutdown_for_signals.send(true);
+        };
+        let mut ctrl_c = tokio::signal::windows::ctrl_c().context("ctrl_c handler")?;
+        let mut ctrl_break = tokio::signal::windows::ctrl_break().context("ctrl_break handler")?;
+        let mut ctrl_close = tokio::signal::windows::ctrl_close().context("ctrl_close handler")?;
+        let mut ctrl_logoff =
+            tokio::signal::windows::ctrl_logoff().context("ctrl_logoff handler")?;
+        let mut ctrl_shutdown =
+            tokio::signal::windows::ctrl_shutdown().context("ctrl_shutdown handler")?;
+        loop {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = ctrl_c.recv() => { console_shutdown("ctrl_c"); break; }
+                _ = ctrl_break.recv() => { console_shutdown("ctrl_break"); break; }
+                _ = ctrl_close.recv() => { console_shutdown("window close"); break; }
+                _ = ctrl_logoff.recv() => { console_shutdown("logoff"); break; }
+                _ = ctrl_shutdown.recv() => { console_shutdown("system shutdown"); break; }
             }
         }
         let _ = server_task.await;

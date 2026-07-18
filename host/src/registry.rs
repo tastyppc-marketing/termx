@@ -38,16 +38,31 @@ pub struct Registry {
     graveyard: Mutex<Vec<Arc<Session>>>,
 }
 
+/// Terminal dims a real UI can produce. 0 panics conhost math; huge values
+/// make conhost allocate screen buffers far outside the host's memory bound.
+fn validate_dims(cols: u16, rows: u16) -> Result<()> {
+    if cols == 0 || rows == 0 || cols > 4096 || rows > 4096 {
+        bail!("invalid terminal size {cols}x{rows} (must be 1..=4096)");
+    }
+    Ok(())
+}
+
 impl Registry {
     pub fn new(data_dir: PathBuf, config: Config) -> Registry {
-        // Load prior state: layout blob + the highest session id ever persisted,
-        // so ids never recycle across restarts (persisted layouts reference them).
+        // Load prior state: layout blob + the id watermark, so ids never
+        // recycle across restarts (persisted layouts reference them). The
+        // explicit next_id field is authoritative — deriving only from the
+        // sessions list would reset the counter whenever the last persist
+        // happened to have zero sessions open.
         let mut layout = serde_json::Value::Null;
         let mut max_seen_id: u32 = 0;
         match std::fs::read_to_string(data_dir.join("state.json")) {
             Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(v) => {
                     layout = v.get("layout").cloned().unwrap_or(serde_json::Value::Null);
+                    if let Some(next) = v.get("next_id").and_then(|n| n.as_u64()) {
+                        max_seen_id = max_seen_id.max((next as u32).saturating_sub(1));
+                    }
                     if let Some(sessions) = v.get("sessions").and_then(|s| s.as_array()) {
                         for s in sessions {
                             if let Some(id) = s.get("id").and_then(|i| i.as_u64()) {
@@ -83,6 +98,7 @@ impl Registry {
         cols: u16,
         rows: u16,
     ) -> Result<(SessionInfo, Arc<Session>)> {
+        validate_dims(cols, rows)?;
         let name = profile.unwrap_or(&self.config.default_profile);
         let prof = profiles::resolve(name)?;
         // Spawn outside the lock (slow syscall), but decide whether it may
@@ -135,20 +151,23 @@ impl Registry {
     }
 
     pub fn close_session(&self, id: SessionId) -> bool {
-        let removed = self.entries.lock().unwrap().remove(&id);
-        match removed {
-            Some(entry) => {
-                entry.session.kill();
-                // Track until its teardown completes; prune the already-dead.
-                let mut graveyard = self.graveyard.lock().unwrap();
-                graveyard.retain(|s| s.exited().is_none());
-                graveyard.push(entry.session);
-                drop(graveyard);
-                self.persist_logged();
-                true
-            }
-            None => false,
-        }
+        // Remove and graveyard-register under ONE entries critical section
+        // (graveyard locked inside — same order as shutdown_all): a session
+        // must never be in neither set, or a concurrent shutdown_all's
+        // teardown wait can miss it and the daemon exits mid-teardown.
+        let entry = {
+            let mut entries = self.entries.lock().unwrap();
+            let Some(entry) = entries.remove(&id) else {
+                return false;
+            };
+            let mut graveyard = self.graveyard.lock().unwrap();
+            graveyard.retain(|s| s.exited().is_none());
+            graveyard.push(Arc::clone(&entry.session));
+            entry
+        };
+        entry.session.kill();
+        self.persist_logged();
+        true
     }
 
     /// Resize the PTY and the recorded dims under ONE lock, so two concurrent
@@ -158,6 +177,7 @@ impl Registry {
     /// must not hammer state.json with synchronous writes. Dims land on disk
     /// with the next lifecycle persist (create/close/layout/exit/shutdown).
     pub fn resize_session(&self, id: SessionId, cols: u16, rows: u16) -> Result<()> {
+        validate_dims(cols, rows)?;
         let mut entries = self.entries.lock().unwrap();
         let Some(entry) = entries.get_mut(&id) else {
             bail!("no session {id}");
@@ -169,6 +189,12 @@ impl Registry {
     }
 
     pub fn list(&self) -> Vec<SessionInfo> {
+        // Opportunistic graveyard prune: without this, the LAST closed
+        // session's ring would linger until the next close or shutdown.
+        self.graveyard
+            .lock()
+            .unwrap()
+            .retain(|s| s.exited().is_none());
         let mut infos: Vec<SessionInfo> = self
             .entries
             .lock()
@@ -204,6 +230,7 @@ impl Registry {
         let state = serde_json::json!({
             "layout": self.layout(),
             "sessions": self.list(),
+            "next_id": self.next_id.load(Ordering::SeqCst),
         });
         let path = self.data_dir.join("state.json");
         let tmp = self
@@ -243,6 +270,9 @@ impl Registry {
         // covers live sessions AND the graveyard (recently closed, teardown
         // in flight): every one observes its exit watch (which fires only
         // after the master is dropped), or 5s total elapse.
+        // (close_session registers into the graveyard under the entries lock,
+        // so any close that got its entry out before OUR drain above has its
+        // session in the graveyard by the time we drain it here.)
         let parting: Vec<Arc<Session>> = drained
             .iter()
             .map(|e| Arc::clone(&e.session))
@@ -373,6 +403,57 @@ mod tests {
         );
         reg.close_session(info.id);
         assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn close_then_immediate_shutdown_waits_for_full_teardown() {
+        // The close-last-tab-then-quit flow: shutdown must not let the daemon
+        // exit while the just-closed session's ConPTY teardown is in flight.
+        let (_tmp, reg) = test_registry();
+        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        assert!(reg.close_session(info.id));
+        reg.shutdown_all();
+        assert!(
+            s.exited().is_some(),
+            "shutdown_all returned before the closed session finished teardown"
+        );
+    }
+
+    #[test]
+    fn absurd_dims_are_rejected() {
+        let (_tmp, reg) = test_registry();
+        assert!(reg.create_session(Some("cmd"), None, 0, 25).is_err());
+        assert!(reg.create_session(Some("cmd"), None, 80, 0).is_err());
+        assert!(reg.create_session(Some("cmd"), None, 65535, 25).is_err());
+        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        assert!(reg.resize_session(info.id, 0, 25).is_err());
+        assert!(reg.resize_session(info.id, 80, 65535).is_err());
+        reg.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn ids_do_not_recycle_even_when_no_sessions_were_persisted() {
+        // Close-everything-then-restart: the sessions list persists as empty,
+        // so the watermark must come from the explicit next_id field.
+        let tmp = tempfile::tempdir().unwrap();
+        let first_id = {
+            let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+            let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+            reg.close_session(info.id); // persists with sessions: []
+            assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
+            info.id
+        };
+        let reg2 = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let (info2, s2) = reg2.create_session(Some("cmd"), None, 80, 25).unwrap();
+        assert!(
+            info2.id > first_id,
+            "id {} recycled after empty-list persist (first was {})",
+            info2.id,
+            first_id
+        );
+        reg2.close_session(info2.id);
+        assert!(s2.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
     #[test]

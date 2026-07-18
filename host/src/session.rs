@@ -298,6 +298,12 @@ impl Session {
         self.ring.lock().unwrap().snapshot()
     }
 
+    /// Current end of the output stream (total bytes ever produced) without
+    /// copying the ring — for attach horizons when no replay is wanted.
+    pub fn stream_end(&self) -> u64 {
+        self.ring.lock().unwrap().end_offset()
+    }
+
     /// Kill the whole process tree (shells spawn children; killing only the
     /// direct child would orphan grandchildren under ConPTY).
     ///
@@ -313,10 +319,14 @@ impl Session {
         let mut killer = self.killer.lock().unwrap().clone_killer();
         std::thread::spawn(move || {
             if let Some(pid) = pid {
+                use std::os::windows::process::CommandExt;
                 let _ = std::process::Command::new("taskkill")
                     .args(["/T", "/F", "/PID", &pid.to_string()])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
+                    // CREATE_NO_WINDOW: a headless daemon must not flash a
+                    // console window on every tab close.
+                    .creation_flags(0x0800_0000)
                     .status();
             }
             let _ = killer.kill();
@@ -491,6 +501,62 @@ mod tests {
         );
         s.kill();
         assert!(s.wait_exit_blocking(Duration::from_secs(10)));
+    }
+
+    /// Is a pid present in tasklist output?
+    fn pid_alive(pid: u32) -> bool {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .expect("tasklist");
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    #[test]
+    fn kill_reaps_grandchildren_not_just_the_shell() {
+        let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
+        // The doc-claimed property of the /T tree kill: a process the SHELL
+        // spawned (grandchild of the host) must die with the session.
+        let profile = profiles::resolve("cmd").unwrap();
+        let s = Session::spawn(&profile, None, 80, 25, 1024 * 1024).unwrap();
+        let shell_pid = s.pid().expect("shell pid");
+        s.write_input(b"ping -n 60 127.0.0.1 >nul\r\n").unwrap();
+        // Find the ping grandchild via its parent pid.
+        let find_ping = || -> Option<u32> {
+            let out = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "(Get-CimInstance Win32_Process -Filter \"ParentProcessId={shell_pid} and Name='PING.EXE'\").ProcessId"
+                    ),
+                ])
+                .output()
+                .ok()?;
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let ping_pid = loop {
+            if let Some(pid) = find_ping() {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ping grandchild never appeared under shell {shell_pid}"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        assert!(pid_alive(ping_pid), "grandchild should be running");
+        s.kill();
+        assert!(s.wait_exit_blocking(Duration::from_secs(15)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while pid_alive(ping_pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild ping {ping_pid} survived the tree kill"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     #[test]

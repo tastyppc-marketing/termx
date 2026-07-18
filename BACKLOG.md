@@ -17,7 +17,8 @@ A session running an LLM can gather context from another session's LLM (better t
 - Installer / Start-menu integration (v1 ships as a portable folder)
 
 ## 5. M2 protocol/renderer work flagged by review round 2 (host is fine for M1)
-- **Unsolicited lifecycle events**: push SessionCreated/SessionClosed/SessionExited to ALL authed clients (not just attached ones) so sidebars stay in sync without ListSessions polling.
+- **Unsolicited lifecycle events** (re-confirmed as the top protocol gap in review rounds 3 AND 4 — treat as required M2 work, not optional): push SessionCreated/SessionClosed/SessionExited/SessionResized and layout changes to ALL authed clients (not just attached ones) so sidebars and split panes stay in sync without ListSessions polling.
+- **Job-object session containment**: `taskkill /T` walks the parent chain, so a detached descendant whose intermediate parent already exited escapes the tree kill. Assigning each session to a Windows Job Object (kill-on-close) closes that hole completely.
 - **Replay sanitization beyond ESC[6n**: the host strips/answers only DSR cursor queries. Other terminal-answerable queries a child app emitted (DA1 `ESC[c`, DSR 5n, OSC color queries) can sit in the ring; on replay xterm.js would auto-answer stale ones into the shell. M2 attach should feed replays through a sanitizer or use xterm.js hooks to suppress query answering during replay.
 - **Replay can start mid-escape-sequence** (ring is a byte window) and cannot restore terminal modes set before the window. M2: reset terminal state (`RIS`-lite) before writing a replay, accept possibly-garbled first line, or move to a terminal-state snapshot model later.
 - **Exited-but-unclosed sessions** keep their scrollback ring alive by design (so the UI can show a dead shell's last output). M2 UI must actually CloseSession when a dead tab is dismissed, else rings accumulate.

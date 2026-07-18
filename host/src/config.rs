@@ -9,10 +9,11 @@ fn default_scrollback_bytes() -> usize {
 }
 
 /// Upper clamp: a whole ring rides in ONE Replay message (base64, ~4/3
-/// inflation), and WS clients default to a 64 MiB message cap — 32 MiB keeps
-/// the worst-case replay comfortably under that. Also stops a config typo
-/// (one extra zero) from defeating the memory-bound guarantee.
-pub const MAX_SCROLLBACK_BYTES: usize = 32 * 1024 * 1024;
+/// inflation) sent unfragmented, and WS clients default to a 16 MiB FRAME
+/// limit (tungstenite) — 8 MiB scrollback keeps the worst-case ~10.7 MiB
+/// replay under it. Also stops a config typo (one extra zero) from defeating
+/// the memory-bound guarantee.
+pub const MAX_SCROLLBACK_BYTES: usize = 8 * 1024 * 1024;
 fn default_profile() -> String {
     "powershell".to_string()
 }

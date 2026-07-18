@@ -248,7 +248,9 @@ async fn handle_conn(
 ) -> Result<()> {
     // Inbound message cap: the protocol's largest legit client message is a
     // 256KiB input frame (+ layout JSON, far smaller) — without this,
-    // tungstenite buffers up to its 64MiB default per message.
+    // tungstenite buffers up to its 64MiB default per message. Contract:
+    // input frames over MAX_INPUT_FRAME get a graceful Error reply; anything
+    // over THIS cap is a protocol violation and drops the connection.
     let ws_cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
         max_message_size: Some(1024 * 1024),
         max_frame_size: Some(1024 * 1024),
@@ -393,10 +395,15 @@ async fn handle_conn(
                         // offset lets the client trim the overlap.
                         let chunk_rx = session.subscribe();
                         let exit_rx = session.subscribe_exit();
-                        let (msg, replay_end) = replay_msg(session_id, &session);
-                        if replay {
+                        // replay:false still needs the dedupe horizon, but
+                        // must not base64 a multi-MB ring just to discard it.
+                        let replay_end = if replay {
+                            let (msg, end) = replay_msg(session_id, &session);
                             send_ctl(&out_tx, &msg).await;
-                        }
+                            end
+                        } else {
+                            session.stream_end()
+                        };
                         let handle = tokio::spawn(forward_session(
                             session_id,
                             session,
@@ -1431,6 +1438,44 @@ mod tests {
         let (final_start, final_bytes) = session.snapshot();
         let total_end = final_start + final_bytes.len() as u64;
         assert_no_holes(&mut intervals, start, total_end);
+    }
+
+    #[tokio::test]
+    async fn attach_without_replay_suppresses_the_initial_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        let id = create_cmd(&mut ws).await;
+        // Let the banner land in the ring so a replay WOULD have content.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: false,
+            },
+        )
+        .await;
+        // Round-trip: by the time Sessions comes back the Attach (and any
+        // replay it wrongly sent) is already in our stream.
+        send_json(&mut ws, &ClientMsg::ListSessions).await;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next())
+                .await
+                .expect("timeout")
+                .expect("stream ended")
+                .expect("ws error")
+            {
+                Message::Text(t) => match serde_json::from_str::<HostMsg>(&t).unwrap() {
+                    HostMsg::Replay { .. } => panic!("replay:false must not send a Replay"),
+                    HostMsg::Sessions { .. } => break,
+                    _ => continue,
+                },
+                _ => continue,
+            }
+        }
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
