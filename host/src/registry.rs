@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+// DESIGN, not a leak: exited sessions stay registered (ring intact) until a
+// client sends CloseSession — the M2 UI shows a dead shell's final output and
+// must explicitly close a dismissed tab. Memory is bounded by sessions the
+// user has actually opened, each capped at scrollback_bytes.
 struct Entry {
     session: Arc<Session>,
     info: SessionInfo,
@@ -27,6 +31,11 @@ pub struct Registry {
     // under the same lock, so a session can never slip in after the drain and
     // outlive the daemon as an orphan conhost tree.
     shutting_down: AtomicBool,
+    // Closed sessions whose ConPTY teardown may still be in flight. If the
+    // process exits before a waiter thread drops the PTY master, the orphaned
+    // OpenConsole can spin at 100% CPU forever (observed saturating this
+    // machine). shutdown_all waits on these too; pruned once exited.
+    graveyard: Mutex<Vec<Arc<Session>>>,
 }
 
 impl Registry {
@@ -63,6 +72,7 @@ impl Registry {
             layout: Mutex::new(layout),
             persist_lock: Mutex::new(()),
             shutting_down: AtomicBool::new(false),
+            graveyard: Mutex::new(Vec::new()),
         }
     }
 
@@ -92,12 +102,16 @@ impl Registry {
             cols,
             rows,
             alive: true,
+            pid: session.pid(),
         };
         {
             let mut entries = self.entries.lock().unwrap();
             if self.shutting_down.load(Ordering::SeqCst) {
                 drop(entries);
                 session.kill();
+                // The daemon is exiting imminently; give this stray's teardown
+                // a moment so its conhost doesn't outlive us as a CPU-spinner.
+                session.wait_exit_blocking(std::time::Duration::from_secs(2));
                 bail!("host is shutting down");
             }
             entries.insert(
@@ -125,6 +139,11 @@ impl Registry {
         match removed {
             Some(entry) => {
                 entry.session.kill();
+                // Track until its teardown completes; prune the already-dead.
+                let mut graveyard = self.graveyard.lock().unwrap();
+                graveyard.retain(|s| s.exited().is_none());
+                graveyard.push(entry.session);
+                drop(graveyard);
                 self.persist_logged();
                 true
             }
@@ -134,17 +153,18 @@ impl Registry {
 
     /// Resize the PTY and the recorded dims under ONE lock, so two concurrent
     /// resizes can't leave the PTY at A's size and the registry at B's.
+    ///
+    /// Deliberately does NOT persist: resize storms (every drag tick in M2)
+    /// must not hammer state.json with synchronous writes. Dims land on disk
+    /// with the next lifecycle persist (create/close/layout/exit/shutdown).
     pub fn resize_session(&self, id: SessionId, cols: u16, rows: u16) -> Result<()> {
-        {
-            let mut entries = self.entries.lock().unwrap();
-            let Some(entry) = entries.get_mut(&id) else {
-                bail!("no session {id}");
-            };
-            entry.session.resize(cols, rows)?;
-            entry.info.cols = cols;
-            entry.info.rows = rows;
-        }
-        self.persist_logged();
+        let mut entries = self.entries.lock().unwrap();
+        let Some(entry) = entries.get_mut(&id) else {
+            bail!("no session {id}");
+        };
+        entry.session.resize(cols, rows)?;
+        entry.info.cols = cols;
+        entry.info.rows = rows;
         Ok(())
     }
 
@@ -213,8 +233,29 @@ impl Registry {
             self.shutting_down.store(true, Ordering::SeqCst);
             entries.drain().map(|(_, e)| e).collect()
         };
-        for entry in drained {
+        for entry in &drained {
             entry.session.kill();
+        }
+        // kill() runs its tree-kill on a detached thread, and each session's
+        // waiter thread still has to drop the PTY master; the daemon is about
+        // to exit and MUST NOT take either down mid-teardown — an OpenConsole
+        // orphaned with broken pipes spins at 100% CPU forever. Bounded wait
+        // covers live sessions AND the graveyard (recently closed, teardown
+        // in flight): every one observes its exit watch (which fires only
+        // after the master is dropped), or 5s total elapse.
+        let parting: Vec<Arc<Session>> = drained
+            .iter()
+            .map(|e| Arc::clone(&e.session))
+            .chain(self.graveyard.lock().unwrap().drain(..))
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        for session in &parting {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                tracing::warn!("shutdown kill wait exhausted; exiting anyway");
+                break;
+            }
+            session.wait_exit_blocking(left);
         }
     }
 }
@@ -232,7 +273,7 @@ mod tests {
     #[test]
     fn create_list_close_lifecycle() {
         let (_tmp, reg) = test_registry();
-        let (info, _s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
         assert_eq!(info.id, 1);
         assert_eq!(info.profile, "cmd");
         let listed = reg.list();
@@ -241,16 +282,20 @@ mod tests {
         assert!(reg.close_session(info.id));
         assert!(reg.list().is_empty());
         assert!(!reg.close_session(999), "unknown id -> false");
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
     #[test]
     fn ids_are_unique_and_increasing() {
         let (_tmp, reg) = test_registry();
-        let (a, _sa) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
-        let (b, _sb) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (a, sa) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (b, sb) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
         assert!(b.id > a.id);
         reg.close_session(a.id);
         reg.close_session(b.id);
+        for s in [sa, sb] {
+            assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
+        }
     }
 
     #[test]
@@ -262,19 +307,37 @@ mod tests {
         )
         .unwrap();
         let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
-        let (info, _s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
         assert!(
             info.id > 41,
             "new ids must not collide with persisted layout references (got {})",
             info.id
         );
         reg.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
     #[test]
     fn unknown_profile_is_an_error() {
         let (_tmp, reg) = test_registry();
         assert!(reg.create_session(Some("nope"), None, 80, 25).is_err());
+    }
+
+    #[test]
+    fn configured_default_profile_applies_when_profile_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(
+            tmp.path().to_path_buf(),
+            Config {
+                default_profile: "cmd".into(),
+                ..Config::default()
+            },
+        );
+        let (info, s) = reg.create_session(None, None, 80, 25).unwrap();
+        assert_eq!(info.profile, "cmd", "config.json default_profile must win");
+        assert!(info.pid.is_some(), "spawned session must report its pid");
+        reg.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
     #[test]
@@ -300,7 +363,7 @@ mod tests {
     #[test]
     fn resize_session_updates_pty_and_dims_atomically() {
         let (_tmp, reg) = test_registry();
-        let (info, _s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
         reg.resize_session(info.id, 132, 43).unwrap();
         let listed = reg.list();
         assert_eq!((listed[0].cols, listed[0].rows), (132, 43));
@@ -309,6 +372,7 @@ mod tests {
             "unknown id errors"
         );
         reg.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
     #[test]
@@ -326,12 +390,13 @@ mod tests {
     #[test]
     fn persist_writes_sessions_snapshot() {
         let (tmp, reg) = test_registry();
-        let (info, _s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
         reg.persist().unwrap();
         let text = std::fs::read_to_string(tmp.path().join("state.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["sessions"][0]["id"], info.id);
         reg.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
     #[test]
@@ -353,5 +418,6 @@ mod tests {
         let (_, bytes) = session.snapshot();
         assert!(bytes.len() <= 2048, "ring exceeded configured cap");
         session.kill();
+        assert!(session.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 }

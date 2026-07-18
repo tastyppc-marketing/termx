@@ -7,6 +7,12 @@ use std::path::Path;
 fn default_scrollback_bytes() -> usize {
     4 * 1024 * 1024
 }
+
+/// Upper clamp: a whole ring rides in ONE Replay message (base64, ~4/3
+/// inflation), and WS clients default to a 64 MiB message cap — 32 MiB keeps
+/// the worst-case replay comfortably under that. Also stops a config typo
+/// (one extra zero) from defeating the memory-bound guarantee.
+pub const MAX_SCROLLBACK_BYTES: usize = 32 * 1024 * 1024;
 fn default_profile() -> String {
     "powershell".to_string()
 }
@@ -41,6 +47,13 @@ pub fn load_or_create(data_dir: &Path) -> Result<Config> {
             // 0 would panic RingBuffer::new on every session create.
             tracing::warn!("scrollback_bytes: 0 is invalid; using default");
             cfg.scrollback_bytes = default_scrollback_bytes();
+        }
+        if cfg.scrollback_bytes > MAX_SCROLLBACK_BYTES {
+            tracing::warn!(
+                "scrollback_bytes {} exceeds max {MAX_SCROLLBACK_BYTES}; clamping",
+                cfg.scrollback_bytes
+            );
+            cfg.scrollback_bytes = MAX_SCROLLBACK_BYTES;
         }
         Ok(cfg)
     } else {
@@ -90,6 +103,21 @@ mod tests {
             cfg.scrollback_bytes,
             4 * 1024 * 1024,
             "0 would panic ring construction"
+        );
+    }
+
+    #[test]
+    fn oversized_scrollback_is_clamped() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{ "scrollback_bytes": 999999999999 }"#,
+        )
+        .unwrap();
+        let cfg = load_or_create(tmp.path()).unwrap();
+        assert_eq!(
+            cfg.scrollback_bytes, MAX_SCROLLBACK_BYTES,
+            "typo'd giant value must not defeat the memory bound"
         );
     }
 

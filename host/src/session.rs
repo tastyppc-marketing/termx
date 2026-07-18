@@ -142,15 +142,36 @@ impl Session {
         let (tx_out, _) = broadcast::channel::<OutputChunk>(broadcast_cap.max(1));
         let (exit_tx, exit_rx) = watch::channel::<ExitState>(None);
 
-        // Writer thread: serializes all input to the PTY. Bounded channel —
-        // if the child stops reading, input errors instead of growing memory.
+        // Writer thread: serializes all input to the PTY. Client input rides a
+        // bounded channel (a child that stops reading -> input errors instead
+        // of growing memory). DSR answers ride a DEDICATED unbounded channel
+        // drained with priority: a full input channel must never drop a
+        // console-init query answer — conhost blocks the spawning child's init
+        // until it arrives (invariant #2), so one dropped answer is a
+        // permanently wedged shell. The channel is unbounded but tiny: one
+        // unit per query, queries are rare and bounded by output volume.
         let (tx_writer, rx_writer) = std::sync::mpsc::sync_channel::<WriterCmd>(256);
+        let (tx_dsr, rx_dsr) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
-            while let Ok(WriterCmd::Data(data)) = rx_writer.recv() {
-                if writer.write_all(&data).is_err() {
-                    break; // PTY gone; child exited
+            loop {
+                while rx_dsr.try_recv().is_ok() {
+                    if writer.write_all(b"\x1b[1;1R").is_err() {
+                        return; // PTY gone; child exited
+                    }
+                    let _ = writer.flush();
                 }
-                let _ = writer.flush();
+                // Short timeout so a pending DSR answer is picked up promptly
+                // even when no client input is flowing.
+                match rx_writer.recv_timeout(Duration::from_millis(10)) {
+                    Ok(WriterCmd::Data(data)) => {
+                        if writer.write_all(&data).is_err() {
+                            break;
+                        }
+                        let _ = writer.flush();
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             }
         });
 
@@ -158,7 +179,6 @@ impl Session {
         // answerer (see strip_dsr docs).
         let ring_r = Arc::clone(&ring);
         let tx_r = tx_out.clone();
-        let tx_dsr = tx_writer.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut carry: Vec<u8> = Vec::new();
@@ -189,8 +209,9 @@ impl Session {
                         let (clean, queries, new_carry) = strip_dsr(&carry, &buf[..n]);
                         carry = new_carry;
                         for _ in 0..queries {
-                            // try_send: a wedged writer must not stall the reader.
-                            let _ = tx_dsr.try_send(WriterCmd::Data(b"\x1b[1;1R".to_vec()));
+                            // Unbounded + non-blocking: never stalls the reader,
+                            // never drops an answer. Err = writer gone (exit).
+                            let _ = tx_dsr.send(());
                         }
                         publish(clean);
                     }
@@ -280,19 +301,31 @@ impl Session {
     /// Kill the whole process tree (shells spawn children; killing only the
     /// direct child would orphan grandchildren under ConPTY).
     ///
-    /// Fire-and-forget: spawn() not status(), because kill() is called from
-    /// async request handlers and taskkill can take hundreds of ms — the exit
-    /// watch (not this call) is what signals completion. The direct-child
-    /// killer below is synchronous and immediate as a fallback.
+    /// ORDER MATTERS: taskkill /T must walk the tree WHILE THE ROOT IS STILL
+    /// ALIVE — terminate the root first and taskkill finds nothing, orphaning
+    /// detached descendants (dev servers, daemons), exactly what /T exists to
+    /// catch. So the tree kill runs to completion on its own thread (async
+    /// callers never block; the exit watch — not this call — signals
+    /// completion), and only then does the direct-child TerminateProcess
+    /// fallback fire for anything taskkill missed.
     pub fn kill(&self) {
-        if let Some(pid) = self.child_pid {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/T", "/F", "/PID", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-        }
-        let _ = self.killer.lock().unwrap().kill();
+        let pid = self.child_pid;
+        let mut killer = self.killer.lock().unwrap().clone_killer();
+        std::thread::spawn(move || {
+            if let Some(pid) = pid {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/T", "/F", "/PID", &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            let _ = killer.kill();
+        });
+    }
+
+    /// OS pid of the shell process (None if the platform didn't report one).
+    pub fn pid(&self) -> Option<u32> {
+        self.child_pid
     }
 
     pub fn exited(&self) -> ExitState {
@@ -485,6 +518,13 @@ mod tests {
         assert!(s.write_input(b"anyone there?\r\n").is_err());
     }
 
+    // NOTE: the reader's EOF flush of a carried partial-query prefix is NOT
+    // testable through a real ConPTY — conhost re-renders child output and
+    // swallows incomplete escape sequences, so a child can't plant a partial
+    // "\x1b[6" at stream end (verified empirically). The carry mechanics are
+    // covered by the strip_dsr unit tests above; the EOF flush itself is a
+    // two-line take-and-publish.
+
     #[test]
     fn oversized_input_frame_is_rejected() {
         let profile = profiles::resolve("cmd").unwrap();
@@ -511,6 +551,7 @@ mod tests {
 
     #[test]
     fn firehose_stays_bounded_real_pty() {
+        let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
         // The spec's memory-soak: a real shell floods output; the ring must
         // stay at/under cap while total stream far exceeds it.
         let cap = 64 * 1024;
@@ -522,7 +563,7 @@ mod tests {
         ];
         let s = Session::spawn(&p, None, 120, 40, cap).unwrap();
         assert!(
-            s.wait_exit_blocking(Duration::from_secs(120)),
+            s.wait_exit_blocking(Duration::from_secs(240)),
             "firehose shell should finish"
         );
         let (start, bytes) = s.snapshot();

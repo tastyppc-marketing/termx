@@ -1,6 +1,14 @@
 //! Wire protocol: JSON text frames for control, binary frames for PTY bytes.
-//! `Replay` rides in JSON (base64) because it is a one-shot per attach;
-//! steady-state output uses binary frames for throughput.
+//!
+//! `Replay` rides in JSON (base64); steady-state output uses binary frames
+//! for throughput. Replay is NOT one-shot: besides the initial attach replay,
+//! the host sends unsolicited resync Replays whenever a client lags the live
+//! broadcast — including to `replay: false` attachers (they opted out of
+//! history, not of resync). Each Replay is authoritative for
+//! `[start_offset, start_offset + len)`, and `start_offset` may jump FORWARD
+//! past bytes the client never received (ring eviction under sustained lag):
+//! clients must treat such a gap as lost scrollback, render the replay, and
+//! continue — never wait for the missing range.
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -91,6 +99,10 @@ pub struct SessionInfo {
     pub cols: u16,
     pub rows: u16,
     pub alive: bool,
+    /// OS pid of the shell process (None if unavailable). Lets the UI show
+    /// diagnostics and lets tests verify the tree actually dies.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

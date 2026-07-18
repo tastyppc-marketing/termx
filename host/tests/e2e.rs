@@ -65,7 +65,7 @@ async fn full_lifecycle_against_real_binary() {
     }
 
     // Client A: create session, write marker, die abruptly.
-    let session_id = {
+    let (session_id, shell_pid) = {
         let mut ws = ws_connect(port).await;
         ws.send(Message::Text(
             serde_json::json!({"type": "auth", "token": token}).to_string(),
@@ -83,15 +83,37 @@ async fn full_lifecycle_against_real_binary() {
         let created = next_control(&mut ws).await;
         assert_eq!(created["type"], "session_created", "{created}");
         let id = created["info"]["id"].as_u64().unwrap();
+        let shell_pid = created["info"]["pid"]
+            .as_u64()
+            .expect("session must report its shell pid");
         // Binary input frame: tag 2 + u32 id + payload.
         let mut frame = vec![2u8];
         frame.extend_from_slice(&(id as u32).to_le_bytes());
         frame.extend_from_slice(b"echo e2e_marker_7\r\n");
         ws.send(Message::Binary(frame)).await.unwrap();
         tokio::time::sleep(Duration::from_secs(3)).await;
-        id
+        (id, shell_pid)
         // dropped without close — simulated UI crash
     };
+
+    // Single-instance guard, POSITIVE path: a second host started against the
+    // same data dir must detect the live one and bow out without touching it.
+    {
+        let second = std::process::Command::new(exe)
+            .args(["--data-dir", tmp.path().to_str().unwrap()])
+            .output()
+            .expect("spawn second termx-host");
+        assert!(second.status.success(), "second instance: {second:?}");
+        assert!(
+            String::from_utf8_lossy(&second.stdout).contains("already running"),
+            "second instance must report the live host; stdout: {:?}",
+            String::from_utf8_lossy(&second.stdout)
+        );
+        assert!(
+            read_runtime(tmp.path()).map(|v| v["port"].as_u64()) == Some(Some(port)),
+            "second instance must not clobber runtime.json"
+        );
+    }
 
     // Client B: reattach with replay; the marker must be there.
     let mut ws = ws_connect(port).await;
@@ -132,7 +154,15 @@ async fn full_lifecycle_against_real_binary() {
         "replay missing marker"
     );
 
-    // Clean shutdown: host must exit and remove runtime.json.
+    // Persist a layout, then shut down cleanly: host must exit, remove
+    // runtime.json, and actually kill the shell process tree.
+    ws.send(Message::Text(
+        serde_json::json!({"type": "set_layout", "layout": {"e2e": "layout_v1"}}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let saved = next_control(&mut ws).await;
+    assert_eq!(saved["type"], "layout_saved", "{saved}");
     ws.send(Message::Text(
         serde_json::json!({"type": "shutdown"}).to_string(),
     ))
@@ -158,4 +188,98 @@ async fn full_lifecycle_against_real_binary() {
         !tmp.path().join("runtime.json").exists(),
         "runtime.json must be cleaned up"
     );
+
+    // The shell tree must be dead — an orphaned cmd.exe would violate the
+    // stability requirement the daemon exists for.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {shell_pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .expect("tasklist");
+        if !String::from_utf8_lossy(&out.stdout)
+            .to_ascii_lowercase()
+            .contains("cmd.exe")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shell pid {shell_pid} still alive after host shutdown"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // Restart continuity: a fresh host on the same data dir must serve the
+    // persisted layout and never recycle session ids.
+    let mut host2 = std::process::Command::new(exe)
+        .args(["--data-dir", tmp.path().to_str().unwrap()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("respawn termx-host");
+    let rt2 = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(v) = read_runtime(tmp.path()) {
+                break v;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "restarted host never wrote runtime.json"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    let mut ws2 = ws_connect(rt2["port"].as_u64().unwrap()).await;
+    ws2.send(Message::Text(
+        serde_json::json!({"type": "auth", "token": rt2["token"].as_str().unwrap()}).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_control(&mut ws2).await["type"], "auth_ok");
+    ws2.send(Message::Text(
+        serde_json::json!({"type": "get_state"}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let state = loop {
+        let v = next_control(&mut ws2).await;
+        if v["type"] == "state" {
+            break v;
+        }
+    };
+    assert_eq!(
+        state["layout"]["e2e"], "layout_v1",
+        "layout must survive a daemon restart: {state}"
+    );
+    ws2.send(Message::Text(
+        serde_json::json!({"type": "create_session", "profile": "cmd", "cwd": null, "cols": 80, "rows": 25})
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    let created2 = loop {
+        let v = next_control(&mut ws2).await;
+        if v["type"] == "session_created" {
+            break v;
+        }
+    };
+    assert!(
+        created2["info"]["id"].as_u64().unwrap() > session_id,
+        "session ids must not recycle across restarts: {created2}"
+    );
+    ws2.send(Message::Text(
+        serde_json::json!({"type": "shutdown"}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while host2.try_wait().unwrap().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restarted host did not exit on Shutdown"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }

@@ -19,27 +19,36 @@ fn parse_args_from(mut args: impl Iterator<Item = String>) -> Result<Option<std:
     Ok(dir)
 }
 
-/// True only when the pid recorded in runtime.json is a live termx-host
-/// process. A bare TCP probe is not enough: after a crash the port can be
+/// Is the pid recorded in runtime.json a live termx-host process?
+/// Some(false) means verified NOT ours (dead pid, or reused by a stranger);
+/// None means tasklist itself failed and we could not verify either way.
+/// A bare TCP probe alone is not enough: after a crash the port can be
 /// reused by ANY process, and a stale runtime.json would then brick startup
 /// forever ("already running" against a stranger's socket).
-fn pid_is_termx_host(pid: u32) -> bool {
+fn pid_is_termx_host(pid: u32) -> Option<bool> {
     let out = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
             .to_ascii_lowercase()
             .contains("termx-host"),
-        Err(_) => false, // can't verify -> treat as stale and start fresh
-    }
+    )
 }
 
 /// True if a live host already serves this data dir.
 fn already_running(data_dir: &std::path::Path) -> Option<server::RuntimeInfo> {
     let text = std::fs::read_to_string(paths::runtime_file(data_dir)).ok()?;
     let info: server::RuntimeInfo = serde_json::from_str(&text).ok()?;
-    if !pid_is_termx_host(info.pid) {
+    // Some(false) = verified stale — a fresh start is safe. Some(true) or
+    // None (couldn't verify) falls through to the TCP probe: never declare a
+    // host stale on a FAILED check — booting a second host would strand the
+    // first one's live sessions.
+    if pid_is_termx_host(info.pid) == Some(false) {
         return None;
     }
     std::net::TcpStream::connect_timeout(
@@ -48,6 +57,29 @@ fn already_running(data_dir: &std::path::Path) -> Option<server::RuntimeInfo> {
     )
     .ok()?;
     Some(info)
+}
+
+/// Delete aged rotated logs (host.log.YYYY-MM-DD): a daemon that runs for
+/// months must not grow an unbounded logs dir. Age = file mtime.
+fn clean_old_logs(dir: &std::path::Path, keep: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("host.log") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .is_some_and(|age| age > keep);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -64,6 +96,7 @@ fn main() -> Result<()> {
 
     let logs = paths::logs_dir(&data_dir);
     std::fs::create_dir_all(&logs).context("creating logs dir")?;
+    clean_old_logs(&logs, std::time::Duration::from_secs(14 * 24 * 3600));
     let file_appender = tracing_appender::rolling::daily(&logs, "host.log");
     let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
     use tracing_subscriber::layer::SubscriberExt;
@@ -155,10 +188,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        // A REAL dead pid: spawn-and-reap a throwaway process. (An absurd
+        // out-of-range pid makes tasklist error, which correctly takes the
+        // conservative can't-verify path instead of the stale path.)
+        let dead_pid = {
+            let mut child = std::process::Command::new("cmd")
+                .args(["/c", "exit"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            child.wait().unwrap();
+            pid
+        };
         let stale = server::RuntimeInfo {
             port,
             token: "dead".into(),
-            pid: 4_000_000_000, // far above any real Windows pid
+            pid: dead_pid,
             version: "0.0.0".into(),
         };
         std::fs::write(
@@ -176,5 +223,22 @@ mod tests {
     fn missing_runtime_json_is_not_already_running() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(already_running(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn clean_old_logs_removes_only_stale_host_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("host.log.2020-01-01");
+        let other = tmp.path().join("keep-me.txt");
+        std::fs::write(&log, "old").unwrap();
+        std::fs::write(&other, "unrelated").unwrap();
+        // Generous window: nothing qualifies as stale.
+        clean_old_logs(tmp.path(), std::time::Duration::from_secs(3600));
+        assert!(log.exists() && other.exists());
+        // Zero window: any measurable age is stale — but only host.log files.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        clean_old_logs(tmp.path(), std::time::Duration::ZERO);
+        assert!(!log.exists(), "stale rotated log must be removed");
+        assert!(other.exists(), "non-log files must never be touched");
     }
 }

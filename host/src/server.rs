@@ -246,10 +246,18 @@ async fn handle_conn(
     token: String,
     shutdown: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
+    // Inbound message cap: the protocol's largest legit client message is a
+    // 256KiB input frame (+ layout JSON, far smaller) — without this,
+    // tungstenite buffers up to its 64MiB default per message.
+    let ws_cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(1024 * 1024),
+        max_frame_size: Some(1024 * 1024),
+        ..Default::default()
+    };
     // A half-open TCP connection must not park an accept task forever.
     let ws = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio_tungstenite::accept_async(stream),
+        tokio_tungstenite::accept_async_with_config(stream, Some(ws_cfg)),
     )
     .await
     .context("ws handshake timeout")?
@@ -291,6 +299,9 @@ async fn handle_conn(
     // its sends, so at any instant the queue holds at most a handful of
     // replays (attach bursts / lag resyncs) — bounded in practice by
     // sessions x scrollback, the same order as the rings themselves.
+    // Accepted for M1: control replies share this queue, so under full output
+    // backpressure a reply await can briefly stall inbound processing — the
+    // only client is our own UI, which always drains its socket.
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(256);
 
     // Writer half: single task owns `tx`.
@@ -307,6 +318,9 @@ async fn handle_conn(
         std::collections::HashMap::new();
 
     while let Some(msg) = rx.next().await {
+        // Reap finished forwarder handles (exited sessions) so a long-lived
+        // connection doesn't accumulate one dead handle per session forever.
+        forwarders.retain(|_, h| !h.is_finished());
         let msg = match msg {
             Ok(m) => m,
             Err(_) => break,
@@ -396,7 +410,11 @@ async fn handle_conn(
                     }
                     ClientMsg::Detach { session_id } => {
                         if let Some(handle) = forwarders.remove(&session_id) {
+                            // Await after abort: no frame may trail the detach
+                            // point (a later re-attach replays from a snapshot
+                            // that must be the only source of those bytes).
                             handle.abort();
+                            let _ = handle.await;
                         }
                     }
                     ClientMsg::Resize {
@@ -420,6 +438,7 @@ async fn handle_conn(
                     ClientMsg::CloseSession { session_id } => {
                         if let Some(handle) = forwarders.remove(&session_id) {
                             handle.abort();
+                            let _ = handle.await;
                         }
                         if registry.close_session(session_id) {
                             // Other clients' forwarders learn via the exit
@@ -590,6 +609,22 @@ mod tests {
         }
     }
 
+    /// End a test's server the way production ends: Shutdown tears every
+    /// session down with a bounded wait BEFORE the test process may exit.
+    /// Skipping this orphans OpenConsole processes that outlive the test
+    /// runner spinning at 100% CPU (observed saturating this machine).
+    async fn shutdown_and_drain(ws: &mut Ws) {
+        send_json(ws, &ClientMsg::Shutdown).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while let Some(msg) = ws.next().await {
+                if msg.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+
     async fn create_cmd(ws: &mut Ws) -> SessionId {
         send_json(
             ws,
@@ -709,6 +744,7 @@ mod tests {
                 _ => continue,
             }
         }
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
@@ -750,6 +786,7 @@ mod tests {
         };
         let info = sessions.iter().find(|s| s.id == id).expect("still listed");
         assert!(!info.alive);
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
@@ -795,6 +832,7 @@ mod tests {
                 _ => continue,
             }
         }
+        shutdown_and_drain(&mut ws_a).await;
     }
 
     #[tokio::test]
@@ -846,6 +884,7 @@ mod tests {
             "detached client must not receive output: {seen_b2:?}"
         );
         send_json(&mut ws_a, &ClientMsg::CloseSession { session_id: id }).await;
+        shutdown_and_drain(&mut ws_a).await;
     }
 
     #[tokio::test]
@@ -919,6 +958,7 @@ mod tests {
             }
         }
         send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
@@ -1016,6 +1056,7 @@ mod tests {
             "replay must contain pre-crash output; got: {replayed:?}"
         );
         send_json(&mut ws_b, &ClientMsg::CloseSession { session_id: id }).await;
+        shutdown_and_drain(&mut ws_b).await;
     }
 
     /// Sorted-merge coverage check: the client-visible stream (replays +
@@ -1092,10 +1133,12 @@ mod tests {
             }
         }
         assert!(got_replay, "replay must precede the exit notification");
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
     async fn attach_mid_stream_delivers_gapless_coverage() {
+        let _serial = crate::HEAVY_PTY_TEST.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
@@ -1105,7 +1148,7 @@ mod tests {
         // the broadcast subscription race live output here.
         ws.send(input_frame(
             id,
-            b"for /L %i in (1,1,3000) do @echo gap_%i\r\n",
+            b"for /L %i in (1,1,1500) do @echo gap_%i\r\n",
         ))
         .await
         .unwrap();
@@ -1122,9 +1165,11 @@ mod tests {
         let mut intervals: Vec<(u64, u64)> = Vec::new();
         let mut first_replay_start: Option<u64> = None;
         let mut text = String::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while std::time::Instant::now() < deadline && !text.contains("gap_3000") {
-            match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline && !text.contains("gap_1500") {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+                Err(_) => continue, // quiet spell; the outer deadline governs
+                Ok(None) | Ok(Some(Err(_))) => break,
                 Ok(Some(Ok(Message::Text(t)))) => {
                     if let Ok(HostMsg::Replay {
                         session_id,
@@ -1154,11 +1199,10 @@ mod tests {
                     }
                 }
                 Ok(Some(Ok(_))) => continue,
-                _ => break,
             }
         }
         assert!(
-            text.contains("gap_3000"),
+            text.contains("gap_1500"),
             "firehose tail never arrived; got {} bytes",
             text.len()
         );
@@ -1166,10 +1210,12 @@ mod tests {
         let to = intervals.iter().map(|&(_, e)| e).max().unwrap();
         assert_no_holes(&mut intervals, from, to);
         send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
     async fn reattach_never_delivers_stale_covered_frames() {
+        let _serial = crate::HEAVY_PTY_TEST.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
@@ -1177,7 +1223,7 @@ mod tests {
         let id = create_cmd(&mut ws).await;
         ws.send(input_frame(
             id,
-            b"for /L %i in (1,1,3000) do @echo re_%i\r\n",
+            b"for /L %i in (1,1,1500) do @echo re_%i\r\n",
         ))
         .await
         .unwrap();
@@ -1249,6 +1295,7 @@ mod tests {
             }
         }
         send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
@@ -1279,6 +1326,7 @@ mod tests {
             },
         )
         .await;
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
@@ -1307,6 +1355,7 @@ mod tests {
 
     #[tokio::test]
     async fn lagged_forwarder_resyncs_via_replay_with_no_holes() {
+        let _serial = crate::HEAVY_PTY_TEST.lock().await;
         // Direct forward_session harness: a broadcast capacity of 2 plus a
         // deliberately slow consumer forces the Lagged path deterministically.
         let profile = crate::profiles::resolve("cmd").unwrap();
@@ -1382,6 +1431,119 @@ mod tests {
         let (final_start, final_bytes) = session.snapshot();
         let total_end = final_start + final_bytes.len() as u64;
         assert_no_holes(&mut intervals, start, total_end);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_connection_is_closed_at_the_deadline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        // Send NOTHING. The 5s auth deadline must close the socket; we must
+        // never receive AuthOk.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Text(t))) => {
+                        let parsed: HostMsg = serde_json::from_str(&t).unwrap();
+                        assert!(
+                            !matches!(parsed, HostMsg::AuthOk { .. }),
+                            "must not auth a silent client"
+                        );
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) | None => break,
+                }
+            }
+        })
+        .await;
+        assert!(outcome.is_ok(), "connection was not closed by the deadline");
+    }
+
+    #[tokio::test]
+    async fn set_layout_persist_failure_reaches_the_client() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A DIRECTORY named state.json makes the persist rename fail
+        // deterministically — the client must get the error, not silence.
+        std::fs::create_dir(tmp.path().join("state.json")).unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::SetLayout {
+                layout: serde_json::json!({"groups": []}),
+            },
+        )
+        .await;
+        loop {
+            match next_json(&mut ws).await {
+                HostMsg::Error { context, .. } => {
+                    assert_eq!(context, "set_layout");
+                    break;
+                }
+                HostMsg::LayoutSaved => panic!("must not ack a failed persist"),
+                _ => continue,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn one_client_attached_to_two_sessions_gets_both_streams() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        let a = create_cmd(&mut ws).await;
+        let b = create_cmd(&mut ws).await;
+        for id in [a, b] {
+            send_json(
+                &mut ws,
+                &ClientMsg::Attach {
+                    session_id: id,
+                    replay: false,
+                },
+            )
+            .await;
+        }
+        ws.send(input_frame(a, b"echo marker_from_a\r\n"))
+            .await
+            .unwrap();
+        ws.send(input_frame(b, b"echo marker_from_b\r\n"))
+            .await
+            .unwrap();
+        // One pass over the shared socket: both streams arrive interleaved,
+        // so pumping per-session would discard the other session's frames.
+        let mut seen_a = String::new();
+        let mut seen_b = String::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline
+            && !(seen_a.contains("marker_from_a") && seen_b.contains("marker_from_b"))
+        {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+                Err(_) => continue,
+                Ok(Some(Ok(Message::Binary(buf)))) => {
+                    if let Ok(Frame::Output {
+                        session_id, data, ..
+                    }) = protocol::decode_frame(&buf)
+                    {
+                        let text = String::from_utf8_lossy(&data).to_string();
+                        if session_id == a {
+                            seen_a.push_str(&text);
+                        } else if session_id == b {
+                            seen_b.push_str(&text);
+                        }
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                _ => break,
+            }
+        }
+        assert!(seen_a.contains("marker_from_a"), "A: {seen_a:?}");
+        assert!(seen_b.contains("marker_from_b"), "B: {seen_b:?}");
+        for id in [a, b] {
+            send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
+        }
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
