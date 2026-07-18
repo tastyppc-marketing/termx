@@ -55,6 +55,20 @@ pub async fn run(
         .with_context(|| format!("writing {}", runtime_tmp.display()))?;
     std::fs::rename(&runtime_tmp, &runtime_path)
         .with_context(|| format!("renaming to {}", runtime_path.display()))?;
+    // Read-back self-check: if another host raced us and its rename landed
+    // after ours, WE are the undiscoverable one — bow out instead of running
+    // forever as an orphan daemon nobody can find. (A write landing after
+    // this check is still possible; that residual window is the documented
+    // accepted TOCTOU above.)
+    let check: RuntimeInfo =
+        serde_json::from_str(&std::fs::read_to_string(&runtime_path).context("runtime read-back")?)
+            .context("runtime read-back parse")?;
+    if check.pid != info.pid {
+        anyhow::bail!(
+            "another termx-host (pid {}) won the startup race; exiting",
+            check.pid
+        );
+    }
     let _ = ready.send(info);
 
     let mut shutdown_rx = shutdown.subscribe();
@@ -113,15 +127,22 @@ fn replay_msg(session_id: SessionId, session: &Session) -> (HostMsg, u64) {
 
 /// Relay live output for one (connection, session) pair. Ends — with a
 /// SessionExited notification — when the session's exit watch fires.
+///
+/// `chunk_rx`/`exit_rx` are created by the CALLER, strictly before the ring
+/// snapshot that fixed `replay_end`: a broadcast receiver only sees chunks
+/// sent after it exists, so subscribing in here (after the spawn is polled)
+/// would silently lose anything published between snapshot and first poll.
+/// Subscribe-then-snapshot means the worst case is overlap, and overlap is
+/// deduped by the `end <= replay_end` check.
 async fn forward_session(
     session_id: SessionId,
     session: Arc<Session>,
+    mut chunk_rx: tokio::sync::broadcast::Receiver<crate::session::OutputChunk>,
+    mut exit_rx: tokio::sync::watch::Receiver<crate::session::ExitState>,
     mut replay_end: u64,
     out_tx: tokio::sync::mpsc::Sender<Message>,
     registry: Arc<Registry>,
 ) {
-    let mut chunk_rx = session.subscribe();
-    let mut exit_rx = session.subscribe_exit();
     let exit_code = loop {
         // Already exited before (or during) this attach: finish deterministically.
         let current = *exit_rx.borrow();
@@ -145,21 +166,20 @@ async fn forward_session(
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Bounded-memory path: resend the authoritative ring and
-                    // ADVANCE the horizon so already-replayed bytes are not
-                    // duplicated by chunks still in the broadcast buffer.
+                    // Bounded-memory path: resend the authoritative ring. The
+                    // horizon advances ONLY once the replay is actually in the
+                    // outbound queue — advancing on a dropped replay would
+                    // discard every later chunk under it as "already seen",
+                    // silently and permanently. Awaited send: the replay IS
+                    // the resync mechanism, so backpressure here is correct;
+                    // while we wait we fall further behind, which at worst
+                    // triggers another Lagged and a fresher snapshot.
                     let (msg, end) = replay_msg(session_id, &session);
-                    replay_end = end;
                     if let Ok(text) = serde_json::to_string(&msg) {
-                        // try_send: if this client's queue is full it is
-                        // already drowning — skip; a later Lagged resyncs.
-                        match out_tx.try_send(Message::Text(text)) {
-                            Ok(()) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                tracing::debug!("lag-replay skipped: client queue full");
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                        if out_tx.send(Message::Text(text)).await.is_err() {
+                            return; // connection gone
                         }
+                        replay_end = end;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -177,21 +197,35 @@ async fn forward_session(
     .flatten();
 
     // Drain trailing output that raced the exit signal (conhost flushes the
-    // tail after the child dies).
-    while let Ok(Ok(chunk)) =
-        tokio::time::timeout(std::time::Duration::from_millis(300), chunk_rx.recv()).await
-    {
-        let end = chunk.offset + chunk.data.len() as u64;
-        if end <= replay_end {
-            continue;
-        }
-        let frame = protocol::encode_frame(&Frame::Output {
-            session_id,
-            offset: chunk.offset,
-            data: chunk.data.to_vec(),
-        });
-        if out_tx.send(Message::Binary(frame)).await.is_err() {
-            return;
+    // tail after the child dies). A Lagged here must not abort the drain —
+    // that would drop the session's final lines; resync from the ring instead.
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_millis(300), chunk_rx.recv()).await {
+            Err(_) => break, // quiet for 300ms — tail is flushed
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                let (msg, end) = replay_msg(session_id, &session);
+                if let Ok(text) = serde_json::to_string(&msg) {
+                    if out_tx.send(Message::Text(text)).await.is_err() {
+                        return;
+                    }
+                    replay_end = end;
+                }
+            }
+            Ok(Ok(chunk)) => {
+                let end = chunk.offset + chunk.data.len() as u64;
+                if end <= replay_end {
+                    continue;
+                }
+                let frame = protocol::encode_frame(&Frame::Output {
+                    session_id,
+                    offset: chunk.offset,
+                    data: chunk.data.to_vec(),
+                });
+                if out_tx.send(Message::Binary(frame)).await.is_err() {
+                    return;
+                }
+            }
         }
     }
 
@@ -252,9 +286,12 @@ async fn handle_conn(
     .await?;
 
     // ---- Post-auth: fan session output into one outbound channel ----
-    // Bounded by count; every frame is <=8KB and lag-replays use try_send, so
-    // worst-case queue memory is bounded too.
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(1024);
+    // Count-bounded. Steady-state items are <=8KiB frames (~2MiB at cap);
+    // replays can be up to scrollback_bytes each, but every producer awaits
+    // its sends, so at any instant the queue holds at most a handful of
+    // replays (attach bursts / lag resyncs) — bounded in practice by
+    // sessions x scrollback, the same order as the rings themselves.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(256);
 
     // Writer half: single task owns `tx`.
     let writer = tokio::spawn(async move {
@@ -314,10 +351,13 @@ async fn handle_conn(
                         send_ctl(&out_tx, &reply).await;
                     }
                     ClientMsg::Attach { session_id, replay } => {
-                        // Abort any previous forwarder FIRST so its stale
-                        // frames can't land after the fresh replay.
+                        // Abort the previous forwarder AND await it, so a
+                        // stale frame it was mid-sending can't land after the
+                        // fresh replay below. (Await after abort returns as
+                        // soon as the task hits a cancellation point.)
                         if let Some(old) = forwarders.remove(&session_id) {
                             old.abort();
+                            let _ = old.await;
                         }
                         let Some(session) = registry.get(session_id) else {
                             send_ctl(
@@ -330,10 +370,15 @@ async fn handle_conn(
                             .await;
                             continue;
                         };
-                        // Subscribe (inside forward_session) happens before
-                        // the snapshot horizon is used for dedupe, so there is
-                        // no replay/live gap; chunks straddling the horizon
-                        // are skipped only when FULLY covered by the replay.
+                        // ORDER MATTERS: subscribe strictly BEFORE snapshot.
+                        // A broadcast receiver only sees post-subscribe sends,
+                        // so snapshot-first would silently lose any chunk
+                        // published in the gap. Subscribe-first only risks
+                        // overlap, which dedupes against replay_end. Chunks
+                        // straddling the horizon are forwarded whole; their
+                        // offset lets the client trim the overlap.
+                        let chunk_rx = session.subscribe();
+                        let exit_rx = session.subscribe_exit();
                         let (msg, replay_end) = replay_msg(session_id, &session);
                         if replay {
                             send_ctl(&out_tx, &msg).await;
@@ -341,6 +386,8 @@ async fn handle_conn(
                         let handle = tokio::spawn(forward_session(
                             session_id,
                             session,
+                            chunk_rx,
+                            exit_rx,
                             replay_end,
                             out_tx.clone(),
                             Arc::clone(&registry),
@@ -356,31 +403,20 @@ async fn handle_conn(
                         session_id,
                         cols,
                         rows,
-                    } => match registry.get(session_id) {
-                        Some(session) => match session.resize(cols, rows) {
-                            Ok(()) => registry.update_dims(session_id, cols, rows),
-                            Err(e) => {
-                                send_ctl(
-                                    &out_tx,
-                                    &HostMsg::Error {
-                                        context: "resize".into(),
-                                        message: format!("{e:#}"),
-                                    },
-                                )
-                                .await;
-                            }
-                        },
-                        None => {
+                    } => {
+                        // PTY + recorded dims move together under one registry
+                        // lock; concurrent resizes can't leave them diverged.
+                        if let Err(e) = registry.resize_session(session_id, cols, rows) {
                             send_ctl(
                                 &out_tx,
                                 &HostMsg::Error {
                                     context: "resize".into(),
-                                    message: format!("no session {session_id}"),
+                                    message: format!("{e:#}"),
                                 },
                             )
                             .await;
                         }
-                    },
+                    }
                     ClientMsg::CloseSession { session_id } => {
                         if let Some(handle) = forwarders.remove(&session_id) {
                             handle.abort();
@@ -410,7 +446,14 @@ async fn handle_conn(
                         .await;
                     }
                     ClientMsg::SetLayout { layout } => {
-                        registry.set_layout(layout);
+                        let reply = match registry.set_layout(layout) {
+                            Ok(()) => HostMsg::LayoutSaved,
+                            Err(e) => HostMsg::Error {
+                                context: "set_layout".into(),
+                                message: format!("{e:#}"),
+                            },
+                        };
+                        send_ctl(&out_tx, &reply).await;
                     }
                     ClientMsg::GetState => {
                         send_ctl(
@@ -818,6 +861,8 @@ mod tests {
             },
         )
         .await;
+        // Durable-save ack must arrive before anything else.
+        assert!(matches!(next_json(&mut ws).await, HostMsg::LayoutSaved));
         send_json(&mut ws, &ClientMsg::GetState).await;
         let layout = loop {
             match next_json(&mut ws).await {
@@ -971,6 +1016,372 @@ mod tests {
             "replay must contain pre-crash output; got: {replayed:?}"
         );
         send_json(&mut ws_b, &ClientMsg::CloseSession { session_id: id }).await;
+    }
+
+    /// Sorted-merge coverage check: the client-visible stream (replays +
+    /// frames) must have no hole between `from` and `to`.
+    fn assert_no_holes(intervals: &mut [(u64, u64)], from: u64, to: u64) {
+        intervals.sort_unstable();
+        let mut covered = from;
+        for &(s, e) in intervals.iter() {
+            assert!(
+                s <= covered,
+                "hole in client stream: [{covered}, {s}) never delivered"
+            );
+            covered = covered.max(e);
+        }
+        assert!(
+            covered >= to,
+            "stream truncated: covered to {covered}, expected {to}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_to_exited_session_gets_replay_and_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        let id = create_cmd(&mut ws).await;
+        // Exit WITHOUT ever attaching, then wait until the host sees it dead.
+        ws.send(input_frame(id, b"exit 5\r\n")).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session never reported dead"
+            );
+            send_json(&mut ws, &ClientMsg::ListSessions).await;
+            let sessions = loop {
+                match next_json(&mut ws).await {
+                    HostMsg::Sessions { sessions } => break sessions,
+                    _ => continue,
+                }
+            };
+            if sessions.iter().any(|s| s.id == id && !s.alive) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        // Attaching to the corpse must yield its last output + a deterministic
+        // SessionExited with the real code — this is how M2 shows dead shells.
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+            },
+        )
+        .await;
+        let mut got_replay = false;
+        loop {
+            match next_json(&mut ws).await {
+                HostMsg::Replay { session_id, .. } => {
+                    assert_eq!(session_id, id);
+                    got_replay = true;
+                }
+                HostMsg::SessionExited {
+                    session_id,
+                    exit_code,
+                } => {
+                    assert_eq!(session_id, id);
+                    assert_eq!(exit_code, Some(5));
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(got_replay, "replay must precede the exit notification");
+    }
+
+    #[tokio::test]
+    async fn attach_mid_stream_delivers_gapless_coverage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        let id = create_cmd(&mut ws).await;
+        // Start a firehose, let it run, THEN attach — the replay snapshot and
+        // the broadcast subscription race live output here.
+        ws.send(input_frame(
+            id,
+            b"for /L %i in (1,1,3000) do @echo gap_%i\r\n",
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+            },
+        )
+        .await;
+
+        let mut intervals: Vec<(u64, u64)> = Vec::new();
+        let mut first_replay_start: Option<u64> = None;
+        let mut text = String::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline && !text.contains("gap_3000") {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), ws.next()).await {
+                Ok(Some(Ok(Message::Text(t)))) => {
+                    if let Ok(HostMsg::Replay {
+                        session_id,
+                        start_offset,
+                        data_b64,
+                    }) = serde_json::from_str(&t)
+                    {
+                        assert_eq!(session_id, id);
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(data_b64)
+                            .unwrap();
+                        first_replay_start.get_or_insert(start_offset);
+                        intervals.push((start_offset, start_offset + bytes.len() as u64));
+                        text.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                }
+                Ok(Some(Ok(Message::Binary(buf)))) => {
+                    if let Ok(Frame::Output {
+                        session_id,
+                        offset,
+                        data,
+                    }) = protocol::decode_frame(&buf)
+                    {
+                        assert_eq!(session_id, id);
+                        intervals.push((offset, offset + data.len() as u64));
+                        text.push_str(&String::from_utf8_lossy(&data));
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                _ => break,
+            }
+        }
+        assert!(
+            text.contains("gap_3000"),
+            "firehose tail never arrived; got {} bytes",
+            text.len()
+        );
+        let from = first_replay_start.expect("a replay must have been delivered");
+        let to = intervals.iter().map(|&(_, e)| e).max().unwrap();
+        assert_no_holes(&mut intervals, from, to);
+        send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
+    }
+
+    #[tokio::test]
+    async fn reattach_never_delivers_stale_covered_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        let id = create_cmd(&mut ws).await;
+        ws.send(input_frame(
+            id,
+            b"for /L %i in (1,1,3000) do @echo re_%i\r\n",
+        ))
+        .await
+        .unwrap();
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+            },
+        )
+        .await;
+        // Let the first forwarder stream for a bit, then re-attach mid-flow.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+            },
+        )
+        .await;
+        // Skip the backlog (frames + first replay) until the SECOND Replay.
+        let mut replays_seen = 0;
+        let replay2_end = loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(20), ws.next())
+                .await
+                .expect("timeout waiting for second replay")
+                .expect("stream ended")
+                .expect("ws error")
+            {
+                Message::Text(t) => {
+                    if let Ok(HostMsg::Replay {
+                        start_offset,
+                        data_b64,
+                        ..
+                    }) = serde_json::from_str(&t)
+                    {
+                        replays_seen += 1;
+                        if replays_seen == 2 {
+                            let len = base64::engine::general_purpose::STANDARD
+                                .decode(data_b64)
+                                .unwrap()
+                                .len() as u64;
+                            break start_offset + len;
+                        }
+                    }
+                }
+                _ => continue,
+            }
+        };
+        // After the fresh replay, no frame may be FULLY covered by it — that
+        // would be a stale send from the aborted first forwarder.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut checked = 0u32;
+        while std::time::Instant::now() < deadline && checked < 200 {
+            match tokio::time::timeout(std::time::Duration::from_millis(1500), ws.next()).await {
+                Ok(Some(Ok(Message::Binary(buf)))) => {
+                    if let Ok(Frame::Output { offset, data, .. }) = protocol::decode_frame(&buf) {
+                        let end = offset + data.len() as u64;
+                        assert!(
+                            end > replay2_end,
+                            "stale frame [{offset},{end}) fully covered by replay ending {replay2_end}"
+                        );
+                        checked += 1;
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                _ => break,
+            }
+        }
+        send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
+    }
+
+    #[tokio::test]
+    async fn default_profile_is_used_when_profile_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::CreateSession {
+                profile: None,
+                cwd: None,
+                cols: 100,
+                rows: 30,
+            },
+        )
+        .await;
+        let info = match next_json(&mut ws).await {
+            HostMsg::SessionCreated { info } => info,
+            other => panic!("expected SessionCreated, got {other:?}"),
+        };
+        assert_eq!(info.profile, "powershell", "config default must apply");
+        send_json(
+            &mut ws,
+            &ClientMsg::CloseSession {
+                session_id: info.id,
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn client_sent_output_frame_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        ws.send(Message::Binary(protocol::encode_frame(&Frame::Output {
+            session_id: 1,
+            offset: 0,
+            data: b"spoof".to_vec(),
+        })))
+        .await
+        .unwrap();
+        loop {
+            match next_json(&mut ws).await {
+                HostMsg::Error { message, .. } => {
+                    assert!(message.contains("Output"), "got: {message}");
+                    break;
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lagged_forwarder_resyncs_via_replay_with_no_holes() {
+        // Direct forward_session harness: a broadcast capacity of 2 plus a
+        // deliberately slow consumer forces the Lagged path deterministically.
+        let profile = crate::profiles::resolve("cmd").unwrap();
+        let mut p = profile.clone();
+        p.args = vec![
+            "/c".into(),
+            "for /L %i in (1,1,4000) do @echo lag_line_%i".into(),
+        ];
+        let session = Arc::new(
+            crate::session::Session::spawn_with_broadcast_cap(
+                &p,
+                None,
+                120,
+                40,
+                4 * 1024 * 1024,
+                2,
+            )
+            .unwrap(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
+        // Same order as the Attach arm: subscribe, then snapshot.
+        let chunk_rx = session.subscribe();
+        let exit_rx = session.subscribe_exit();
+        let (start, bytes) = session.snapshot();
+        let replay_end = start + bytes.len() as u64;
+        let mut intervals: Vec<(u64, u64)> = vec![(start, replay_end)];
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(2);
+        let fwd = tokio::spawn(forward_session(
+            1,
+            Arc::clone(&session),
+            chunk_rx,
+            exit_rx,
+            replay_end,
+            out_tx,
+            Arc::clone(&reg),
+        ));
+        let mut lag_replays = 0u32;
+        let mut exited = false;
+        while let Some(msg) = out_rx.recv().await {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await; // slow client
+            match msg {
+                Message::Text(t) => match serde_json::from_str::<HostMsg>(&t).unwrap() {
+                    HostMsg::Replay {
+                        start_offset,
+                        data_b64,
+                        ..
+                    } => {
+                        lag_replays += 1;
+                        let len = base64::engine::general_purpose::STANDARD
+                            .decode(data_b64)
+                            .unwrap()
+                            .len() as u64;
+                        intervals.push((start_offset, start_offset + len));
+                    }
+                    HostMsg::SessionExited { .. } => exited = true,
+                    _ => {}
+                },
+                Message::Binary(buf) => {
+                    if let Ok(Frame::Output { offset, data, .. }) = protocol::decode_frame(&buf) {
+                        intervals.push((offset, offset + data.len() as u64));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let _ = fwd.await;
+        assert!(exited, "forwarder must end with SessionExited");
+        assert!(
+            lag_replays >= 1,
+            "tiny broadcast + slow consumer must force a lag replay"
+        );
+        let (final_start, final_bytes) = session.snapshot();
+        let total_end = final_start + final_bytes.len() as u64;
+        assert_no_holes(&mut intervals, start, total_end);
     }
 
     #[tokio::test]

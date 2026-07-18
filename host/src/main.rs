@@ -1,21 +1,47 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::sync::Arc;
 use termx_host::{config, paths, registry::Registry, server};
 
-fn parse_data_dir_arg() -> Option<std::path::PathBuf> {
-    let mut args = std::env::args().skip(1);
+/// Strict CLI parse: `--data-dir <path>` only. A typo'd flag or a missing
+/// value is an error, not a silent fall-through to the default data dir
+/// (which would quietly run against the wrong state).
+fn parse_args_from(mut args: impl Iterator<Item = String>) -> Result<Option<std::path::PathBuf>> {
+    let mut dir = None;
     while let Some(arg) = args.next() {
-        if arg == "--data-dir" {
-            return args.next().map(std::path::PathBuf::from);
+        match arg.as_str() {
+            "--data-dir" => {
+                let value = args.next().context("--data-dir requires a value")?;
+                dir = Some(std::path::PathBuf::from(value));
+            }
+            other => bail!("unknown argument: {other} (usage: termx-host [--data-dir <path>])"),
         }
     }
-    None
+    Ok(dir)
+}
+
+/// True only when the pid recorded in runtime.json is a live termx-host
+/// process. A bare TCP probe is not enough: after a crash the port can be
+/// reused by ANY process, and a stale runtime.json would then brick startup
+/// forever ("already running" against a stranger's socket).
+fn pid_is_termx_host(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .to_ascii_lowercase()
+            .contains("termx-host"),
+        Err(_) => false, // can't verify -> treat as stale and start fresh
+    }
 }
 
 /// True if a live host already serves this data dir.
 fn already_running(data_dir: &std::path::Path) -> Option<server::RuntimeInfo> {
     let text = std::fs::read_to_string(paths::runtime_file(data_dir)).ok()?;
     let info: server::RuntimeInfo = serde_json::from_str(&text).ok()?;
+    if !pid_is_termx_host(info.pid) {
+        return None;
+    }
     std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], info.port)),
         std::time::Duration::from_millis(500),
@@ -25,7 +51,7 @@ fn already_running(data_dir: &std::path::Path) -> Option<server::RuntimeInfo> {
 }
 
 fn main() -> Result<()> {
-    let override_dir = parse_data_dir_arg();
+    let override_dir = parse_args_from(std::env::args().skip(1))?;
     let data_dir = paths::resolve_data_dir(override_dir.as_deref())?;
 
     if let Some(info) = already_running(&data_dir) {
@@ -92,4 +118,63 @@ fn main() -> Result<()> {
         tracing::info!("termx-host exiting cleanly");
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> impl Iterator<Item = String> {
+        list.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn parse_args_accepts_data_dir_and_rejects_garbage() {
+        assert_eq!(parse_args_from(args(&[])).unwrap(), None);
+        assert_eq!(
+            parse_args_from(args(&["--data-dir", r"C:\x"])).unwrap(),
+            Some(std::path::PathBuf::from(r"C:\x"))
+        );
+        assert!(
+            parse_args_from(args(&["--data-dir"])).is_err(),
+            "missing value must error"
+        );
+        assert!(
+            parse_args_from(args(&["--dtaa-dir", r"C:\x"])).is_err(),
+            "typo'd flag must error, not silently use the default dir"
+        );
+    }
+
+    #[test]
+    fn stale_runtime_json_with_foreign_listener_is_not_already_running() {
+        // A dead pid + a random process listening on the recorded port is the
+        // post-crash port-reuse scenario; startup must NOT be blocked.
+        let tmp = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stale = server::RuntimeInfo {
+            port,
+            token: "dead".into(),
+            pid: 4_000_000_000, // far above any real Windows pid
+            version: "0.0.0".into(),
+        };
+        std::fs::write(
+            paths::runtime_file(tmp.path()),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            already_running(tmp.path()).is_none(),
+            "foreign listener + dead pid must be treated as stale"
+        );
+    }
+
+    #[test]
+    fn missing_runtime_json_is_not_already_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(already_running(tmp.path()).is_none());
+    }
 }

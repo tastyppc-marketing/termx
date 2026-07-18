@@ -5,10 +5,10 @@ use crate::config::Config;
 use crate::profiles;
 use crate::protocol::{SessionId, SessionInfo};
 use crate::session::Session;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct Entry {
@@ -23,6 +23,10 @@ pub struct Registry {
     entries: Mutex<HashMap<SessionId, Entry>>,
     layout: Mutex<serde_json::Value>,
     persist_lock: Mutex<()>,
+    // Set (under the entries lock) by shutdown_all; create_session checks it
+    // under the same lock, so a session can never slip in after the drain and
+    // outlive the daemon as an orphan conhost tree.
+    shutting_down: AtomicBool,
 }
 
 impl Registry {
@@ -58,6 +62,7 @@ impl Registry {
             entries: Mutex::new(HashMap::new()),
             layout: Mutex::new(layout),
             persist_lock: Mutex::new(()),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -70,6 +75,8 @@ impl Registry {
     ) -> Result<(SessionInfo, Arc<Session>)> {
         let name = profile.unwrap_or(&self.config.default_profile);
         let prof = profiles::resolve(name)?;
+        // Spawn outside the lock (slow syscall), but decide whether it may
+        // LIVE inside it — see `shutting_down`.
         let session = Arc::new(Session::spawn(
             &prof,
             cwd,
@@ -86,13 +93,21 @@ impl Registry {
             rows,
             alive: true,
         };
-        self.entries.lock().unwrap().insert(
-            id,
-            Entry {
-                session: Arc::clone(&session),
-                info: info.clone(),
-            },
-        );
+        {
+            let mut entries = self.entries.lock().unwrap();
+            if self.shutting_down.load(Ordering::SeqCst) {
+                drop(entries);
+                session.kill();
+                bail!("host is shutting down");
+            }
+            entries.insert(
+                id,
+                Entry {
+                    session: Arc::clone(&session),
+                    info: info.clone(),
+                },
+            );
+        }
         self.persist_logged();
         Ok((info, session))
     }
@@ -117,12 +132,20 @@ impl Registry {
         }
     }
 
-    pub fn update_dims(&self, id: SessionId, cols: u16, rows: u16) {
-        if let Some(entry) = self.entries.lock().unwrap().get_mut(&id) {
+    /// Resize the PTY and the recorded dims under ONE lock, so two concurrent
+    /// resizes can't leave the PTY at A's size and the registry at B's.
+    pub fn resize_session(&self, id: SessionId, cols: u16, rows: u16) -> Result<()> {
+        {
+            let mut entries = self.entries.lock().unwrap();
+            let Some(entry) = entries.get_mut(&id) else {
+                bail!("no session {id}");
+            };
+            entry.session.resize(cols, rows)?;
             entry.info.cols = cols;
             entry.info.rows = rows;
         }
         self.persist_logged();
+        Ok(())
     }
 
     pub fn list(&self) -> Vec<SessionInfo> {
@@ -141,9 +164,12 @@ impl Registry {
         infos
     }
 
-    pub fn set_layout(&self, layout: serde_json::Value) {
+    /// Returns the persist result so callers can tell the client whether the
+    /// layout is actually durable (a silent persist failure here would lose
+    /// the user's tab/group arrangement on the next restart).
+    pub fn set_layout(&self, layout: serde_json::Value) -> Result<()> {
         *self.layout.lock().unwrap() = layout;
-        self.persist_logged();
+        self.persist()
     }
 
     pub fn layout(&self) -> serde_json::Value {
@@ -180,7 +206,14 @@ impl Registry {
     pub fn shutdown_all(&self) {
         // Capture the final state (with alive flags) BEFORE killing everything.
         self.persist_logged();
-        for (_, entry) in self.entries.lock().unwrap().drain() {
+        // Flag is set while holding the entries lock; create_session checks it
+        // under the same lock, so nothing can be inserted after this drain.
+        let drained: Vec<Entry> = {
+            let mut entries = self.entries.lock().unwrap();
+            self.shutting_down.store(true, Ordering::SeqCst);
+            entries.drain().map(|(_, e)| e).collect()
+        };
+        for entry in drained {
             entry.session.kill();
         }
     }
@@ -249,7 +282,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         {
             let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
-            reg.set_layout(serde_json::json!({"groups": [{"name": "client work"}]}));
+            reg.set_layout(serde_json::json!({"groups": [{"name": "client work"}]}))
+                .unwrap();
         }
         let reg2 = Registry::new(tmp.path().to_path_buf(), Config::default());
         assert_eq!(reg2.layout()["groups"][0]["name"], "client work");
@@ -264,13 +298,29 @@ mod tests {
     }
 
     #[test]
-    fn update_dims_reflected_in_list() {
+    fn resize_session_updates_pty_and_dims_atomically() {
         let (_tmp, reg) = test_registry();
         let (info, _s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
-        reg.update_dims(info.id, 132, 43);
+        reg.resize_session(info.id, 132, 43).unwrap();
         let listed = reg.list();
         assert_eq!((listed[0].cols, listed[0].rows), (132, 43));
+        assert!(
+            reg.resize_session(9999, 80, 25).is_err(),
+            "unknown id errors"
+        );
         reg.close_session(info.id);
+    }
+
+    #[test]
+    fn create_session_after_shutdown_is_refused() {
+        let (_tmp, reg) = test_registry();
+        reg.shutdown_all();
+        let err = match reg.create_session(Some("cmd"), None, 80, 25) {
+            Ok(_) => panic!("create after shutdown must fail"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("shutting down"), "{err:#}");
+        assert!(reg.list().is_empty(), "no orphan entry may remain");
     }
 
     #[test]

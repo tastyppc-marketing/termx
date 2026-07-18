@@ -84,6 +84,11 @@ pub struct Session {
     exit_rx: watch::Receiver<ExitState>,
 }
 
+/// Largest single input frame accepted. Input rides a COUNT-bounded channel
+/// (256 slots), so per-frame bytes must be capped or one client could park
+/// gigabytes of paste data in memory. Clients chunk larger pastes.
+pub const MAX_INPUT_FRAME: usize = 256 * 1024;
+
 impl Session {
     pub fn spawn(
         profile: &Profile,
@@ -91,6 +96,20 @@ impl Session {
         cols: u16,
         rows: u16,
         ring_cap: usize,
+    ) -> Result<Session> {
+        Self::spawn_with_broadcast_cap(profile, cwd, cols, rows, ring_cap, 256)
+    }
+
+    /// `broadcast_cap` is the live-listener chunk buffer (chunks, not bytes);
+    /// laggards resync from the ring. Exposed so tests can force the Lagged
+    /// path deterministically with a tiny capacity.
+    pub(crate) fn spawn_with_broadcast_cap(
+        profile: &Profile,
+        cwd: Option<&Path>,
+        cols: u16,
+        rows: u16,
+        ring_cap: usize,
+        broadcast_cap: usize,
     ) -> Result<Session> {
         let pty = native_pty_system();
         let pair = pty
@@ -120,7 +139,7 @@ impl Session {
         let master = Arc::new(Mutex::new(Some(pair.master)));
 
         let ring = Arc::new(Mutex::new(RingBuffer::new(ring_cap)));
-        let (tx_out, _) = broadcast::channel::<OutputChunk>(256);
+        let (tx_out, _) = broadcast::channel::<OutputChunk>(broadcast_cap.max(1));
         let (exit_tx, exit_rx) = watch::channel::<ExitState>(None);
 
         // Writer thread: serializes all input to the PTY. Bounded channel —
@@ -209,6 +228,15 @@ impl Session {
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<()> {
+        if data.len() > MAX_INPUT_FRAME {
+            bail!(
+                "input frame too large ({} bytes, max {MAX_INPUT_FRAME}); chunk large pastes",
+                data.len()
+            );
+        }
+        // Accepted race: between the child exiting and the waiter clearing this
+        // slot (~100ms), a frame can be enqueued to a writer nobody drains and
+        // be reported Ok. Input to a dying shell is lost either way.
         let guard = self.tx_writer.lock().unwrap();
         let Some(tx) = guard.as_ref() else {
             bail!("session exited");
@@ -251,13 +279,18 @@ impl Session {
 
     /// Kill the whole process tree (shells spawn children; killing only the
     /// direct child would orphan grandchildren under ConPTY).
+    ///
+    /// Fire-and-forget: spawn() not status(), because kill() is called from
+    /// async request handlers and taskkill can take hundreds of ms — the exit
+    /// watch (not this call) is what signals completion. The direct-child
+    /// killer below is synchronous and immediate as a fallback.
     pub fn kill(&self) {
         if let Some(pid) = self.child_pid {
             let _ = std::process::Command::new("taskkill")
                 .args(["/T", "/F", "/PID", &pid.to_string()])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status();
+                .spawn();
         }
         let _ = self.killer.lock().unwrap().kill();
     }
@@ -450,6 +483,20 @@ mod tests {
         // input must fail rather than silently vanish.
         std::thread::sleep(Duration::from_millis(500));
         assert!(s.write_input(b"anyone there?\r\n").is_err());
+    }
+
+    #[test]
+    fn oversized_input_frame_is_rejected() {
+        let profile = profiles::resolve("cmd").unwrap();
+        let s = Session::spawn(&profile, None, 80, 25, 1024 * 1024).unwrap();
+        let big = vec![b'x'; MAX_INPUT_FRAME + 1];
+        assert!(s.write_input(&big).is_err(), "over-cap frame must error");
+        assert!(
+            s.write_input(b"echo ok\r\n").is_ok(),
+            "normal input still works"
+        );
+        s.kill();
+        assert!(s.wait_exit_blocking(Duration::from_secs(10)));
     }
 
     #[test]

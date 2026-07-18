@@ -70,6 +70,9 @@ pub enum HostMsg {
     Sessions {
         sessions: Vec<SessionInfo>,
     },
+    /// Ack that SetLayout was applied AND durably persisted; persist failures
+    /// come back as Error{context:"set_layout"} instead of silence.
+    LayoutSaved,
     State {
         layout: serde_json::Value,
         sessions: Vec<SessionInfo>,
