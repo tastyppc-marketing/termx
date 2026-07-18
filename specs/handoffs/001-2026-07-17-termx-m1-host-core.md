@@ -28,7 +28,7 @@ ROUND-5 COMMIT: `b06e7cf` (`fix(host): complete M1 stability quality loop`).
 
 NEXT STEPS:
 1. M1 stability work is complete. Report to Michael: findings per round (32 → 21 → 24 → 27 → round-5 independently verified set), the orphan-leak story, final 105-test count, the two leftover generated review directories, and that MSVC UAC is still pending for M2.
-2. Begin M2 planning only after the MSVC toolchain blocker is cleared.
+2. MSVC blocker cleared 2026-07-18: Visual Studio Build Tools 2022 17.14.36 installed; Rust default is `stable-x86_64-pc-windows-msvc`; fresh MSVC verification passed fmt, strict Clippy, 96 lib + 6 bin + 3 e2e tests. M2 planning can begin.
 
 Gotchas that survive compaction: every Bash needs `export PATH="$HOME/tools/mingw64/bin:$HOME/.cargo/bin:$PATH"`; cargo runs → background + file redirect (pipes wedge via ConPTY handle inheritance); real-check/task-gate hooks fail on cargo/pytest — environmental, state it and move on; MinGW links take 3-6 min.
 
@@ -60,7 +60,7 @@ Building TermX (`C:\Dev\TermX`) — a stable Warp-like terminal manager for Wind
 - `C:\Dev\TermX\BACKLOG.md` - deferred features Michael explicitly wants later
 
 ## Blockers / Notes
-- **MSVC missing**: winget VS Build Tools needs Michael to approve UAC. Command: `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`. After install: `rustup default stable-x86_64-pc-windows-msvc` + full rebuild. Required before M2 (Tauri).
+- **MSVC installed and verified 2026-07-18**: Visual Studio Build Tools 2022 17.14.36 with VCTools is installed; Rust default is `stable-x86_64-pc-windows-msvc`. Fresh isolated MSVC verification passed fmt, strict Clippy, 96 lib + 6 bin + 3 e2e tests. Tauri/M2 toolchain blocker is cleared.
 - Session-scoped env needed in every Bash call this session: `export PATH="$HOME/tools/mingw64/bin:$HOME/.cargo/bin:$PATH"` (hooks/other shells started pre-PATH-change will not see cargo — their failures are environmental noise).
 - MinGW test-binary links are SLOW (~3-6 min); always run cargo with output redirected to a file (ConPTY children can inherit pipe handles and wedge pipelines), background + generous timeout.
 - Windows build 26200.8875 — the ConPTY slave-drop bug bites here; do not "simplify" the slave-lifetime code in session.rs.
