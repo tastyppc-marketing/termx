@@ -27,6 +27,7 @@ pub struct Registry {
     entries: Mutex<HashMap<SessionId, Entry>>,
     layout: Mutex<serde_json::Value>,
     persist_lock: Mutex<()>,
+    spawn_lock: Mutex<()>,
     // Set (under the entries lock) by shutdown_all; create_session checks it
     // under the same lock, so a session can never slip in after the drain and
     // outlive the daemon as an orphan conhost tree.
@@ -38,13 +39,33 @@ pub struct Registry {
     graveyard: Mutex<Vec<Arc<Session>>>,
 }
 
-/// Terminal dims a real UI can produce. 0 panics conhost math; huge values
-/// make conhost allocate screen buffers far outside the host's memory bound.
+/// Terminal dims a real UI can produce. 0 panics conhost math; huge axes or
+/// cell areas make conhost allocate screen buffers outside the memory bound.
+const MAX_COLS: u16 = 1000;
+const MAX_ROWS: u16 = 500;
+const MAX_CELLS: u32 = 250_000;
+
 fn validate_dims(cols: u16, rows: u16) -> Result<()> {
-    if cols == 0 || rows == 0 || cols > 4096 || rows > 4096 {
-        bail!("invalid terminal size {cols}x{rows} (must be 1..=4096)");
+    let cells = u32::from(cols) * u32::from(rows);
+    if cols == 0 || rows == 0 || cols > MAX_COLS || rows > MAX_ROWS || cells > MAX_CELLS {
+        bail!("invalid terminal size {cols}x{rows} (max {MAX_COLS}x{MAX_ROWS}, {MAX_CELLS} cells)");
     }
     Ok(())
+}
+
+fn validate_cwd(cwd: Option<&Path>) -> Result<Option<PathBuf>> {
+    let Some(cwd) = cwd else {
+        return Ok(None);
+    };
+    if !cwd.is_absolute() {
+        bail!("session cwd must be an absolute path: {}", cwd.display());
+    }
+    let metadata = std::fs::metadata(cwd)
+        .with_context(|| format!("resolving session cwd {}", cwd.display()))?;
+    if !metadata.is_dir() {
+        bail!("session cwd is not a directory: {}", cwd.display());
+    }
+    Ok(Some(cwd.to_path_buf()))
 }
 
 impl Registry {
@@ -86,6 +107,7 @@ impl Registry {
             entries: Mutex::new(HashMap::new()),
             layout: Mutex::new(layout),
             persist_lock: Mutex::new(()),
+            spawn_lock: Mutex::new(()),
             shutting_down: AtomicBool::new(false),
             graveyard: Mutex::new(Vec::new()),
         }
@@ -99,13 +121,19 @@ impl Registry {
         rows: u16,
     ) -> Result<(SessionInfo, Arc<Session>)> {
         validate_dims(cols, rows)?;
+        let cwd = validate_cwd(cwd)?;
         let name = profile.unwrap_or(&self.config.default_profile);
         let prof = profiles::resolve(name)?;
-        // Spawn outside the lock (slow syscall), but decide whether it may
-        // LIVE inside it — see `shutting_down`.
+        // Serialize spawn+registration with shutdown's transition. Once
+        // shutdown_all holds this lock and flips the flag, no late ConPTY can
+        // appear after its entries/graveyard drain.
+        let _spawn = self.spawn_lock.lock().unwrap();
+        if self.shutting_down.load(Ordering::SeqCst) {
+            bail!("host is shutting down");
+        }
         let session = Arc::new(Session::spawn(
             &prof,
-            cwd,
+            cwd.as_deref(),
             cols,
             rows,
             self.config.scrollback_bytes,
@@ -114,7 +142,7 @@ impl Registry {
         let info = SessionInfo {
             id,
             profile: name.to_string(),
-            cwd: cwd.map(|p| p.display().to_string()),
+            cwd: cwd.as_deref().map(|p| p.display().to_string()),
             cols,
             rows,
             alive: true,
@@ -125,9 +153,6 @@ impl Registry {
             if self.shutting_down.load(Ordering::SeqCst) {
                 drop(entries);
                 session.kill();
-                // The daemon is exiting imminently; give this stray's teardown
-                // a moment so its conhost doesn't outlive us as a CPU-spinner.
-                session.wait_exit_blocking(std::time::Duration::from_secs(2));
                 bail!("host is shutting down");
             }
             entries.insert(
@@ -195,6 +220,7 @@ impl Registry {
             .lock()
             .unwrap()
             .retain(|s| s.exited().is_none());
+        let shutting_down = self.shutting_down.load(Ordering::SeqCst);
         let mut infos: Vec<SessionInfo> = self
             .entries
             .lock()
@@ -202,7 +228,7 @@ impl Registry {
             .values()
             .map(|e| {
                 let mut info = e.info.clone();
-                info.alive = e.session.exited().is_none();
+                info.alive = !shutting_down && e.session.exited().is_none();
                 info
             })
             .collect();
@@ -214,8 +240,16 @@ impl Registry {
     /// layout is actually durable (a silent persist failure here would lose
     /// the user's tab/group arrangement on the next restart).
     pub fn set_layout(&self, layout: serde_json::Value) -> Result<()> {
-        *self.layout.lock().unwrap() = layout;
-        self.persist()
+        let _persist = self.persist_lock.lock().unwrap();
+        let previous = {
+            let mut current = self.layout.lock().unwrap();
+            std::mem::replace(&mut *current, layout)
+        };
+        if let Err(error) = self.persist_unlocked() {
+            *self.layout.lock().unwrap() = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn layout(&self) -> serde_json::Value {
@@ -227,6 +261,10 @@ impl Registry {
     /// the tmp file; rename keeps crash-consistency.
     pub fn persist(&self) -> Result<()> {
         let _guard = self.persist_lock.lock().unwrap();
+        self.persist_unlocked()
+    }
+
+    fn persist_unlocked(&self) -> Result<()> {
         let state = serde_json::json!({
             "layout": self.layout(),
             "sessions": self.list(),
@@ -251,15 +289,31 @@ impl Registry {
     }
 
     pub fn shutdown_all(&self) {
-        // Capture the final state (with alive flags) BEFORE killing everything.
-        self.persist_logged();
-        // Flag is set while holding the entries lock; create_session checks it
-        // under the same lock, so nothing can be inserted after this drain.
-        let drained: Vec<Entry> = {
+        // Wait for any spawn already in progress, then prevent every later spawn
+        // before taking the final registry/graveyard snapshot.
+        let _spawn = self.spawn_lock.lock().unwrap();
+        // Mark every session dead in the final durable snapshot. A fresh daemon
+        // cannot recover ConPTY processes owned by the old process, so persisting
+        // alive:true here would advertise sessions that no longer exist.
+        // Set the shutdown flag under the same entries lock create_session uses,
+        // then persist before draining so the final session metadata is retained.
+        {
             let mut entries = self.entries.lock().unwrap();
-            self.shutting_down.store(true, Ordering::SeqCst);
-            entries.drain().map(|(_, e)| e).collect()
-        };
+            if self.shutting_down.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            for entry in entries.values_mut() {
+                entry.info.alive = false;
+            }
+        }
+        self.persist_logged();
+        let drained: Vec<Entry> = self
+            .entries
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, e)| e)
+            .collect();
         for entry in &drained {
             entry.session.kill();
         }
@@ -371,6 +425,47 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_failed_layout_updates_cannot_rollback_each_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
+        let original = serde_json::json!({"groups": ["original"]});
+        reg.set_layout(original.clone()).unwrap();
+        std::fs::remove_file(tmp.path().join("state.json")).unwrap();
+        std::fs::create_dir(tmp.path().join("state.json")).unwrap();
+
+        let persist_guard = reg.persist_lock.lock().unwrap();
+        let reg_a = Arc::clone(&reg);
+        let update_a =
+            std::thread::spawn(move || reg_a.set_layout(serde_json::json!({"groups": ["a"]})));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let reg_b = Arc::clone(&reg);
+        let update_b =
+            std::thread::spawn(move || reg_b.set_layout(serde_json::json!({"groups": ["b"]})));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(persist_guard);
+
+        assert!(update_a.join().unwrap().is_err());
+        assert!(update_b.join().unwrap().is_err());
+        assert_eq!(reg.layout(), original);
+    }
+
+    #[test]
+    fn failed_layout_persist_rolls_back_in_memory_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        reg.set_layout(serde_json::json!({"groups": ["durable"]}))
+            .unwrap();
+        std::fs::remove_file(tmp.path().join("state.json")).unwrap();
+        std::fs::create_dir(tmp.path().join("state.json")).unwrap();
+
+        assert!(reg
+            .set_layout(serde_json::json!({"groups": ["not-durable"]}))
+            .is_err());
+
+        assert_eq!(reg.layout(), serde_json::json!({"groups": ["durable"]}));
+    }
+
+    #[test]
     fn layout_blob_persists_across_instances() {
         let tmp = tempfile::tempdir().unwrap();
         {
@@ -425,11 +520,47 @@ mod tests {
         assert!(reg.create_session(Some("cmd"), None, 0, 25).is_err());
         assert!(reg.create_session(Some("cmd"), None, 80, 0).is_err());
         assert!(reg.create_session(Some("cmd"), None, 65535, 25).is_err());
+        assert!(
+            reg.create_session(Some("cmd"), None, 1000, 500).is_err(),
+            "individually plausible axes must still respect the cell-area cap"
+        );
         let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
         assert!(reg.resize_session(info.id, 0, 25).is_err());
         assert!(reg.resize_session(info.id, 80, 65535).is_err());
+        assert!(reg.resize_session(info.id, 1000, 500).is_err());
         reg.close_session(info.id);
         assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn validated_cwd_preserves_user_selected_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = tmp.path().to_path_buf();
+
+        let validated = validate_cwd(Some(&selected)).unwrap().unwrap();
+
+        assert_eq!(
+            validated, selected,
+            "cwd metadata must not expose canonicalized Windows path syntax"
+        );
+    }
+
+    #[test]
+    fn cwd_must_be_an_existing_absolute_directory() {
+        let (_tmp, reg) = test_registry();
+        assert!(
+            reg.create_session(Some("cmd"), Some(Path::new("relative")), 80, 25)
+                .is_err(),
+            "relative cwd must never resolve against the daemon's own cwd"
+        );
+        let missing = std::env::temp_dir().join("termx-definitely-missing-cwd");
+        assert!(reg
+            .create_session(Some("cmd"), Some(&missing), 80, 25)
+            .is_err());
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(reg
+            .create_session(Some("cmd"), Some(file.path()), 80, 25)
+            .is_err());
     }
 
     #[test]
@@ -466,6 +597,44 @@ mod tests {
         };
         assert!(err.to_string().contains("shutting down"), "{err:#}");
         assert!(reg.list().is_empty(), "no orphan entry may remain");
+    }
+
+    #[test]
+    fn shutdown_persists_sessions_as_not_alive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let (_info, session) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+
+        reg.shutdown_all();
+
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join("state.json")).unwrap())
+                .unwrap();
+        assert!(
+            state["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|info| info["alive"] == false),
+            "a stopped daemon must never persist sessions as alive: {state}"
+        );
+        assert!(session.exited().is_some());
+    }
+
+    #[test]
+    fn repeated_shutdown_preserves_final_session_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let (info, _session) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+
+        reg.shutdown_all();
+        reg.shutdown_all();
+
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join("state.json")).unwrap())
+                .unwrap();
+        assert_eq!(state["sessions"][0]["id"], info.id);
+        assert_eq!(state["sessions"][0]["alive"], false);
     }
 
     #[test]

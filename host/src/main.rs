@@ -42,23 +42,33 @@ fn pid_is_termx_host(pid: u32) -> Option<bool> {
     )
 }
 
-/// True if a live host already serves this data dir.
-fn already_running(data_dir: &std::path::Path) -> Option<server::RuntimeInfo> {
-    let text = std::fs::read_to_string(paths::runtime_file(data_dir)).ok()?;
-    let info: server::RuntimeInfo = serde_json::from_str(&text).ok()?;
-    // Some(false) = verified stale — a fresh start is safe. Some(true) or
-    // None (couldn't verify) falls through to the TCP probe: never declare a
-    // host stale on a FAILED check — booting a second host would strand the
-    // first one's live sessions.
-    if pid_is_termx_host(info.pid) == Some(false) {
-        return None;
-    }
-    std::net::TcpStream::connect_timeout(
+fn runtime_owner_is_reachable(pid_matches: Option<bool>, port_reachable: bool) -> bool {
+    pid_matches != Some(false) && port_reachable
+}
+
+/// Whether a live host already serves this data dir. Unreadable or malformed
+/// discovery state fails closed, but an unreachable recorded listener is stale:
+/// Windows can reuse the old pid for another termx-host serving another data dir.
+fn already_running(data_dir: &std::path::Path) -> Result<Option<server::RuntimeInfo>> {
+    let path = paths::runtime_file(data_dir);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let info: server::RuntimeInfo =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let pid_matches = pid_is_termx_host(info.pid);
+    let port_reachable = std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], info.port)),
         std::time::Duration::from_millis(500),
     )
-    .ok()?;
-    Some(info)
+    .is_ok();
+    if runtime_owner_is_reachable(pid_matches, port_reachable) {
+        Ok(Some(info))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Delete aged rotated logs (host.log.YYYY-MM-DD): a daemon that runs for
@@ -87,14 +97,6 @@ fn clean_old_logs(dir: &std::path::Path, keep: std::time::Duration) {
 fn main() -> Result<()> {
     let override_dir = parse_args_from(std::env::args().skip(1))?;
     let data_dir = paths::resolve_data_dir(override_dir.as_deref())?;
-
-    if let Some(info) = already_running(&data_dir) {
-        println!(
-            "termx-host already running (pid {}, port {})",
-            info.pid, info.port
-        );
-        return Ok(());
-    }
 
     let logs = paths::logs_dir(&data_dir);
     std::fs::create_dir_all(&logs).context("creating logs dir")?;
@@ -125,70 +127,94 @@ fn main() -> Result<()> {
         default_panic(info);
     }));
 
-    let cfg = config::load_or_create(&data_dir)?;
-    tracing::info!("termx-host starting; data dir {}", data_dir.display());
+    // Keep the logging guard alive while the whole host body runs, then log
+    // the complete anyhow chain before returning it. The UI launches this
+    // daemon with stderr discarded, so an unlogged startup/runtime error is
+    // otherwise indistinguishable from "nothing happened."
+    let result = (|| -> Result<()> {
+        if let Some(info) = already_running(&data_dir)? {
+            println!(
+                "termx-host already running (pid {}, port {})",
+                info.pid, info.port
+            );
+            return Ok(());
+        }
+        let cfg = config::load_or_create(&data_dir)?;
+        tracing::info!("termx-host starting; data dir {}", data_dir.display());
 
-    let runtime = tokio::runtime::Runtime::new().context("tokio runtime")?;
-    runtime.block_on(async {
-        let reg = Arc::new(Registry::new(data_dir.clone(), cfg));
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-        let shutdown_for_signals = shutdown_tx.clone();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let server_task = tokio::spawn(server::run(
-            Arc::clone(&reg),
-            data_dir.clone(),
-            shutdown_tx,
-            ready_tx,
-        ));
-        match ready_rx.await {
-            Ok(info) => tracing::info!("listening on 127.0.0.1:{}", info.port),
-            Err(_) => {
-                // Surface the ACTUAL failure (bind error, runtime.json write...)
-                // instead of a generic "failed before ready".
-                let cause = match server_task.await {
-                    Ok(Err(e)) => format!("{e:#}"),
-                    Ok(Ok(())) => "server exited before signaling ready".to_string(),
-                    Err(join_err) => format!("server task panicked: {join_err}"),
-                };
-                anyhow::bail!("server failed to start: {cause}");
-            }
-        }
-        // Wait for the shutdown-flag flip (client Shutdown) OR a console
-        // control event. Ctrl+C, window close, logoff, and system shutdown
-        // must run the SAME teardown as a client Shutdown — skipping
-        // shutdown_all orphans OpenConsole processes that spin at 100% CPU.
-        // Windows grants close/logoff handlers ~5s, matching shutdown_all's
-        // bounded wait; the session teardown runs first, cosmetics last.
-        let console_shutdown = |why: &str| {
-            tracing::info!("console control event ({why}); tearing sessions down");
-            reg.shutdown_all();
-            let _ = shutdown_for_signals.send(true);
-        };
-        let mut ctrl_c = tokio::signal::windows::ctrl_c().context("ctrl_c handler")?;
-        let mut ctrl_break = tokio::signal::windows::ctrl_break().context("ctrl_break handler")?;
-        let mut ctrl_close = tokio::signal::windows::ctrl_close().context("ctrl_close handler")?;
-        let mut ctrl_logoff =
-            tokio::signal::windows::ctrl_logoff().context("ctrl_logoff handler")?;
-        let mut ctrl_shutdown =
-            tokio::signal::windows::ctrl_shutdown().context("ctrl_shutdown handler")?;
-        loop {
-            tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        break;
-                    }
+        let runtime = tokio::runtime::Runtime::new().context("tokio runtime")?;
+        runtime.block_on(async {
+            let reg = Arc::new(Registry::new(data_dir.clone(), cfg));
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+            let shutdown_for_signals = shutdown_tx.clone();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let server_task = tokio::spawn(server::run(
+                Arc::clone(&reg),
+                data_dir.clone(),
+                shutdown_tx,
+                ready_tx,
+            ));
+            match ready_rx.await {
+                Ok(info) => tracing::info!("listening on 127.0.0.1:{}", info.port),
+                Err(_) => {
+                    // Surface the ACTUAL failure (bind error, runtime.json write...)
+                    // instead of a generic "failed before ready".
+                    let cause = match server_task.await {
+                        Ok(Err(e)) => format!("{e:#}"),
+                        Ok(Ok(())) => "server exited before signaling ready".to_string(),
+                        Err(join_err) => format!("server task panicked: {join_err}"),
+                    };
+                    anyhow::bail!("server failed to start: {cause}");
                 }
-                _ = ctrl_c.recv() => { console_shutdown("ctrl_c"); break; }
-                _ = ctrl_break.recv() => { console_shutdown("ctrl_break"); break; }
-                _ = ctrl_close.recv() => { console_shutdown("window close"); break; }
-                _ = ctrl_logoff.recv() => { console_shutdown("logoff"); break; }
-                _ = ctrl_shutdown.recv() => { console_shutdown("system shutdown"); break; }
             }
-        }
-        let _ = server_task.await;
-        tracing::info!("termx-host exiting cleanly");
-        Ok(())
-    })
+            // Wait for the shutdown-flag flip (client Shutdown) OR a console
+            // control event. Ctrl+C, window close, logoff, and system shutdown
+            // must run the SAME teardown as a client Shutdown — skipping
+            // shutdown_all orphans OpenConsole processes that spin at 100% CPU.
+            // Windows grants close/logoff handlers ~5s, matching shutdown_all's
+            // bounded wait; the session teardown runs first, cosmetics last.
+            let console_shutdown = |why: &str| {
+                tracing::info!("console control event ({why}); tearing sessions down");
+                reg.shutdown_all();
+                let _ = shutdown_for_signals.send(true);
+            };
+            let mut ctrl_c = tokio::signal::windows::ctrl_c().context("ctrl_c handler")?;
+            let mut ctrl_break =
+                tokio::signal::windows::ctrl_break().context("ctrl_break handler")?;
+            let mut ctrl_close =
+                tokio::signal::windows::ctrl_close().context("ctrl_close handler")?;
+            let mut ctrl_logoff =
+                tokio::signal::windows::ctrl_logoff().context("ctrl_logoff handler")?;
+            let mut ctrl_shutdown =
+                tokio::signal::windows::ctrl_shutdown().context("ctrl_shutdown handler")?;
+            loop {
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = ctrl_c.recv() => { console_shutdown("ctrl_c"); break; }
+                    _ = ctrl_break.recv() => { console_shutdown("ctrl_break"); break; }
+                    _ = ctrl_close.recv() => { console_shutdown("window close"); break; }
+                    _ = ctrl_logoff.recv() => { console_shutdown("logoff"); break; }
+                    _ = ctrl_shutdown.recv() => { console_shutdown("system shutdown"); break; }
+                }
+            }
+            match server_task.await {
+                Ok(Ok(())) => {
+                    tracing::info!("termx-host exiting cleanly");
+                    Ok(())
+                }
+                Ok(Err(error)) => Err(error).context("server stopped after startup"),
+                Err(error) => Err(error).context("server task panicked after startup"),
+            }
+        })
+    })();
+    if let Err(error) = &result {
+        tracing::error!("fatal host error: {error:#}");
+    }
+    result
 }
 
 #[cfg(test)]
@@ -252,15 +278,34 @@ mod tests {
         )
         .unwrap();
         assert!(
-            already_running(tmp.path()).is_none(),
+            already_running(tmp.path()).unwrap().is_none(),
             "foreign listener + dead pid must be treated as stale"
+        );
+    }
+
+    #[test]
+    fn reused_termx_host_pid_with_unreachable_port_is_stale() {
+        assert!(
+            !runtime_owner_is_reachable(Some(true), false),
+            "same executable name cannot prove ownership after Windows reuses a PID"
         );
     }
 
     #[test]
     fn missing_runtime_json_is_not_already_running() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(already_running(tmp.path()).is_none());
+        assert!(already_running(tmp.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_runtime_json_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(paths::runtime_file(tmp.path()), "{ not json").unwrap();
+        let err = already_running(tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("parsing"),
+            "corrupt discovery state must stop startup, not launch a second host: {err:#}"
+        );
     }
 
     #[test]

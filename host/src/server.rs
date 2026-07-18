@@ -16,12 +16,72 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
+/// At most one full Replay may be materialized or queued per connection.
+/// The permit travels with the message and is released only after the socket
+/// writer sends or drops it; ordinary output remains bounded by channel count.
+struct Outbound {
+    message: Message,
+    replay_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl Outbound {
+    fn ordinary(message: Message) -> Self {
+        Self {
+            message,
+            replay_permit: None,
+        }
+    }
+}
+
+fn replay_budget() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(1))
+}
+
+async fn reserve_replay_budget(
+    budget: Arc<tokio::sync::Semaphore>,
+) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError> {
+    budget.acquire_owned().await
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeInfo {
     pub port: u16,
     pub token: String,
     pub pid: u32,
     pub version: String,
+}
+
+/// Remove discovery state only when it still describes THIS exact host. A
+/// startup race may let another host replace runtime.json after our read-back;
+/// unconditional cleanup would then delete the winner's live discovery file.
+fn cleanup_runtime_if_owned(path: &std::path::Path, ours: &RuntimeInfo) -> Result<()> {
+    let should_remove = match std::fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<RuntimeInfo>(&text) {
+            Ok(current) => {
+                current.pid == ours.pid
+                    && current.port == ours.port
+                    && current.token == ours.token
+                    && current.version == ours.version
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "runtime discovery state became corrupt during host lifetime; removing {}: {error}",
+                    path.display()
+                );
+                true
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reading runtime discovery state {}", path.display()));
+        }
+    };
+    if should_remove {
+        std::fs::remove_file(path)
+            .with_context(|| format!("removing runtime discovery state {}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub async fn run(
@@ -69,7 +129,7 @@ pub async fn run(
             check.pid
         );
     }
-    let _ = ready.send(info);
+    let _ = ready.send(info.clone());
 
     let mut shutdown_rx = shutdown.subscribe();
     loop {
@@ -96,7 +156,7 @@ pub async fn run(
             }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
-                    let _ = std::fs::remove_file(&runtime_path);
+                    cleanup_runtime_if_owned(&runtime_path, &info)?;
                     tracing::info!("shutdown requested; exiting accept loop");
                     return Ok(());
                 }
@@ -106,10 +166,31 @@ pub async fn run(
 }
 
 /// Send a JSON control message into a connection's outbound queue.
-async fn send_ctl(out_tx: &tokio::sync::mpsc::Sender<Message>, msg: &HostMsg) {
+async fn send_ctl(out_tx: &tokio::sync::mpsc::Sender<Outbound>, msg: &HostMsg) {
     if let Ok(text) = serde_json::to_string(msg) {
-        let _ = out_tx.send(Message::Text(text)).await;
+        let _ = out_tx.send(Outbound::ordinary(Message::Text(text))).await;
     }
+}
+
+/// Reserve the connection's Replay slot before taking a ring snapshot or
+/// base64-encoding it. The permit remains attached through socket send.
+async fn send_replay(
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+    budget: Arc<tokio::sync::Semaphore>,
+    session_id: SessionId,
+    session: &Session,
+) -> Option<u64> {
+    let permit = reserve_replay_budget(budget).await.ok()?;
+    let (msg, end) = replay_msg(session_id, session);
+    let text = serde_json::to_string(&msg).ok()?;
+    out_tx
+        .send(Outbound {
+            message: Message::Text(text),
+            replay_permit: Some(permit),
+        })
+        .await
+        .ok()?;
+    Some(end)
 }
 
 fn replay_msg(session_id: SessionId, session: &Session) -> (HostMsg, u64) {
@@ -134,13 +215,15 @@ fn replay_msg(session_id: SessionId, session: &Session) -> (HostMsg, u64) {
 /// would silently lose anything published between snapshot and first poll.
 /// Subscribe-then-snapshot means the worst case is overlap, and overlap is
 /// deduped by the `end <= replay_end` check.
+#[allow(clippy::too_many_arguments)] // lifecycle inputs are intentionally explicit
 async fn forward_session(
     session_id: SessionId,
     session: Arc<Session>,
     mut chunk_rx: tokio::sync::broadcast::Receiver<crate::session::OutputChunk>,
     mut exit_rx: tokio::sync::watch::Receiver<crate::session::ExitState>,
     mut replay_end: u64,
-    out_tx: tokio::sync::mpsc::Sender<Message>,
+    out_tx: tokio::sync::mpsc::Sender<Outbound>,
+    replay_budget: Arc<tokio::sync::Semaphore>,
     registry: Arc<Registry>,
 ) {
     let exit_code = loop {
@@ -161,7 +244,7 @@ async fn forward_session(
                         offset: chunk.offset,
                         data: chunk.data.to_vec(),
                     });
-                    if out_tx.send(Message::Binary(frame)).await.is_err() {
+                    if out_tx.send(Outbound::ordinary(Message::Binary(frame))).await.is_err() {
                         return; // connection gone
                     }
                 }
@@ -174,13 +257,17 @@ async fn forward_session(
                     // the resync mechanism, so backpressure here is correct;
                     // while we wait we fall further behind, which at worst
                     // triggers another Lagged and a fresher snapshot.
-                    let (msg, end) = replay_msg(session_id, &session);
-                    if let Ok(text) = serde_json::to_string(&msg) {
-                        if out_tx.send(Message::Text(text)).await.is_err() {
-                            return; // connection gone
-                        }
-                        replay_end = end;
-                    }
+                    let Some(end) = send_replay(
+                        &out_tx,
+                        Arc::clone(&replay_budget),
+                        session_id,
+                        &session,
+                    )
+                    .await
+                    else {
+                        return; // connection gone
+                    };
+                    replay_end = end;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     break *exit_rx.borrow();
@@ -204,13 +291,12 @@ async fn forward_session(
             Err(_) => break, // quiet for 300ms — tail is flushed
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                let (msg, end) = replay_msg(session_id, &session);
-                if let Ok(text) = serde_json::to_string(&msg) {
-                    if out_tx.send(Message::Text(text)).await.is_err() {
-                        return;
-                    }
-                    replay_end = end;
-                }
+                let Some(end) =
+                    send_replay(&out_tx, Arc::clone(&replay_budget), session_id, &session).await
+                else {
+                    return;
+                };
+                replay_end = end;
             }
             Ok(Ok(chunk)) => {
                 let end = chunk.offset + chunk.data.len() as u64;
@@ -222,7 +308,11 @@ async fn forward_session(
                     offset: chunk.offset,
                     data: chunk.data.to_vec(),
                 });
-                if out_tx.send(Message::Binary(frame)).await.is_err() {
+                if out_tx
+                    .send(Outbound::ordinary(Message::Binary(frame)))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -238,6 +328,27 @@ async fn forward_session(
     )
     .await;
     registry.persist_logged();
+}
+
+enum ConnectionEvent<T> {
+    Inbound(Option<T>),
+    WriterStopped(Result<()>),
+}
+
+async fn next_connection_event<S>(
+    inbound: &mut S,
+    writer: &mut tokio::task::JoinHandle<Result<()>>,
+) -> ConnectionEvent<S::Item>
+where
+    S: futures_util::Stream + Unpin,
+{
+    tokio::select! {
+        message = inbound.next() => ConnectionEvent::Inbound(message),
+        result = writer => ConnectionEvent::WriterStopped(match result {
+            Ok(result) => result,
+            Err(error) => Err(error).context("WebSocket writer task failed"),
+        }),
+    }
 }
 
 async fn handle_conn(
@@ -296,36 +407,45 @@ async fn handle_conn(
     .await?;
 
     // ---- Post-auth: fan session output into one outbound channel ----
-    // Count-bounded. Steady-state items are <=8KiB frames (~2MiB at cap);
-    // replays can be up to scrollback_bytes each, but every producer awaits
-    // its sends, so at any instant the queue holds at most a handful of
-    // replays (attach bursts / lag resyncs) — bounded in practice by
-    // sessions x scrollback, the same order as the rings themselves.
-    // Accepted for M1: control replies share this queue, so under full output
+    // Ordinary output is count-bounded (<=8KiB chunks, ~2MiB queue at cap).
+    // Replays have a separate one-per-connection permit acquired BEFORE ring
+    // snapshot/base64 materialization and held through socket send, preventing
+    // repeated Attach/Lagged traffic from parking gigabytes in this queue.
+    // Accepted for M1: control replies share the queue, so under full output
     // backpressure a reply await can briefly stall inbound processing — the
     // only client is our own UI, which always drains its socket.
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(256);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Outbound>(256);
+    let replay_budget = replay_budget();
 
-    // Writer half: single task owns `tx`.
-    let writer = tokio::spawn(async move {
-        while let Some(msg) = out_rx.recv().await {
-            if tx.send(msg).await.is_err() {
-                break;
-            }
+    // Writer half: single task owns `tx`. Keep any Replay permit alive until
+    // the actual WebSocket send completes, then release it with `outbound`.
+    let mut writer = tokio::spawn(async move {
+        while let Some(outbound) = out_rx.recv().await {
+            let Outbound {
+                message,
+                replay_permit,
+            } = outbound;
+            let _hold_until_sent = replay_permit;
+            tx.send(message).await.context("WebSocket send")?;
         }
+        Ok(())
     });
 
     // Per-attached-session forwarder tasks, aborted on Detach/socket end.
     let mut forwarders: std::collections::HashMap<SessionId, tokio::task::JoinHandle<()>> =
         std::collections::HashMap::new();
 
-    while let Some(msg) = rx.next().await {
+    let connection_result = loop {
         // Reap finished forwarder handles (exited sessions) so a long-lived
         // connection doesn't accumulate one dead handle per session forever.
         forwarders.retain(|_, h| !h.is_finished());
-        let msg = match msg {
-            Ok(m) => m,
-            Err(_) => break,
+        let msg = match next_connection_event(&mut rx, &mut writer).await {
+            ConnectionEvent::Inbound(Some(Ok(message))) => message,
+            ConnectionEvent::Inbound(Some(Err(error))) => {
+                break Err(error).context("WebSocket receive");
+            }
+            ConnectionEvent::Inbound(None) => break Ok(()),
+            ConnectionEvent::WriterStopped(result) => break result,
         };
         match msg {
             Message::Text(text) => {
@@ -398,8 +518,16 @@ async fn handle_conn(
                         // replay:false still needs the dedupe horizon, but
                         // must not base64 a multi-MB ring just to discard it.
                         let replay_end = if replay {
-                            let (msg, end) = replay_msg(session_id, &session);
-                            send_ctl(&out_tx, &msg).await;
+                            let Some(end) = send_replay(
+                                &out_tx,
+                                Arc::clone(&replay_budget),
+                                session_id,
+                                &session,
+                            )
+                            .await
+                            else {
+                                break Ok(());
+                            };
                             end
                         } else {
                             session.stream_end()
@@ -411,6 +539,7 @@ async fn handle_conn(
                             exit_rx,
                             replay_end,
                             out_tx.clone(),
+                            Arc::clone(&replay_budget),
                             Arc::clone(&registry),
                         ));
                         forwarders.insert(session_id, handle);
@@ -494,7 +623,7 @@ async fn handle_conn(
                     ClientMsg::Shutdown => {
                         registry.shutdown_all();
                         let _ = shutdown.send(true);
-                        break;
+                        break Ok(());
                     }
                 }
             }
@@ -544,17 +673,17 @@ async fn handle_conn(
                     .await;
                 }
             },
-            Message::Close(_) => break,
+            Message::Close(_) => break Ok(()),
             _ => {}
         }
-    }
+    };
 
     // Client gone: tear down THIS client's forwarders. Sessions keep running.
     for (_, handle) in forwarders.drain() {
         handle.abort();
     }
     writer.abort();
-    Ok(())
+    connection_result
 }
 
 #[cfg(test)]
@@ -1390,7 +1519,7 @@ mod tests {
         let (start, bytes) = session.snapshot();
         let replay_end = start + bytes.len() as u64;
         let mut intervals: Vec<(u64, u64)> = vec![(start, replay_end)];
-        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(2);
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Outbound>(2);
         let fwd = tokio::spawn(forward_session(
             1,
             Arc::clone(&session),
@@ -1398,13 +1527,14 @@ mod tests {
             exit_rx,
             replay_end,
             out_tx,
+            replay_budget(),
             Arc::clone(&reg),
         ));
         let mut lag_replays = 0u32;
         let mut exited = false;
-        while let Some(msg) = out_rx.recv().await {
+        while let Some(outbound) = out_rx.recv().await {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await; // slow client
-            match msg {
+            match outbound.message {
                 Message::Text(t) => match serde_json::from_str::<HostMsg>(&t).unwrap() {
                     HostMsg::Replay {
                         start_offset,
@@ -1600,5 +1730,116 @@ mod tests {
         assert_eq!(parsed.port, rt.port);
         assert_eq!(parsed.token, rt.token);
         assert_eq!(parsed.pid, std::process::id());
+    }
+
+    #[tokio::test]
+    async fn connection_loop_observes_writer_task_death() {
+        let mut inbound = futures_util::stream::pending::<u8>();
+        let mut writer = tokio::spawn(async { Ok(()) });
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            next_connection_event(&mut inbound, &mut writer),
+        )
+        .await
+        .expect("writer completion must wake an otherwise-idle connection");
+        assert!(matches!(event, ConnectionEvent::WriterStopped(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn replay_budget_allows_only_one_max_replay_at_a_time() {
+        let budget = replay_budget();
+        let first = reserve_replay_budget(Arc::clone(&budget))
+            .await
+            .expect("first max replay fits");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                reserve_replay_budget(Arc::clone(&budget)),
+            )
+            .await
+            .is_err(),
+            "a second max replay must wait instead of materializing another 10+ MiB message"
+        );
+        drop(first);
+        let _second = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reserve_replay_budget(budget),
+        )
+        .await
+        .expect("budget released")
+        .expect("second max replay fits after release");
+    }
+
+    #[test]
+    fn runtime_cleanup_removes_corrupt_discovery_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let ours = RuntimeInfo {
+            port: 1001,
+            token: "ours".into(),
+            pid: 11,
+            version: "1".into(),
+        };
+        std::fs::write(&path, "{ corrupt during runtime").unwrap();
+
+        cleanup_runtime_if_owned(&path, &ours).unwrap();
+
+        assert!(
+            !path.exists(),
+            "malformed discovery state must not poison the next launch"
+        );
+    }
+
+    #[test]
+    fn runtime_cleanup_reports_delete_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let ours = RuntimeInfo {
+            port: 1001,
+            token: "ours".into(),
+            pid: 11,
+            version: "1".into(),
+        };
+        std::fs::write(&path, serde_json::to_string(&ours).unwrap()).unwrap();
+        use std::os::windows::fs::OpenOptionsExt;
+        let _file_without_delete_sharing = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2) // FILE_SHARE_READ | FILE_SHARE_WRITE
+            .open(&path)
+            .unwrap();
+
+        let error = cleanup_runtime_if_owned(&path, &ours)
+            .expect_err("cleanup failure must reach host shutdown");
+
+        assert!(
+            error.to_string().contains("runtime discovery state"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn runtime_cleanup_never_removes_another_hosts_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("runtime.json");
+        let ours = RuntimeInfo {
+            port: 1001,
+            token: "ours".into(),
+            pid: 11,
+            version: "1".into(),
+        };
+        let winner = RuntimeInfo {
+            port: 1002,
+            token: "winner".into(),
+            pid: 22,
+            version: "1".into(),
+        };
+        std::fs::write(&path, serde_json::to_string(&winner).unwrap()).unwrap();
+
+        cleanup_runtime_if_owned(&path, &ours).unwrap();
+
+        let preserved: RuntimeInfo =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(preserved.pid, winner.pid);
+        assert_eq!(preserved.token, winner.token);
     }
 }

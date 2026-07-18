@@ -19,6 +19,56 @@ async fn ws_connect(
     ws
 }
 
+#[test]
+fn malformed_runtime_error_is_written_to_host_log() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("runtime.json"), "{ not json").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_termx-host"))
+        .args(["--data-dir", tmp.path().to_str().unwrap()])
+        .output()
+        .expect("spawn termx-host");
+    assert!(
+        !output.status.success(),
+        "malformed runtime must fail closed"
+    );
+
+    let logs = tmp.path().join("logs");
+    let text = std::fs::read_dir(&logs)
+        .expect("logs dir")
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<String>();
+    assert!(
+        text.contains("parsing") && text.contains("runtime.json"),
+        "discovery failure must survive discarded stderr; logs: {text:?}"
+    );
+}
+
+#[test]
+fn fatal_config_error_is_written_to_host_log() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("config.json"), "{ not json").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_termx-host"))
+        .args(["--data-dir", tmp.path().to_str().unwrap()])
+        .output()
+        .expect("spawn termx-host");
+    assert!(
+        !output.status.success(),
+        "malformed config must fail startup"
+    );
+
+    let logs = tmp.path().join("logs");
+    let text = std::fs::read_dir(&logs)
+        .expect("logs dir")
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<String>();
+    assert!(
+        text.contains("parsing") && text.contains("config.json"),
+        "fatal startup cause must survive discarded stderr; logs: {text:?}"
+    );
+}
+
 #[tokio::test]
 async fn full_lifecycle_against_real_binary() {
     let tmp = tempfile::tempdir().unwrap();
