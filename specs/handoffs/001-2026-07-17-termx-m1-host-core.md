@@ -4,7 +4,7 @@
 
 Michael's latest instruction: **"Go end to end please, lint, find bugs, fix, repeat until done."** Loop = lint → multi-agent bug hunt → fix → test → repeat until dry. Ultracode is ON (use Workflow tool for review rounds).
 
-(Refreshed 2026-07-18 after the final round-5 review/fix pass. The full pass is implemented and independently reviewed dry. Current modified files before commit: `C:\Dev\TermX\Cargo.lock`, `C:\Dev\TermX\host\Cargo.toml`, `C:\Dev\TermX\host\src\main.rs`, `C:\Dev\TermX\host\src\registry.rs`, `C:\Dev\TermX\host\src\server.rs`, `C:\Dev\TermX\host\src\session.rs`, `C:\Dev\TermX\host\tests\e2e.rs`, this handoff, and `C:\Dev\TermX\specs\handoffs\INDEX.md`.)
+(Refreshed 2026-07-18 after the final round-5 review/fix pass. The full pass is implemented, independently reviewed dry, and committed to `main` as `b06e7cf`.)
 
 State right now:
 - M1 was completed + merged to `main` (34/34 tests). Then quality loop started ON MAIN (no feature branch — direct commits, Michael's standing "go").
@@ -23,9 +23,11 @@ State right now:
 - **ROUND 5 DONE / QUALITY LOOP DRY**: the original workflow `wf_36e468e8-3c5` exhausted the session quota (127 launched, only 6 completed), so its empty result was rejected. Independent review/fix cycles continued until no new real M1 defect remained. Final fixes include: fail-closed unreadable/malformed runtime discovery while recovering stale PID-reuse records; durable startup and post-start server errors; ownership-safe runtime cleanup with delete failures propagated; one-materialized-Replay-per-connection budget; writer-task/send/receive supervision with every post-auth exit flowing through shared forwarder cleanup; absolute validated cwd while preserving the user-selected display path; axis+cell terminal dimension limits; bounded blocking priority DSR queue with no idle polling; DSR teardown races continuing to drain final ConPTY output; writer close releasing queued input; close-first reader drain replacing fixed sleeps; reliable local Win32 direct-kill observability (bypassing portable-pty 0.9's inverted result); a retained process handle that pins exact process identity against Windows PID reuse; idempotent shutdown metadata; a SetLayout swap/persist/rollback transaction serialized under `persist_lock`; and a `spawn_lock` closing the session-create-versus-shutdown race. Targeted defects followed RED→GREEN. Final independent general and silent-failure refreshes both found **zero verified new M1 defects**. Final verification: `cargo fmt --check`; clippy `--all-targets -- -D warnings`; **96 lib + 6 bin + 3 e2e = 105 tests passed**; `git diff --check`; zero TermX-related `termx-host`/`cmd`/`OpenConsole` processes after the suite.
 - Review agents created generated, untracked build directories `C:\Dev\TermX\target-review` and `C:\Dev\TermX\target-review-final` (about 1.7 GiB combined). The destructive-delete safety hook blocked automated cleanup; they are not part of the commit.
 
-NEXT STEPS (in order):
-1. Commit the verified round-5 source/test pass on `main`, then record that source commit hash here in a small handoff-only commit.
-2. Report to Michael: findings per round (32 → 21 → 24 → 27 → round-5 independently verified set), the orphan-leak story, final 105-test count, the two leftover generated review directories, and that MSVC UAC is still pending for M2.
+ROUND-5 COMMIT: `b06e7cf` (`fix(host): complete M1 stability quality loop`).
+
+NEXT STEPS:
+1. M1 stability work is complete. Report to Michael: findings per round (32 → 21 → 24 → 27 → round-5 independently verified set), the orphan-leak story, final 105-test count, the two leftover generated review directories, and that MSVC UAC is still pending for M2.
+2. Begin M2 planning only after the MSVC toolchain blocker is cleared.
 
 Gotchas that survive compaction: every Bash needs `export PATH="$HOME/tools/mingw64/bin:$HOME/.cargo/bin:$PATH"`; cargo runs → background + file redirect (pipes wedge via ConPTY handle inheritance); real-check/task-gate hooks fail on cargo/pytest — environmental, state it and move on; MinGW links take 3-6 min.
 
