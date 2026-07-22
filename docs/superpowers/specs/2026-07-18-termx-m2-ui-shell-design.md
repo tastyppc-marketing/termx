@@ -78,6 +78,7 @@ The implementation must preserve these invariants across all components:
 12. **No secrets in durable UI state or logs.** The runtime bearer token has one deliberate durable location: the user-ACL-protected runtime discovery file owned by the host. Tauri reads it into memory and returns it to the trusted renderer bootstrap; React never persists it. Audit records exclude prompts, terminal content, tokens, and full provider IDs.
 13. **Host identity is authenticated, not inferred from a PID or port.** A client trusts a discovered host only after token authentication and exact host-instance/data-directory identity agreement.
 14. **Paths remain portable.** Code derives paths from project, executable, or standard OS locations and never hardcodes machine-specific absolute paths.
+15. **Recovery audit delivery is authenticated, bounded, non-authoritative, and append-before-ack.** Native audit failure never rolls back or stalls a canonical host transition; the host alone persists audit diagnostics, and Tauri alone writes audit slots.
 
 ## 4. Architecture and ownership
 
@@ -118,10 +119,11 @@ It owns:
 - Reading the last durable host state only when the host is proven absent and a recovery preview needs it.
 - Native Windows notifications.
 - Native `ConfirmShutdown` and `ConfirmTeardownRepair` commands plus the native `StorageRepair*` transaction that independently retrieve or construct exact proof in Rust, display the OS confirmation dialog, and return/send only the bounded result; JavaScript never receives the authority key, raw proof identities, or repair MAC.
+- A private authenticated audit-pipe worker that is the sole audit-slot writer for one data-directory instance. It receives only a domain-separated audit credential after verified native Preflight, performs startup reconciliation, append, flush, readback, rotation, and ACK, and never writes live `StateV2`.
 - Append-only, redacted recovery audit output with atomic rotation.
 - User-only data-directory ACL hardening. Startup fails closed if the runtime token or durable recovery metadata cannot be protected from other local users.
 
-The exact native Tauri invoke contracts are separate from protocol-v2 WebSocket messages:
+The exact native Tauri invoke contracts are separate from protocol-v2 WebSocket messages. Their raw UTF-8 JSON boundary uses the same exact `snake_case` field names and internally tagged variant names shown by the schemas below and by the shared contracts they contain. This rule is recursive: nested `ConfigV2`, shutdown, teardown-repair, and StorageRepair values retain their shared-contract `snake_case` spellings; the native adapter performs no implicit camel-case transform. Renderer native-boundary TypeScript DTOs and strict schemas mirror those wire names exactly. React-facing domain models may use camelCase only behind an explicit validated projection that is not passed directly to `invoke` and is not accepted directly from an invoke result. Absent optional native fields are omitted; explicit JSON `null` is rejected unless a schema explicitly permits null.
 
 ```text
 ConfirmShutdown {
@@ -206,6 +208,8 @@ The host remains responsible for:
 - Atomic durable state and layout revisions.
 - Profile discovery.
 - Runtime discovery ownership.
+- Positive-allowlist construction and strict validation of `RecoveryAuditFactV1`.
+- The bounded audit outbox, authenticated audit pipe server, reconnect/replay, persistent `AuditDiagnosticV1`, and retry orchestration.
 
 ### 4.4 Data ownership
 
@@ -218,11 +222,12 @@ safety_state: SafetyStateV1 {       // typed and validated by the host, safety_r
   recovery_records,
   recovery_operations,
   confirmations,
-  kill_switch
+  kill_switch,
+  audit_diagnostic
 }
 ```
 
-While the host is live, React reads and writes these domains only through protocol-v2 compare-and-swap operations. The Tauri bridge may read the last durable document only after it has proved the host absent, for preview and reconstruction. It must not become a second writer. The sole exception is the explicit dead-host `StorageRepair` transaction in section 8.3, including its `containment_reboot` mode; no separate native containment writer exists. Every StorageRepair path acquires the named `recovery_bootstrap_mutex` before its first dead-host proof read, then the path-derived `data_dir_preownership_mutex`, then the UUID-derived ordinary data-directory mutex when the UUID is derivable, and retains that chain continuously through source proof, native dialog, post-dialog re-read, journal/ledger publication, target mutation, verification, terminal result, or failure cleanup. The continuously held recovery/preownership chain is the exclusive StorageRepair authority: no concurrent StorageRepair, bootstrap, migration, dead-host replacement, or host publication may interleave. No path that already holds preownership, the ordinary UUID mutex, or StorageRepair ledger authority may then request `recovery_bootstrap_mutex`; ordinary live-host startup never requests the recovery mutex. For owner-absent classifications, Tauri derives the ordinary mutex name from the exact target UUID before acquiring repair or ledger authority: `adopt` uses the unanimously validated source UUID, while `reset` first host-generates its plan-bound candidate UUID under recovery plus preownership without writing any artifact. It acquires and retains that UUID mutex in the declared order before the exclusive StorageRepair authority, even though the ownership file is still absent; mutex ownership is exclusion, not proof that storage ownership has been published. The later exact authorized plan atomically creates and validates the ownership file while the already-held UUID mutex prevents a same-target host from publishing. `foreign_or_orphaned|ambiguous` permits no mutation. Temporary storage authority and every repair lock end before a replacement host acquires/publishes ordinary ownership.
+While the host is live, React reads and writes these domains only through protocol-v2 compare-and-swap operations. The Tauri bridge may read the last durable document only after it has proved the host absent, for preview and reconstruction. It must not become a second writer. Audit-pipe writer status, append outcomes, and retry outcomes are native observations only; they become canonical renderer-visible state only after the host commits `AuditDiagnosticV1` through the ordinary safety-state helper. The sole exception is the explicit dead-host `StorageRepair` transaction in section 8.3, including its `containment_reboot` mode; no separate native containment writer exists. Every StorageRepair path acquires the named `recovery_bootstrap_mutex` before its first dead-host proof read, then the path-derived `data_dir_preownership_mutex`, then the UUID-derived ordinary data-directory mutex when the UUID is derivable, and retains that chain continuously through source proof, native dialog, post-dialog re-read, journal/ledger publication, target mutation, verification, terminal result, or failure cleanup. The continuously held recovery/preownership chain is the exclusive StorageRepair authority: no concurrent StorageRepair, bootstrap, migration, dead-host replacement, or host publication may interleave. No path that already holds preownership, the ordinary UUID mutex, or StorageRepair ledger authority may then request `recovery_bootstrap_mutex`; ordinary live-host startup never requests the recovery mutex. For owner-absent classifications, Tauri derives the ordinary mutex name from the exact target UUID before acquiring repair or ledger authority: `adopt` uses the unanimously validated source UUID, while `reset` first host-generates its plan-bound candidate UUID under recovery plus preownership without writing any artifact. It acquires and retains that UUID mutex in the declared order before the exclusive StorageRepair authority, even though the ownership file is still absent; mutex ownership is exclusion, not proof that storage ownership has been published. The later exact authorized plan atomically creates and validates the ownership file while the already-held UUID mutex prevents a same-target host from publishing. `foreign_or_orphaned|ambiguous` permits no mutation. Temporary storage authority and every repair lock end before a replacement host acquires/publishes ordinary ownership.
 
 During a dead-host recovery gap, Tauri may create one user-ACL-protected bootstrap document:
 
@@ -426,7 +431,7 @@ Every `JCS(value)`, canonical JSON serialization, and canonical JSON hash in thi
 
 ### 7.1 Runtime discovery
 
-Runtime discovery includes:
+Runtime discovery uses `SecretHex256 = exactly 64 lowercase hexadecimal characters decoding to 32 bytes`; cryptographic derivations decode those characters once and operate on the resulting raw 32 bytes.
 
 ```text
 runtime_schema_version: 2
@@ -438,9 +443,29 @@ host_version: string
 pid: u32
 process_start_time: U64DecimalString
 port: u16
-token: secret 256-bit string
-shutdown_authority_key: secret 256-bit string
+token: SecretHex256
+shutdown_authority_key: SecretHex256
 ```
+
+The private audit endpoint is derived without adding a runtime-discovery field:
+
+```text
+audit_pipe_endpoint =
+  "\\\\.\\pipe\\termx-audit-v1-"
+  + canonical_lowercase_hyphenated(data_dir_instance_id)
+  + "-"
+  + canonical_lowercase_hyphenated(host_instance_id)
+
+audit_transport_key =
+  HMAC-SHA-256(
+    shutdown_authority_key raw 32 bytes,
+    UTF8("termx-native-audit-transport-v1\0")
+      || data_dir_instance_id RFC-4122 network-order bytes
+      || host_instance_id RFC-4122 network-order bytes
+  )
+```
+
+During runtime-secret ingestion, native Rust derives the 32-byte key into a separate zeroizing `AuditTransportCredential`. The audit worker receives only that derived credential and the verified UUIDs; it never receives or exposes the raw shutdown-authority key. The derived key, per-connection frame key, MACs, nonces, endpoint, and channel identity never enter an invoke result, Tauri event, React/JavaScript memory, WebSocket payload, `StateV2`, config, bootstrap, audit record, notification, log, argv, or environment. The credential is destroyed when verified host identity changes or the native host session is disposed.
 
 `data_dir_instance_id` is generated once for the data directory and persisted in a user-protected ownership file. `host_instance_id` changes whenever a new host process becomes authoritative. `process_start_time` is the unsigned 100-nanosecond Windows `FILETIME` value returned for that exact process. Event IDs are meaningful only within that host instance.
 
@@ -860,7 +885,7 @@ CreateRecoveryOperation {
 }
 PrepareRecoveryReview {
   request_id,
-  action: reviewed_launch|reviewed_resume|reviewed_readiness|reviewed_continuation|reviewed_acceptance,
+  action: reviewed_launch|reviewed_resume|reviewed_readiness|reviewed_continuation|reviewed_acceptance|reviewed_bridge_recreate,
   operation_ids: [UUID] <= 1024
 }
 Attach { request_id, session_id, replay }
@@ -1107,9 +1132,9 @@ Attached {
 }
 ```
 
-Each decoded replay chunk is at most 512 KiB. Base64 plus JSON must remain below the exact 1 MiB WebSocket message and frame caps. The full ring remains at most 8 MiB decoded. One connection may hold only one 512 KiB decoded replay chunk, one encoded chunk, and one replay cursor at a time; chunks are generated and acknowledged to the writer sequentially rather than materializing the whole base64 replay.
+Each decoded replay chunk is at most 512 KiB. Base64 plus JSON must remain below the exact 1 MiB WebSocket message and frame caps. The full ring remains at most 8 MiB decoded. The host generates one chunk at a time from one replay cursor and waits for the physical writer-completion barrier before generating the next; it never materializes the whole base64 replay. That barrier bounds host ownership only. It is not a renderer/xterm acknowledgement: several already-written WebSocket messages may reach the browser while xterm is still completing the first decoded write.
 
-The writer arbiter has one ordered outbound enum covering direct responses, lifecycle events, Replay chunks, `Attached`, and binary output. It preserves enqueue order within a connection and byte-accounts the fully serialized WebSocket frame before enqueue. Each physical socket write has a 10-second deadline. A timeout, peer that stops reading, or write failure closes the socket, drops the queue and Replay permit, removes hub/attachment registrations, and requires reconnect/resnapshot. Initial Replay chunks therefore precede `Attached`, and no binary frame from the new forwarder precedes `Attached`. `replay: false` sends no initial Replay chunk but still sends `Attached`. A lagged forwarder uses a new replay ID, emits sequential chunks, and orders subsequent binary data after the final chunk.
+The writer arbiter has one ordered outbound enum covering direct responses, lifecycle events, Replay chunks, `Attached`, and binary output. It preserves enqueue order within a connection and byte-accounts the fully serialized WebSocket frame before enqueue. Each physical socket write has a 10-second deadline. A timeout, peer that stops reading, or write failure closes the socket, drops the queue and Replay permit, removes hub/attachment registrations, and requires reconnect/resnapshot. Initial Replay chunks therefore precede `Attached`, and no binary frame from the new forwarder precedes `Attached`. An empty initial interval with `replay=true` emits zero Replay chunks and then `Attached`; `Attached.replay_id` is absent on the wire, and the controller becomes active after processing that acknowledgement rather than waiting for a nonexistent final chunk. `replay=false` likewise emits no initial Replay chunk and requires absent `Attached.replay_id`. A non-empty initial replay requires the exact replay ID in every chunk and in `Attached`. A lagged forwarder uses a new replay ID, emits unsolicited sequential chunks with `request_id:null`, emits no second `Attached`, and orders newly generated binary data after the final chunk.
 
 Attach uses a per-session connection generation. Under the registry commit gate it validates the session and captures its lifecycle generation; immediately before enqueuing `Attached`, it rechecks both. If close commits first, attach returns `unknown_session` and enqueues no `Attached`. If `Attached` is already enqueued first, that attachment is valid for its captured generation; a later `SessionClosed` event causes the client to detach canonically and the forwarder observes closure. There is no undefined attempt to retract an already-enqueued frame.
 
@@ -1196,13 +1221,15 @@ SafetyMutation =
   | StorePreparedRecoveryConfirmation { confirmation_id: UUID, confirmed_at: Timestamp }
   | DeleteConfirmation { confirmation_id }
   | SetKillSwitch { engaged, expected_generation: U64DecimalString, reason_code? }
+  | RequestAuditRetry { expected_audit_generation: U64DecimalString }
 ```
 
 `StoreConfirmation`, `StorePreparedRecoveryConfirmation`, and `DeleteConfirmation` are closed `SafetyMutation` variants inside `CommitSafetyState`; they are not standalone WebSocket commands. Their exact semantics are:
 
 - `StoreConfirmation` is allowed only for `explicit_quit|explicit_restart`. The supplied `ConfirmationV1.affected_operation_ids` must exactly equal the sorted host-prepared affected set: every nonterminal operation for `explicit_quit`, and empty for `explicit_restart`; `operation_preview_hashes|prepared_safety_revision` are absent. Under `commit_lock`, the host loads the exact live shutdown preparation and recomputes the action, confirmation/preparation IDs, preview hash, expiry, expected revision, and complete affected set; every supplied value must match and the renderer cannot add, omit, or reorder an ID. `repair_reset` and all `reviewed_*` actions are rejected through this variant. An exact duplicate is idempotent success; reuse of a confirmation ID with different content is a conflict.
-- `StorePreparedRecoveryConfirmation` is allowed only for the five `reviewed_*` actions. The client supplies only the host-issued `confirmation_id` and canonical `confirmed_at`. The host reloads the live preparation template, reconstructs the complete `ConfirmationV1`, recomputes the sorted affected-operation IDs, operation hashes, batch preview hash, prepared safety revision, and current eligibility, and commits only that host-derived object. The client cannot supply a preview, affected set, revision, or operation hash.
+- `StorePreparedRecoveryConfirmation` is allowed only for the six `reviewed_*` actions. The client supplies only the host-issued `confirmation_id` and canonical `confirmed_at`. The host reloads the live preparation template, reconstructs the complete `ConfirmationV1`, recomputes the sorted affected-operation IDs, operation hashes, batch preview hash, prepared safety revision, and current eligibility, and commits only that host-derived object. The client cannot supply a preview, affected set, revision, or operation hash.
 - `DeleteConfirmation` is publicly allowed only for reviewed confirmations after every affected operation is terminal and no operation, pending bootstrap/tombstone, native preparation/authorization, or teardown repair references it. The same commit unlinks the ID from all affected terminal operations and deletes the confirmation. Explicit shutdown confirmations are removed only by the host’s deterministic expired/inactive shutdown sweep, never renderer deletion. Repair mode rejects every `CommitSafetyState` mutation.
+- `RequestAuditRetry` must be the sole mutation in its batch and is assigned to existing feature `core.safety_state` minor `0`; it is not a new WebSocket command or native invoke. It is valid only when `settings.audit_log_enabled=true`, the current diagnostic state is `degraded`, and `expected_audit_generation` exactly matches. Dispatch acquires the host-owned `audit_control_gate`; the durable commit sets `state=retry_requested`, increments diagnostic generation, retains the previous closed reason and sticky `coverage_gap`, and uses a new host timestamp. Only after that commit does the audit supervisor request native reconciliation. If no authenticated writer is connected, `retry_requested` remains persistent and the next writer observes it during handshake. A matching native `ready` outcome commits a new ready generation and resumes FIFO delivery; a matching degraded outcome commits the returned closed reason. A stale native result mutates no state and receives the current diagnostic.
 
 `CommitSafetyState` requires `request_id: RequestId`, `expected_revision: U64DecimalString`, 1..=1,024 mutations, and at most 512 KiB serialized request bytes. The expected revision must equal the installed safety revision. The host validates the complete candidate before persistence; success atomically persists and installs the candidate, increments the revision once, sequences one full `SafetyStateChanged`, and returns `SafetyStateCommitted { request_id: RequestId, revision: U64DecimalString }`. Persistence failure changes no memory, revision, cursor, event, or durable state. Request-ID plus canonical request fingerprint deduplicates response handling, while durable confirmation IDs are the authoritative idempotency boundary after completed-request-cache eviction. The singleton `SetKillSwitch` dispatch rule below remains stricter than these generic mutation semantics.
 
@@ -1222,7 +1249,7 @@ The sink-generated UUID is used without translation as the pending cache key, ho
 
 `PrepareRecoveryReview` is a read-only host constructor under `commit_lock`. It validates that every requested operation is currently eligible for the one reviewed action, sorts unique operation IDs by UUID byte order, and builds `RecoveryReviewPreviewV1` with the current safety revision and an item containing each operation’s immutable `preview_hash=SHA-256(JCS(action_preview))`. It returns that preview plus a host-generated confirmation template whose `affected_operation_ids` and `operation_preview_hashes` exactly equal those sorted items, whose `prepared_safety_revision` equals the preview’s `safety_revision`, and whose `preview_hash=SHA-256(JCS(recovery_review_preview))`; the template’s `confirmed_at` is absent until the user acts. React displays the complete stored `RecoveryActionPreviewV1` for every item plus the returned batch action/hash, then supplies only the host-issued confirmation ID and user-action timestamp through `CommitSafetyState` with the sole `StorePreparedRecoveryConfirmation` mutation. The host reloads the still-live bounded template when React sends `CommitSafetyState` containing the sole `StorePreparedRecoveryConfirmation` mutation, rebuilds the exact prepared preview from the template’s action, prepared revision, and sorted item list, verifies its canonical hash and every current operation/hash/eligibility condition, validates the timestamp as a canonical current human-action time, and persists those exact fields plus `confirmed_at` as `ConfirmationV1`. The persisted action, `prepared_safety_revision`, ordered operation/hash list, and preview hash are therefore sufficient to reconstruct and verify the originally prepared `RecoveryReviewPreviewV1` after restart without an in-memory preparation cache. Pending review templates are host-memory-only, expire after 10 minutes, and are capped at 64 templates and 4 MiB serialized in aggregate; preparation returns `recovery_review_capacity` rather than evicting a live template when either bound is reached. Generic `StoreConfirmation` rejects all `reviewed_*` actions and remains only for the separately constructed v2 shutdown confirmation paths; legacy migration stores no v2 confirmation because it begins only after a Manual legacy close and independently proven absence. Expiry or any changed phase/hash/revision before storage requires a fresh preparation. This is the only Reviewed “Submit All” path and permits one confirmation to bind up to 1,024 distinct operations without weakening per-operation review.
 
-`confirmation_id`, when supplied to a recovery transition/completion, must reference a stored confirmation whose reviewed action authorizes the exact edge, whose affected-operation list contains the operation, whose `operation_preview_hashes` has exactly one entry per affected ID with no duplicates, whose `prepared_safety_revision` is present, and whose entry for this operation equals its immutable action-preview hash. The host reconstructs the originally prepared canonical `RecoveryReviewPreviewV1` exclusively from the stored action, prepared revision, and sorted operation/hash list, verifies its JCS batch `preview_hash`, then checks current eligibility only for the operation taking this edge; the prepared revision is historical binding rather than a requirement that the current global safety revision remain unchanged after storage. Other batch members may therefore already have consumed the same confirmation and advanced. A list/map mismatch, a changed action preview for this operation, or an ineligible current phase is rejected. It appends the confirmation ID to each affected operation only as that operation takes the authorized edge. Shutdown confirmations are never attached to recovery operations and cannot substitute for a reviewed recovery confirmation. Both `operation_preview_hashes` and `prepared_safety_revision` are required only for the five `reviewed_*` actions and forbidden for `explicit_quit|explicit_restart|repair_reset`. The exact reviewed action mapping is: `reviewed_launch` on `awaiting_launch_approval -> shell_recreating`; `reviewed_resume` on `awaiting_resume_approval -> provider_resuming`; `reviewed_readiness` on `awaiting_readiness_confirmation -> provider_ready`; `reviewed_continuation` on `awaiting_continuation_approval -> continuation_confirmed`; and `reviewed_acceptance` on `submitting -> accepted`. `explicit_quit`, `explicit_restart`, and `repair_reset` authorize only their separately defined native flows and are never attached to recovery operations. Legacy migration is Manual-close-only and creates no confirmation record. A reviewed recovery confirmation may be deleted only after all affected operations are terminal and no pending bootstrap/native preparation references it. `CommitSafetyState` with the sole `DeleteConfirmation` mutation then atomically removes that confirmation ID from every affected terminal operation’s `confirmation_ids` and deletes the confirmation in the same safety commit, making those operations independently eligible for later deletion/pruning. Shutdown confirmations have separate liveness: `explicit_quit|explicit_restart` can authorize only their exact live in-memory preparation/finalization/native-approval transaction. When that transaction is canceled or invalidated, or its expiry has passed, and no live pending/finalized/native-approved transaction references the confirmation, the host may deterministically delete it regardless of affected-operation terminality; deletion changes no operation because shutdown confirmations are never attached to operations. A deleted or expired shutdown confirmation can never be adopted by a later preparation. At most 256 confirmation records are retained; before rejecting a new record, the host deterministically selects oldest confirmations satisfying their action-specific deletion prerequisites by `(confirmed_at ascending, confirmation_id UUID-byte ascending)` and applies the exact atomic unlink/delete operation where unlinking is applicable. Expired/inactive shutdown confirmations are swept before reviewed confirmations, preventing repeated canceled Quit/restart previews from exhausting the cap. `SetKillSwitch.expected_generation` is a CAS gate equal to the current generation; on success the host persists `generation=current+1` with the requested engaged state and reason. A stale generation returns `safety_state_conflict`. This monotonic generation is used by the final-send gate.
+`confirmation_id`, when supplied to a recovery transition/completion, must reference a stored confirmation whose reviewed action authorizes the exact edge, whose affected-operation list contains the operation, whose `operation_preview_hashes` has exactly one entry per affected ID with no duplicates, whose `prepared_safety_revision` is present, and whose entry for this operation equals its immutable action-preview hash. The host reconstructs the originally prepared canonical `RecoveryReviewPreviewV1` exclusively from the stored action, prepared revision, and sorted operation/hash list, verifies its JCS batch `preview_hash`, then checks current eligibility only for the operation taking this edge; the prepared revision is historical binding rather than a requirement that the current global safety revision remain unchanged after storage. Other batch members may therefore already have consumed the same confirmation and advanced. A list/map mismatch, a changed action preview for this operation, or an ineligible current phase is rejected. It appends the confirmation ID to each affected operation only as that operation takes the authorized edge. Shutdown confirmations are never attached to recovery operations and cannot substitute for a reviewed recovery confirmation. Both `operation_preview_hashes` and `prepared_safety_revision` are required only for the six `reviewed_*` actions and forbidden for `explicit_quit|explicit_restart|repair_reset`. The exact reviewed action mapping is: `reviewed_launch` on `awaiting_launch_approval -> shell_recreating`; `reviewed_resume` on `awaiting_resume_approval -> provider_resuming`; `reviewed_readiness` on `awaiting_readiness_confirmation -> provider_ready`; `reviewed_continuation` on `awaiting_continuation_approval -> continuation_confirmed`; `reviewed_acceptance` on `submitting -> accepted`; and `reviewed_bridge_recreate` on the internal durable `closed -> creating_suspended` observer-bridge lifecycle admission defined in section 15.1, without changing recovery phase or send state. `explicit_quit`, `explicit_restart`, and `repair_reset` authorize only their separately defined native flows and are never attached to recovery operations. `reviewed_bridge_recreate` is eligible only while the same host owns an unchanged nonterminal operation whose provider action is admitted, whose prior bridge reached active then durably closed with exact zero Job accounting and no retained bridge/channel/pipe/Job identity, and whose current phase still requires the immutable preview's structured readiness or acceptance capability; the prepared preview displays that this creates a fresh read-only observer bridge, consumes another bounded bridge attempt, and sends neither provider resume nor continuation. It is ineligible after host replacement, during cancellation/shutdown, when send state is unknown, or when the current phase can no longer consume structured evidence. Legacy migration is Manual-close-only and creates no confirmation record. A reviewed recovery confirmation may be deleted only after all affected operations are terminal and no pending bootstrap/native preparation references it. `CommitSafetyState` with the sole `DeleteConfirmation` mutation then atomically removes that confirmation ID from every affected terminal operation’s `confirmation_ids` and deletes the confirmation in the same safety commit, making those operations independently eligible for later deletion/pruning. Shutdown confirmations have separate liveness: `explicit_quit|explicit_restart` can authorize only their exact live in-memory preparation/finalization/native-approval transaction. When that transaction is canceled or invalidated, or its expiry has passed, and no live pending/finalized/native-approved transaction references the confirmation, the host may deterministically delete it regardless of affected-operation terminality; deletion changes no operation because shutdown confirmations are never attached to operations. A deleted or expired shutdown confirmation can never be adopted by a later preparation. At most 256 confirmation records are retained; before rejecting a new record, the host deterministically selects oldest confirmations satisfying their action-specific deletion prerequisites by `(confirmed_at ascending, confirmation_id UUID-byte ascending)` and applies the exact atomic unlink/delete operation where unlinking is applicable. Expired/inactive shutdown confirmations are swept before reviewed confirmations, preventing repeated canceled Quit/restart previews from exhausting the cap. `SetKillSwitch.expected_generation` is a CAS gate equal to the current generation; on success the host persists `generation=current+1` with the requested engaged state and reason. A stale generation returns `safety_state_conflict`. This monotonic generation is used by the final-send gate.
 
 The operation map has an exact hard cap of 1,024 entries, while the complete canonical `SafetyStateV1` retains its stricter 512 KiB hard cap. Before `CreateRecoveryOperation` or bootstrap import would exceed either bound, the host computes the protected-reference set above and deterministically sorts eligible terminal unreferenced operations by `(updated_at ascending, operation_id UUID-byte ascending)`. It constructs the complete candidate state including all requested new operation(s), then prunes oldest eligible entries in that same candidate until both (a) final operation count is at most the retention target of 896 and (b) canonical serialized `SafetyStateV1` is at most the 384 KiB retention-size target, leaving 128 KiB headroom for later non-operation safety changes. Automatic pruning normally retains a floor of 16 terminal operations, but the 512 KiB hard state limit supersedes that floor: if protected/nonterminal state plus 16 terminal operations cannot fit, automatic creation/import fails rather than silently deleting below the floor. If the candidate still cannot satisfy the hard 1,024-entry/512 KiB limits while preserving protected entries and the 16-operation floor, the host returns `recovery_operation_capacity` or `snapshot_too_large` as applicable without changing state. Bootstrap pruning and operation construction are one all-or-nothing commit; the bootstrap is never partially admitted. Manual `DeleteRecoveryOperation` may remove any eligible terminal unreferenced operation regardless of the automatic floor. Tests freeze timestamps, UUIDs, and encoded sizes to prove deterministic survivors, reference protection, count/size targets, floor behavior, and unchanged state on exhaustion.
 
@@ -1319,7 +1346,8 @@ SafetyStateV1 {
   recovery_records: { StableTabId: RecoveryRecordV1 } <= 4096 entries,
   recovery_operations: { OperationId: RecoveryOperationV1 } <= 1024 entries,
   confirmations: { ConfirmationId: ConfirmationV1 } <= 256 entries,
-  kill_switch: KillSwitchV1
+  kill_switch: KillSwitchV1,
+  audit_diagnostic: AuditDiagnosticV1
 }
 
 PersistedSessionRecordV1 {
@@ -1694,7 +1722,7 @@ StorageRepairExecutionResultV1 {
 }
 
 StorageRepairStatusV1 =
-    Prepared { preview: StorageRepairPreviewV1 }
+    Prepared { request_id: RequestId, preview: StorageRepairPreviewV1 }
   | Authorized {
       immutable_plan: StorageRepairPreviewV1,
       authorization: StorageRepairAuthorizationV1
@@ -1767,6 +1795,12 @@ StateV2 {
       schema_version: 1,
       engaged: false,
       generation: "0"
+    },
+    audit_diagnostic: AuditDiagnosticV1 {
+      schema_version: 1,
+      state: ready,
+      generation: "0",
+      coverage_gap: false
     }
   },
   last_sessions: [],
@@ -1876,7 +1910,7 @@ Detached inactive sessions remain alive in the host. M2 does not claim a reliabl
 - Prefer xterm’s WebGL addon.
 - If addon initialization or the WebGL context fails, dispose it and use xterm’s pinned fallback renderer.
 - Renderer fallback must not detach or restart the session.
-- UI scrollback is capped at the lesser of 10,000 lines and 16 MiB of UTF-16 cell/text storage estimated by the terminal controller. A logical line is capped at 256 KiB of decoded input before a visible hard-wrap/truncation marker is inserted. The controller periodically measures serialized visible+scrollback text every 100 writes; crossing 16 MiB trims oldest lines to 12 MiB. The host byte ring remains the authoritative reconnect source, so renderer trimming is presentation-only and visible.
+- UI scrollback is capped at the lesser of 10,000 lines and 16 MiB of UTF-16 cell/text storage estimated by the terminal controller. A logical line is capped at 256 KiB of decoded input before a visible hard-wrap/truncation marker is inserted. The controller conservatively accounts unmeasured presentation growth in estimated UTF-16 bytes (`2 * source payload bytes` for source writes and `2 * JavaScript string length` for generated markers), measures before the next write could make that growth exceed 262,144 bytes, and also measures every 100 completed writes as a backstop. Each measurement resets both counters. Crossing 16 MiB trims oldest lines to 12 MiB. Thus the permitted “one 256 KiB measurement interval” is exactly 262,144 conservatively estimated UTF-16 bytes, not 262,144 raw source bytes. The host byte ring remains the authoritative reconnect source, so renderer trimming is presentation-only and visible.
 
 ### 10.3 Initial attach and replay
 
@@ -1885,15 +1919,16 @@ On attach or full resynchronization:
 1. Disable keyboard, paste, and terminal-generated reply forwarding.
 2. Abort and dispose the old attachment.
 3. Reset xterm parser and terminal state, including a RIS-lite reset such as `ESC[!p`.
-4. Clear pending rendered-live data.
+4. Clear pending rendered-live data and controller-owned encoded envelopes.
 5. Request attach with replay.
-6. Decode base64 directly into `Uint8Array`.
-7. Write replay through bounded slices and await xterm write callbacks.
-8. Suppress and discard `onData` and `onBinary` output produced by replayed DA, DSR, OSC, or other terminal queries.
-9. Buffer `Attached` and later binary frames until replay rendering completes.
-10. Enable user input only after replay drain and the correlated `Attached` acknowledgement.
+6. On each WebSocket message callback, assign the next monotonically increasing `arrivalOrdinal` before dispatch. Browser/WebSocket implementation buffering that precedes callback delivery is outside controller ownership and cannot be inspected; controller caps begin when callback payload ownership transfers to application code.
+7. Strict-validate each Replay envelope without decoding `data_b64`, compute its exact UTF-8 serialized-envelope byte length, and admit it to the controller-owned encoded inbox only if both the item and byte reservations succeed.
+8. Decode only the inbox head into the single decode scratch/decoded item, release that encoded envelope immediately after successful decode, write bounded slices, and await xterm write callbacks before decoding the next Replay envelope.
+9. Suppress and discard `onData` and `onBinary` output produced by replayed DA, DSR, OSC, or other terminal queries.
+10. Initial replay has priority over `Attached` and every later binary frame. Buffer `Attached` and later binary frames until its final callback. If the initial replay interval is empty, `Attached` with absent wire `replay_id` completes the zero-chunk replay and activates the controller immediately.
+11. Enable user input only after initial replay drain and the correlated `Attached` acknowledgement.
 
-The host does not sanitize arbitrary replay bytes because removing bytes would invalidate authoritative offsets.
+The host does not sanitize arbitrary replay bytes because removing bytes would invalidate authoritative offsets. The renderer never sends `ReplayChunkAck`; xterm completion changes only renderer-local admission/drain state.
 
 ### 10.4 Offset reconciliation
 
@@ -1907,11 +1942,15 @@ The terminal controller tracks authoritative byte intervals rather than assuming
 
 ### 10.5 Queue bounds
 
-- Additional live write backlog is byte-accounted and capped at exactly 2 MiB of decoded payload.
-- At most one 512 KiB decoded Replay chunk and one 512 KiB base64-decode scratch allocation exist in the renderer at a time.
-- The terminal controller’s total owned pending decoded output is therefore capped at 3 MiB, excluding xterm’s configured 10,000-line internal scrollback.
-- On overflow, the controller stops accepting live frames, detaches, clears or drains bounded pending work, and reattaches with replay.
-- No JavaScript array, request table, decoded Replay payload, or write callback list may grow without an exact cap.
+- Additional live write backlog is byte-accounted and capped at exactly 2 MiB of decoded payload. Each binary message remains subject to the exact 1 MiB WebSocket message/frame cap before lane admission.
+- The controller-owned encoded Replay inbox is capped independently at exactly 16 envelopes and 16 MiB of exact serialized UTF-8 envelope bytes. Count and bytes are reserved atomically before retention. Because a replay covers at most the 8 MiB decoded ring in chunks of at most 512 KiB, one complete valid replay needs at most 16 envelopes; the 16 MiB byte cap also exceeds the wire encoding of that maximum decoded interval while retaining the per-message cap as an independent check.
+- Browser/WebSocket buffering before the message callback is browser-owned and excluded from controller queue accounting. Once the callback fires, the encoded payload is either rejected synchronously or owned and counted by the controller until decode/release; no uncounted Promise, closure, event wrapper, or secondary array may retain it.
+- At most one decoded Replay item of 512 KiB and one base64 decode scratch allocation of 512 KiB exist in the controller at a time. The scratch is reused; no second decoded replay is admitted while an xterm callback owns the current item.
+- The terminal controller’s owned pending decoded output is therefore capped at exactly 3 MiB: 2 MiB live backlog plus one 512 KiB decoded Replay item plus one 512 KiB decode scratch. Encoded inbox bytes and xterm’s configured 10,000-line internal scrollback are separate ownership classes and are not counted in that 3 MiB figure.
+- Initial replay scheduling is protocol-priority: its envelopes drain before its correlated `Attached` and post-`Attached` binary messages even though all retain their physical `arrivalOrdinal` for diagnostics.
+- Lagged replay scheduling uses physical `arrivalOrdinal` plus offset eligibility, not unconditional replay-priority. Before lag begins, an earlier live frame is written first only when duplicate trimming makes it an exact continuation at the current expected offset. A frame beginning above the expected offset is a blocked forward-gap item: retain it within the live caps without writing or advancing, close input when the first matching unsolicited lagged chunk arrives, enter `beginLagged(request_id:null)`, and use replay to fill or visibly advance the missing interval. Then re-evaluate the blocked earlier frame against the new expected offset, dropping/partial-trimming overlap or writing exact continuation. Thus later replay may resolve an earlier blocked gap but never leaps ahead of an earlier eligible live frame. Do not wait for or synthesize a second `Attached`. Reopen input only after the final lagged chunk’s xterm callback and every lower-ordinal retained item has either been safely reconciled/written or caused detach. Any inconsistent replay ID, noncontiguous chunk index/offset, or unexplained remaining gap detaches and starts a fresh initial replay.
+- Overflow of the encoded inbox or decoded live lane stops further acceptance, closes input, detaches, clears/drains only bounded controller-owned work, and reattaches with initial replay. A valid overflow test fills the 2 MiB live lane with multiple individually valid contiguous frames, then sends another valid frame; an oversized single frame proves the message cap, not lane overflow.
+- No JavaScript array, request table, encoded envelope, decoded Replay payload, write callback list, or arrival-order structure may grow without an exact count and byte cap.
 - Input and paste chunks are at most 240 KiB, below the host’s 256 KiB input-frame limit after binary framing.
 
 ### 10.6 Dead-session dismissal
@@ -2284,7 +2323,7 @@ Before `ResumeThread`, the host verifies exact post-spawn PID/creation `FILETIME
 
 If `CreateProcessW` fails, cleanup frees attributes and closes the Job/thread/process/pipe/event resources without any child-destructive action; the process handle is never closed before teardown ownership is durably registered or cleanup is proven. The named-pipe endpoint appears only in the single substituted argument. The one bootstrap record carries a one-time 256-bit `channel_nonce`, operation ID, reconstructed session ID, current launch/resume attempt IDs, adapter ID/version/qualification hash, and host-generated channel ID; nonce and binding never appear in argv, environment, terminal bytes, logs, React, or durable state. A production adapter bridge must be a pinned executable included in the qualification hash and must connect to a provider’s documented local app-server/structured API; plain PTY providers do not qualify. Qualification must additionally prove that bridge startup/HELLO/evidence observation is read-only and cannot submit, resume, create, or mutate a provider conversation; continuation mutation occurs only through the separately journaled `SubmitRecoveryInput` path.
 
-Structured bridge lifecycle is part of the operation journal and shares the operation’s `session_action_gate`. After provider resume is durably `admitted` and before structured readiness can advance, the host acquires `kill_switch_action_gate` before that session gate, requires the caller-observed `expected_kill_switch_generation: U64DecimalString` to equal the current persisted disengaged generation, and starts a bridge attempt only from initial/prior `structured_bridge_state=not_started|failed_pre_action`. It enforces `max_structured_bridge_retries` as additional attempts, increments `structured_bridge_attempts`, generates `current_structured_bridge_attempt_id`, and includes that exact ID in both `StructuredChannelBindingV1` and `BridgeProcessIdentityV1`. After all pipe/Job/suspended-launch preparation and immediately before `CreateProcessW`, it re-reads the same generation and requires `engaged=false`; a mismatch or engagement fails before process creation and is durably classified `failed_pre_action` without consuming an OS bridge attempt. Only then does it create the suspended bridge in its preconfigured Job. Once `CreateProcessW` returns, it obtains creation time from the retained process handle and durably commits `structured_bridge_state=creating_suspended` plus exact `BridgeProcessIdentityV1` before `ResumeThread`; persistence failure terminates the Job through the setup guard, waits for the exact process handle and zero Job accounting, and may commit `failed_pre_action` only after proving the primary thread never resumed and the exact bridge process/Job are gone. That durable classification alone permits a fresh bridge attempt; timeout, transport loss, or incomplete cleanup does not. The host resumes exactly once, validates the named-pipe peer identity, sends the one bootstrap record, authenticates HELLO within the shared ten-second connect/bootstrap/HELLO deadline, and commits `structured_bridge_state=active` before accepting evidence. For Unattended mode this occurs while phase remains `provider_resuming`, allowing structured readiness to perform the defined internal edge. For Reviewed mode, successful bridge activation is followed by the ordinary `provider_resuming -> awaiting_readiness_confirmation` transition before evidence admission opens; readiness frames are never state-advancing in Reviewed mode, while the active channel remains available for the later preview-bound structured acceptance when that capability was selected. A failure or crash after resume but before that active commit is never classified pre-action: the operation records `unknown`/`unknown_external_action` or requires Reviewed manual intervention and never launches a replacement bridge automatically. At most one non-closed bridge identity may exist per operation.
+Structured bridge lifecycle is part of the operation journal and shares the operation’s `session_action_gate`. After provider resume is durably `admitted` and before structured readiness can advance, the host acquires `kill_switch_action_gate` before that session gate, requires the caller-observed `expected_kill_switch_generation: U64DecimalString` to equal the current persisted disengaged generation, and starts an initial or classified pre-action retry only from `structured_bridge_state=not_started|failed_pre_action`. A bridge that previously reached `active` and then durably reached `closed` may begin one fresh read-only observer-bridge attempt only through a stored `reviewed_bridge_recreate` confirmation: the operation must still be nonterminal and require structured readiness or acceptance, the same host instance must own the unchanged operation/provider/session/execution binding, provider resume must remain durably `admitted`, send state must not be `unknown`, exact prior Job accounting must be zero, `structured_bridge_process` and every prior channel/pipe/Job ownership identity must be absent, and no cancellation/shutdown/superseding attempt may be pending. This reviewed admission changes no recovery phase, provider action state, or send state; it never resends provider resume or continuation, and it generates fresh bridge-attempt/channel/endpoint/nonce IDs before entering the ordinary suspended-launch sequence. It enforces `max_structured_bridge_retries` as additional attempts across initial, classified pre-action retry, and reviewed recreation admissions, increments `structured_bridge_attempts`, generates `current_structured_bridge_attempt_id`, and includes that exact ID in both `StructuredChannelBindingV1` and `BridgeProcessIdentityV1`. A `reviewed_bridge_recreate` confirmation authorizes exactly one `closed` admission; after that admission changes the bridge journal, the same confirmation cannot authorize a later recreation. After all pipe/Job/suspended-launch preparation and immediately before `CreateProcessW`, it re-reads the same generation and requires `engaged=false`; a mismatch or engagement fails before process creation and is durably classified `failed_pre_action` without consuming an OS bridge attempt. Only then does it create the suspended bridge in its preconfigured Job. Once `CreateProcessW` returns, it obtains creation time from the retained process handle and durably commits `structured_bridge_state=creating_suspended` plus exact `BridgeProcessIdentityV1` before `ResumeThread`; persistence failure terminates the Job through the setup guard, waits for the exact process handle and zero Job accounting, and may commit `failed_pre_action` only after proving the primary thread never resumed and the exact bridge process/Job are gone. That durable classification alone permits an unreviewed retry; timeout, transport loss, durable `closed`, or incomplete cleanup never permits an automatic attempt. Durable `closed` permits only the explicitly confirmed, same-host `reviewed_bridge_recreate` admission above. The host resumes exactly once, validates the named-pipe peer identity, sends the one bootstrap record, authenticates HELLO within the shared ten-second connect/bootstrap/HELLO deadline, and commits `structured_bridge_state=active` before accepting evidence. For Unattended mode this occurs while phase remains `provider_resuming`, allowing structured readiness to perform the defined internal edge. For Reviewed mode, successful bridge activation is followed by the ordinary `provider_resuming -> awaiting_readiness_confirmation` transition before evidence admission opens; readiness frames are never state-advancing in Reviewed mode, while the active channel remains available for the later preview-bound structured acceptance when that capability was selected. A failure or crash after resume but before that active commit is never classified pre-action: the operation records `unknown`/`unknown_external_action` or requires Reviewed manual intervention and never launches a replacement bridge automatically. At most one non-closed bridge identity may exist per operation.
 
 Normal channel closure first stops evidence admission, closes the pipe, calls `TerminateJobObject`, waits up to five seconds for the exact process handle to signal, verifies Job accounting zero, and durably commits `structured_bridge_state=closed` plus clears `structured_bridge_process`; only after that persistence succeeds may it close the retained Job/process handles. If that final persistence fails, the still-owned zero-accounting Job/process handles remain retained and the operation stays nonterminal/blocked until persistence can be retried or startup reconciles it; it does not falsely claim `containment_uncertain` merely because durable bookkeeping failed after exact zero-process proof. Timeout, inaccessible identity/accounting, or an observation contradicting the one-process/no-breakaway invariant commits `containment_uncertain`, blocks automatic completion/retry/ordinary close, and retains the exact identity and every available ownership handle. `CloseSession` may proceed only after normal bridge cleanup has durably reached `closed`; if cleanup becomes `containment_uncertain`, its graveyard commit atomically moves (never copies) the retained bridge identity from `RecoveryOperationV1.structured_bridge_process` into `TeardownRecordV1.structured_bridge_process`, leaves the operation’s bridge state `containment_uncertain` with its process field absent, and makes that exact teardown generation the sole durable process-ownership record. The zero-process proof/teardown repair includes that identity. Operation completion, superseded attempt, cancellation, evidence timeout, and host shutdown all run this same cleanup before releasing the session gate and cannot terminalize, supersede, cancel, or tear down the session while bridge state is `creating_suspended|active|unknown|containment_uncertain`.
 
@@ -2387,6 +2426,121 @@ KillSwitchV1 {
   generation: U64DecimalString,
   engaged_at?: Timestamp,
   reason_code?: user|policy|recovery_error
+}
+
+AuditDegradedReasonV1 =
+    host_queue_overflow
+  | fact_encoding_failed
+  | audit_endpoint_failed
+  | audit_transport_protocol_failed
+  | fact_validation_failed
+  | fact_hash_mismatch
+  | fact_identity_conflict
+  | writer_startup_reconciliation_failed
+  | writer_append_failed
+  | writer_flush_failed
+  | writer_readback_failed
+  | writer_rotation_failed
+  | writer_acl_failed
+  | writer_quota_failed
+
+AuditDiagnosticV1 {
+  schema_version: 1,
+  state: ready|degraded|retry_requested,
+  generation: U64DecimalString,
+  changed_at?: Timestamp,
+  reason_code?: AuditDegradedReasonV1,
+  coverage_gap: bool
+}
+
+RecoveryAuditFactV1 {
+  schema_version: 1,
+  redaction_schema_version: 1,
+  audit_fact_id: UUID,
+  data_dir_instance_id: UUID,
+  host_instance_id: UUID,
+  event_id?: U64DecimalString,
+  operation_id?: UUID,
+  stable_tab_id?: UUID,
+  terminal_session_id?: u32,
+  provider?: claude_cli|codex_cli|structured_test,
+  adapter_id?: AdapterId,
+  masked_conversation_id?: string <= 64 UTF-8 bytes,
+  action_category: preview|shell_launch|provider_resume|structured_bridge|continuation|completion|cancellation|kill_switch,
+  phase?: RecoveryPhase,
+  occurred_at: Timestamp,
+  result_category: preview_available|started|progress|succeeded|failed|unknown_send_outcome|unrecoverable|partial_recovery|kill_switch_cancelled|manual_intervention_required,
+  retry_count: u16,
+  host_version: string <= 256 UTF-8 bytes,
+  safe_cwd_fingerprint?: Sha256Fingerprint
+}
+
+AuditWriterStartupStatusV1 =
+    Ready
+  | Degraded { reason_code: AuditDegradedReasonV1 }
+
+AuditServerChallengeV1 {
+  schema_version: 1,
+  data_dir_instance_id: UUID,
+  host_instance_id: UUID,
+  server_nonce: SecretHex256,
+  audit_diagnostic: AuditDiagnosticV1
+}
+
+AuditClientAuthenticateV1 {
+  schema_version: 1,
+  data_dir_instance_id: UUID,
+  host_instance_id: UUID,
+  server_nonce: SecretHex256,
+  client_nonce: SecretHex256,
+  writer_instance_id: UUID,
+  observed_diagnostic_generation: U64DecimalString,
+  writer_status: AuditWriterStartupStatusV1
+}
+
+AuditServerReadyV1 {
+  schema_version: 1,
+  data_dir_instance_id: UUID,
+  host_instance_id: UUID,
+  server_nonce: SecretHex256,
+  client_nonce: SecretHex256,
+  audit_diagnostic: AuditDiagnosticV1
+}
+
+AuditFactDeliveryV1 {
+  schema_version: 1,
+  fact: RecoveryAuditFactV1,
+  record_sha256: Sha256Hex
+}
+
+AuditFactAckV1 {
+  schema_version: 1,
+  audit_fact_id: UUID,
+  record_sha256: Sha256Hex
+}
+
+AuditWriterDegradedV1 {
+  schema_version: 1,
+  diagnostic_generation: U64DecimalString,
+  reason_code: AuditDegradedReasonV1
+}
+
+AuditRetryRequestedV1 {
+  schema_version: 1,
+  diagnostic_generation: U64DecimalString,
+  reason_code: AuditDegradedReasonV1
+}
+
+AuditRetryOutcomeV1 {
+  schema_version: 1,
+  diagnostic_generation: U64DecimalString,
+  outcome: ready|degraded,
+  reason_code?: AuditDegradedReasonV1
+}
+
+AuditDiagnosticStateV1 {
+  schema_version: 1,
+  audit_diagnostic: AuditDiagnosticV1
 }
 
 ProviderConversationV1 {
@@ -2573,7 +2727,7 @@ RecoveryReviewPreviewItemV1 {
 
 RecoveryReviewPreviewV1 {
   schema_version: 1,
-  action: reviewed_launch|reviewed_resume|reviewed_readiness|reviewed_continuation|reviewed_acceptance,
+  action: reviewed_launch|reviewed_resume|reviewed_readiness|reviewed_continuation|reviewed_acceptance|reviewed_bridge_recreate,
   safety_revision: U64DecimalString,
   items: [RecoveryReviewPreviewItemV1] <= 1024
 }
@@ -2581,7 +2735,7 @@ RecoveryReviewPreviewV1 {
 RecoveryConfirmationTemplateV1 {
   schema_version: 1,
   confirmation_id: UUID,
-  action: reviewed_launch|reviewed_resume|reviewed_readiness|reviewed_continuation|reviewed_acceptance,
+  action: reviewed_launch|reviewed_resume|reviewed_readiness|reviewed_continuation|reviewed_acceptance|reviewed_bridge_recreate,
   affected_operation_ids: [UUID] <= 1024,
   operation_preview_hashes: [RecoveryReviewPreviewItemV1] <= 1024,
   preview_hash: Sha256Hex,
@@ -2593,7 +2747,7 @@ ConfirmationV1 {
   schema_version: 1,
   confirmation_id: UUID,
   confirmed_at: Timestamp,
-  action: explicit_quit|explicit_restart|repair_reset|reviewed_launch|reviewed_resume|reviewed_readiness|reviewed_continuation|reviewed_acceptance,
+  action: explicit_quit|explicit_restart|repair_reset|reviewed_launch|reviewed_resume|reviewed_readiness|reviewed_continuation|reviewed_acceptance|reviewed_bridge_recreate,
   affected_operation_ids: [UUID] <= 1024,
   operation_preview_hashes?: [RecoveryReviewPreviewItemV1] <= 1024,
   prepared_safety_revision?: U64DecimalString,
@@ -2700,13 +2854,13 @@ planned
   --Complete(terminal_state=manually_completed|cancelled)--> terminal
 ```
 
-Every arrow preserves the current send state unless the matrix labels a new one. `shell_recreating` and `provider_resuming` are action-in-progress phases; a structured bridge in `creating_suspended|active` is an internal action-in-progress even while the phase remains `provider_resuming|awaiting_readiness_confirmation|provider_ready|continuation_confirmed`. A classified shell/provider retry commits a self-transition on the corresponding in-progress phase with `begin_attempt` after backoff and immediately before repeating the external action; a classified bridge retry is an internal journal commit allowed only from durable `failed_pre_action` and does not change the recovery phase. A launch failure never fabricates `shell_recreated`; a successful launch records the exact reconstructed session ID before resume can begin. No phase may advance past a bridge-dependent edge and no terminal completion may commit until required bridge cleanup has durably reached `closed`. `updated_at` is generated by the host on every transition, completion, cancellation request, structured-bridge journal change, and internal submit/acceptance commit; clients do not supply canonical timestamps. A reviewed confirmation must pass the action, operation-ID, and exact preview-hash binding defined in section 7.8.
+Every arrow preserves the current send state unless the matrix labels a new one. `shell_recreating` and `provider_resuming` are action-in-progress phases; a structured bridge in `creating_suspended|active` is an internal action-in-progress even while the phase remains `provider_resuming|awaiting_readiness_confirmation|provider_ready|continuation_confirmed`. A classified shell/provider retry commits a self-transition on the corresponding in-progress phase with `begin_attempt` after backoff and immediately before repeating the external action; an unreviewed classified bridge retry is an internal journal commit allowed only from durable `failed_pre_action`, while a bridge that previously reached active may be recreated from durable `closed` only by the one-use stored `reviewed_bridge_recreate` confirmation and exact same-host/zero-accounting/no-identity gates in section 15.1. Neither bridge admission changes the recovery phase. A launch failure never fabricates `shell_recreated`; a successful launch records the exact reconstructed session ID before resume can begin. No phase may advance past a bridge-dependent edge and no terminal completion may commit until required bridge cleanup has durably reached `closed`. `updated_at` is generated by the host on every transition, completion, cancellation request, structured-bridge journal change, and internal submit/acceptance commit; clients do not supply canonical timestamps. A reviewed confirmation must pass the action, operation-ID, and exact preview-hash binding defined in section 7.8.
 
 `TransitionRecoveryOperation` remains the sole owner of every recovery-phase edge. The coordinator-triggered plain-provider edge is host-internal, carries no confirmation ID, and is requested only after observing durable `provider_action_state=admitted` or while reconciling that same durable state after startup/reload. It is valid only when `mode=reviewed`; `action_preview.readiness_capability=human_confirmation`; `planned_actions` contains `await_human_readiness`; `phase=provider_resuming`; the current resume attempt, reconstructed session, provider identity, and immutable execution binding match; `send_state=not_started`; `structured_bridge_state=not_required`; `structured_bridge_attempts=0`; and the current bridge attempt, bridge process, channel, pipe, Job, pending evidence, and structured-channel identities are all absent. The edge creates no external action or lifecycle event. One ordinary safety commit changes only `phase=awaiting_readiness_confirmation` plus host `updated_at`, increments `safety_revision` once, installs after persistence, and publishes exactly one full `SafetyStateChanged`. Persistence failure leaves durable `provider_resuming/admitted`; reconciliation may retry only this idempotent phase commit and never resends provider resume or creates a bridge. `reviewed_readiness` confirmation remains the sole owner of `awaiting_readiness_confirmation -> provider_ready`; structured evidence cannot advance a `not_required` operation.
 
 The coordinator-triggered Reviewed structured edge is a separate host-internal `TransitionRecoveryOperation` edge, carries no confirmation ID, and is requested only after the same operation durably records `provider_action_state=admitted` and `structured_bridge_state=active`, including startup/reload reconciliation. It is valid only when `mode=reviewed`; `phase=provider_resuming`; `action_preview.readiness_capability=structured`; `planned_actions` contains `await_structured_readiness`; `send_state=not_started`; provider action is admitted; and the operation's stable tab, reconstructed session, provider conversation, immutable execution binding/hash, current resume attempt ID, current structured-bridge attempt ID, exact `BridgeProcessIdentityV1`, channel ID, pipe endpoint ID, structured-channel binding/hash, Job ownership/accounting, executable identity, and bridge qualification all match the one currently active retained bridge. No pending readiness or acceptance evidence, cancellation, shutdown transaction, superseding attempt, or conflicting durable process owner may exist. The edge admits no evidence and creates, resumes, closes, or retries no process/channel. One ordinary safety commit changes only `phase=awaiting_readiness_confirmation` plus host `updated_at`, increments `safety_revision` once, installs after persistence, and publishes exactly one full `SafetyStateChanged`; if the exact operation is already in that phase with the same active bridge, replay is an idempotent no-op. Persistence failure leaves durable `provider_resuming/admitted/active` and permits retry only of this phase commit. `reviewed_readiness` confirmation remains the sole owner of the next `provider_ready` edge; readiness frames received before or after this transition are never state-advancing in Reviewed mode, and no pending evidence is retained across the human gate.
 
-Coordinator reload/reconnect while the same host and exact active bridge remain alive reconciles this Reviewed prefix before any later action. Durable `provider_action_state=admitted` plus bridge `not_started|failed_pre_action` may start or explicitly retry the bridge only through the ordinary bounded bridge lifecycle and kill-switch gates; admission alone never advances readiness. Durable `active` with exact current identities permits only the structured phase edge above. `creating_suspended|unknown|containment_uncertain`, a resumed bridge without durable active proof, identity drift, missing ownership, or conflicting evidence blocks/fails closed through the existing unknown/containment rules and never launches a replacement bridge automatically. Same-host acknowledgement loss after durable `active` but before the phase edge replays only that edge; loss after the phase commit retains the exact active channel and waits for Reviewed confirmation. A host process crash/restart is different: section 15.1 startup reconciliation first closes or proves absent every retained active bridge identity and, because provider resume may already have happened without durable acceptance, terminalizes the operation as `unknown_external_action` or blocks as `containment_uncertain`; it never replays the phase edge or relaunches provider/bridge. Lost same-host acknowledgements reconcile from the durable operation and bridge identities, never by resending provider resume, recreating a bridge, or accepting evidence as readiness.
+Coordinator reload/reconnect while the same host and exact active bridge remain alive reconciles this Reviewed prefix before any later action. Durable `provider_action_state=admitted` plus bridge `not_started|failed_pre_action` may start or explicitly retry the bridge only through the ordinary bounded bridge lifecycle and kill-switch gates; durable `closed` may begin a replacement observer bridge only through a newly stored one-use `reviewed_bridge_recreate` confirmation and the exact same-host/zero-accounting/no-retained-identity gates in section 15.1. None of these admissions alone advances readiness. Durable `active` with exact current identities permits only the structured phase edge above. `creating_suspended|unknown|containment_uncertain`, a resumed bridge without durable active proof, identity drift, missing ownership, or conflicting evidence blocks/fails closed through the existing unknown/containment rules and never launches a replacement bridge automatically. Same-host acknowledgement loss after durable `active` but before the phase edge replays only that edge; loss after the phase commit retains the exact active channel and waits for Reviewed confirmation. Same-host bridge loss after an earlier durable active state never auto-recreates: exact cleanup must first reach durable `closed`, then the renderer must prepare, display, and store a fresh `reviewed_bridge_recreate` confirmation before one new observer-bridge admission; stale/wrong-action/wrong-operation confirmations, a reused confirmation, changed host/binding/phase/send state, retained identity, or nonzero/uncertain accounting reject unchanged. A host process crash/restart is different: section 15.1 startup reconciliation first closes or proves absent every retained active bridge identity and, because provider resume may already have happened without durable acceptance, terminalizes the operation as `unknown_external_action` or blocks as `containment_uncertain`; it never replays the phase edge or relaunches provider/bridge. Lost same-host acknowledgements reconcile from the durable operation and bridge identities, never by resending provider resume, recreating a bridge, or accepting evidence as readiness.
 
 `mode=unattended` with `structured_bridge_state=not_required` is `invalid_recovery_transition` at construction, action validation, and startup/reload reconciliation. Plain Claude and Codex therefore remain Manual/Reviewed and can never enter an Unattended provider, readiness, continuation, or acceptance edge.
 
@@ -2811,9 +2965,36 @@ It blocks new shell launches, managed provider launches/resumes, structured-brid
 
 ### 15.8 Audit and notifications
 
-Audit records are append-only JSON Lines with each encoded record capped at 8 KiB and rotated before an append would make a slot exceed 8 MiB. TermX uses exactly five owned slots: one active plus four completed, for an exact 40 MiB quota including slot headers and partial final lines. Rotation uses metadata-only same-volume renames and no copy/temp file: under the single-writer audit lock it flushes/closes active, deletes completed slot 4 first, renames 3->4, 2->3, 1->2, renames active->1, then creates and ACL-verifies an empty active slot before accepting another record. Deletion happens before any new file creation, and a rename does not duplicate file bytes, so every crash prefix remains at or below 40 MiB. Each slot begins with a fixed bounded header containing schema version and monotonic audit-generation number.
+Audit uses one host-owned authenticated Windows named-pipe channel and one Tauri-owned slot writer. The host creates exactly one remote-rejecting byte-mode pipe instance at the derived endpoint with overlapped duplex access, `FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS`, non-inheritable handles, and a protected DACL granting only the current user SID, SYSTEM, and Administrators. Tauri must acquire `Local\TermX.AuditWriter.v1.<data_dir_instance_id>` under the same DACL before slot reconciliation or pipe connection; a second UI may bootstrap, but it cannot become a second audit writer. Normal disconnect releases the client and writer mutex but not the host outbox; a later authenticated writer receives the unacknowledged head.
 
-On startup, before enabling audit, TermX exclusively opens the audit directory, enumerates only its exact five slot paths plus audit-owned rotation markers from older builds, and enforces the quota. It validates headers, sorts surviving slots by embedded generation, discards malformed/duplicate-oldest audit-owned slots, truncates only a partial final JSON line, and renames the newest at most five files into canonical active/1..4 slots using delete-before-rename without copying. Any unexpected audit-owned temp/marker is deleted before audit is enabled; any non-audit filename is ignored. If deletion, rename, ACL verification, or quota reconciliation cannot prove total owned audit bytes <= 40 MiB, audit enters the degraded failure policy below and performs no append. Startup never promotes malformed content. Audit append/rotation runs on a bounded single-writer queue of 1,024 records or 4 MiB, whichever is reached first. Audit is non-authoritative: append, rotation, ACL, or quota-enforcement failure never rolls back an already durable safety/session transition and never blocks ConPTY I/O, but it sets a persistent `audit_degraded` diagnostic, disables further audit writes for that host instance, emits one redacted high-severity notification through the native bridge, and requires explicit retry/restart from Settings. Queue overflow follows the same fail-closed-for-audit degradation rather than dropping selected records while claiming the audit is complete. The data-directory DACL applies to every generation.
+Every TXAU frame is exactly:
+
+```text
+magic="TXAU" (4 bytes)
+| version=u16 little-endian (1)
+| kind=u16 little-endian
+| channel_id=16 RFC-4122 network-order UUID bytes
+| sequence=u64 little-endian
+| payload_len=u32 little-endian
+| payload
+| mac=32 bytes
+```
+
+Fixed overhead is 68 bytes, payload length is at most 12,288, and complete frame length is at most 12,356. Payload is strict RFC 8785/JCS UTF-8 for the closed schema selected by kind. The host generates a fresh random channel UUID and 256-bit server nonce for each accepted connection, and both sides derive `frame_key=HMAC-SHA-256(audit_transport_key, UTF8("termx-native-audit-channel-v1\0") || channel_id bytes)`. The MAC covers every preceding frame byte exactly as transmitted and is compared in constant time. Kinds are `SERVER_CHALLENGE=0x0001`, `CLIENT_AUTHENTICATE=0x0002`, `SERVER_READY=0x0003`, `FACT_DELIVERY=0x0010`, `FACT_ACK=0x0011`, `WRITER_DEGRADED=0x0012`, `RETRY_REQUESTED=0x0013`, `RETRY_OUTCOME=0x0014`, and `DIAGNOSTIC_STATE=0x0015`. Server challenge sequence is 0, server ready is 1, later server frames begin at 2; client authenticate is 0 and later client frames begin at 1. Duplicate, skipped, wrapped, wrong-direction, wrong-kind, oversized, bad-MAC, or schema-invalid frames close the connection. Challenge/authentication completes within five seconds. No fact is exposed before authentication.
+
+The host constructs `RecoveryAuditFactV1` by positive allowlist, never by serializing a recovery object and subtracting fields. `masked_conversation_id` is `<conversation-kind>:sha256:<first 16 lowercase hex characters of SHA-256(UTF8(exact conversation value))>` and `safe_cwd_fingerprint` is `sha256:v1:` plus SHA-256 of the exact safe cwd; source values are not retained in the fact. `canonical_fact_bytes=JCS(validated fact)`, `record_sha256=SHA-256(canonical_fact_bytes)`, and the on-disk record is those canonical bytes plus one LF not included in the hash. Complete line length is at most 8,192 bytes. Delivery-attempt, pipe sequence, channel, and reconnect metadata are outside the fact/hash.
+
+The host outbox contains at most 1,024 accepted facts including one in flight and at most 4,194,304 total canonical fact bytes including the in-flight fact. It preserves FIFO order and delivers exactly one unacknowledged fact. Admission reserves count and exact canonical bytes before clone/enqueue, uses a non-waiting `try_publish`, and never awaits pipe I/O, disk I/O, or queue space while holding `commit_lock`, a session-action gate, ConPTY I/O path, registry transition, or safety persistence path. For event-backed facts, admission occurs in the same commit sequence after the durable transition and event ID are fixed, but performs no native I/O. Queue overflow or fact-encoding failure preserves the authoritative transition and existing facts, latches degradation once, rejects later fact admission, and schedules the ordinary safety helper to commit `AuditDiagnosticV1`; diagnostic commits never recursively audit themselves. Normal writer disconnect is not degradation.
+
+For each delivery, Tauri validates the fact, recomputes its JCS hash, and searches the reconciled retained-slot identity map. Same `audit_fact_id` and same hash is ACK-only. Same ID with another hash stops writes and reports `fact_identity_conflict`. Otherwise Tauri rotates first if necessary, appends the complete canonical line, calls `FlushFileBuffers`, reads back the exact appended byte range, reparses/revalidates it, verifies the same ID/hash, and only then sends `FACT_ACK`. The host removes only a head whose ID/hash exactly matches the ACK. Unknown, stale, out-of-order, or wrong-hash ACK is an authenticated protocol failure and removes nothing. Disconnect before append redelivers; disconnect after append but before ACK redelivers and is deduplicated without a second line. Startup truncates only a partial final line, validates and flushes complete uncertain lines, scans the fixed five-slot/40 MiB set to rebuild its bounded in-memory ID/hash map, and degrades on any conflict.
+
+Audit records are append-only JSON Lines and rotate before an append would make a slot exceed 8 MiB. TermX uses exactly five owned slots: one active plus four completed, for an exact 40 MiB quota including slot headers and partial final lines. Rotation uses metadata-only same-volume renames and no copy/temp file: under the single-writer audit lock it flushes/closes active, deletes completed slot 4 first, renames 3->4, 2->3, 1->2, renames active->1, then creates and ACL-verifies an empty active slot before accepting another record. Deletion happens before any new file creation, and a rename does not duplicate file bytes, so every crash prefix remains at or below 40 MiB. Each slot begins with a fixed bounded header containing schema version and monotonic audit-generation number.
+
+On startup, before enabling audit, Tauri exclusively opens the audit directory, enumerates only its exact five slot paths plus recognized audit-owned rotation markers from older builds, and enforces the quota. It validates every owned slot/header/complete record and requires generation and fact identities to be unique and internally ordered. It may truncate only a partial final JSON line and may delete only a recognized crash-prefix marker whose schema and bound source/destination identities prove it is superseded after reconciliation. A malformed header or complete line, duplicate generation, same fact ID with another hash, unexpected audit-owned filename/marker, unverifiable marker binding, ACL/read failure, or more than five non-superseded owned slots reports the applicable closed startup/validation/identity reason and performs no delete, rename, truncation of a complete line, or append. After validation it sorts surviving slots by embedded generation and renames the newest at most five files into canonical active/1..4 slots using delete-before-rename without copying. Non-audit filenames are ignored. If any allowed delete, rename, ACL verification, or quota reconciliation cannot prove total owned audit bytes at most 40 MiB, Tauri reports the closed reason and performs no append. Audit is non-authoritative: failure never rolls back an already durable transition, blocks ConPTY I/O, or directly writes state. The host commits persistent `AuditDiagnosticV1`, stops fact delivery while degraded, and the native side emits at most one redacted high-severity notification per degraded generation.
+
+`AuditDiagnosticV1` presence rules are exact: initial/fresh-reset/migrated state is `ready`, generation `0`, no timestamp, no reason, and `coverage_gap=false`; after every committed transition generation increments and `changed_at` is required. `reason_code` is absent exactly for `ready` and required for `degraded|retry_requested`. First degradation makes `coverage_gap=true`, and the value remains sticky after successful retry because historical completeness cannot be restored. A persisted degraded host accepts an authenticated writer for status/retry but sends no facts until explicit retry succeeds. Disabling and re-enabling audit does not clear degradation. Settings renders ready, ready with prior coverage gap, degraded with its closed reason, and retry requested/waiting for native writer; Retry exists only for degraded state and uses the sole `RequestAuditRetry` safety mutation. No direct native status/retry invoke is added, and the approved native invoke registry remains exactly ten commands.
+
+Host startup loads the diagnostic, initializes the outbox/degradation latch, derives the endpoint/key, and creates plus ACL-verifies the pipe before ordinary listener/runtime publication. Endpoint failure commits `audit_endpoint_failed` without blocking normal host startup. Tauri starts its audit worker in the background only after verified Preflight and returns renderer bootstrap without waiting for audit reconciliation. Ordinary Tauri close/crash stops fetching new facts, completes an already-started append/flush/readback when possible, closes the channel, releases the writer mutex, and sends no Shutdown, CloseSession, PTY command, or safety mutation. Once `shutdown_persistence_epoch` commits, no new audit fact or diagnostic persistence begins; shutdown closes producer admission and the pipe without waiting for outbox drain, and an unacknowledged fact cannot delay `ShutdownAccepted`. Replay is guaranteed only for the current live host instance; a new host UUID creates a new endpoint/key/outbox rather than a second authoritative durable journal.
 
 Audit records may contain:
 
@@ -2874,6 +3055,9 @@ Likely focused host additions:
 
 - `C:\Dev\TermX\host\src\job.rs`
 - `C:\Dev\TermX\host\src\events.rs`
+- `C:\Dev\TermX\host\src\recovery\audit_fact.rs`
+- `C:\Dev\TermX\host\src\recovery\audit_transport.rs`
+- `C:\Dev\TermX\host\tests\recovery_audit_transport.rs`
 
 ### 17.2 UI and Tauri files likely created
 
@@ -2889,6 +3073,7 @@ Likely focused host additions:
 - `C:\Dev\TermX\ui\src-tauri\src\lib.rs`
 - `C:\Dev\TermX\ui\src-tauri\src\host_lifecycle.rs`
 - `C:\Dev\TermX\ui\src-tauri\src\storage.rs`
+- `C:\Dev\TermX\ui\src-tauri\src\audit_source.rs`
 - `C:\Dev\TermX\ui\src-tauri\src\notifications.rs`
 - `C:\Dev\TermX\ui\src\main.tsx`
 - `C:\Dev\TermX\ui\src\app\App.tsx`
@@ -3014,7 +3199,7 @@ All behavioral changes follow test-driven development: write a focused failing t
 - `[M2-TST-STORAGE-AUTH-LEDGER]` Ledger fixtures enforce strict JCS/ACL/generation/read-back, exact 96-KiB JCS plan / 192-KiB raw canonical response / 256-KiB base64 replay bounds, 64-record/512-KiB aggregate and per-response/replay caps, request-ID/body deduplication, retained authorization without a second dialog, journaled-as-sole-consumption, crash between journal and consumed mirror, authoritative startup reconciliation, exact pre-journal cancelled result, post-journal retained `too_late`, conflicting/missing journal ambiguity, and at-least-30-day terminal retention. Confirm-acknowledgement-loss followed by complete Tauri/native restart proves `Authorized` status and Execute recover the exact retained canonical plan preimage, publication branch, names, source/owner/result bytes and identities without re-preparing; missing/malformed plan bytes or any disk/authorization/plan projection drift becomes non-mutating ambiguity. Direct ledger `mode|record_id|source_snapshot` fields must equal both immutable-plan and authorization projections by presence and value. Sweeps run only under the complete recovery-bootstrap/preownership/ordinary-when-derivable/repair/ledger chain, remove only oldest eligible terminal records, and fail before target mutation when caps cannot be met.
 - Live protocol mismatch leaves the host untouched.
 - `[M2-TST-REVIEWED-NOBRIDGE]` Plain Claude and Codex Reviewed fixtures prove durable provider admission followed by exactly one coordinator-triggered `TransitionRecoveryOperation` to `awaiting_readiness_confirmation`, including coordinator reload before the edge and event/acknowledgement loss after it. The path performs zero bridge process/pipe/channel/Job/evidence/screen-parse actions; persistence failure exposes no candidate and never resends resume. Missing, stale, wrong-hash, or wrong-action `reviewed_readiness` cannot reach `provider_ready`, and structured evidence cannot advance `not_required`; exact human readiness, reviewed continuation, at-most-once submission, and reviewed acceptance can complete `recovered`. Unattended/not-required is rejected before provider resume and every stale/wrong-state internal edge is a no-op.
-- `[M2-TST-REVIEWED-STRUCTURED-EDGE]` A qualified Reviewed fixture proves provider admission alone does not advance readiness; `not_started` begins only the ordinary bridge lifecycle, durable exact `active` enables exactly one host-internal structured `TransitionRecoveryOperation`, and that commit changes only phase/updated time with one safety revision/event while retaining the active bridge and admitting no evidence. Every stable-tab/session/execution-binding/resume-attempt/bridge-attempt/process/channel/pipe/Job/qualification mismatch rejects. Same-host coordinator reload or lost acknowledgement replays only the idempotent phase edge. `creating_suspended|unknown|containment_uncertain` blocks/fails closed. A host crash before or after active persistence runs exact bridge startup cleanup and becomes `unknown_external_action|containment_uncertain`, never relaunching provider/bridge or replaying the phase edge on the replacement host. Reviewed readiness confirmation remains the sole `provider_ready` edge.
+- `[M2-TST-REVIEWED-STRUCTURED-EDGE]` A qualified Reviewed fixture proves provider admission alone does not advance readiness; `not_started` begins only the ordinary bridge lifecycle, durable exact `active` enables exactly one host-internal structured `TransitionRecoveryOperation`, and that commit changes only phase/updated time with one safety revision/event while retaining the active bridge and admitting no evidence. Every stable-tab/session/execution-binding/resume-attempt/bridge-attempt/process/channel/pipe/Job/qualification mismatch rejects. Same-host coordinator reload or lost acknowledgement replays only the idempotent phase edge. `creating_suspended|unknown|containment_uncertain` blocks/fails closed. After a bridge that reached active is cleanly terminated and durably reaches `closed`, no automatic attempt occurs; a fresh `reviewed_bridge_recreate` preparation displays the read-only observer/no-resend action, exact confirmation admits one new bounded attempt with fresh bridge-attempt/channel/endpoint/nonce IDs, and provider-resume/continuation admission counts remain unchanged. Stale, wrong-action, wrong-operation, reused, cross-host, post-phase, unknown-send, nonzero-accounting, or retained-identity confirmations reject without process creation. A host crash before or after active persistence runs exact bridge startup cleanup and becomes `unknown_external_action|containment_uncertain`, never relaunching provider/bridge or replaying the phase edge on the replacement host. Reviewed readiness confirmation remains the sole `provider_ready` edge.
 - Plain Claude and Codex records cannot become Unattended. A qualified structured operation may complete as cancelled, timed out, failed, or unrecoverable from every active pre-bridge phase while `structured_bridge_state=not_started` only when attempts remain zero and every bridge attempt/process/channel/Job identity is absent; fixtures cover `planned`, launch approval, `shell_recreated`, resume approval, and provider-resuming-before-bridge-creation. Any persisted attempt or identity requires the normal cleanup/classification path and cannot use this shortcut.
 - A qualified Unattended operation with `auto_submit_after_preview=false` takes the explicit `awaiting_continuation_approval -> reviewed_continuation -> continuation_confirmed` subpath without changing its stored mode, cannot submit without that exact confirmation, and still requires structured acceptance; with the setting true it takes the confirmation-free Unattended continuation edge.
 - Managed Claude initial launch generates and durably stores one UUID and exact initial/resume argv before admission; fixtures prove `--session-id <uuid>` on initial launch and `--resume <same uuid>` on recovery. `StartManagedProvider`, recovery-bound `CreateSession`, `StartRecoveryProvider`, and `SubmitRecoveryInput` boundary-race tests hold the shared kill-switch gate, use typed decimal generations, persist their pre-action journal state, recheck immediately before the irreversible call, and prove concurrent `SetKillSwitch` either blocks before admission or waits for one durable classified outcome. Retry-boundary fixtures set each `max_launch_retries|max_resume_retries|max_structured_bridge_retries` independently to 255, prove the corresponding `u16` attempt count reaches exactly 256 without wrap or rejection, reject a 257th attempt, and prove stale caller-observed initial-launch count 255 cannot begin or reconcile attempt 256 while exact count 256 can only reconcile the already-classified outcome.
@@ -3037,8 +3222,15 @@ All behavioral changes follow test-driven development: write a focused failing t
 - `SetKillSwitch` is rejected in a mixed or repeated-mutation batch; a sole mutation acquires `kill_switch_action_gate` before validation and retains it through durable install/event sequencing. Boundary tests prove no generic `CommitSafetyState` dispatcher path can bypass that gate, and concurrent launch/send either classifies first or observes the incremented engaged generation.
 - `[M2-TST-RECEIPT-PRUNE-PRECEDENCE]` Completed-request-cache eviction tests reuse old request IDs after more than 1,024 entries and 2 MiB: durable creation sequence/ID/identity hash, operation/attempt/submission identities, lifecycle generation, repair preparation, and shutdown authorization reconcile the original result or return `action_reconciliation_required`, with no second process creation, provider/input admission, termination, repair, or shutdown. Session-creation crash injection covers reservation persistence, immediately before/after the OS creation call, registration, receipt outcome persistence, acknowledgement loss, startup `reserved -> unknown`, receipt pruning, sequence high-water non-reuse, and M1 deterministic migration identities; only an uninterrupted guard-proven `failed_pre_action` may reuse the exact consumed sequence, and no crash prefix creates a second shell. Pruning tests prove `created` receipts for active, exited, or teardown generations are protected; final-close identity is retained; an absent receipt plus exactly one matching durable generation returns canonical metadata; high-water alone never fabricates metadata or permits reuse; no match returns `action_reconciliation_required`; duplicate/hash-conflicting matches fail closed; and a protected set exceeding count or byte caps rejects before sequence reservation.
 - ACL integration tests inspect the actual protected DACL on the data directory, ownership file, runtime discovery, state/backup/temp, config, recovery bootstrap/tombstone, shutdown-uncertain, teardown-repair artifacts, and all audit slots; inheritance/broad-principal injection or ACL application/readback failure prevents credential publication or mutation and enters the documented fail-closed mode. Runtime-secret tests prove the bearer token and shutdown-authority key each have exactly one durable occurrence in the protected runtime discovery file, the shutdown key is independently random and absent from host state/config/recovery/bootstrap/audit artifacts, and every invoke result, Tauri event, JavaScript object, React bootstrap, and WebSocket payload exposes no shutdown-key field or value while native finalized-read/authorization MACs still succeed from trusted Rust memory.
-- Audit and notifications contain no token, continuation, terminal capture, full provider ID, or private provider state.
-- Audit rotation is crash-injected after every delete/rename/create/flush prefix; startup reconciliation always retains the newest valid generations, never exceeds five 8 MiB slots/40 MiB, and enters `audit_degraded` rather than appending when deletion, ACL, header, rename, or quota proof fails.
+- Audit and notifications contain no token, continuation, terminal capture, full provider ID, raw cwd, shutdown-authority key, audit transport key, channel frame key, server/client nonce, or private provider state. Positive-allowlist fact fixtures mutate every excluded recovery field and prove canonical fact bytes/hash stay unchanged.
+- `[M2-TST-AUDIT-DIAGNOSTIC-PRESENCE]` Strict schema fixtures accept absent `changed_at` only for `ready` generation `0`, absent reason, and `coverage_gap=false`; every later generation requires `changed_at`, `ready` requires absent reason, `degraded|retry_requested` require a closed reason, and `coverage_gap` remains true after a successful retry.
+- `[M2-TST-AUDIT-TXAU-FRAMES]` Cross-language fixtures pin the 68-byte TXAU overhead, 12,288-byte payload and 12,356-byte frame caps, little-endian numeric fields, RFC-4122 channel bytes, exact domain-separated transport/channel-key derivation, JCS payload bytes, MAC coverage/constant-time comparison, fresh channel/nonce, five-second handshake, directional sequence zero points, and rejection/connection close for BOM, duplicate/unknown keys, unsafe numbers, malformed decimal strings, unknown kind, wrong direction/channel/version/MAC, duplicate/skipped/wrapped sequence, truncation, and trailing bytes.
+- `[M2-TST-AUDIT-PIPE-ACL-PEER]` Real Windows tests prove the exact derived pipe name, `FILE_FLAG_FIRST_PIPE_INSTANCE|PIPE_REJECT_REMOTE_CLIENTS`, byte mode, one instance, non-inheritable handles, current-user/SYSTEM/Administrators protected DACL, remote-client rejection, and single `Local\\TermX.AuditWriter.v1.<data_dir_instance_id>` writer mutex. A second UI cannot reconcile/write concurrently; normal owner disconnect permits a later verified writer without degrading the host.
+- `[M2-TST-AUDIT-OUTBOX-BOUNDS]` Fact admission reserves exact canonical bytes and count before enqueue, never waits while authoritative/session/ConPTY locks are held, preserves FIFO with exactly one delivered-unacknowledged head, accepts exactly 1,024 facts/4 MiB including in-flight, and degrades without dropping an accepted fact when either next reservation crosses its cap. Encoding failure has the same non-authoritative degradation, and diagnostic commits do not recursively create audit facts.
+- `[M2-TST-AUDIT-APPEND-BEFORE-ACK]` Crash/disconnect injection before append, after append, after flush, after exact readback, and before ACK proves no ACK precedes append+`FlushFileBuffers`+readback+strict reparse+ID/hash verification. Redelivery of same ID/hash is ACK-only without a duplicate line; same ID/different hash reports `fact_identity_conflict`, stops writes, and removes no outbox head; stale/out-of-order/wrong-hash ACK closes the channel and removes nothing.
+- Audit rotation is crash-injected after every delete/rename/create/flush prefix; startup reconciliation always retains the newest valid generations, truncates only a partial final line, rebuilds the retained ID/hash index, never exceeds five 8 MiB slots/40 MiB, and reports the exact closed degradation reason rather than appending when deletion, ACL, header, identity, readback, rename, or quota proof fails.
+- `[M2-TST-AUDIT-RECONNECT-SHUTDOWN]` A Tauri crash with one unacknowledged fact leaves host state and ConPTY output unaffected; a replacement authenticated writer receives that exact head. Ordinary disconnect alone leaves diagnostic generation unchanged. The shutdown persistence epoch prevents later fact/diagnostic persistence, closes admission/pipe without waiting for outbox drain, and permits `ShutdownAccepted`/release with an unacknowledged fact.
+- `[M2-TST-AUDIT-RETRY]` `RequestAuditRetry` is accepted only from exact degraded generation under `core.safety_state`, commits `retry_requested` before native work, has no eleventh invoke or bearer protocol audit command, and remains waiting with no writer. Matching native ready/degraded outcome commits a newer generation; stale outcome is ignored. Disable/re-enable and restart do not clear degradation or sticky `coverage_gap`.
 - Fake structured adapters can demonstrate capability qualification without enabling real plain-CLI unattended sends.
 
 ### 18.5 Memory and soak
@@ -3055,8 +3247,8 @@ Definitions:
 
 Pass criteria:
 
-- Renderer-owned decoded output backlog never exceeds 3 MiB and estimated xterm visible+scrollback text never exceeds 16 MiB plus one 256 KiB measurement interval.
-- One connection never owns more than one encoded and one decoded 512 KiB Replay chunk.
+- Renderer-controller-owned decoded output backlog never exceeds 3 MiB, the encoded Replay inbox never exceeds 16 envelopes or 16 MiB of exact serialized UTF-8 envelope bytes, and estimated xterm visible+scrollback text never exceeds 16 MiB plus exactly 262,144 bytes of conservatively estimated unmeasured UTF-16 presentation growth.
+- One controller never owns more than one decoded 512 KiB Replay item plus one 512 KiB decode scratch allocation; encoded envelopes are separately count/byte-accounted and fall to zero after each replay drain. Browser/WebSocket buffering before callback delivery is reported separately where observable and is not misclassified as controller ownership.
 - Pending correlated requests never exceed 1,024 entries or 2 MiB and return to fewer than 10 entries and 64 KiB between cycles.
 - For both host and UI, every post-warm-up RSS sample is at most warm-up baseline + 96 MiB.
 - The five post-warm-up five-minute moving minima may not increase in every consecutive window; a strictly monotonic increase is failure.
