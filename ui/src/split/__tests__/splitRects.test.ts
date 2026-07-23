@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { SplitNode } from "../../state/layout";
-import { computeRects, samePath, type FractionBox } from "../splitRects";
+import {
+  computeRects,
+  pathToSplitNode,
+  samePath,
+  type FractionBox,
+  type SplitBranch,
+} from "../splitRects";
 
 function pane(sessionId: number): SplitNode {
   return { kind: "pane", sessionId };
@@ -75,28 +81,70 @@ describe("computeRects", () => {
     expect(rects.panes.map((rect) => rect.sessionId)).toEqual([2, 9]);
   });
 
-  it("applies a drag override only to the addressed split", () => {
+  it("applies a drag override only to the addressed split node", () => {
+    const inner: SplitBranch = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [pane(2), pane(3)],
+    };
     const tree: SplitNode = {
       kind: "split",
       dir: "row",
       sizes: [0.5, 0.5],
-      children: [
-        pane(1),
-        {
-          kind: "split",
-          dir: "row",
-          sizes: [0.5, 0.5],
-          children: [pane(2), pane(3)],
-        },
-      ],
+      children: [pane(1), inner],
     };
-    const rects = computeRects(tree, { path: [1], fraction: 0.2 });
-    const outer = rects.dividers.find((divider) => divider.path.length === 0);
-    const inner = rects.dividers.find((divider) => divider.path.length === 1);
-    expect(outer?.position).toBeCloseTo(0.5);
-    expect(inner?.position).toBeCloseTo(0.5 + 0.5 * 0.2);
+    const rects = computeRects(tree, { node: inner, fraction: 0.2 });
+    const outerDivider = rects.dividers.find((divider) => divider.path.length === 0);
+    const innerDivider = rects.dividers.find((divider) => divider.path.length === 1);
+    expect(outerDivider?.position).toBeCloseTo(0.5);
+    expect(innerDivider?.position).toBeCloseTo(0.5 + 0.5 * 0.2);
     expect(rects.panes.find((rect) => rect.sessionId === 2)?.box.width).toBeCloseTo(0.1);
     expect(rects.panes.find((rect) => rect.sessionId === 3)?.box.width).toBeCloseTo(0.4);
+    expect(innerDivider?.node).toBe(inner);
+  });
+
+  it("still applies the override when the node moved to a different path", () => {
+    const inner: SplitBranch = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [pane(2), pane(3)],
+    };
+    // The same node, collapsed to the root after its sibling closed.
+    const rects = computeRects(inner, { node: inner, fraction: 0.3 });
+    expect(rects.dividers[0]?.position).toBeCloseTo(0.3);
+  });
+});
+
+describe("pathToSplitNode", () => {
+  const inner: SplitBranch = {
+    kind: "split",
+    dir: "col",
+    sizes: [0.5, 0.5],
+    children: [pane(2), pane(3)],
+  };
+  const tree: SplitNode = {
+    kind: "split",
+    dir: "row",
+    sizes: [0.5, 0.5],
+    children: [pane(1), inner],
+  };
+
+  it("finds a split node's current path by reference", () => {
+    expect(pathToSplitNode(tree, tree as SplitBranch)).toEqual([]);
+    expect(pathToSplitNode(tree, inner)).toEqual([1]);
+  });
+
+  it("returns null for a node no longer in the tree", () => {
+    const gone: SplitBranch = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [pane(8), pane(9)],
+    };
+    expect(pathToSplitNode(tree, gone)).toBeNull();
+    expect(pathToSplitNode(pane(1), gone)).toBeNull();
   });
 });
 

@@ -495,6 +495,29 @@ describe("WorkspaceController split actions", () => {
     expect(controller.getSnapshot().notice).toBe("The pane could not be split.");
   });
 
+  it("keeps tracking the created session when the rollback close itself fails", async () => {
+    const { controller, createSession, closeSession, attachments } = harness({
+      closeSession: async (sessionId) => {
+        if (sessionId === 50) {
+          throw new Error("host busy");
+        }
+      },
+    });
+    createSession.mockImplementationOnce(async (createOptions) => {
+      // The pane disappears while the host is creating the new session.
+      await controller.closePane("tab-1", 1);
+      return session(50, { cwd: createOptions.cwd });
+    });
+
+    const created = await controller.splitPane("tab-1", 1, "row");
+
+    expect(created).toBeNull();
+    expect(closeSession).toHaveBeenCalledWith(50);
+    // The host still owns session 50 — it must NOT be forgotten into a leak.
+    expect(attachments.forgetSession).not.toHaveBeenCalledWith(50);
+    expect(controller.getSnapshot().notice).toBe("The pane could not be split.");
+  });
+
   it("closes a pane pessimistically and collapses the split into the sibling", async () => {
     const { controller, closeSession, persistenceCalls } = harness();
 

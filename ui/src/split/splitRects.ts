@@ -14,9 +14,16 @@ export interface PaneRect {
   box: FractionBox;
 }
 
+export type SplitBranch = Extract<SplitNode, { kind: "split" }>;
+
 export interface DividerRect {
   /// Child-index path from the tab root to the split node this divider resizes.
   path: number[];
+  /// The split node itself. The store's trees are immutable with structural
+  /// sharing, so this reference survives unrelated mutations — drags identify
+  /// their divider by node, never by positional path (a concurrent close can
+  /// alias a path onto a DIFFERENT split).
+  node: SplitBranch;
   dir: SplitDir;
   sizes: [number, number];
   /// The split node's own box — drag math projects the pointer onto this
@@ -33,12 +40,33 @@ export interface SplitRects {
 }
 
 export interface FractionOverride {
-  path: number[];
+  node: SplitBranch;
   fraction: number;
 }
 
 export function samePath(a: readonly number[], b: readonly number[]): boolean {
   return a.length === b.length && a.every((step, index) => step === b[index]);
+}
+
+/// Current child-index path of a split node found by REFERENCE, or null when
+/// the node is no longer in the tree. Resize commits resolve their path
+/// through this at release time so a mid-drag structural change can never
+/// retarget the commit.
+export function pathToSplitNode(
+  root: SplitNode,
+  target: SplitBranch,
+  path: number[] = [],
+): number[] | null {
+  if (root.kind === "pane") {
+    return null;
+  }
+  if (root === target) {
+    return path;
+  }
+  return (
+    pathToSplitNode(root.children[0], target, [...path, 0]) ??
+    pathToSplitNode(root.children[1], target, [...path, 1])
+  );
 }
 
 /// Flattens a layout_v1 split tree into absolutely-positioned pane and divider
@@ -70,13 +98,14 @@ function walk(
     return;
   }
   const fraction =
-    override !== undefined && samePath(override.path, path)
+    override !== undefined && override.node === node
       ? override.fraction
       : node.sizes[0];
   if (node.dir === "row") {
     const firstWidth = box.width * fraction;
     dividers.push({
       path,
+      node,
       dir: "row",
       sizes: node.sizes,
       box,
@@ -95,6 +124,7 @@ function walk(
     const firstHeight = box.height * fraction;
     dividers.push({
       path,
+      node,
       dir: "col",
       sizes: node.sizes,
       box,

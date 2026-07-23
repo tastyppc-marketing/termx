@@ -296,6 +296,29 @@ describe("SplitLayout actions", () => {
     expect(container.querySelector(".split-dialog")).toBeNull();
     expect(layoutActions.dismissPane).toHaveBeenCalledWith(1);
   });
+
+  it("ignores shortcuts while an editable field outside the terminal is focused", async () => {
+    const layoutActions = await renderLayout();
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.focus();
+    await act(async () => key("w", { ctrlKey: true, shiftKey: true }));
+    await act(async () => key("d", { ctrlKey: true, shiftKey: true }));
+    expect(container.querySelector(".split-dialog")).toBeNull();
+    expect(layoutActions.splitPane).not.toHaveBeenCalled();
+    input.remove();
+  });
+
+  it("keeps shortcuts live from xterm's hidden textarea", async () => {
+    const layoutActions = await renderLayout();
+    const textarea = document.createElement("textarea");
+    textarea.className = "xterm-helper-textarea";
+    document.body.append(textarea);
+    textarea.focus();
+    await act(async () => key("d", { ctrlKey: true, shiftKey: true }));
+    expect(layoutActions.splitPane).toHaveBeenCalledWith(1, "row");
+    textarea.remove();
+  });
 });
 
 describe("SplitLayout divider", () => {
@@ -332,7 +355,7 @@ describe("SplitLayout divider", () => {
     expect(sizes[0]).toBeCloseTo(0.1);
   });
 
-  it("cancels the drag on Escape without committing", async () => {
+  it("cancels the drag on Escape, releasing pointer capture without committing", async () => {
     mockContainerRect();
     const layoutActions = await renderLayout();
     const divider = container.querySelector<HTMLElement>("[data-testid='split-divider-root']")!;
@@ -343,8 +366,115 @@ describe("SplitLayout divider", () => {
     expect(
       container.querySelector<HTMLElement>("[data-testid='split-pane-1']")?.style.width,
     ).toBe("50%");
+    expect(divider.releasePointerCapture).toHaveBeenCalledWith(7);
 
     await act(async () => divider.dispatchEvent(pointer("pointerup", { x: 300 })));
+    expect(layoutActions.resizePane).not.toHaveBeenCalled();
+  });
+
+  it("commits to the dragged split's NEW path after a mid-drag restructure", async () => {
+    mockContainerRect();
+    const layoutActions = actions();
+    // root(row): pane 1 | s1(row): pane 2 | s2(row): pane 3, pane 4
+    const s2: SplitNode = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 3 },
+        { kind: "pane", sessionId: 4 },
+      ],
+    };
+    const s1: SplitNode = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [{ kind: "pane", sessionId: 2 }, s2],
+    };
+    const tree: SplitNode = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [{ kind: "pane", sessionId: 1 }, s1],
+    };
+    const states = {
+      1: { status: "live", exitCode: null },
+      2: { status: "live", exitCode: null },
+      3: { status: "live", exitCode: null },
+      4: { status: "live", exitCode: null },
+    } as const;
+    await renderLayout(layoutActions, { tree, states });
+
+    // Drag s1's divider (path [1]); s1 spans x 500..1000 so 800px -> 0.6.
+    const divider = container.querySelector<HTMLElement>("[data-testid='split-divider-1']")!;
+    await act(async () => divider.dispatchEvent(pointer("pointerdown", { x: 750 })));
+    await act(async () => divider.dispatchEvent(pointer("pointermove", { x: 800 })));
+
+    // Pane 1 closes mid-drag: s1 (same node reference) becomes the ROOT, and
+    // the DOM element keyed "split-divider-1" now belongs to s2.
+    await renderLayout(layoutActions, { tree: s1, states });
+    const survivor = container.querySelector<HTMLElement>("[data-testid='split-divider-1']")!;
+    await act(async () => survivor.dispatchEvent(pointer("pointerup", { x: 800 })));
+
+    expect(layoutActions.resizePane).toHaveBeenCalledTimes(1);
+    const [path, sizes] = vi.mocked(layoutActions.resizePane).mock.calls[0]!;
+    expect(path).toEqual([]);
+    expect(sizes[0]).toBeCloseTo(0.6);
+  });
+
+  it("discards the drag when the dragged split no longer exists at release", async () => {
+    mockContainerRect();
+    const layoutActions = actions();
+    const s1: SplitNode = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 2 },
+        { kind: "pane", sessionId: 3 },
+      ],
+    };
+    const tree: SplitNode = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [{ kind: "pane", sessionId: 1 }, s1],
+    };
+    const states = {
+      1: { status: "live", exitCode: null },
+      2: { status: "live", exitCode: null },
+      3: { status: "live", exitCode: null },
+      9: { status: "live", exitCode: null },
+      10: { status: "live", exitCode: null },
+    } as const;
+    await renderLayout(layoutActions, { tree, states });
+    const divider = container.querySelector<HTMLElement>("[data-testid='split-divider-1']")!;
+    await act(async () => divider.dispatchEvent(pointer("pointerdown", { x: 750 })));
+    await act(async () => divider.dispatchEvent(pointer("pointermove", { x: 800 })));
+
+    // A replacement tree keeps the same divider KEY at path [1] but with an
+    // entirely new split node; the dragged node is gone.
+    const replacement: SplitNode = {
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 1 },
+        {
+          kind: "split",
+          dir: "row",
+          sizes: [0.5, 0.5],
+          children: [
+            { kind: "pane", sessionId: 9 },
+            { kind: "pane", sessionId: 10 },
+          ],
+        },
+      ],
+    };
+    await renderLayout(layoutActions, { tree: replacement, states });
+    const survivor = container.querySelector<HTMLElement>("[data-testid='split-divider-1']")!;
+    await act(async () => survivor.dispatchEvent(pointer("pointerup", { x: 800 })));
+
     expect(layoutActions.resizePane).not.toHaveBeenCalled();
   });
 

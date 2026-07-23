@@ -441,14 +441,20 @@ export class WorkspaceController {
     const before = this.store.getState();
     const after = this.store.splitPane(tabId, paneSessionId, dir, created.id);
     if (after === before) {
+      let rolledBack = true;
       try {
         await this.client.closeSession(created.id);
       } catch {
-        // The host reaps the session on its own close path.
+        rolledBack = false;
       }
-      this.sessions.delete(created.id);
-      this.sessionsRevision += 1;
-      this.attachments.forgetSession(created.id);
+      if (rolledBack) {
+        this.sessions.delete(created.id);
+        this.sessionsRevision += 1;
+        this.attachments.forgetSession(created.id);
+      }
+      // On close failure the host still owns a live session: keep tracking it
+      // (restore reconciliation re-adopts orphans) instead of forgetting it
+      // into an invisible leak.
       this.setNotice("The pane could not be split.");
       this.publish();
       return null;

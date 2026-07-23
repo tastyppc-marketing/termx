@@ -9,9 +9,10 @@ import { DeadPane } from "./DeadPane";
 import { dividerFraction, sizesFromFraction } from "./splitMath";
 import {
   computeRects,
-  samePath,
+  pathToSplitNode,
   type DividerRect,
   type FractionBox,
+  type SplitBranch,
 } from "./splitRects";
 import "./SplitLayout.css";
 
@@ -35,10 +36,15 @@ export interface SplitLayoutProps {
 
 interface DividerDrag {
   pointerId: number;
-  path: number[];
+  /// The dragged split node BY REFERENCE — a concurrent structural change can
+  /// alias a positional path onto a different split, so preview and commit
+  /// both resolve through this node instead.
+  node: SplitBranch;
   dir: SplitDir;
   box: FractionBox;
   fraction: number;
+  /// The capturing divider element, so Escape can release pointer capture.
+  element: HTMLElement;
 }
 
 const MISSING_PANE: PaneSessionState = { status: "missing", exitCode: null };
@@ -97,7 +103,13 @@ export function SplitLayout({
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (dragRef.current) {
+        const current = dragRef.current;
+        if (current) {
+          try {
+            current.element.releasePointerCapture(current.pointerId);
+          } catch {
+            // Capture may already be gone.
+          }
           installDrag(null);
         }
         return;
@@ -110,6 +122,19 @@ export function SplitLayout({
       }
       const key = event.key.toLowerCase();
       if (key !== "d" && key !== "e" && key !== "w") {
+        return;
+      }
+      // Shortcuts stay live inside xterm (its hidden textarea IS the terminal)
+      // but must not fire from rename fields, search boxes, or other editors —
+      // opening the confirm dialog from a rename would blur-commit it.
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        !active.classList.contains("xterm-helper-textarea") &&
+        (active instanceof HTMLInputElement ||
+          active instanceof HTMLTextAreaElement ||
+          active.isContentEditable)
+      ) {
         return;
       }
       event.preventDefault();
@@ -140,10 +165,11 @@ export function SplitLayout({
     }
     installDrag({
       pointerId: event.pointerId,
-      path: divider.path,
+      node: divider.node,
       dir: divider.dir,
       box: divider.box,
       fraction: divider.sizes[0],
+      element: event.currentTarget,
     });
   };
 
@@ -184,7 +210,14 @@ export function SplitLayout({
     }
     releaseCapture(event);
     installDrag(null);
-    actions.resizePane(current.path, sizesFromFraction(current.fraction));
+    // Resolve the node's CURRENT path at release: if the tree changed
+    // mid-drag the commit follows the dragged split, and if that split is
+    // gone the drag is discarded rather than resizing whatever now sits at
+    // the stale path.
+    const path = pathToSplitNode(root, current.node);
+    if (path !== null) {
+      actions.resizePane(path, sizesFromFraction(current.fraction));
+    }
   };
 
   const cancelDividerDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -205,7 +238,7 @@ export function SplitLayout({
     () =>
       computeRects(
         root,
-        drag !== null ? { path: drag.path, fraction: drag.fraction } : undefined,
+        drag !== null ? { node: drag.node, fraction: drag.fraction } : undefined,
       ),
     [root, drag],
   );
@@ -270,7 +303,7 @@ export function SplitLayout({
         );
       })}
       {rects.dividers.map((divider) => {
-        const dragging = drag !== null && samePath(drag.path, divider.path);
+        const dragging = drag !== null && drag.node === divider.node;
         const first = dragging ? drag.fraction : divider.sizes[0];
         const testId = `split-divider-${divider.path.join("-") || "root"}`;
         return (
