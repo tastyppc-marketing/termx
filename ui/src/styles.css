@@ -1,10 +1,10 @@
 :root {
   color-scheme: dark;
-  font-family: Inter, Segoe UI, system-ui, sans-serif;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
   line-height: 1.4;
   font-weight: 400;
   color: #e6e6e6;
-  background: #0b0d10;
+  background: #0f1115;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -18,57 +18,80 @@
 html,
 body,
 #root {
-  margin: 0;
   width: 100%;
   height: 100%;
+  margin: 0;
   overflow: hidden;
-  background: #0b0d10;
+  background: #0f1115;
+}
+
+button,
+input {
+  font: inherit;
 }
 
 .app-shell {
   display: flex;
-  flex-direction: column;
   width: 100%;
   height: 100%;
-  background: linear-gradient(180deg, #12151b 0%, #0b0d10 40%);
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  background: #0f1115;
 }
 
 .app-header {
   display: flex;
+  min-height: 42px;
+  flex: 0 0 42px;
   align-items: baseline;
   gap: 12px;
   padding: 10px 14px;
-  border-bottom: 1px solid #1f2430;
-  background: rgba(15, 17, 21, 0.92);
+  background: #0f1115;
+  border-bottom: 1px solid rgb(255 255 255 / 6%);
   user-select: none;
 }
 
 .app-brand {
+  color: #f8fafc;
   font-size: 14px;
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #f8fafc;
 }
 
 .app-subtitle {
+  color: #8b93a7;
   font-size: 12px;
-  color: #94a3b8;
+}
+
+.app-workspace {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .app-main {
-  flex: 1;
+  position: relative;
+  min-width: 0;
   min-height: 0;
+  flex: 1 1 auto;
   padding: 10px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 75% 20%, rgb(35 42 54 / 26%), transparent 38%),
+    #0f1115;
 }
 
 .terminal-host {
   width: 100%;
   height: 100%;
-  border: 1px solid #1f2430;
-  border-radius: 8px;
   overflow: hidden;
   background: #0f1115;
+  border: 1px solid #1f2430;
+  border-radius: 8px;
 }
 
 .terminal-host .xterm {
@@ -78,4 +101,65 @@ body,
 
 .terminal-host .xterm-viewport {
   overflow-y: auto !important;
+}
+
+.workspace-panel {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  height: 100%;
+  place-items: center;
+  padding: 32px;
+  color: #8b93a7;
+  background:
+    radial-gradient(circle at center, rgb(35 42 54 / 32%), transparent 42%),
+    #0f1115;
+  text-align: center;
+}
+
+.workspace-panel__content {
+  max-width: 420px;
+}
+
+.workspace-panel__mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin: 0 auto 16px;
+  place-items: center;
+  color: #0f1115;
+  background: #7aa2f7;
+  border-radius: 11px;
+  box-shadow: 0 8px 28px rgb(122 162 247 / 18%);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.workspace-panel h1 {
+  margin: 0 0 7px;
+  color: #e6e6e6;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.workspace-panel p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+@media (max-width: 640px) {
+  .app-header {
+    padding-inline: 12px;
+  }
+
+  .app-main {
+    padding: 8px;
+  }
+
+  .workspace-panel {
+    padding: 24px;
+  }
 }
