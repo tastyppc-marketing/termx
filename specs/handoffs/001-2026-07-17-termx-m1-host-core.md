@@ -1,6 +1,25 @@
 # Session Handoff - 2026-07-17
 
-## DELTA 2026-07-22 (M2 scope revision + multi-LLM execution) — CURRENT, READ THIS FIRST
+## DELTA 2026-07-23 (M2 supervision loop mid-flight) — CURRENT, READ THIS FIRST
+
+Standing orders from Michael: supervise autonomously until T8 done (review → verify → commit/bounce → dispatch, no check-ins); EXTRA scrutiny on Grok diffs; UI quality bar is binding (plan §"UI quality bar"); ultracode OFF; externals do the writes (claude-x `gpt-5.6` Sol + `grok-4.5` live and authed; gemini UNUSABLE — proxy OAuth scope bug, see memory); Claude subagents = Opus 4.8; 2 Fable forks approved for parallel writes.
+
+**Committed so far (main):** `677e221` plan-of-record → `a3c2e64` UI quality bar + T5 spec → `5e98ade` layout_v1 spec (docs/superpowers/specs/2026-07-22-termx-layout-v1.md) → `a2ebe23` T1 scaffold → `e13b978` T2 bootstrap → `118cdab` T3 transport → `0ca6e2f` docs/memos (xterm replay hazard = BINDING for T4; T8 e2e architecture) → `868b0bb` adversarial-review fixes (DETACHED_PROCESS bug, CSP, poison recovery; externalBin release-blocker tracked in BACKLOG §4).
+
+**IN FLIGHT (4 workers + 3 parked agents):**
+1. **T4 Sol** (terminal pane) — detached runner `scratchpad\t4-runner.ps1`, log `t4-sol.log`, completion flag `t4-done.flag`. PLANNED ONE-BOUNCE on report: brief predates the replay-hazard memo — bounce spec = `C:\Dev\TermX\docs\memos\2026-07-23-xterm-replay-hazard.md` (parser-hook suppression during replay write, reset-before-replay, hold live frames till write-callback, OSC query-vs-set, win32-input-mode re-assert) + its 10-point checklist. ALSO: Sol edited committed transport files mid-task (client.ts: paste chunking into HostClient, TEXT_ENCODER hoist; frames.ts: subarray decodes, assertSessionId/MAX_INPUT_PAYLOAD exports, Uint8Array<ArrayBuffer>) — uncommitted, outside its lane, review hard before accepting.
+2. **T6 Grok** (folder picker) — detached runner `t6-runner.ps1`, log `t6-grok.log`, flag `t6-done.flag`. Its in-progress uncommitted edits: ui/package.json, ui/src-tauri/{Cargo.toml,Cargo.lock,capabilities,lib.rs}. NEVER sweep these into other commits (`git add` scoped paths only).
+3. **Fable fork `t8-e2e-impl`** — T8 harness per memo: new ui/vitest.e2e.config.ts + reattach.e2e.test.ts (zero-dep marker assertions), excludes e2e from unit glob. Notifies on completion.
+4. **Fable fork `layout-store-impl`** — ui/src/state/{layout,store,reconcile}.ts + exhaustive tests per layout_v1 spec. Notifies on completion.
+Parked Opus agents (context intact, resume via SendMessage): `review-t1-t2` (knows the codebase — reuse for T4/T5 reviews), `risk-xterm-conpty`, `research-t8-e2e`.
+
+**Worker launch recipe (MUST use):** child background tasks get killed mysteriously — launch via detached runner: write `<task>-runner.ps1` in scratchpad (Set-Location repo; claude-x <alias> -p $brief --dangerously-skip-permissions --max-turns 100-120 --disallowedTools "Skill,Agent,Workflow" --append-system-prompt "<headless worker, ignore skill mandates>" *> log; Set-Content done-flag), then `Start-Process powershell -File runner -WindowStyle Hidden`. Check flags on every wake — watchers die silently.
+
+**Loop procedure per landing:** read log/report → diff review (Grok = line-by-line) → independently run verifies (export PATH="$HOME/tools/mingw64/bin:$HOME/.cargo/bin:$PATH"; cargo/vitest output → scratchpad files) → commit scoped paths with worker-attribution message + trailers, or bounce (max 2) → dispatch next per plan order T4→(T5∥T6)→T7→T8. After T6 frees package.json: add @xterm/headless devDep + test:e2e script to finish T8 harness. T5 = Sol, design brief from me on top of the layout store + quality bar. T9 = my audit + reuse review-t1-t2 agent. Ship gate = T8 three ship-gate cases green.
+
+**Gotchas:** hook pytest/cargo-not-found failures = environmental noise, state and proceed; briefs live in scratchpad `t*-brief.md`; scratchpad = C:\Users\mjfos\AppData\Local\Temp\claude\C--Dev\7e673402-8c77-471b-bbda-fa825fd7a42e\scratchpad; commit trailers required (Co-Authored-By: Claude Fable 5 <noreply@anthropic.com> + Claude-Session: https://claude.ai/code/session_01QQ5LKEJZ21RXbHx3YjonZx).
+
+## DELTA 2026-07-22 (M2 scope revision + multi-LLM execution) — superseded by 07-23 delta above
 
 Michael's directives (2026-07-22): ultracode OFF (no Workflow fan-outs — he hits the 5h limit fast); heavy implementation goes to EXTERNAL models via claude-x (grok = fast iteration but not smartest, gemini-3.1, gpt-5.6 Sol on ChatGPT Max); any Claude-side subagent must be **Opus 4.8**; Fable revises + supervises every diff, commits, then does final cleanup + adversarial audit (T9). Context: the 2026-07-18/19 M2 planning marathon below was GPT-5.6-Sol stuck in a review loop (Michael confirmed); its output is checkpointed at commit `1a43977` and **PARKED for M3+** — it is NOT the plan of record.
 

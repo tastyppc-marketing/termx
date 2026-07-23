@@ -1,3 +1,3 @@
 # Handoff Index
 
-- [001-2026-07-17-termx-m1-host-core.md](001-2026-07-17-termx-m1-host-core.md) — M1 complete (105 tests, MSVC); 07-18/19 full-scope M2 planning PARKED for M3 (checkpoint `1a43977`); plan of record is `plans/2026-07-22-termx-m2-terminal-ui.md` (T1–T9, claude-x workers + Fable supervising); T1 scaffold dispatched to gemini-3.1
+- [001-2026-07-17-termx-m1-host-core.md](001-2026-07-17-termx-m1-host-core.md) — M1 done (105 tests); M2 terminal UI mid-build under multi-LLM supervision: T1/T2/T3 committed (+review fixes `868b0bb`), T4(Sol)/T6(Grok)/T8-harness(Fable)/layout-store(Fable) in flight, T4 gets planned bounce vs replay-hazard memo; read the 07-23 delta first
