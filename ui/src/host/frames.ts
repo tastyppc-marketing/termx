@@ -6,9 +6,8 @@ const MAX_U32 = 0xffffffff;
 const MAX_U64 = 0xffffffffffffffffn;
 
 /// Host-side `session::MAX_INPUT_FRAME`: input payloads above this get a
-/// host Error reply, and anything above the 1 MiB WS cap DROPS the whole
-/// connection — refuse client-side so a giant paste can never kill the link.
-/// Callers chunk larger pastes (the terminal layer chunks at 64 KiB).
+/// host Error reply, and anything above the 1 MiB WS cap drops the whole
+/// connection. HostClient chunks larger pastes before encoding.
 export const MAX_INPUT_PAYLOAD = 256 * 1024;
 
 export interface OutputFrame {
@@ -27,7 +26,7 @@ export interface InputFrame {
 export type BinaryFrame = OutputFrame | InputFrame;
 export type BinaryData = ArrayBuffer | ArrayBufferView;
 
-export function encodeFrame(frame: BinaryFrame): Uint8Array {
+export function encodeFrame(frame: BinaryFrame): Uint8Array<ArrayBuffer> {
   assertSessionId(frame.sessionId);
 
   if (frame.type === "output") {
@@ -72,7 +71,7 @@ export function decodeFrame(data: BinaryData): BinaryFrame {
       type: "output",
       sessionId: view.getUint32(1, true),
       offset: view.getBigUint64(5, true),
-      data: bytes.slice(OUTPUT_HEADER_LENGTH),
+      data: bytes.subarray(OUTPUT_HEADER_LENGTH),
     };
   }
 
@@ -83,7 +82,7 @@ export function decodeFrame(data: BinaryData): BinaryFrame {
     return {
       type: "input",
       sessionId: view.getUint32(1, true),
-      data: bytes.slice(INPUT_HEADER_LENGTH),
+      data: bytes.subarray(INPUT_HEADER_LENGTH),
     };
   }
 
@@ -97,7 +96,7 @@ function asBytes(data: BinaryData): Uint8Array {
   return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 
-function assertSessionId(sessionId: number) {
+export function assertSessionId(sessionId: number) {
   if (!Number.isInteger(sessionId) || sessionId < 0 || sessionId > MAX_U32) {
     throw new RangeError("session id must fit an unsigned 32-bit integer");
   }

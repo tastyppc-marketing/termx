@@ -1,7 +1,13 @@
-import { decodeFrame, encodeFrame } from "./frames";
+import {
+  assertSessionId,
+  decodeFrame,
+  encodeFrame,
+  MAX_INPUT_PAYLOAD,
+} from "./frames";
 import type { ClientMsg, HostMsg, JsonValue, SessionInfo } from "./protocol";
 
 const OPEN = 1;
+const TEXT_ENCODER = new TextEncoder();
 const REQUEST_CONTEXTS = new Set([
   "create_session",
   "close_session",
@@ -70,7 +76,9 @@ interface AttachmentState {
   sessionId: number;
   callbacks: SessionAttachmentCallbacks;
   nextOffset: bigint | null;
+  replay: boolean;
   awaitingReplay: boolean;
+  detaching: boolean;
   detached: boolean;
   resolve: (handle: SessionAttachment) => void;
   reject: (error: Error) => void;
@@ -85,8 +93,11 @@ export class HostClient {
   readonly version: string;
   readonly initialSessions: SessionInfo[];
 
+  private latestError: Error | null = null;
+
   private readonly requestQueue: PendingRequest[] = [];
   private readonly attachments = new Map<number, AttachmentState>();
+  private readonly attachQueue: AttachmentState[] = [];
   private readonly sessionExitedListeners = new Set<SessionExitedListener>();
   private readonly sessionClosedListeners = new Set<SessionClosedListener>();
   private readonly errorListeners = new Set<ErrorListener>();
@@ -94,6 +105,7 @@ export class HostClient {
   private readonly errorListener: EventListener;
   private readonly closeListener: EventListener;
   private activeRequest: PendingRequest | null = null;
+  private activeAttach: AttachmentState | null = null;
   private closed = false;
 
   private constructor(
@@ -110,6 +122,10 @@ export class HostClient {
     socket.addEventListener("message", this.messageListener);
     socket.addEventListener("error", this.errorListener);
     socket.addEventListener("close", this.closeListener);
+  }
+
+  get lastError(): Error | null {
+    return this.latestError;
   }
 
   static connect(options: HostClientConnectOptions): Promise<HostClient> {
@@ -233,6 +249,9 @@ export class HostClient {
   }
 
   setLayout(layout: JsonValue): Promise<void> {
+    if (!isJsonValue(layout)) {
+      throw new TypeError("layout must contain only finite JSON values");
+    }
     return this.request(
       { type: "set_layout", layout },
       "set_layout",
@@ -297,26 +316,18 @@ export class HostClient {
       Object.assign(state, {
         sessionId,
         callbacks,
-        nextOffset: null,
+        nextOffset: replay ? 0n : null,
+        replay,
         awaitingReplay: replay,
+        detaching: false,
         detached: false,
         resolve,
         reject,
         handle,
       } satisfies AttachmentState);
       this.attachments.set(sessionId, state);
-
-      try {
-        this.sendJson({ type: "attach", session_id: sessionId, replay });
-      } catch (error) {
-        this.attachments.delete(sessionId);
-        reject(asError(error));
-        return;
-      }
-
-      if (!replay) {
-        resolve(handle);
-      }
+      this.attachQueue.push(state);
+      this.pumpAttachments();
     });
   }
 
@@ -340,7 +351,7 @@ export class HostClient {
   }
 
   close(): void {
-    this.terminate(new Error("Host connection closed"), true);
+    this.terminate(new Error("Host connection closed"), true, false);
   }
 
   private request<T>(
@@ -384,6 +395,104 @@ export class HostClient {
     }
   }
 
+  private pumpAttachments() {
+    if (this.activeAttach || this.closed) {
+      return;
+    }
+    const next = this.attachQueue.shift();
+    if (!next) {
+      return;
+    }
+    this.activeAttach = next;
+    try {
+      this.sendJson({
+        type: "attach",
+        session_id: next.sessionId,
+        replay: next.replay,
+      });
+    } catch {
+      this.activeAttach = null;
+      this.attachments.delete(next.sessionId);
+      next.detached = true;
+      next.reject(new Error("Unable to attach to the host session"));
+      this.terminate(new Error("Host connection failed"), true);
+      return;
+    }
+
+    if (!next.replay) {
+      void this.listSessions().then(
+        () => this.completeAttachment(next),
+        (error: unknown) => this.failAttachment(next, asError(error)),
+      );
+    }
+  }
+
+  private completeAttachment(attachment: AttachmentState) {
+    if (this.activeAttach !== attachment || attachment.detached) {
+      return;
+    }
+    attachment.awaitingReplay = false;
+    this.activeAttach = null;
+    const resolve = attachment.resolve;
+    attachment.resolve = () => undefined;
+    attachment.reject = () => undefined;
+    resolve(attachment.handle);
+    this.pumpAttachments();
+  }
+
+  private failAttachment(attachment: AttachmentState, error: Error) {
+    if (attachment.detached) {
+      return;
+    }
+    if (this.activeAttach === attachment) {
+      this.activeAttach = null;
+    } else {
+      const queuedIndex = this.attachQueue.indexOf(attachment);
+      if (queuedIndex >= 0) {
+        this.attachQueue.splice(queuedIndex, 1);
+      }
+    }
+    this.attachments.delete(attachment.sessionId);
+    attachment.detached = true;
+    attachment.awaitingReplay = false;
+    const reject = attachment.reject;
+    attachment.resolve = () => undefined;
+    attachment.reject = () => undefined;
+    attachment.callbacks = {};
+    reject(error);
+    this.pumpAttachments();
+  }
+
+  private closeAttachment(sessionId: number) {
+    const attachment = this.attachments.get(sessionId);
+    if (!attachment) {
+      return;
+    }
+    const error = new Error(`Session ${sessionId} closed before attachment completed`);
+
+    if (this.activeAttach === attachment) {
+      this.attachments.delete(sessionId);
+      attachment.detached = true;
+      attachment.awaitingReplay = false;
+      const reject = attachment.reject;
+      attachment.resolve = () => undefined;
+      attachment.reject = () => undefined;
+      attachment.callbacks = {};
+      reject(error);
+      return;
+    }
+
+    if (this.attachQueue.includes(attachment)) {
+      this.failAttachment(attachment, error);
+      return;
+    }
+
+    attachment.detached = true;
+    attachment.detaching = false;
+    attachment.callbacks = {};
+    this.attachments.delete(sessionId);
+  }
+
   private receiveMessage(event: MessageEvent) {
     try {
       if (typeof event.data === "string") {
@@ -396,7 +505,7 @@ export class HostClient {
           throw new Error("host sent an input frame");
         }
         const attachment = this.attachments.get(frame.sessionId);
-        if (attachment && !attachment.detached) {
+        if (attachment && !attachment.detached && !attachment.detaching) {
           this.deliverOutput(attachment, frame.offset, frame.data, "live");
         }
         return;
@@ -411,22 +520,27 @@ export class HostClient {
     switch (message.type) {
       case "replay": {
         const attachment = this.attachments.get(message.session_id);
-        if (!attachment || attachment.detached) {
+        if (!attachment || attachment.detached || attachment.detaching) {
           return;
         }
         const data = decodeBase64(message.data_b64);
         this.deliverOutput(attachment, BigInt(message.start_offset), data, "replay");
         if (attachment.awaitingReplay) {
-          attachment.awaitingReplay = false;
-          attachment.resolve(attachment.handle);
+          if (this.activeAttach !== attachment) {
+            throw new Error("replay arrived for an attachment that was not sent");
+          }
+          this.completeAttachment(attachment);
         }
         return;
       }
       case "session_exited": {
-        this.attachments.get(message.session_id)?.callbacks.onExit?.(message.exit_code);
+        this.invokeConsumer(
+          this.attachments.get(message.session_id)?.callbacks.onExit,
+          [message.exit_code],
+        );
         const event = { sessionId: message.session_id, exitCode: message.exit_code };
         for (const listener of this.sessionExitedListeners) {
-          listener(event);
+          this.invokeConsumer(listener, [event]);
         }
         return;
       }
@@ -444,9 +558,9 @@ export class HostClient {
         return;
       case "session_closed":
         this.receiveReply(message);
-        this.attachments.delete(message.session_id);
+        this.closeAttachment(message.session_id);
         for (const listener of this.sessionClosedListeners) {
-          listener({ sessionId: message.session_id });
+          this.invokeConsumer(listener, [{ sessionId: message.session_id }]);
         }
         return;
     }
@@ -476,20 +590,17 @@ export class HostClient {
       return;
     }
 
-    if (context === "attach") {
-      const pending = [...this.attachments.values()].filter((item) => item.awaitingReplay);
-      if (pending.length === 1) {
-        const [attachment] = pending;
-        if (!attachment) {
-          throw new Error("missing attachment");
-        }
-        this.attachments.delete(attachment.sessionId);
-        attachment.reject(new Error(`Host request failed (attach): ${this.redact(message)}`));
+    if (context === "attach" && this.activeAttach) {
+      if (this.activeAttach.detached) {
+        this.activeAttach = null;
+        this.pumpAttachments();
         return;
       }
-      if (pending.length > 1) {
-        throw new Error("ambiguous attach error");
-      }
+      this.failAttachment(
+        this.activeAttach,
+        new Error(`Host request failed (attach): ${this.redact(message)}`),
+      );
+      return;
     }
 
     if (active && REQUEST_CONTEXTS.has(context)) {
@@ -500,9 +611,7 @@ export class HostClient {
     }
 
     const error = new Error(`Host error (${context}): ${this.redact(message)}`);
-    for (const listener of this.errorListeners) {
-      listener(error);
-    }
+    this.emitError(error);
   }
 
   private deliverOutput(
@@ -513,19 +622,16 @@ export class HostClient {
   ) {
     const end = offset + BigInt(data.byteLength);
     const expected = attachment.nextOffset;
-    if (expected === null) {
-      attachment.nextOffset = end;
-      if (data.byteLength > 0) {
-        attachment.callbacks.onOutput?.({ offset, data, source });
+    if (expected === null || offset > expected) {
+      if (expected !== null) {
+        this.invokeConsumer(attachment.callbacks.onLostScrollback, [{
+          expectedOffset: expected,
+          receivedOffset: offset,
+        }]);
       }
-      return;
-    }
-
-    if (offset > expected) {
-      attachment.callbacks.onLostScrollback?.({ expectedOffset: expected, receivedOffset: offset });
       attachment.nextOffset = end;
       if (data.byteLength > 0) {
-        attachment.callbacks.onOutput?.({ offset, data, source });
+        this.invokeConsumer(attachment.callbacks.onOutput, [{ offset, data, source }]);
       }
       return;
     }
@@ -535,15 +641,33 @@ export class HostClient {
     }
 
     const overlap = Number(expected - offset);
-    const remaining = data.slice(overlap);
+    const remaining = data.subarray(overlap);
     attachment.nextOffset = end;
-    attachment.callbacks.onOutput?.({ offset: expected, data: remaining, source });
+    this.invokeConsumer(attachment.callbacks.onOutput, [{
+      offset: expected,
+      data: remaining,
+      source,
+    }]);
   }
 
   private sendInput(attachment: AttachmentState, data: string | Uint8Array) {
     this.assertAttachmentActive(attachment);
-    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-    this.sendBinary(encodeFrame({ type: "input", sessionId: attachment.sessionId, data: bytes }));
+    const bytes = typeof data === "string" ? TEXT_ENCODER.encode(data) : data;
+    if (bytes.byteLength === 0) {
+      this.sendBinary(encodeFrame({
+        type: "input",
+        sessionId: attachment.sessionId,
+        data: bytes,
+      }));
+      return;
+    }
+    for (let start = 0; start < bytes.byteLength; start += MAX_INPUT_PAYLOAD) {
+      this.sendBinary(encodeFrame({
+        type: "input",
+        sessionId: attachment.sessionId,
+        data: bytes.subarray(start, start + MAX_INPUT_PAYLOAD),
+      }));
+    }
   }
 
   private resizeAttachment(attachment: AttachmentState, cols: number, rows: number) {
@@ -553,21 +677,42 @@ export class HostClient {
   }
 
   private detachAttachment(attachment: AttachmentState) {
-    if (attachment.detached) {
+    if (attachment.detached || attachment.detaching) {
       return;
     }
     this.assertConnectionOpen();
-    attachment.detached = true;
-    this.attachments.delete(attachment.sessionId);
     this.sendJson({ type: "detach", session_id: attachment.sessionId });
-    if (attachment.awaitingReplay) {
-      attachment.awaitingReplay = false;
-      attachment.reject(new Error("Attachment detached before replay"));
+    attachment.detaching = true;
+    attachment.awaitingReplay = false;
+    queueMicrotask(() => {
+      if (this.closed || attachment.detached) {
+        return;
+      }
+      void this.listSessions().then(
+        () => this.finalizeDetach(attachment),
+        (error: unknown) => this.terminate(asError(error), true),
+      );
+    });
+  }
+
+  private finalizeDetach(attachment: AttachmentState) {
+    if (attachment.detached) {
+      return;
     }
+    attachment.detached = true;
+    attachment.detaching = false;
+    this.attachments.delete(attachment.sessionId);
+    attachment.callbacks = {};
+    attachment.resolve = () => undefined;
+    attachment.reject = () => undefined;
   }
 
   private assertAttachmentActive(attachment: AttachmentState) {
-    if (attachment.detached || this.attachments.get(attachment.sessionId) !== attachment) {
+    if (
+      attachment.detached
+      || attachment.detaching
+      || this.attachments.get(attachment.sessionId) !== attachment
+    ) {
       throw new Error("Session attachment is detached");
     }
     this.assertConnectionOpen();
@@ -578,11 +723,9 @@ export class HostClient {
     this.socket.send(JSON.stringify(message));
   }
 
-  private sendBinary(data: Uint8Array) {
+  private sendBinary(data: Uint8Array<ArrayBuffer>) {
     this.assertConnectionOpen();
-    const copy = new Uint8Array(data.byteLength);
-    copy.set(data);
-    this.socket.send(copy.buffer);
+    this.socket.send(data.buffer);
   }
 
   private assertConnectionOpen() {
@@ -595,7 +738,32 @@ export class HostClient {
     return this.token.length === 0 ? message : message.split(this.token).join("[redacted]");
   }
 
-  private terminate(error: Error, closeSocket: boolean) {
+  private invokeConsumer<TArgs extends unknown[]>(
+    callback: ((...args: TArgs) => void) | undefined,
+    args: TArgs,
+  ) {
+    if (!callback) {
+      return;
+    }
+    try {
+      callback(...args);
+    } catch (cause) {
+      this.emitError(new Error("Host client callback failed", { cause }));
+    }
+  }
+
+  private emitError(error: Error) {
+    this.latestError = error;
+    for (const listener of this.errorListeners) {
+      try {
+        listener(error);
+      } catch (listenerError) {
+        console.error("HostClient error listener failed", listenerError);
+      }
+    }
+  }
+
+  private terminate(error: Error, closeSocket: boolean, reportError = true) {
     if (this.closed) {
       return;
     }
@@ -609,18 +777,34 @@ export class HostClient {
     for (const request of this.requestQueue.splice(0)) {
       request.reject(error);
     }
-    for (const attachment of this.attachments.values()) {
-      if (attachment.awaitingReplay) {
-        attachment.reject(error);
-      }
-      attachment.callbacks.onDisconnect?.();
-      attachment.detached = true;
-    }
+
+    const attachments = [...this.attachments.values()];
     this.attachments.clear();
+    this.attachQueue.splice(0);
+    this.activeAttach = null;
+    for (const attachment of attachments) {
+      attachment.detached = true;
+      attachment.detaching = false;
+      attachment.awaitingReplay = false;
+      attachment.reject(error);
+      attachment.resolve = () => undefined;
+      attachment.reject = () => undefined;
+    }
 
     if (closeSocket && this.socket.readyState !== 3) {
       this.socket.close();
     }
+    if (reportError) {
+      this.emitError(error);
+    }
+    for (const attachment of attachments) {
+      this.invokeConsumer(attachment.callbacks.onDisconnect, []);
+      attachment.callbacks = {};
+    }
+
+    this.sessionExitedListeners.clear();
+    this.sessionClosedListeners.clear();
+    this.errorListeners.clear();
   }
 }
 
@@ -766,12 +950,6 @@ function isJsonValue(value: unknown): value is JsonValue {
     return value.every(isJsonValue);
   }
   return isRecord(value) && Object.values(value).every(isJsonValue);
-}
-
-function assertSessionId(sessionId: number) {
-  if (!Number.isInteger(sessionId) || sessionId < 0 || sessionId > 0xffff_ffff) {
-    throw new RangeError("session id must fit an unsigned 32-bit integer");
-  }
 }
 
 function assertDimensions(cols: number, rows: number) {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { HostClient } from "../client";
-import { decodeFrame, encodeFrame } from "../frames";
+import { decodeFrame, encodeFrame, MAX_INPUT_PAYLOAD } from "../frames";
 import type { HostMsg, SessionInfo } from "../protocol";
 
 const SESSION: SessionInfo = {
@@ -18,6 +18,7 @@ class FakeWebSocket {
   readyState = 0;
   readonly sent: Array<string | ArrayBufferLike | Blob | ArrayBufferView> = [];
   closeCalls = 0;
+  failNextSend = false;
   private readonly listeners = new Map<string, Set<EventListener>>();
 
   addEventListener(type: string, listener: EventListenerOrEventListenerObject | null) {
@@ -42,6 +43,10 @@ class FakeWebSocket {
   send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
     if (this.readyState !== 1) {
       throw new Error("socket is not open");
+    }
+    if (this.failNextSend) {
+      this.failNextSend = false;
+      throw new Error("injected send failure");
     }
     this.sent.push(data);
   }
@@ -335,6 +340,7 @@ describe("HostClient session attachments", () => {
       { offset: 122n, text: "z", source: "live" },
     ]);
     expect(gaps).toEqual([
+      { expectedOffset: 0n, receivedOffset: 100n },
       { expectedOffset: 109n, receivedOffset: 120n },
     ]);
   });
@@ -472,5 +478,257 @@ describe("HostClient cleanup", () => {
     await expect(queued).rejects.toThrow(/closed/i);
     expect(disconnected).toHaveBeenCalledTimes(1);
     expect(socket.listenerCount()).toBe(0);
+  });
+});
+
+describe("HostClient review regressions", () => {
+  it("isolates consumer callback failures from valid host traffic", async () => {
+    const { client, socket } = await connect();
+    const errors = vi.fn();
+    client.onError(errors);
+    const attaching = client.attach(7, {
+      onOutput: () => {
+        throw new Error("renderer failed");
+      },
+    });
+    await flushPromises();
+
+    socket.receiveJson({
+      type: "replay",
+      session_id: 7,
+      start_offset: 0,
+      data_b64: base64("a"),
+    });
+
+    await expect(attaching).resolves.toMatchObject({ sessionId: 7 });
+    expect(errors).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringMatching(/callback/i),
+    }));
+    expect(socket.closeCalls).toBe(0);
+  });
+
+  it("finishes teardown when one disconnect callback throws", async () => {
+    const { client, socket } = await connect();
+    const secondDisconnect = vi.fn();
+    const first = client.attach(7, {
+      onDisconnect: () => {
+        throw new Error("dispose failed");
+      },
+    });
+    await flushPromises();
+    socket.receiveJson({ type: "replay", session_id: 7, start_offset: 0, data_b64: "" });
+    await first;
+
+    const second = client.attach(8, { onDisconnect: secondDisconnect });
+    await flushPromises();
+    socket.receiveJson({ type: "replay", session_id: 8, start_offset: 0, data_b64: "" });
+    await second;
+
+    expect(() => client.close()).not.toThrow();
+    expect(socket.closeCalls).toBe(1);
+    expect(secondDisconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes attaches so an uncorrelated host error rejects only its owner", async () => {
+    const { client, socket } = await connect();
+    const first = client.attach(70);
+    const second = client.attach(71);
+    await flushPromises();
+
+    expect(sentJson(socket).filter((message) => message.type === "attach")).toEqual([
+      { type: "attach", session_id: 70, replay: true },
+    ]);
+
+    socket.receiveJson({ type: "error", context: "attach", message: "no session 70" });
+    await expect(first).rejects.toThrow(/attach/i);
+    expect(socket.closeCalls).toBe(0);
+    expect(sentJson(socket).filter((message) => message.type === "attach")).toEqual([
+      { type: "attach", session_id: 70, replay: true },
+      { type: "attach", session_id: 71, replay: true },
+    ]);
+
+    socket.receiveJson({ type: "replay", session_id: 71, start_offset: 0, data_b64: "" });
+    await expect(second).resolves.toMatchObject({ sessionId: 71 });
+  });
+
+  it("uses a round-trip barrier before resolving replay-free attaches", async () => {
+    const { client, socket } = await connect();
+    const attaching = client.attach(7, {}, false);
+    let settled = false;
+    void attaching.then(() => {
+      settled = true;
+    });
+    await flushPromises();
+
+    expect(settled).toBe(false);
+    socket.receiveJson({ type: "sessions", sessions: [SESSION] });
+    await expect(attaching).resolves.toMatchObject({ sessionId: 7 });
+  });
+
+  it("routes replay-free attach errors before the barrier", async () => {
+    const { client, socket } = await connect();
+    const attaching = client.attach(99, {}, false);
+    await flushPromises();
+
+    socket.receiveJson({ type: "error", context: "attach", message: "no session 99" });
+
+    await expect(attaching).rejects.toThrow(/attach/i);
+    expect(socket.closeCalls).toBe(0);
+  });
+
+  it("chunks large input without dropping paste bytes", async () => {
+    const { client, socket } = await connect();
+    const attaching = client.attach(7);
+    await flushPromises();
+    socket.receiveJson({ type: "replay", session_id: 7, start_offset: 0, data_b64: "" });
+    const handle = await attaching;
+    const input = Uint8Array.from(
+      { length: MAX_INPUT_PAYLOAD + 17 },
+      (_value, index) => index % 251,
+    );
+    const sentBefore = socket.sent.length;
+
+    handle.sendInput(input);
+
+    const chunks = socket.sent.slice(sentBefore).map((message) => {
+      const frame = decodeFrame(message as ArrayBufferView);
+      expect(frame.type).toBe("input");
+      return frame.data;
+    });
+    expect(chunks.map((chunk) => chunk.byteLength)).toEqual([MAX_INPUT_PAYLOAD, 17]);
+    const reconstructed = new Uint8Array(input.byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      reconstructed.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    expect([...reconstructed]).toEqual([...input]);
+  });
+
+  it("keeps the attachment active when detach send fails", async () => {
+    const { client, socket } = await connect();
+    const attaching = client.attach(7);
+    await flushPromises();
+    socket.receiveJson({ type: "replay", session_id: 7, start_offset: 0, data_b64: "" });
+    const handle = await attaching;
+    socket.failNextSend = true;
+
+    expect(() => handle.detach()).toThrow(/injected send failure/);
+    expect(() => handle.sendInput("x")).not.toThrow();
+  });
+
+  it("holds a detaching generation until a round-trip barrier", async () => {
+    const { client, socket } = await connect();
+    const oldOutput = vi.fn();
+    const attaching = client.attach(7, { onOutput: oldOutput });
+    await flushPromises();
+    socket.receiveJson({ type: "replay", session_id: 7, start_offset: 0, data_b64: "" });
+    const handle = await attaching;
+
+    handle.detach();
+    const blocked = client.attach(7);
+    await flushPromises();
+    expect(sentJson(socket).filter((message) => message.type === "attach")).toHaveLength(1);
+    socket.receive(encodeFrame({
+      type: "output",
+      sessionId: 7,
+      offset: 0n,
+      data: new TextEncoder().encode("stale"),
+    }));
+    expect(oldOutput).not.toHaveBeenCalled();
+
+    socket.receiveJson({ type: "sessions", sessions: [SESSION] });
+    await expect(blocked).rejects.toThrow(/already attached/i);
+    const freshOutput = vi.fn();
+    const fresh = client.attach(7, { onOutput: freshOutput });
+    await flushPromises();
+    socket.receiveJson({
+      type: "replay",
+      session_id: 7,
+      start_offset: 0,
+      data_b64: base64("fresh"),
+    });
+    await fresh;
+    expect(freshOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects non-finite layouts before serialization", async () => {
+    const { client, socket } = await connect();
+
+    expect(() => client.setLayout({ ratio: Number.NaN })).toThrow(/finite JSON/i);
+    expect(sentJson(socket).some((message) => message.type === "set_layout")).toBe(false);
+  });
+
+  it("reports an idle remote disconnect through the error channel", async () => {
+    const { client, socket } = await connect();
+    const errors = vi.fn();
+    client.onError(errors);
+
+    socket.remoteClose();
+
+    expect(errors).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringMatching(/closed/i),
+    }));
+  });
+
+  it("retains the latest error when no listener is registered", async () => {
+    const { client, socket } = await connect();
+
+    socket.remoteClose();
+
+    const observable = client as unknown as { readonly lastError: Error | null };
+    expect(observable.lastError).toEqual(expect.objectContaining({
+      message: expect.stringMatching(/closed/i),
+    }));
+  });
+
+  it("settles an attach closed before validation without wedging the queue", async () => {
+    const { client, socket } = await connect();
+    const closing = client.closeSession(7);
+    const attaching = client.attach(7);
+    await flushPromises();
+
+    socket.receiveJson({ type: "session_closed", session_id: 7 });
+    await expect(closing).resolves.toBeUndefined();
+    await expect(attaching).rejects.toThrow(/closed/i);
+
+    const next = client.attach(8);
+    await flushPromises();
+    expect(sentJson(socket).filter((message) =>
+      message.type === "attach" && message.session_id === 8
+    )).toHaveLength(0);
+
+    socket.receiveJson({ type: "error", context: "attach", message: "no session 7" });
+    expect(sentJson(socket).filter((message) =>
+      message.type === "attach" && message.session_id === 8
+    )).toHaveLength(1);
+    socket.receiveJson({ type: "replay", session_id: 8, start_offset: 0, data_b64: "" });
+    await expect(next).resolves.toMatchObject({ sessionId: 8 });
+    expect(socket.closeCalls).toBe(0);
+  });
+
+  it("removes a queued attach when its session closes before send", async () => {
+    const { client, socket } = await connect();
+    const first = client.attach(70);
+    const queued = client.attach(7);
+    const closing = client.closeSession(7);
+    await flushPromises();
+
+    socket.receiveJson({ type: "session_closed", session_id: 7 });
+    await expect(closing).resolves.toBeUndefined();
+    await expect(queued).rejects.toThrow(/closed/i);
+    socket.receiveJson({ type: "replay", session_id: 70, start_offset: 0, data_b64: "" });
+    await first;
+
+    expect(sentJson(socket).filter((message) =>
+      message.type === "attach" && message.session_id === 7
+    )).toHaveLength(0);
+    const next = client.attach(8);
+    await flushPromises();
+    expect(sentJson(socket).filter((message) =>
+      message.type === "attach" && message.session_id === 8
+    )).toHaveLength(1);
+    socket.receiveJson({ type: "replay", session_id: 8, start_offset: 0, data_b64: "" });
+    await expect(next).resolves.toMatchObject({ sessionId: 8 });
   });
 });
