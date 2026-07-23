@@ -15,6 +15,7 @@ A session running an LLM can gather context from another session's LLM (better t
 - Blocks for cmd.exe via prompt heuristics (no OSC 133 hooks exist there)
 - Keybinding editor UI (config-file rebinding ships in v1)
 - Installer / Start-menu integration (v1 ships as a portable folder)
+- **Packaged-release blocker (adversarial review 2026-07-23):** tauri.conf.json declares no `bundle.externalBin`, so a bundled build ships NO termx-host.exe and `resolve_host_exe` can never succeed in release (the target/ fallback is debug-only by design). Before any packaged build: stage the host binary under the Tauri sidecar naming (`termx-host-x86_64-pc-windows-msvc.exe`) and add `bundle.externalBin`. Dev + tests hide this — it bites only at bundle time.
 
 ## 5. M2 protocol/renderer work flagged by review round 2 (host is fine for M1)
 - **Unsolicited lifecycle events** (re-confirmed as the top protocol gap in review rounds 3 AND 4 — treat as required M2 work, not optional): push SessionCreated/SessionClosed/SessionExited/SessionResized and layout changes to ALL authed clients (not just attached ones) so sidebars and split panes stay in sync without ListSessions polling.

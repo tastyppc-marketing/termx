@@ -12,12 +12,15 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// CREATE_NO_WINDOW — no console flash when the UI spawns the daemon.
+/// CREATE_NO_WINDOW — the host gets its own HIDDEN console: no flash, and
+/// the console still delivers ctrl_close/ctrl_logoff/ctrl_shutdown events,
+/// which the host's teardown handlers require (host/src/main.rs) to avoid
+/// orphaning OpenConsole at 100% CPU on logoff/OS shutdown.
+/// Deliberately NOT combined with DETACHED_PROCESS: that would strip the
+/// console entirely and those events would never fire — and it buys nothing,
+/// since Windows children already outlive their parents.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// DETACHED_PROCESS — host outlives the UI.
-#[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// Serializes bootstrap attempts so two concurrent invokes do not race-spawn.
 static BOOTSTRAP_LOCK: Mutex<()> = Mutex::new(());
@@ -71,9 +74,11 @@ pub async fn bootstrap_host() -> Result<BootstrapResult, String> {
 
 /// Core bootstrap used by the command and by unit/integration tests.
 pub fn bootstrap_with(opts: BootstrapOptions) -> Result<BootstrapResult, String> {
+    // Poison recovery: the lock only serializes attempts (no invariant-bearing
+    // state), so a panic in one bootstrap must not brick every later one.
     let _guard = BOOTSTRAP_LOCK
         .lock()
-        .map_err(|_| "bootstrap lock poisoned".to_string())?;
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let data_dir = paths::resolve_data_dir(opts.data_dir.as_deref())?;
     let timeout = opts.ready_timeout.unwrap_or(Duration::from_secs(10));
@@ -230,7 +235,7 @@ fn spawn_host(host_exe: &Path, data_dir: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
     cmd.spawn()
