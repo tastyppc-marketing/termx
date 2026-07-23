@@ -1,9 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "identifier": "default",
-  "description": "Capability for the main TermX window (T1 scaffold — no custom commands yet)",
+  "description": "Capability for the main TermX window",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "allow-bootstrap-host"
   ]
 }

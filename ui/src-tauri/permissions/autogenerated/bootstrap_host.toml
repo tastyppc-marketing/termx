@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bootstrap-host"
+description = "Enables the bootstrap_host command without any pre-configured scope."
+commands.allow = ["bootstrap_host"]
+
+[[permission]]
+identifier = "deny-bootstrap-host"
+description = "Denies the bootstrap_host command without any pre-configured scope."
+commands.deny = ["bootstrap_host"]
