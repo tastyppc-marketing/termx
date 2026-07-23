@@ -1,14 +1,14 @@
-import { LocalEchoTerminal } from "./demo/LocalEchoTerminal";
+import { TerminalPane } from "./terminal/TerminalPane";
 
 export default function App() {
   return (
     <div className="app-shell">
       <header className="app-header">
         <div className="app-brand">TermX</div>
-        <div className="app-subtitle">M2 scaffold · local-echo demo (no host yet)</div>
+        <div className="app-subtitle">Terminal workspace</div>
       </header>
       <main className="app-main">
-        <LocalEchoTerminal />
+        <TerminalPane />
       </main>
     </div>
   );
