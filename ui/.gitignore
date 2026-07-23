@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+src-tauri/target
+src-tauri/gen
+src-tauri/WixTools
+*.log
+.vscode/*
+!.vscode/extensions.json
+.idea
