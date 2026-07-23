@@ -111,6 +111,11 @@ function workspace(): WorkspaceSnapshot {
         }],
       },
     ],
+    paneStates: {
+      1: { status: "live", exitCode: null },
+      2: { status: "dead", exitCode: 0 },
+      3: { status: "live", exitCode: null },
+    },
     activeTabId: "tab-1",
     activeSessionId: 1,
     persistence: { saving: false, error: null },

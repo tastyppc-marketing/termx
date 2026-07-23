@@ -1,0 +1,270 @@
+.split-layout {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.split-pane {
+  position: absolute;
+  min-width: 0;
+  min-height: 0;
+  padding: 2px;
+  overflow: hidden;
+}
+
+.split-pane--focused::after {
+  content: "";
+  position: absolute;
+  z-index: 5;
+  inset: 2px;
+  border: 2px solid rgb(122 162 247 / 55%);
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+/* A lone pane doesn't need a "which pane is focused" ring. */
+.split-layout[data-pane-count="1"] .split-pane--focused::after {
+  display: none;
+}
+
+.split-pane__toolbar {
+  position: absolute;
+  z-index: 6;
+  top: 8px;
+  right: 10px;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: rgb(22 26 34 / 88%);
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 7px;
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.split-pane:hover .split-pane__toolbar,
+.split-pane:focus-within .split-pane__toolbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.split-pane__toolbar button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  color: #8b93a7;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.split-pane__toolbar button:hover:not(:disabled) {
+  color: #e6e6e6;
+  background: rgb(255 255 255 / 8%);
+}
+
+.split-pane__toolbar button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.split-divider {
+  position: absolute;
+  z-index: 10;
+  touch-action: none;
+}
+
+.split-divider--row {
+  cursor: col-resize;
+}
+
+.split-divider--col {
+  cursor: row-resize;
+}
+
+.split-divider::before {
+  content: "";
+  position: absolute;
+  background: rgb(255 255 255 / 7%);
+  transition: background 120ms ease;
+}
+
+.split-divider--row::before {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+}
+
+.split-divider--col::before {
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 1px;
+  transform: translateY(-50%);
+}
+
+.split-divider:hover::before,
+.split-divider--dragging::before,
+.split-divider:focus-visible::before {
+  background: #7aa2f7;
+}
+
+.split-divider:focus-visible {
+  outline: none;
+}
+
+.split-divider--dragging {
+  z-index: 40;
+}
+
+.dead-pane {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  align-content: center;
+  gap: 6px;
+  padding: 20px;
+  color: #8b93a7;
+  text-align: center;
+  background: #0f1115;
+  border: 1px dashed #1f2430;
+  border-radius: 8px;
+}
+
+.dead-pane__mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 4px;
+  place-items: center;
+  color: #8b93a7;
+  background: #161a22;
+  border: 1px solid #232a36;
+  border-radius: 9px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dead-pane__title {
+  color: #e6e6e6;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dead-pane__detail {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dead-pane__dismiss {
+  min-height: 30px;
+  margin-top: 10px;
+  padding: 0 14px;
+  color: #e6e6e6;
+  background: #1b202a;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.dead-pane__dismiss:hover:not(:disabled) {
+  background: #232a36;
+  border-color: rgb(122 162 247 / 55%);
+}
+
+.dead-pane__dismiss:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.split-dialog-backdrop {
+  position: absolute;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(5 7 10 / 62%);
+  backdrop-filter: blur(3px);
+}
+
+.split-dialog {
+  width: min(340px, calc(100% - 32px));
+  padding: 20px;
+  color: #e6e6e6;
+  background: #1b202a;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 8px;
+  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+}
+
+.split-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.split-dialog p {
+  margin: 0 0 20px;
+  color: #8b93a7;
+  line-height: 1.5;
+}
+
+.split-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.split-dialog__actions button {
+  min-height: 34px;
+  padding: 0 12px;
+  color: #e6e6e6;
+  background: #232a36;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.split-dialog__actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.split-dialog__actions .split-dialog__danger {
+  background: #7e3544;
+  border-color: #a4485b;
+}
+
+.split-layout :focus-visible {
+  outline: 2px solid #7aa2f7;
+  outline-offset: 1px;
+}
+
+.split-divider:focus-visible {
+  outline: 1px solid rgb(122 162 247 / 45%);
+  outline-offset: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .split-pane__toolbar,
+  .split-pane__toolbar button,
+  .split-divider::before,
+  .dead-pane__dismiss {
+    transition: none;
+  }
+}

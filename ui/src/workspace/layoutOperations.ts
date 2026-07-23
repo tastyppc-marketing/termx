@@ -1,4 +1,5 @@
 import {
+  MAX_SPLIT_DEPTH,
   PALETTE_IDS,
   sessionIdsInSplit,
   validateInvariants,
@@ -10,6 +11,30 @@ import {
 
 export function firstSessionId(node: SplitNode): number {
   return node.kind === "pane" ? node.sessionId : firstSessionId(node.children[0]);
+}
+
+/// Child-index path from `node` to the pane holding `sessionId`, or null when
+/// the pane is not in this tree.
+export function pathToPaneNode(
+  node: SplitNode,
+  sessionId: number,
+  path: number[] = [],
+): number[] | null {
+  if (node.kind === "pane") {
+    return node.sessionId === sessionId ? path : null;
+  }
+  return (
+    pathToPaneNode(node.children[0], sessionId, [...path, 0]) ??
+    pathToPaneNode(node.children[1], sessionId, [...path, 1])
+  );
+}
+
+/// Mirrors the store's splitPane depth guard (splitting a pane whose path has
+/// length d creates a node at depth d + 1) so the UI can disable split
+/// affordances instead of discovering refusal after creating a session.
+export function canSplitPane(root: SplitNode, sessionId: number): boolean {
+  const path = pathToPaneNode(root, sessionId);
+  return path !== null && path.length + 1 <= MAX_SPLIT_DEPTH;
 }
 
 export function sessionIdsInTab(tab: Tab): number[] {

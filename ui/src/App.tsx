@@ -1,15 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Sidebar } from "./sidebar/Sidebar";
-import { TerminalPane } from "./terminal/TerminalPane";
+import { SplitLayout, type SplitLayoutActions } from "./split/SplitLayout";
+import { sessionIdsInSplit, type SplitNode } from "./state/layout";
 import {
   bootstrapWorkspace,
   type BootstrappedWorkspace,
 } from "./workspace/bootstrapWorkspace";
+import { firstSessionId } from "./workspace/layoutOperations";
 import { useWorkspace } from "./workspace/useWorkspace";
-import type {
-  SidebarTabModel,
-  WorkspaceSnapshot,
-} from "./workspace/WorkspaceController";
 
 type AppState =
   | { type: "loading" }
@@ -78,32 +76,87 @@ export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
 }
 
 function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
-  const snapshot = useWorkspace(workspace.controller);
-  const activeTab = findActiveTab(snapshot);
-  const ended = activeTab?.status === "dead" || activeTab?.status === "missing";
+  const controller = workspace.controller;
+  const snapshot = useWorkspace(controller);
+  // Focused pane per tab is ephemeral UI state (layout spec: never persisted).
+  const [focusByTab, setFocusByTab] = useState<Record<string, number>>({});
+  const [dismissing, setDismissing] = useState<ReadonlySet<number>>(new Set());
+
+  const activeTabId = snapshot.activeTabId;
+  const activeTab = activeTabId ? snapshot.layout.tabs[activeTabId] : undefined;
+
+  const actions = useMemo<SplitLayoutActions | null>(() => {
+    if (!activeTabId) {
+      return null;
+    }
+    return {
+      splitPane(sessionId, dir) {
+        void controller.splitPane(activeTabId, sessionId, dir).then((created) => {
+          if (created !== null) {
+            setFocusByTab((prev) => ({ ...prev, [activeTabId]: created }));
+          }
+        });
+      },
+      closePane(sessionId) {
+        return controller.closePane(activeTabId, sessionId);
+      },
+      async dismissPane(sessionId) {
+        setDismissing((prev) => new Set(prev).add(sessionId));
+        try {
+          await controller.closePane(activeTabId, sessionId);
+        } finally {
+          setDismissing((prev) => {
+            const next = new Set(prev);
+            next.delete(sessionId);
+            return next;
+          });
+        }
+      },
+      resizePane(path, sizes) {
+        controller.resizePane(activeTabId, path, sizes);
+      },
+    };
+  }, [controller, activeTabId]);
 
   return (
     <div className="app-workspace">
-      <Sidebar snapshot={snapshot} actions={workspace.controller} />
+      <Sidebar snapshot={snapshot} actions={controller} />
       <main className="app-main">
-        {snapshot.activeSessionId === null || !activeTab ? (
+        {!activeTab || !actions ? (
           <WorkspacePanel testId="workspace-empty" title="No terminal tabs">
             Create a terminal from the sidebar to begin.
           </WorkspacePanel>
-        ) : ended ? (
-          <WorkspacePanel testId="workspace-ended" title="Terminal exited">
-            This terminal session has ended. Dismiss it from the sidebar when you no longer need it.
-          </WorkspacePanel>
         ) : (
-          <TerminalPane
-            key={snapshot.activeSessionId}
-            client={workspace.controller.attachments}
-            sessionId={snapshot.activeSessionId}
+          <SplitLayout
+            key={activeTab.id}
+            tabId={activeTab.id}
+            root={activeTab.split}
+            client={controller.attachments}
+            paneStates={snapshot.paneStates}
+            focusedSessionId={resolveFocusedSession(
+              activeTab.split,
+              focusByTab[activeTab.id],
+            )}
+            dismissingSessionIds={dismissing}
+            onFocusPane={(sessionId) =>
+              setFocusByTab((prev) =>
+                prev[activeTab.id] === sessionId
+                  ? prev
+                  : { ...prev, [activeTab.id]: sessionId }
+              )}
+            actions={actions}
           />
         )}
       </main>
     </div>
   );
+}
+
+function resolveFocusedSession(root: SplitNode, preferred: number | undefined): number {
+  if (preferred !== undefined && sessionIdsInSplit(root).includes(preferred)) {
+    return preferred;
+  }
+  return firstSessionId(root);
 }
 
 function WorkspacePanel({
@@ -124,16 +177,6 @@ function WorkspacePanel({
       </div>
     </section>
   );
-}
-
-function findActiveTab(snapshot: WorkspaceSnapshot): SidebarTabModel | null {
-  if (!snapshot.activeTabId) {
-    return null;
-  }
-  return [
-    ...snapshot.ungroupedTabs,
-    ...snapshot.groups.flatMap((group) => group.tabs),
-  ].find((tab) => tab.id === snapshot.activeTabId) ?? null;
 }
 
 function disposeWorkspace(workspace: BootstrappedWorkspace): void {

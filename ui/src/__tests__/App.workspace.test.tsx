@@ -75,10 +75,18 @@ function snapshot(activeTab: SidebarTabModel | null = tab()): WorkspaceSnapshot 
     tabs,
     activeTabId: activeTab?.id ?? null,
   };
+  const paneStatus = activeTab?.status === "live"
+    ? ("live" as const)
+    : activeTab?.status === "dead"
+      ? ("dead" as const)
+      : ("missing" as const);
   return {
     layout,
     ungroupedTabs: activeTab ? [activeTab] : [],
     groups: [],
+    paneStates: activeTab
+      ? { [activeTab.primarySessionId]: { status: paneStatus, exitCode: null } }
+      : {},
     activeTabId: activeTab?.id ?? null,
     activeSessionId: activeTab?.primarySessionId ?? null,
     persistence: { saving: false, error: null },
@@ -116,6 +124,9 @@ function controllerHarness(initial = snapshot()): ControllerHarness {
     closeLiveTab: vi.fn(),
     closeGroup: vi.fn(),
     dismissDeadTab: vi.fn(),
+    splitPane: vi.fn(async () => null),
+    closePane: vi.fn(async () => undefined),
+    resizePane: vi.fn(),
   };
   const client = {
     close: vi.fn(() => order.push("client.close")),
@@ -188,7 +199,7 @@ describe("App workspace lifecycle", () => {
     expect(harness.order).toEqual(["controller.dispose", "client.close"]);
   });
 
-  it("renders intentional empty and dead-active workspace panels", async () => {
+  it("renders the intentional empty panel and a dead-pane placeholder for a dead tab", async () => {
     const emptyHarness = controllerHarness(snapshot(null));
     const emptyContainer = document.createElement("div");
     document.body.append(emptyContainer);
@@ -203,9 +214,24 @@ describe("App workspace lifecycle", () => {
     document.body.append(deadContainer);
     const deadRoot = createRoot(deadContainer);
     await act(async () => deadRoot.render(<App bootstrap={async () => deadHarness.workspace} />));
-    expect(deadContainer.querySelector("[data-testid='workspace-ended']")).not.toBeNull();
+    expect(deadContainer.querySelector("[data-testid='dead-pane']")).not.toBeNull();
     expect(deadContainer.querySelector("[data-testid='workspace-terminal']")).toBeNull();
     await act(async () => deadRoot.unmount());
+  });
+
+  it("routes dead-pane dismissal through the pessimistic controller close", async () => {
+    const harness = controllerHarness(snapshot(tab({ status: "dead" })));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<App bootstrap={async () => harness.workspace} />));
+
+    const dismiss = container.querySelector<HTMLButtonElement>(".dead-pane__dismiss");
+    expect(dismiss).not.toBeNull();
+    await act(async () => dismiss!.click());
+
+    expect(harness.workspace.controller.closePane).toHaveBeenCalledWith("tab-1", 1);
+    await act(async () => root.unmount());
   });
 
   it("bounds bootstrap failures without exposing internal or token text", async () => {

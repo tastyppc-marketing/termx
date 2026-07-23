@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { PALETTE_IDS, validateInvariants, type LayoutV1 } from "../../state/layout";
 import {
+  PALETTE_IDS,
+  validateInvariants,
+  type LayoutV1,
+  type SplitNode,
+} from "../../state/layout";
+import {
+  canSplitPane,
   firstSessionId,
   flattenTabIds,
   nextTabColor,
+  pathToPaneNode,
   pruneSessionIds,
   removeGroupAndTabs,
   reorderGroup,
@@ -103,5 +110,56 @@ describe("layoutOperations", () => {
     expect(removed.ungroupedTabIds).toEqual(["t1"]);
     expect(removed.activeTabId).toBe("t3");
     expect(validateInvariants(removed)).toEqual([]);
+  });
+});
+
+describe("split depth helpers", () => {
+  const deep: SplitNode = {
+    kind: "split",
+    dir: "row",
+    sizes: [0.5, 0.5],
+    children: [
+      { kind: "pane", sessionId: 1 },
+      {
+        kind: "split",
+        dir: "col",
+        sizes: [0.5, 0.5],
+        children: [
+          { kind: "pane", sessionId: 2 },
+          {
+            kind: "split",
+            dir: "row",
+            sizes: [0.5, 0.5],
+            children: [
+              { kind: "pane", sessionId: 3 },
+              {
+                kind: "split",
+                dir: "col",
+                sizes: [0.5, 0.5],
+                children: [
+                  { kind: "pane", sessionId: 4 },
+                  { kind: "pane", sessionId: 5 },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  it("finds child-index paths to panes", () => {
+    expect(pathToPaneNode({ kind: "pane", sessionId: 7 }, 7)).toEqual([]);
+    expect(pathToPaneNode(deep, 1)).toEqual([0]);
+    expect(pathToPaneNode(deep, 5)).toEqual([1, 1, 1, 1]);
+    expect(pathToPaneNode(deep, 99)).toBeNull();
+  });
+
+  it("mirrors the store's depth guard for split affordances", () => {
+    expect(canSplitPane({ kind: "pane", sessionId: 7 }, 7)).toBe(true);
+    expect(canSplitPane(deep, 3)).toBe(true);
+    expect(canSplitPane(deep, 4)).toBe(false);
+    expect(canSplitPane(deep, 5)).toBe(false);
+    expect(canSplitPane(deep, 99)).toBe(false);
   });
 });

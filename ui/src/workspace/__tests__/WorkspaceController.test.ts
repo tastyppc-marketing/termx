@@ -343,3 +343,208 @@ describe("WorkspaceController mutations", () => {
     expect(controller.getSnapshot().layout.tabs["tab-2"]).toBeUndefined();
   });
 });
+
+describe("WorkspaceController pane states", () => {
+  it("projects live, dead-with-exit-code, and missing sessions per pane", () => {
+    const dead = session(2, { alive: false, pid: null });
+    const { controller, setAttachmentSnapshot } = harness({
+      sessions: [session(1), dead],
+    });
+    setAttachmentSnapshot({
+      sessions: {
+        2: {
+          sessionId: 2,
+          hostAttached: false,
+          terminalAttached: false,
+          active: false,
+          unread: false,
+          exited: true,
+          exitCode: 5,
+          lostScrollback: false,
+          attachError: null,
+        },
+      },
+    });
+
+    const { paneStates } = controller.getSnapshot();
+    expect(paneStates[1]).toEqual({ status: "live", exitCode: null });
+    expect(paneStates[2]).toEqual({ status: "dead", exitCode: 5 });
+    expect(paneStates[3]).toEqual({ status: "missing", exitCode: null });
+  });
+});
+
+describe("WorkspaceController split actions", () => {
+  it("splits a live pane by duplicating its session and focuses the result", async () => {
+    const { controller, createSession, attachments, persistenceCalls } = harness();
+
+    const created = await controller.splitPane("tab-1", 1, "row");
+
+    expect(created).toBe(50);
+    expect(createSession).toHaveBeenCalledWith({
+      profile: "powershell",
+      cwd: "C:\\work\\project-1",
+      cols: 120,
+      rows: 30,
+    });
+    expect(attachments.attachSession).toHaveBeenCalledWith(50);
+    expect(controller.getSnapshot().layout.tabs["tab-1"]?.split).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 1 },
+        { kind: "pane", sessionId: 50 },
+      ],
+    });
+    expect(persistenceCalls.at(-1)?.kind).toBe("structural");
+    expect(controller.getSnapshot().paneStates[50]).toEqual({
+      status: "live",
+      exitCode: null,
+    });
+  });
+
+  it("refuses to split a pane whose session is not alive", async () => {
+    const dead = session(1, { alive: false, pid: null });
+    const { controller, createSession } = harness({
+      sessions: [dead, session(2), session(3)],
+    });
+
+    const created = await controller.splitPane("tab-1", 1, "row");
+
+    expect(created).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().notice).toBe("Only a running terminal can be split.");
+  });
+
+  it("refuses a depth-capped split before creating any session", async () => {
+    const initial: LayoutV1 = {
+      version: 1,
+      groups: [],
+      ungroupedTabIds: ["deep"],
+      tabs: {
+        deep: {
+          id: "deep",
+          title: null,
+          color: "blue",
+          split: {
+            kind: "split",
+            dir: "row",
+            sizes: [0.5, 0.5],
+            children: [
+              { kind: "pane", sessionId: 5 },
+              {
+                kind: "split",
+                dir: "col",
+                sizes: [0.5, 0.5],
+                children: [
+                  { kind: "pane", sessionId: 6 },
+                  {
+                    kind: "split",
+                    dir: "row",
+                    sizes: [0.5, 0.5],
+                    children: [
+                      { kind: "pane", sessionId: 7 },
+                      {
+                        kind: "split",
+                        dir: "col",
+                        sizes: [0.5, 0.5],
+                        children: [
+                          { kind: "pane", sessionId: 8 },
+                          { kind: "pane", sessionId: 9 },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      activeTabId: "deep",
+    };
+    const { controller, createSession } = harness({
+      initial,
+      sessions: [session(5), session(6), session(7), session(8), session(9)],
+    });
+
+    const created = await controller.splitPane("deep", 9, "row");
+
+    expect(created).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().notice).toBe(
+      "This pane is already split as deep as it can go.",
+    );
+  });
+
+  it("rolls back the created session when the layout refuses the split", async () => {
+    const { controller, createSession, closeSession, attachments } = harness();
+    createSession.mockImplementationOnce(async (createOptions) => {
+      // The pane disappears while the host is creating the new session.
+      await controller.closePane("tab-1", 1);
+      return session(50, { cwd: createOptions.cwd });
+    });
+
+    const created = await controller.splitPane("tab-1", 1, "row");
+
+    expect(created).toBeNull();
+    expect(closeSession).toHaveBeenCalledWith(50);
+    expect(attachments.forgetSession).toHaveBeenCalledWith(50);
+    expect(controller.getSnapshot().layout.tabs["tab-1"]).toBeUndefined();
+    expect(controller.getSnapshot().paneStates[50]).toBeUndefined();
+    expect(controller.getSnapshot().notice).toBe("The pane could not be split.");
+  });
+
+  it("closes a pane pessimistically and collapses the split into the sibling", async () => {
+    const { controller, closeSession, persistenceCalls } = harness();
+
+    await controller.closePane("tab-2", 2);
+
+    expect(closeSession).toHaveBeenCalledWith(2);
+    expect(controller.getSnapshot().layout.tabs["tab-2"]?.split).toEqual({
+      kind: "pane",
+      sessionId: 3,
+    });
+    expect(persistenceCalls.at(-1)?.kind).toBe("structural");
+  });
+
+  it("keeps the pane when the host refuses to close its session", async () => {
+    const { controller } = harness({
+      closeSession: async () => {
+        throw new Error("host detail");
+      },
+    });
+
+    await controller.closePane("tab-2", 2);
+
+    expect(controller.getSnapshot().layout.tabs["tab-2"]?.split.kind).toBe("split");
+    expect(controller.getSnapshot().notice).toBe(
+      "The terminal session could not be closed.",
+    );
+  });
+
+  it("closes the tab when its last pane closes", async () => {
+    const { controller } = harness();
+
+    await controller.closePane("tab-1", 1);
+
+    expect(controller.getSnapshot().layout.tabs["tab-1"]).toBeUndefined();
+    expect(controller.getSnapshot().layout.ungroupedTabIds).toEqual([]);
+  });
+
+  it("records a structural write for a real resize and nothing for a no-op", () => {
+    const { controller, persistenceCalls } = harness();
+
+    controller.resizePane("tab-2", [], [0.3, 0.7]);
+    const afterResize = persistenceCalls.length;
+    expect(
+      (controller.getSnapshot().layout.tabs["tab-2"]?.split as {
+        sizes: [number, number];
+      }).sizes[0],
+    ).toBeCloseTo(0.3);
+    expect(persistenceCalls.at(-1)?.kind).toBe("structural");
+
+    controller.resizePane("tab-1", [], [0.3, 0.7]);
+    expect(persistenceCalls.length).toBe(afterResize);
+  });
+});

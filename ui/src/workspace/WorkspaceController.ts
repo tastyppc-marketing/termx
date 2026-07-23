@@ -10,7 +10,12 @@ import {
   pickFolderAndCreateSession,
 } from "../native/folderSession";
 import type { FolderPicker } from "../native/dialog";
-import type { LayoutV1, PaletteId } from "../state/layout";
+import {
+  sessionIdsInLayout,
+  type LayoutV1,
+  type PaletteId,
+  type SplitDir,
+} from "../state/layout";
 import type { LayoutStore } from "../state/store";
 import type { AttachmentHubSnapshot } from "./AttachmentHub";
 import type {
@@ -18,6 +23,7 @@ import type {
   LayoutPersistenceSnapshot,
 } from "./LayoutPersistence";
 import {
+  canSplitPane,
   firstSessionId,
   nextTabColor,
   pruneSessionIds,
@@ -79,10 +85,19 @@ export interface SidebarGroupModel {
   tabs: readonly SidebarTabModel[];
 }
 
+/// Per-pane projection for the split renderer. "dead" = the host still knows
+/// the session (scrollback ring intact, exit code may be known); "missing" =
+/// the layout references a session the host no longer has.
+export interface PaneSessionState {
+  status: "live" | "dead" | "missing";
+  exitCode: number | null;
+}
+
 export interface WorkspaceSnapshot {
   layout: LayoutV1;
   ungroupedTabs: readonly SidebarTabModel[];
   groups: readonly SidebarGroupModel[];
+  paneStates: Readonly<Record<number, PaneSessionState>>;
   activeTabId: string | null;
   activeSessionId: number | null;
   persistence: LayoutPersistenceSnapshot;
@@ -209,11 +224,26 @@ export class WorkspaceController {
       color: "slate",
       tabs: group.tabIds.map((tabId) => projectTab(tabId, group.id)),
     }));
+    const paneStates: Record<number, PaneSessionState> = {};
+    for (const sessionId of sessionIdsInLayout(layout)) {
+      const info = this.sessions.get(sessionId);
+      if (info?.alive === true) {
+        paneStates[sessionId] = { status: "live", exitCode: null };
+      } else if (info !== undefined) {
+        paneStates[sessionId] = {
+          status: "dead",
+          exitCode: attachments.sessions[sessionId]?.exitCode ?? null,
+        };
+      } else {
+        paneStates[sessionId] = { status: "missing", exitCode: null };
+      }
+    }
     const activeTab = layout.activeTabId ? layout.tabs[layout.activeTabId] : undefined;
     const snapshot: WorkspaceSnapshot = {
       layout,
       ungroupedTabs,
       groups,
+      paneStates,
       activeTabId: layout.activeTabId,
       activeSessionId: activeTab ? firstSessionId(activeTab.split) : null,
       persistence,
@@ -365,6 +395,88 @@ export class WorkspaceController {
     if (failed) {
       this.setNotice("The ended terminal could not be dismissed.");
     }
+  };
+
+  /// Split a live pane: duplicate its session (same profile + cwd), attach it
+  /// in the hub, then apply the store split. The store re-validates after the
+  /// createSession await; if it refuses (layout moved underneath us), the
+  /// just-created session is closed again so no orphan outlives the action.
+  /// Returns the new pane's session id so the caller can focus it.
+  splitPane = async (
+    tabId: string,
+    paneSessionId: number,
+    dir: SplitDir,
+  ): Promise<number | null> => {
+    const tab = this.store.getState().tabs[tabId];
+    if (!tab) {
+      return null;
+    }
+    const source = this.sessions.get(paneSessionId);
+    if (source?.alive !== true) {
+      this.setNotice("Only a running terminal can be split.");
+      return null;
+    }
+    if (!canSplitPane(tab.split, paneSessionId)) {
+      this.setNotice("This pane is already split as deep as it can go.");
+      return null;
+    }
+    this.setNotice(null);
+    let created: SessionInfo;
+    try {
+      created = await duplicateFolderTab(
+        { client: this.client },
+        { profile: source.profile, cwd: source.cwd },
+      );
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+      return null;
+    }
+    this.sessions.set(created.id, created);
+    this.sessionsRevision += 1;
+    try {
+      await this.attachments.attachSession(created.id);
+    } catch {
+      // The hub records the attach error; the new pane surfaces it inline.
+    }
+    const before = this.store.getState();
+    const after = this.store.splitPane(tabId, paneSessionId, dir, created.id);
+    if (after === before) {
+      try {
+        await this.client.closeSession(created.id);
+      } catch {
+        // The host reaps the session on its own close path.
+      }
+      this.sessions.delete(created.id);
+      this.sessionsRevision += 1;
+      this.attachments.forgetSession(created.id);
+      this.setNotice("The pane could not be split.");
+      this.publish();
+      return null;
+    }
+    this.persistence.record(after, "structural");
+    this.publish();
+    return created.id;
+  };
+
+  /// Pessimistic pane close (also the dead-pane Dismiss path): the host
+  /// CloseSession must succeed — freeing the scrollback ring — before the
+  /// pane leaves the layout. Closing a tab's last pane closes the tab.
+  closePane = async (tabId: string, sessionId: number): Promise<void> => {
+    const { successful, failed } = await this.closeSessions([sessionId]);
+    if (failed) {
+      this.setNotice("The terminal session could not be closed.");
+      return;
+    }
+    if (successful.has(sessionId)) {
+      this.mutate("structural", () => this.store.closePane(tabId, sessionId));
+    }
+    this.publish();
+  };
+
+  /// Persistence rule 4: the split renderer previews drags locally and calls
+  /// this only on release, so every call is a real structural write.
+  resizePane = (tabId: string, path: number[], sizes: [number, number]): void => {
+    this.mutate("structural", () => this.store.resizePane(tabId, path, sizes));
   };
 
   flush = (): Promise<void> => this.persistence.flush();
