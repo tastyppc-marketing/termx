@@ -1,3 +1,3 @@
 # Handoff Index
 
-- [001-2026-07-17-termx-m1-host-core.md](001-2026-07-17-termx-m1-host-core.md) — M1 done (105 tests); M2 terminal UI mid-build under multi-LLM supervision: T1/T2/T3 committed (+review fixes `868b0bb`), T4(Sol)/T6(Grok)/T8-harness(Fable)/layout-store(Fable) in flight, T4 gets planned bounce vs replay-hazard memo; read the 07-23 delta first
+- [001-2026-07-17-termx-m1-host-core.md](001-2026-07-17-termx-m1-host-core.md) — M1 done; M2 terminal UI NEARLY DONE under multi-LLM supervision: T1-T6 + T8 e2e harness + T5 sidebar all committed (through 41cb400, 245 unit + 5 e2e green); T7 splits in flight (Sol, relaunched 04:05); then L3 manual smoke (Michael) + T9 audit; read the LATE 07-23 supervisor delta first
