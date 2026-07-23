@@ -18,6 +18,11 @@ A session running an LLM can gather context from another session's LLM (better t
 - **Packaged-release blocker (adversarial review 2026-07-23):** tauri.conf.json declares no `bundle.externalBin`, so a bundled build ships NO termx-host.exe and `resolve_host_exe` can never succeed in release (the target/ fallback is debug-only by design). Before any packaged build: stage the host binary under the Tauri sidecar naming (`termx-host-x86_64-pc-windows-msvc.exe`) and add `bundle.externalBin`. Dev + tests hide this — it bites only at bundle time.
 
 - **T9 audit item (found during T8 e2e bring-up, 2026-07-23):** an M1-era test run leaked a `termx-host.exe` that lived for five days and silently locked `target\debug\termx-host.exe` — cargo rebuilds failed with "Access is denied" while wrapper exit codes read 0, so post-Jul-18 runs may have exercised a stale binary. Audit why the leak happened (host L1 e2e teardown?) and consider a build-time freshness assert (compare binary mtime to source) in the e2e beforeAll.
+- **T9 audit notes (adversarial audit 2026-07-23, low-value residue — the 4 confirmed findings were fixed in `3b9f12f`):**
+  - Sidebar `suppressClickRef` may stay `true` if a drag ends without a following click (click-under-capture is browser-dependent; unverifiable in jsdom) — would eat one tab-activation click. Check during any future sidebar work.
+  - A divider whose element unmounts mid-drag leaves drag state set until Escape/next drag (self-heals, never mis-commits since the node-identity fix).
+  - SplitLayout's keydown effect has no dep array (re-subscribes per render, including per pointermove frame). Correctness-neutral; tidy if touched.
+  - StrictMode stays off in main.tsx (App bootstrap is side-effectful against a real host; audit found no current cleanup bug). Cost: dev no longer flags missing effect cleanup — prefer targeted unmount tests for new stateful components.
 
 ## 5. M2 protocol/renderer work flagged by review round 2 (host is fine for M1)
 - **Unsolicited lifecycle events** (re-confirmed as the top protocol gap in review rounds 3 AND 4 — treat as required M2 work, not optional): push SessionCreated/SessionClosed/SessionExited/SessionResized and layout changes to ALL authed clients (not just attached ones) so sidebars and split panes stay in sync without ListSessions polling.
