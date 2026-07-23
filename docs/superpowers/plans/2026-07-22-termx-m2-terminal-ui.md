@@ -34,9 +34,14 @@ Tauri command `bootstrap_host` in `ui/src-tauri`: resolve the host data dir (mir
 `ui/src/terminal/`: `TerminalPane` binding one xterm instance to one attach handle — replay then live output, input→frames, fit-addon + `Resize`, web-links addon (clickable URLs/paths), search addon behind Ctrl+F overlay, exit banner on `SessionExited`.
 **Verify:** Vitest (jsdom + fake HostClient); manual `npm run tauri dev` smoke against the real host.
 
-### T5 — Sessions sidebar (suggested: gemini-3.1)
-Colored tabs in collapsible groups: create (profile menu: powershell/cmd), close, rename, recolor, drag between groups; activity + exited badges via the attach-all model (background sessions render nothing, only badge). Sidebar/group/color state serialized as the `SetLayout` blob (`layout_v1` JSON), restored via `GetState`.
-**Verify:** Vitest for store + serialization round-trip; manual smoke.
+### T5 — Sessions sidebar (owner: gpt-5.6, design brief from Fable)
+The centerpiece. Colored session tabs in collapsible groups with **daily-driver interaction polish**:
+- **Drag and drop** — reorder within a group and move across groups with a pointer-based implementation (no DnD library): drag ghost with subtle elevation, live drop indicator, spring-free 120–150 ms transitions, Escape cancels.
+- **Double-click to rename** — inline input swap (Enter commits, Escape reverts, blur commits), no modal.
+- **Right-click context menu** — Rename, color palette (8 swatches), Duplicate (same profile+cwd), Move to group, Close; dead sessions get Dismiss.
+- Create button with profile menu (powershell/cmd); activity pulse + exited badge via the attach-all model; close-on-hover ×; collapsible group headers with animated chevron; keyboard: Up/Down to switch, F2 rename, Del close (confirm if live).
+State serialized as the `SetLayout` blob (`layout_v1` JSON), restored via `GetState`.
+**Verify:** Vitest for store/serialization + rename/drag state machines; Fable screenshot review of the running app against the UI quality bar before commit.
 
 ### T6 — Folder picker (suggested: grok)
 `tauri-plugin-dialog` open-folder → `CreateSession` with that cwd (the v1 headline: pick any folder, get a shell there). Context menu: "Open folder here", "Duplicate tab" (same profile+cwd).
@@ -52,6 +57,14 @@ Boot flow: `bootstrap_host` → auth → `ListSessions` + `GetState` → rebuild
 
 ### T9 — Cleanup + adversarial audit (Fable + Opus 4.8)
 ESLint/clippy/fmt across `ui/`, full Vitest + cargo suites, orphan-process scan after e2e, then an adversarial audit of all worker-written code (token leaks, absolute paths, state-loss paths, replay/resync misuse, xterm write-backpressure) with a fix pass. Final report + handoff update.
+
+## UI quality bar (Michael, 2026-07-22 — binding for every UI task)
+
+Not "good enough for a test app" — **great**: the app should feel so intuitive, powerful, and lightweight that it wins daily-driver status on ease alone. Concretely:
+- **One design language everywhere**: near-black surface `#0f1115` (panels `#161a22`, borders `#232a36`), text `#e6e6e6`/muted `#8b93a7`, accent `#7aa2f7`, per-session colors from an 8-swatch palette; UI chrome in the system UI font stack, terminals in Consolas/Cascadia Mono; 8 px spacing grid; 6–8 px radii; hover/active states on every interactive element with 120–150 ms ease transitions; visible focus rings for keyboard use.
+- **Interactions are direct**: drag-drop, double-click rename, right-click menus, hover affordances — never a settings page where a gesture would do.
+- **Lightweight is a feature**: no UI framework/component libraries, no DnD or animation deps — hand-rolled, small, fast. Cold start must feel instant; zero jank while dragging or streaming terminal output.
+- **Acceptance question for every UI diff** (Fable applies it at review, with screenshots of the running app): "would this make someone switch terminals?" — not "does it render."
 
 ## Worker protocol
 
