@@ -1,6 +1,14 @@
 # Session Handoff - 2026-07-17
 
-## DELTA 2026-07-26 (RELEASE/PORTABLE BUILD in flight — ship a runnable TermX TODAY) — CURRENT, READ THIS FIRST
+## DELTA 2026-07-26 later (RELEASE VERIFIED + COMMITTED — Michael's smoke is the only open gate) — CURRENT, READ THIS FIRST
+
+The portable build SHIPPED and is VERIFIED RUNNING: `C:\Dev\TermX\dist-portable\TermX\` holds `termx-ui.exe` (4,408,832 bytes, built 07:16 via `npx tauri build --no-bundle`) + `termx-host.exe`. Launch verification passed WITHOUT touching Michael's active desktop: both processes running from the staged folder, fresh `%APPDATA%\TermX\runtime.json`, and a `PrintWindow(hwnd, hdc, 2)` capture (`rel-printwindow.png` in the 07-26 scratchpad — PW_RENDERFULLCONTENT captures a background window without stealing focus; CopyFromScreen does NOT work for a buried window) showing the restored t7-demo tab, correct row(1, col(2,3)) split geometry, and three "Session ended" DeadPanes with Dismiss (expected — the pre-crash sessions died). rel-check's 8-step checklist items 1–4 PASSED; items 5–8 (typing, folder picker, split feel, kill/relaunch reattach, move-folder) are Michael's interactive smoke — deliberately NOT automated (no input injection while he uses the machine).
+
+Hardening committed as `6f2c0a9`: `[features] custom-protocol` guard in ui/src-tauri/Cargo.toml, `docs\RELEASE.md` (the canonical build/stage/verify doc — read it before ANY future release build), BACKLOG updates (blocker resolved; multi-window last-writer-wins, webviewInstallMode, host TOCTOU), dist-portable/ gitignored. Repo tree clean at `6f2c0a9`.
+
+**NEXT SESSION:** nothing in flight. Open items = Michael's smoke verdict (fix what he flags), then BACKLOG §4/§5 by priority. The delta below documents how the release was diagnosed/built — still authoritative for the build procedure alongside docs\RELEASE.md.
+
+## DELTA 2026-07-26 (RELEASE/PORTABLE BUILD in flight — ship a runnable TermX TODAY) — superseded by delta above
 
 Michael's directives this session (after a chat crash): **Opus 5 is now the default subagent model** (`Agent` tool `model: "opus"` — memory file fable-orchestrates-opus-browses.md updated); mission = "get this going, today" = a runnable TermX. M2 code itself is DONE + audited (see delta below; repo at `a08203c`, tree clean, all 289 unit + 5 e2e green).
 
