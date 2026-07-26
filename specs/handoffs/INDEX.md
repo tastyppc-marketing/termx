@@ -1,3 +1,3 @@
 # Handoff Index
 
-- [001-2026-07-17-termx-m1-host-core.md](001-2026-07-17-termx-m1-host-core.md) — M1 done; M2 terminal UI CODE-COMPLETE: T1–T8 all committed (through 926a11b = T7 splits, 281 unit + 5 e2e green, live-verified in the running app); remaining: L3 manual smoke (Michael) + T9 cleanup/audit (Fable); read the "T7 SPLITS DONE" 07-23 delta first
+- [001-2026-07-17-termx-m1-host-core.md](001-2026-07-17-termx-m1-host-core.md) — M1 + M2 code DONE (a08203c, 289 unit + 5 e2e, T9 audit fixed); NOW: release/portable ship in flight — `npx tauri build --no-bundle` is the ONLY correct UI build (bare cargo release = dev-mode exe), stage both exes into dist-portable\TermX\; read the 07-26 RELEASE delta first

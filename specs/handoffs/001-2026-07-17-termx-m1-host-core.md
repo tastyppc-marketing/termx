@@ -1,6 +1,23 @@
 # Session Handoff - 2026-07-17
 
-## DELTA 2026-07-23 later (supervisor: T7 SPLITS DONE + COMMITTED + LIVE-VERIFIED — L3 smoke + T9 audit remain) — CURRENT, READ THIS FIRST
+## DELTA 2026-07-26 (RELEASE/PORTABLE BUILD in flight — ship a runnable TermX TODAY) — CURRENT, READ THIS FIRST
+
+Michael's directives this session (after a chat crash): **Opus 5 is now the default subagent model** (`Agent` tool `model: "opus"` — memory file fable-orchestrates-opus-browses.md updated); mission = "get this going, today" = a runnable TermX. M2 code itself is DONE + audited (see delta below; repo at `a08203c`, tree clean, all 289 unit + 5 e2e green).
+
+**Ship shape decided:** portable pair — `termx-ui.exe` + `termx-host.exe` copied into ONE folder (`C:\Dev\TermX\dist-portable\TermX\`). `resolve_host_exe` (ui/src-tauri/src/bootstrap.rs:167) probes termx-host.exe beside the UI exe in release; no Tauri bundler/installer needed. NO portable.flag → host reuses `%APPDATA%\TermX` (Michael's existing layout; first launch will restore the t7-demo tab as DEAD panes — expected, exercises restore+DeadPane).
+
+**Failure found + being fixed:** bare `cargo build --release` in ui/src-tauri produces a DEV-MODE exe — tauri-build emits `cargo:rustc-cfg=dev` because the crate lacks the `custom-protocol` feature, so `generate_context!` bakes devUrl (localhost:1420) and the window shows ERR_CONNECTION_REFUSED (screenshot `rel-launch.png` in scratchpad). **Correct build: `npx tauri build --no-bundle` from C:\Dev\TermX\ui** (the CLI enables tauri/custom-protocol itself — empirically proven via `ui\src-tauri\target\release\build\tauri-aebb2d4d7848249c\output` showing `custom_protocol`, `dev=false`). NOTE: grepping the exe for localhost:1420 is NOT a valid test (devUrl is embedded in ALL builds); the discriminators are the build\tauri-*\output cfg lines + fresh exe mtime + actual launch. Host half already built fine: `C:\Dev\TermX\target\release\termx-host.exe` (07:00, 2.98MB). termx-ui is NOT in the root workspace (own empty [workspace] in ui/src-tauri/Cargo.toml) — its exe lands in `ui\src-tauri\target\release\`, `-p termx-ui` from root fails.
+
+**IN FLIGHT:** background task running `npx tauri build --no-bundle` (log: scratchpad `rel-tauri-build.log`; last seen compiling the final termx-ui crate). Scratchpad this session = `C:\Users\mjfos\AppData\Local\Temp\claude\C--Dev\b5982ae4-1d2f-41ad-9f10-480d36d80895\scratchpad`.
+
+**Opus 5 rel-check agent report (full release-readiness, received) — key verdicts:** capabilities/default.json complete (bootstrap_host + dialog:allow-open); CSP correct (ws URL must stay literal `127.0.0.1`, never "localhost"); icons present; data-dir chain confirmed (override → portable.flag → APPDATA); layout v1 gate safe (worst case = lost arrangement, never crash); two-UI-instances = both attach to same host, layout last-writer-wins (NOT multi-window-safe — backlog); double-spawn host race self-heals (narrow TOCTOU remains); release has no console/devtools/panic-output — `%APPDATA%\TermX\logs\host.log` is the only breadcrumb.
+
+**NEXT STEPS (in order):**
+1. On build completion: verify `ui\src-tauri\target\release\termx-ui.exe` mtime is fresh + newest `build\tauri-*\output` says custom_protocol; copy BOTH exes into `C:\Dev\TermX\dist-portable\TermX\`; launch; screenshot; automated checks = termx-host process spawned + fresh runtime.json/port + window shows restored t7-demo tab with dead panes; type `dir` via SendKeys (remember the Alt-state gotcha: send `{ESC}` after the "%" foreground trick or the first keystroke is eaten).
+2. Hardening commit (AFTER the build lands, to avoid dirtying fingerprints): add `[features] custom-protocol = ["tauri/custom-protocol"]` to ui/src-tauri/Cargo.toml; also BACKLOG notes: multi-window layout fight; webviewInstallMode absent (matters on clean Win10); host TOCTOU orphan.
+3. Hand Michael: exe path `C:\Dev\TermX\dist-portable\TermX\termx-ui.exe` + interactive smoke list (folder picker proves dialog capability; split/rename/close feel; kill+relaunch reattach; move-folder test; optional portable.flag for self-contained data).
+
+## DELTA 2026-07-23 later (supervisor: T7 SPLITS DONE + COMMITTED + LIVE-VERIFIED — L3 smoke + T9 audit remain) — superseded by delta above
 
 T7 committed `926a11b`, implemented BY ME (Sol failed procedurally twice — superpowers hooks override its system prompt and it exits asking questions into headless void; standing rule held: no third relaunch). All gates independently green: **281 unit (36 new) + e2e 5/5 + tsc + build**.
 
