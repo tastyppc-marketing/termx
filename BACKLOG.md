@@ -15,7 +15,10 @@ A session running an LLM can gather context from another session's LLM (better t
 - Blocks for cmd.exe via prompt heuristics (no OSC 133 hooks exist there)
 - Keybinding editor UI (config-file rebinding ships in v1)
 - Installer / Start-menu integration (v1 ships as a portable folder)
-- **Packaged-release blocker (adversarial review 2026-07-23):** tauri.conf.json declares no `bundle.externalBin`, so a bundled build ships NO termx-host.exe and `resolve_host_exe` can never succeed in release (the target/ fallback is debug-only by design). Before any packaged build: stage the host binary under the Tauri sidecar naming (`termx-host-x86_64-pc-windows-msvc.exe`) and add `bundle.externalBin`. Dev + tests hide this — it bites only at bundle time.
+- **Packaged-release blocker (adversarial review 2026-07-23): RESOLVED 2026-07-26** — v1 ships as a portable pair per `docs\RELEASE.md` (both exes in one folder; `resolve_host_exe` probes beside-exe). `bundle.externalBin` only becomes relevant if we ever ship an actual installer.
+- **Multi-window not safe (rel-check audit 2026-07-26):** two termx-ui instances both attach to the same host and both persist layout — last writer wins, the windows fight over tab arrangement. Fix when multi-window matters: single-instance plugin, or per-window layout namespaces.
+- **Clean-Win10 install (rel-check audit 2026-07-26):** no `webviewInstallMode` in tauri.conf.json — fine on Win11 (WebView2 preinstalled), a clean Win10 image would need the runtime installed manually.
+- **Host double-spawn TOCTOU (pre-existing, narrow):** two hosts racing startup can both survive the runtime.json read-back check if both renames land first — leaves an undiscoverable orphan daemon (server.rs:107-111 documents it).
 
 - **T9 audit item (found during T8 e2e bring-up, 2026-07-23):** an M1-era test run leaked a `termx-host.exe` that lived for five days and silently locked `target\debug\termx-host.exe` — cargo rebuilds failed with "Access is denied" while wrapper exit codes read 0, so post-Jul-18 runs may have exercised a stale binary. Audit why the leak happened (host L1 e2e teardown?) and consider a build-time freshness assert (compare binary mtime to source) in the e2e beforeAll.
 - **T9 audit notes (adversarial audit 2026-07-23, low-value residue — the 4 confirmed findings were fixed in `3b9f12f`):**
