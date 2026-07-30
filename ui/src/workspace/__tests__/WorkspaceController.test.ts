@@ -247,6 +247,7 @@ describe("WorkspaceController mutations", () => {
       cwd: "D:\\chosen",
       cols: 120,
       rows: 30,
+      shellIntegration: true,
     });
     expect(attachments.attachSession).toHaveBeenCalledWith(50);
     expect(controller.getSnapshot().groups[0]?.tabs.at(-1)).toMatchObject({
@@ -277,6 +278,7 @@ describe("WorkspaceController mutations", () => {
       cwd: "C:\\work\\project-2",
       cols: 120,
       rows: 30,
+      shellIntegration: true,
     });
     expect(duplicated.controller.getSnapshot().groups[0]?.tabs.at(-1)?.primarySessionId).toBe(50);
 
@@ -292,6 +294,7 @@ describe("WorkspaceController mutations", () => {
       cwd: "D:\\new-project",
       cols: 120,
       rows: 30,
+      shellIntegration: true,
     });
     expect(opened.controller.getSnapshot().groups[0]?.tabs.at(-1)?.primarySessionId).toBe(50);
   });
@@ -405,6 +408,7 @@ describe("WorkspaceController split actions", () => {
       cwd: "C:\\work\\project-1",
       cols: 120,
       rows: 30,
+      shellIntegration: true,
     });
     expect(attachments.attachSession).toHaveBeenCalledWith(50);
     expect(controller.getSnapshot().layout.tabs["tab-1"]?.split).toEqual({
@@ -603,6 +607,20 @@ describe("WorkspaceController new-tab cwd policy (F1)", () => {
     expect(pickFolder).not.toHaveBeenCalled();
     expect(createSession).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: "D:\\live-cd", profile: "powershell" }),
+    );
+  });
+
+  it("stamps the live shell-integration setting onto every created session", async () => {
+    const on = harness();
+    await on.controller.createTab({ groupId: "group", profile: null });
+    expect(on.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ shellIntegration: true }),
+    );
+
+    const off = harness({ settings: { shellIntegration: false } });
+    await off.controller.createTab({ groupId: "group", profile: null });
+    expect(off.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ shellIntegration: false }),
     );
   });
 

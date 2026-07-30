@@ -163,7 +163,21 @@ export class WorkspaceController {
   private disposed = false;
 
   constructor(options: WorkspaceControllerOptions) {
-    this.client = options.client;
+    // Every session-creation path (policy chain, native dialog, duplicate,
+    // open-folder-here) goes through this.client, so the live shell-integration
+    // setting is stamped here once rather than threaded through each caller.
+    const rawClient = options.client;
+    this.client = {
+      createSession: (createOptions) =>
+        rawClient.createSession({
+          ...createOptions,
+          shellIntegration: this.settings.getSnapshot().shellIntegration,
+        }),
+      closeSession: (sessionId) => rawClient.closeSession(sessionId),
+      onSessionExited: (listener) => rawClient.onSessionExited(listener),
+      onSessionClosed: (listener) => rawClient.onSessionClosed(listener),
+      onError: (listener) => rawClient.onError(listener),
+    };
     this.store = options.store;
     this.persistence = options.persistence;
     this.attachments = options.attachments;

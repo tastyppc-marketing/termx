@@ -23,6 +23,7 @@ export type ClientMsg =
     cwd: string | null;
     cols: number;
     rows: number;
+    shell_integration: boolean;
   }
   | { type: "attach"; session_id: number; replay: boolean }
   | { type: "detach"; session_id: number }

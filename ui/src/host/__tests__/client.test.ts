@@ -275,6 +275,30 @@ describe("HostClient ordered control transport", () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).not.toContain(token);
   });
+
+  it("sends shell_integration on the wire, defaulting to on", async () => {
+    const { client, socket } = await connect();
+    const first = client.createSession({ profile: null, cwd: null, cols: 80, rows: 24 });
+    await flushPromises();
+    socket.receiveJson({ type: "session_created", info: SESSION });
+    await first;
+
+    const second = client.createSession({
+      profile: null,
+      cwd: null,
+      cols: 80,
+      rows: 24,
+      shellIntegration: false,
+    });
+    await flushPromises();
+    socket.receiveJson({ type: "session_created", info: SESSION });
+    await second;
+
+    const created = sentJson(socket).filter(
+      (message) => message.type === "create_session",
+    );
+    expect(created.map((message) => message.shell_integration)).toEqual([true, false]);
+  });
 });
 
 describe("HostClient session attachments", () => {

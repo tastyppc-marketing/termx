@@ -30,6 +30,9 @@ export interface CreateSessionOptions {
   cwd: string | null;
   cols: number;
   rows: number;
+  /** Inject the shell's OSC 9;9 cwd-reporting prompt hook. Omitted means ON,
+   * matching the host's wire default. */
+  shellIntegration?: boolean;
 }
 
 export interface HostState {
@@ -222,6 +225,7 @@ export class HostClient {
         cwd: options.cwd,
         cols: options.cols,
         rows: options.rows,
+        shell_integration: options.shellIntegration ?? true,
       },
       "create_session",
       "session_created",
