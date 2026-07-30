@@ -53,6 +53,15 @@
   pointer-events: auto;
 }
 
+/* Floating pane controls must never overlap each other. The Ctrl+F search bar
+   (TerminalPane) claims the same top-right corner this toolbar uses — and
+   search being open forces :focus-within, so the toolbar is always visible
+   during the collision. While search is open, the toolbar yields the corner
+   and docks below it. */
+.split-pane:has(.terminal-search) .split-pane__toolbar {
+  top: 48px;
+}
+
 .split-pane__toolbar button {
   display: grid;
   width: 24px;
