@@ -1,6 +1,45 @@
 # Session Handoff - 2026-07-30 (living; append as work lands)
 
-## STATE AT ~362k COMPACTION (2026-07-30, second wrap) — READ FIRST
+## FINAL STATE (2026-07-30 ~03:15) — BATCH COMPLETE, READ FIRST
+- **All five features + host + tauri work COMMITTED and the portable pair
+  RESTAGED.** Full commit chain on main: `79aede3` spec → `37f9a3a` plan →
+  `77efbf0` U1 → `bb7a529` U2 → `2b91258` U3 → `197b85c` U4 → `8002572` U5 →
+  `aee91bb` R2 tauri commands → `ada16cd` R1 host OSC 9;9 shell integration →
+  `8448c1c` UI sends shell_integration from the settings toggle.
+- R1 reviewed line-by-line and verified: 116 host tests (107 lib + 6 main +
+  3 e2e incl. real-spawn cd-follow for both shells), fmt + clippy clean.
+  Hook string is quote-free/backslash-free (survives ArgvQuote); $? and
+  $LASTEXITCODE proven byte-identical to an unhooked shell; ConPTY forwards
+  OSC 9;9 unchanged. Payloads arrive as bare absolute paths, ST-terminated.
+- **Gap I caught and fixed (`8448c1c`)**: the UI never sent
+  `shell_integration` on create_session, so the settings toggle was dead
+  (host default = always on). WorkspaceController now wraps its host client
+  so every creation path stamps the live setting at call time. UI suite 361
+  + tsc + `npm run build` + e2e 5/5 all green after.
+- **V1 done**: all gates green; release builds via `npx tauri build
+  --no-bundle` (UI) + `cargo build --release -p termx-host`; staged to
+  `C:\Dev\TermX\dist-portable\TermX\` (TermX.exe, termx-ui.exe,
+  termx-host.exe all 07-30); app launched from the staged folder, renders
+  restored layout + new ⌕/⚙ sidebar buttons (PrintWindow screenshot taken,
+  no focus steal). Data dir is `dist-portable\TermX\data\`.
+- **Open gate: Michael's interactive smoke** (no input injection allowed).
+  Smoke list: new tab follows group cwd after a cd; ⌕ palette
+  (Ctrl+Shift+O) recents+completions+Browse…; Ctrl+Shift+J jump to last
+  input; ⚙ settings — flip policy/shell-integration/profile on the fly
+  (first settings edit must create `data\settings_v1.json` — that file
+  appearing also proves the runtime ACL grant for the new tauri commands,
+  the one thing not provable without interaction); search bar + pane
+  toolbar no longer overlap. `data\ui_state_v1.json` should appear after
+  the first live cd (recents + scope path persistence).
+- Gotcha added this session: task-complete-gate hook runs the FULL test
+  suite per TaskUpdate — flipping several tasks in one message runs
+  several cargo test suites CONCURRENTLY and the registry shutdown-timing
+  tests flake under that load (pass in isolation). Flip tasks one at a
+  time.
+- All task-tool tasks #1–#7 completed; #8 (V1) completes when Michael's
+  smoke passes.
+
+## STATE AT ~362k COMPACTION (2026-07-30, second wrap) — superseded by FINAL STATE above
 - Commits this session, all on main:
   `79aede3` spec → `37f9a3a` plan → `77efbf0` U1 toolbar fix → `bb7a529` U2
   settings → `1cd5a51`-style handoff commits → `2b91258` U3 cwd tracking →
