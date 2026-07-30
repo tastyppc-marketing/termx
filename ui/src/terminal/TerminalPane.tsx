@@ -5,6 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { HostClient } from "../host/client";
+import { InputMarks, type InputMark } from "./inputMarks";
 import {
   TerminalSessionBinding,
   type AttachmentClient,
@@ -29,6 +30,11 @@ export interface TerminalPresentation {
   findPrevious(query: string): boolean;
   focus(): void;
   dispose(): void;
+  /** Marker at the cursor line; undefined in the alternate screen buffer. */
+  registerInputMarker(): InputMark | undefined;
+  scrollToLine(line: number): void;
+  /** Top buffer line of the current viewport. */
+  viewportY(): number;
 }
 
 export interface TerminalPaneDependencies {
@@ -92,8 +98,10 @@ export function TerminalPane(props: TerminalPaneProps) {
     let ownedClient: PaneHostClient | null = null;
     let stopHostErrors: () => void = () => undefined;
     let stopObserving: () => void = () => undefined;
+    let stopJumpListener: () => void = () => undefined;
     let presentation: TerminalPresentation;
     let linkActivationId = 0;
+    const inputMarks = new InputMarks();
     setPaneState({ type: "loading" });
     setLostScrollback(false);
     setLinkNotice(null);
@@ -184,7 +192,22 @@ export function TerminalPane(props: TerminalPaneProps) {
           onStatus: reportStatus,
           onCleanupError: reportCleanupError,
           onCwd: (path, live) => onCwdRef.current?.(path, live),
+          onUserInput: (data) =>
+            inputMarks.onUserInput(data, () => presentation.registerInputMarker()),
         });
+        const onJumpToLastInput = (event: Event) => {
+          const detail = (event as CustomEvent<{ sessionId?: number }>).detail;
+          if (detail?.sessionId !== supplied.sessionId) {
+            return;
+          }
+          const line = inputMarks.jumpPrevious(presentation.viewportY());
+          if (line !== null) {
+            presentation.scrollToLine(line);
+          }
+        };
+        window.addEventListener("termx:jump-last-input", onJumpToLastInput);
+        stopJumpListener = () =>
+          window.removeEventListener("termx:jump-last-input", onJumpToLastInput);
         const activeBinding = binding;
         stopObserving = dependencies.observeResize(element, () => activeBinding.fitAndResize());
         await activeBinding.start();
@@ -210,6 +233,8 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     return () => {
       cancelled = true;
+      attemptCleanup("jump_listener", stopJumpListener);
+      attemptCleanup("input_marks", () => inputMarks.dispose());
       attemptCleanup("resize_observer", stopObserving);
       attemptCleanup("host_error_subscription", stopHostErrors);
       attemptCleanup("terminal_attachment", () => binding?.dispose());
@@ -414,6 +439,14 @@ function createPresentation(
     findPrevious: (query) => search.findPrevious(query, searchOptions),
     focus: () => terminal.focus(),
     dispose: () => terminal.dispose(),
+    registerInputMarker: () => {
+      if (terminal.buffer.active.type === "alternate") {
+        return undefined;
+      }
+      return terminal.registerMarker(0) ?? undefined;
+    },
+    scrollToLine: (line) => terminal.scrollToLine(line),
+    viewportY: () => terminal.buffer.active.viewportY,
   };
 }
 

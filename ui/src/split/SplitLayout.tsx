@@ -123,7 +123,7 @@ export function SplitLayout({
         return;
       }
       const key = event.key.toLowerCase();
-      if (key !== "d" && key !== "e" && key !== "w") {
+      if (key !== "d" && key !== "e" && key !== "w" && key !== "j") {
         return;
       }
       // Shortcuts stay live inside xterm (its hidden textarea IS the terminal)
@@ -142,7 +142,14 @@ export function SplitLayout({
       event.preventDefault();
       event.stopPropagation();
       const focusedState = paneStates[focusedSessionId] ?? MISSING_PANE;
-      if (key === "w") {
+      if (key === "j") {
+        // The focused pane's TerminalPane owns the input marks; route by id.
+        window.dispatchEvent(
+          new CustomEvent("termx:jump-last-input", {
+            detail: { sessionId: focusedSessionId },
+          }),
+        );
+      } else if (key === "w") {
         requestClose(focusedSessionId);
       } else if (focusedState.status === "live") {
         actions.splitPane(focusedSessionId, key === "d" ? "row" : "col");

@@ -79,6 +79,8 @@ export interface TerminalSessionBindingOptions {
    * re-derives a session's cwd but must never move group-level state.
    */
   onCwd?: (path: string, live: boolean) => void;
+  /** User keystrokes actually forwarded to the PTY (input-mark tracking). */
+  onUserInput?: (data: string) => void;
 }
 
 export class TerminalSessionBinding {
@@ -102,6 +104,7 @@ export class TerminalSessionBinding {
       if (!this.acceptingInput) {
         return;
       }
+      options.onUserInput?.(data);
       try {
         this.attachment?.sendInput(data);
       } catch (error) {

@@ -54,6 +54,9 @@ function paneFixture() {
     findPrevious,
     focus,
     dispose,
+    registerInputMarker: vi.fn(() => undefined),
+    scrollToLine: vi.fn(),
+    viewportY: vi.fn(() => 0),
   };
   let callbacks: SessionAttachmentCallbacks | undefined;
   let hostErrorListener: ((error: Error) => void) | undefined;
