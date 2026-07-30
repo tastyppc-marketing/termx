@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { FolderSearch } from "./folders/FolderSearch";
+import { isEditableElement } from "./keyboard";
+import { tauriListDirs } from "./native/folders";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
@@ -9,6 +12,7 @@ import {
   bootstrapWorkspace,
   type BootstrappedWorkspace,
 } from "./workspace/bootstrapWorkspace";
+import type { FolderSearchTarget } from "./workspace/WorkspaceController";
 import { firstSessionId } from "./workspace/layoutOperations";
 import { useWorkspace } from "./workspace/useWorkspace";
 
@@ -88,12 +92,47 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   );
   const settings = useSettings(settingsStore);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [folderSearch, setFolderSearch] = useState<FolderSearchTarget | null>(null);
   // Focused pane per tab is ephemeral UI state (layout spec: never persisted).
   const [focusByTab, setFocusByTab] = useState<Record<string, number>>({});
   const [dismissing, setDismissing] = useState<ReadonlySet<number>>(new Set());
 
   const activeTabId = snapshot.activeTabId;
   const activeTab = activeTabId ? snapshot.layout.tabs[activeTabId] : undefined;
+  const activeGroupId = useMemo(
+    () =>
+      activeTabId
+        ? snapshot.layout.groups.find((group) => group.tabIds.includes(activeTabId))
+            ?.id ?? null
+        : null,
+    [snapshot.layout, activeTabId],
+  );
+
+  // The controller routes the ask-searcher policy through this handler.
+  useEffect(() => {
+    controller.setFolderSearchHandler((target) => setFolderSearch(target));
+    return () => controller.setFolderSearchHandler(null);
+  }, [controller]);
+
+  // Ctrl+Shift+O opens the folder searcher targeting the active tab's group.
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
+        return;
+      }
+      if (event.key.toLowerCase() !== "o") {
+        return;
+      }
+      if (isEditableElement(document.activeElement)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setFolderSearch({ groupId: activeGroupId, profile: null });
+    };
+    window.addEventListener("keydown", handleKey, true);
+    return () => window.removeEventListener("keydown", handleKey, true);
+  }, [activeGroupId]);
 
   const actions = useMemo<SplitLayoutActions | null>(() => {
     if (!activeTabId) {
@@ -134,6 +173,8 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         snapshot={snapshot}
         actions={controller}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenFolderSearch={(groupId) =>
+          setFolderSearch({ groupId, profile: null })}
       />
       <main className="app-main">
         {!activeTab || !actions ? (
@@ -168,6 +209,25 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           settings={settings}
           onChange={settingsStore.update}
           onClose={() => setSettingsOpen(false)}
+        />
+      ) : null}
+      {folderSearch ? (
+        <FolderSearch
+          recents={workspace.uiState?.getSnapshot().recentFolders ?? []}
+          listDirs={tauriListDirs}
+          onPick={(path) => {
+            setFolderSearch(null);
+            void controller.createTabWithCwd({
+              groupId: folderSearch.groupId,
+              profile: folderSearch.profile,
+              cwd: path,
+            });
+          }}
+          onBrowse={() => {
+            setFolderSearch(null);
+            void controller.createTabViaNativeDialog(folderSearch);
+          }}
+          onClose={() => setFolderSearch(null)}
         />
       ) : null}
     </div>

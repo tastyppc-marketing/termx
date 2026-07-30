@@ -370,17 +370,7 @@ export class WorkspaceController {
       return;
     }
     if (policy === "ask-searcher" || policy === "ask-native") {
-      try {
-        const created = await pickFolderAndCreateSession(
-          { client: this.client, pickFolder: this.pickFolder },
-          { profile, picker: { title: "Open folder for new terminal" } },
-        );
-        if (created) {
-          await this.addSessionTab(created, options.groupId);
-        }
-      } catch {
-        this.setNotice("The terminal session could not be created.");
-      }
+      await this.createTabViaNativeDialog({ groupId: options.groupId, profile });
       return;
     }
 
@@ -411,6 +401,25 @@ export class WorkspaceController {
     try {
       const created = await this.createSessionDownChain(profile, [options.cwd, null]);
       await this.addSessionTab(created, options.groupId);
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+    }
+  };
+
+  /// Native folder dialog → new tab (the searcher's Browse… escape hatch and
+  /// the ask policies' fallback).
+  createTabViaNativeDialog = async (target: FolderSearchTarget): Promise<void> => {
+    this.setNotice(null);
+    const profile =
+      target.profile ?? this.settings.getSnapshot().defaultProfile;
+    try {
+      const created = await pickFolderAndCreateSession(
+        { client: this.client, pickFolder: this.pickFolder },
+        { profile, picker: { title: "Open folder for new terminal" } },
+      );
+      if (created) {
+        await this.addSessionTab(created, target.groupId);
+      }
     } catch {
       this.setNotice("The terminal session could not be created.");
     }

@@ -127,6 +127,10 @@ function controllerHarness(initial = snapshot()): ControllerHarness {
     splitPane: vi.fn(async () => null),
     closePane: vi.fn(async () => undefined),
     resizePane: vi.fn(),
+    reportSessionCwd: vi.fn(),
+    setFolderSearchHandler: vi.fn(),
+    createTabWithCwd: vi.fn(async () => undefined),
+    createTabViaNativeDialog: vi.fn(async () => undefined),
   };
   const client = {
     close: vi.fn(() => order.push("client.close")),

@@ -42,6 +42,8 @@ export interface SidebarProps {
   actions: SidebarActions;
   /** UI chrome, not a workspace action: opens the app settings dialog. */
   onOpenSettings?: () => void;
+  /** Opens the folder-search palette targeting the given group. */
+  onOpenFolderSearch?: (groupId: string | null) => void;
 }
 
 type RenameTarget =
@@ -71,7 +73,12 @@ interface PointerDragState {
   indicator: { left: number; top: number; width: number } | null;
 }
 
-export function Sidebar({ snapshot, actions, onOpenSettings }: SidebarProps) {
+export function Sidebar({
+  snapshot,
+  actions,
+  onOpenSettings,
+  onOpenFolderSearch,
+}: SidebarProps) {
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [confirmClose, setConfirmClose] = useState<ConfirmClose | null>(null);
   const [busy, setBusy] = useState(false);
@@ -613,6 +620,12 @@ export function Sidebar({ snapshot, actions, onOpenSettings }: SidebarProps) {
             closeMenu();
             void createTab(group.id, null);
           }}>New tab in group</button>
+          {onOpenFolderSearch ? (
+            <button type="button" role="menuitem" onClick={() => {
+              closeMenu();
+              onOpenFolderSearch(group.id);
+            }}>New tab in folder…</button>
+          ) : null}
           <button type="button" role="menuitem" onClick={() => {
             actions.toggleGroup(group.id);
             closeMenu();
@@ -635,6 +648,12 @@ export function Sidebar({ snapshot, actions, onOpenSettings }: SidebarProps) {
             closeMenu();
             void createTab(null, null);
           }}>New tab</button>
+          {onOpenFolderSearch ? (
+            <button type="button" role="menuitem" onClick={() => {
+              closeMenu();
+              onOpenFolderSearch(null);
+            }}>New tab in folder…</button>
+          ) : null}
           <button type="button" role="menuitem" onClick={() => {
             closeMenu();
             setCreatingGroup(true);
@@ -645,6 +664,12 @@ export function Sidebar({ snapshot, actions, onOpenSettings }: SidebarProps) {
 
     return (
       <ContextMenu label="New terminal profile" point={menu.point} onClose={closeMenu}>
+        {onOpenFolderSearch ? (
+          <button type="button" role="menuitem" onClick={() => {
+            closeMenu();
+            onOpenFolderSearch(null);
+          }}>New tab in folder…</button>
+        ) : null}
         <button type="button" role="menuitem" onClick={() => {
           closeMenu();
           void createTab(null, null);
@@ -734,6 +759,17 @@ export function Sidebar({ snapshot, actions, onOpenSettings }: SidebarProps) {
         >
           ▴
         </button>
+        {onOpenFolderSearch ? (
+          <button
+            type="button"
+            className="sidebar-create__options"
+            aria-label="New terminal in folder"
+            title="New terminal in folder (Ctrl+Shift+O)"
+            onClick={() => onOpenFolderSearch(null)}
+          >
+            ⌕
+          </button>
+        ) : null}
         {onOpenSettings ? (
           <button
             type="button"
