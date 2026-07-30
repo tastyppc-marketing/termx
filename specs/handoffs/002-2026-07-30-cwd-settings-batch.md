@@ -1,5 +1,32 @@
 # Session Handoff - 2026-07-30 (living; append as work lands)
 
+## SMOKE INCIDENT + E2E RUNTIME PROOF (2026-07-30 ~12:15) — READ FIRST
+- Michael's first smoke hit "The terminal session could not be created."
+  ROOT CAUSE: the app instance had been up since 03:14; its control
+  WebSocket died across overnight sleep/wake and the UI has NO reconnect —
+  netstat showed the daemon LISTENING with zero ESTABLISHED conns; the
+  daemon log has zero entries between the two boots (requests never
+  arrived). NOT a bug in the new feature code. Filed as task #9
+  (reconnect/re-bootstrap on socket death + keepalive). App restarted
+  fresh at 12:11 — healthy, ESTABLISHED socket confirmed.
+- Probe (scratchpad probe.mjs pattern) against the STAGED release binary:
+  create_session OK for powershell/cmd × integration on/off × default
+  profile, AND still OK after deleting the data dir under the running
+  daemon. Daemon side fully healthy.
+- **DATA DIR CORRECTION**: there is NO portable.flag in
+  dist-portable\TermX\, so the app has ALWAYS used %APPDATA%\TermX (config
+  Jul 23, state Jul 26 prove it). Earlier "exe-adjacent data\" claims in
+  this handoff were a misread (an ls fallback chain silently listed
+  APPDATA). Drop a portable.flag file beside the exe iff true portable
+  mode is wanted. settings_v1.json will appear in %APPDATA%\TermX\.
+- **F1 PIPELINE PROVEN END-TO-END IN THE SHIPPED BINARY**: 25s after the
+  12:11 fresh boot, %APPDATA%\TermX\ui_state_v1.json existed with LIVE
+  scope paths (seeds + active = C:\Users\mjfos for ungrouped + a new
+  group) and recentFolders. That means hook injection → ConPTY → WS →
+  xterm OSC parse → reportSessionCwd → debounced write_app_file → runtime
+  ACL grant ALL work in production. The last unproven runtime piece is
+  now proven; Michael's smoke gates only UX quality.
+
 ## FINAL STATE (2026-07-30 ~03:15) — BATCH COMPLETE, READ FIRST
 - **All five features + host + tauri work COMMITTED and the portable pair
   RESTAGED.** Full commit chain on main: `79aede3` spec → `37f9a3a` plan →
