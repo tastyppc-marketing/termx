@@ -6,6 +6,9 @@
   "permissions": [
     "core:default",
     "allow-bootstrap-host",
+    "allow-read-app-file",
+    "allow-write-app-file",
+    "allow-list-dirs",
     "dialog:allow-open"
   ]
 }

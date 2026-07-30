@@ -6,3 +6,4 @@ data/
 .vite/
 target-*/
 dist-portable/
+*.tsbuildinfo

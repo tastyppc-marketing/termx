@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-read-app-file"
+description = "Enables the read_app_file command without any pre-configured scope."
+commands.allow = ["read_app_file"]
+
+[[permission]]
+identifier = "deny-read-app-file"
+description = "Denies the read_app_file command without any pre-configured scope."
+commands.deny = ["read_app_file"]
