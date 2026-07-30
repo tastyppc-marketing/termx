@@ -1,5 +1,36 @@
 # Session Handoff - 2026-07-30 (living; append as work lands)
 
+## STATE AT ~362k COMPACTION (2026-07-30, second wrap) — READ FIRST
+- Commits this session, all on main:
+  `79aede3` spec → `37f9a3a` plan → `77efbf0` U1 toolbar fix → `bb7a529` U2
+  settings → `1cd5a51`-style handoff commits → `2b91258` U3 cwd tracking →
+  `197b85c` U4 folder searcher → `8002572` U5 jump-to-input → `aee91bb` R2
+  tauri commands (reviewed + independently verified: 31 tests, clippy clean).
+  UI suite 359 + tsc green at `8002572`.
+- **ONLY REMAINING WORK: (a) R1 host shell integration, (b) V1.**
+- R1 (Opus agent `r1-host-integration`): working tree holds its UNCOMMITTED
+  mid-work in host/src/{profiles,protocol,registry,server,session}.rs (~400
+  insertions). It died on a 529, was resumed with a note that call sites
+  still fail to compile (profiles::resolve now takes 2 args). NO REPORT YET.
+  If nothing heard: SendMessage it (agents idle without delivering). On
+  report: line-by-line review (it's the security-sensitive spawn path), run
+  `cargo test -p termx-host` from repo root MYSELF (must be ~105+ green),
+  commit scoped host/ with agent attribution + standard trailers.
+- V1 after R1: full gates (host cargo test, ui `npx vitest run` 359+, `npx
+  tsc -b`, `npm run build`, `npm run test:e2e` vs real host) → rebuild UI via
+  `npx tauri build --no-bundle` from C:\Dev\TermX\ui (NEVER bare cargo, see
+  docs\RELEASE.md) + `cargo build --release -p termx-host` at root → copy
+  both exes to `C:\Dev\TermX\dist-portable\TermX\` → launch → PrintWindow
+  screenshot (PW_RENDERFULLCONTENT, no focus steal) → verify settings gear,
+  ⌕ palette, and (in a shell) OSC-driven cwd label → report to Michael with
+  smoke list (new-tab-follows-cd, palette, Ctrl+Shift+J, settings toggles).
+  Then flip task-tool #1/#2/#6/#7/#8 (completion gate hook needs host green).
+- Task tool: #6/#7 are DONE in reality (committed) but the completion-gate
+  hook blocks flags while host doesn't compile — flip after R1 lands.
+- Gotchas: vitest reporter `dot` (basic is gone); `git -C /c/Dev/TermX` for
+  all git (shell cwd drifts); compact-guard hook suggests a BOGUS handoff dir
+  under ui\src-tauri — always update THIS file instead.
+
 ## Context
 Post-release feature batch from Michael's smoke feedback. Spec
 `docs\superpowers\specs\2026-07-30-termx-cwd-settings-design.md` (approved,
