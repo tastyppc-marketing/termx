@@ -40,6 +40,8 @@ export interface SidebarActions {
 export interface SidebarProps {
   snapshot: WorkspaceSnapshot;
   actions: SidebarActions;
+  /** UI chrome, not a workspace action: opens the app settings dialog. */
+  onOpenSettings?: () => void;
 }
 
 type RenameTarget =
@@ -69,7 +71,7 @@ interface PointerDragState {
   indicator: { left: number; top: number; width: number } | null;
 }
 
-export function Sidebar({ snapshot, actions }: SidebarProps) {
+export function Sidebar({ snapshot, actions, onOpenSettings }: SidebarProps) {
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [confirmClose, setConfirmClose] = useState<ConfirmClose | null>(null);
   const [busy, setBusy] = useState(false);
@@ -732,6 +734,17 @@ export function Sidebar({ snapshot, actions }: SidebarProps) {
         >
           ▴
         </button>
+        {onOpenSettings ? (
+          <button
+            type="button"
+            className="sidebar-create__options"
+            aria-label="Settings"
+            title="Settings"
+            onClick={onOpenSettings}
+          >
+            ⚙
+          </button>
+        ) : null}
       </div>
       {snapshot.notice || snapshot.persistence.error ? (
         <div className="sidebar__notice" role="status">

@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { SettingsDialog } from "./settings/SettingsDialog";
+import { SettingsStore } from "./settings/SettingsStore";
+import { useSettings } from "./settings/useSettings";
 import { Sidebar } from "./sidebar/Sidebar";
 import { SplitLayout, type SplitLayoutActions } from "./split/SplitLayout";
 import { sessionIdsInSplit, type SplitNode } from "./state/layout";
@@ -78,6 +81,13 @@ export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
 function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const controller = workspace.controller;
   const snapshot = useWorkspace(controller);
+  // Legacy fixtures omit the settings store; fall back to in-memory defaults.
+  const settingsStore = useMemo(
+    () => workspace.settings ?? new SettingsStore(),
+    [workspace],
+  );
+  const settings = useSettings(settingsStore);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // Focused pane per tab is ephemeral UI state (layout spec: never persisted).
   const [focusByTab, setFocusByTab] = useState<Record<string, number>>({});
   const [dismissing, setDismissing] = useState<ReadonlySet<number>>(new Set());
@@ -120,7 +130,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
 
   return (
     <div className="app-workspace">
-      <Sidebar snapshot={snapshot} actions={controller} />
+      <Sidebar
+        snapshot={snapshot}
+        actions={controller}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
       <main className="app-main">
         {!activeTab || !actions ? (
           <WorkspacePanel testId="workspace-empty" title="No terminal tabs">
@@ -148,6 +162,13 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           />
         )}
       </main>
+      {settingsOpen ? (
+        <SettingsDialog
+          settings={settings}
+          onChange={settingsStore.update}
+          onClose={() => setSettingsOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

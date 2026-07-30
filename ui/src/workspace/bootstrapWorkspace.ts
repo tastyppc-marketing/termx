@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { HostClient, type HostClientConnectOptions } from "../host/client";
 import type { SessionInfo } from "../host/protocol";
+import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
+import { SettingsStore, loadSettingsStore } from "../settings/SettingsStore";
 import { parseLayout } from "../state/layout";
 import { reconcile } from "../state/reconcile";
 import { createLayoutStore } from "../state/store";
@@ -28,11 +30,14 @@ export interface BootstrapWorkspaceOptions {
   connect?: (options: HostClientConnectOptions) => Promise<BootstrapWorkspaceClient>;
   generateId?: () => string;
   pickFolder?: FolderPicker;
+  appFiles?: AppFileStore;
 }
 
 export interface BootstrappedWorkspace {
   client: BootstrapWorkspaceClient;
   controller: WorkspaceController;
+  /** Absent only in legacy test fixtures; App falls back to an in-memory store. */
+  settings?: SettingsStore;
 }
 
 export function parseBootstrapHostResult(value: unknown): HostClientConnectOptions {
@@ -61,6 +66,14 @@ export async function bootstrapWorkspace(
   let controller: WorkspaceController | null = null;
 
   try {
+    // Settings load never blocks or fails the workspace: read errors yield
+    // defaults, save errors stay contained in the store.
+    const appFiles = options.appFiles ?? tauriAppFiles;
+    const settings = await loadSettingsStore({
+      read: () => appFiles.read("settings_v1.json"),
+      save: (text) => appFiles.write("settings_v1.json", text),
+    });
+
     const bootstrap = parseBootstrapHostResult(await invokeBootstrap());
     client = await connect(bootstrap);
     const state = await client.getState();
@@ -103,7 +116,7 @@ export async function bootstrapWorkspace(
       await persistence.flush();
     }
 
-    return { client, controller };
+    return { client, controller, settings };
   } catch {
     try {
       controller?.dispose();
