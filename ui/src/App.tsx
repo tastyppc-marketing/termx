@@ -152,6 +152,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
               focusByTab[activeTab.id],
             )}
             dismissingSessionIds={dismissing}
+            onSessionCwd={controller.reportSessionCwd}
             onFocusPane={(sessionId) =>
               setFocusByTab((prev) =>
                 prev[activeTab.id] === sessionId

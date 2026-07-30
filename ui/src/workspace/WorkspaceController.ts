@@ -5,11 +5,22 @@ import type {
 } from "../host/client";
 import type { SessionInfo } from "../host/protocol";
 import {
+  createSessionWithCwd,
   duplicateTab as duplicateFolderTab,
   openFolderHere as openFolderFromTab,
   pickFolderAndCreateSession,
 } from "../native/folderSession";
 import type { FolderPicker } from "../native/dialog";
+import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
+import {
+  dropScope,
+  newTabCwdCandidates,
+  reportScopeCwd,
+  scopeKeyFor,
+  seedScope,
+  type ScopeKey,
+} from "./scopePaths";
+import { UiStateStore, touchRecentFolder, updateScopePaths } from "./uiState";
 import {
   sessionIdsInLayout,
   type LayoutV1,
@@ -104,6 +115,17 @@ export interface WorkspaceSnapshot {
   notice: string | null;
 }
 
+/** Read-only view of live settings (SettingsStore satisfies this). */
+export interface SettingsReader {
+  getSnapshot(): TermxSettings;
+}
+
+/** Target for a deferred "pick a folder first" create (searcher palette). */
+export interface FolderSearchTarget {
+  groupId: string | null;
+  profile: string | null;
+}
+
 export interface WorkspaceControllerOptions {
   client: WorkspaceHostClient;
   store: LayoutStore;
@@ -112,6 +134,8 @@ export interface WorkspaceControllerOptions {
   sessions: readonly SessionInfo[];
   generateId?: () => string;
   pickFolder?: FolderPicker;
+  settings?: SettingsReader;
+  uiState?: UiStateStore;
 }
 
 export class WorkspaceController {
@@ -122,6 +146,9 @@ export class WorkspaceController {
   private readonly persistence: WorkspacePersistence;
   private readonly generateId: () => string;
   private readonly pickFolder?: FolderPicker;
+  private readonly settings: SettingsReader;
+  private readonly uiState: UiStateStore;
+  private folderSearchHandler: ((target: FolderSearchTarget) => void) | null = null;
   private readonly sessions = new Map<number, SessionInfo>();
   private readonly listeners = new Set<() => void>();
   private readonly cleanups: Array<() => void> = [];
@@ -142,9 +169,38 @@ export class WorkspaceController {
     this.attachments = options.attachments;
     this.generateId = options.generateId ?? (() => crypto.randomUUID());
     this.pickFolder = options.pickFolder;
+    this.settings = options.settings ?? { getSnapshot: () => DEFAULT_SETTINGS };
+    this.uiState = options.uiState ?? new UiStateStore();
     for (const session of options.sessions) {
       this.sessions.set(session.id, session);
     }
+
+    // Seed scopes from the restored layout so group-aware policies work
+    // immediately on layouts that predate scope tracking. seedScope never
+    // moves an existing seed, so persisted state wins.
+    this.uiState.update((state) =>
+      updateScopePaths(state, (paths) => {
+        const layout = this.store.getState();
+        let next = paths;
+        const seedFromTab = (tabId: string, key: ScopeKey) => {
+          const tab = layout.tabs[tabId];
+          if (!tab) {
+            return;
+          }
+          const primary = this.sessions.get(firstSessionId(tab.split));
+          next = seedScope(next, key, primary?.cwd ?? null);
+        };
+        for (const tabId of layout.ungroupedTabIds) {
+          seedFromTab(tabId, scopeKeyFor(null));
+        }
+        for (const group of layout.groups) {
+          for (const tabId of group.tabIds) {
+            seedFromTab(tabId, group.id);
+          }
+        }
+        return next;
+      }),
+    );
 
     this.cleanups.push(
       this.store.subscribe(() => this.publish()),
@@ -297,22 +353,100 @@ export class WorkspaceController {
     this.mutate("structural", () => this.store.toggleGroupCollapsed(groupId));
   };
 
+  /// Plain "new tab": resolve the cwd from the settings policy — the default
+  /// policies never prompt. Ask policies route to the folder searcher (when
+  /// the UI registered one) or the native dialog.
   createTab = async (options: {
     groupId: string | null;
     profile: string | null;
   }): Promise<void> => {
     this.setNotice(null);
-    try {
-      const created = await pickFolderAndCreateSession(
-        { client: this.client, pickFolder: this.pickFolder },
-        { profile: options.profile, picker: { title: "Open folder for new terminal" } },
-      );
-      if (created) {
-        await this.addSessionTab(created, options.groupId);
+    const settings = this.settings.getSnapshot();
+    const profile = options.profile ?? settings.defaultProfile;
+    const policy = settings.newTabPolicy;
+
+    if (policy === "ask-searcher" && this.folderSearchHandler) {
+      this.folderSearchHandler({ groupId: options.groupId, profile });
+      return;
+    }
+    if (policy === "ask-searcher" || policy === "ask-native") {
+      try {
+        const created = await pickFolderAndCreateSession(
+          { client: this.client, pickFolder: this.pickFolder },
+          { profile, picker: { title: "Open folder for new terminal" } },
+        );
+        if (created) {
+          await this.addSessionTab(created, options.groupId);
+        }
+      } catch {
+        this.setNotice("The terminal session could not be created.");
       }
+      return;
+    }
+
+    const key = scopeKeyFor(options.groupId);
+    const candidates = newTabCwdCandidates(
+      this.uiState.getSnapshot().scopePaths,
+      key,
+      policy,
+      policy === "active-tab" ? this.activeTabCwdInScope(key) : null,
+    );
+    try {
+      const created = await this.createSessionDownChain(profile, candidates);
+      await this.addSessionTab(created, options.groupId);
     } catch {
       this.setNotice("The terminal session could not be created.");
     }
+  };
+
+  /// Direct create with a known folder (searcher palette / Browse…).
+  createTabWithCwd = async (options: {
+    groupId: string | null;
+    profile: string | null;
+    cwd: string;
+  }): Promise<void> => {
+    this.setNotice(null);
+    const profile =
+      options.profile ?? this.settings.getSnapshot().defaultProfile;
+    try {
+      const created = await this.createSessionDownChain(profile, [options.cwd, null]);
+      await this.addSessionTab(created, options.groupId);
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+    }
+  };
+
+  /// The UI registers the folder-search palette opener here; without one the
+  /// ask-searcher policy falls back to the native dialog.
+  setFolderSearchHandler = (
+    handler: ((target: FolderSearchTarget) => void) | null,
+  ): void => {
+    this.folderSearchHandler = handler;
+  };
+
+  /// OSC 9;9 cwd report from a pane. Session cwd always follows (including
+  /// replay-derived reports); scope active paths and recents move only on
+  /// LIVE reports so relaunch replay can't clobber newer persisted state.
+  reportSessionCwd = (sessionId: number, path: string, live: boolean): void => {
+    const existing = this.sessions.get(sessionId);
+    if (existing && existing.cwd !== path) {
+      this.sessions.set(sessionId, { ...existing, cwd: path });
+      this.sessionsRevision += 1;
+      this.publish();
+    }
+    if (!live) {
+      return;
+    }
+    const key = this.scopeKeyOfSession(sessionId);
+    if (key === null) {
+      return;
+    }
+    this.uiState.update((state) =>
+      touchRecentFolder(
+        updateScopePaths(state, (paths) => reportScopeCwd(paths, key, path)),
+        path,
+      ),
+    );
   };
 
   duplicateTab = async (tabId: string): Promise<void> => {
@@ -379,6 +513,10 @@ export class WorkspaceController {
     });
     if (failed) {
       this.setNotice("Some terminal sessions could not be closed.");
+    } else {
+      this.uiState.update((state) =>
+        updateScopePaths(state, (paths) => dropScope(paths, groupId)),
+      );
     }
   };
 
@@ -518,7 +656,77 @@ export class WorkspaceController {
       color: nextTabColor(layout),
       groupId: targetGroupId,
     }));
+    if (session.cwd) {
+      const cwd = session.cwd;
+      this.uiState.update((state) =>
+        touchRecentFolder(
+          updateScopePaths(state, (paths) =>
+            seedScope(paths, scopeKeyFor(targetGroupId), cwd),
+          ),
+          cwd,
+        ),
+      );
+    }
     this.publish();
+  }
+
+  /// Cwd of the globally active tab, when that tab belongs to the scope a
+  /// new tab targets. Falls back to the group-active chain otherwise.
+  private activeTabCwdInScope(key: ScopeKey): string | null {
+    const layout = this.store.getState();
+    const activeTabId = layout.activeTabId;
+    if (!activeTabId) {
+      return null;
+    }
+    const inScope =
+      key === scopeKeyFor(null)
+        ? layout.ungroupedTabIds.includes(activeTabId)
+        : layout.groups.some(
+            (group) => group.id === key && group.tabIds.includes(activeTabId),
+          );
+    if (!inScope) {
+      return null;
+    }
+    const tab = layout.tabs[activeTabId];
+    if (!tab) {
+      return null;
+    }
+    return this.sessions.get(firstSessionId(tab.split))?.cwd ?? null;
+  }
+
+  private scopeKeyOfSession(sessionId: number): ScopeKey | null {
+    const layout = this.store.getState();
+    const tabHasSession = (tabId: string): boolean => {
+      const tab = layout.tabs[tabId];
+      return tab !== undefined && sessionIdsInTab(tab).includes(sessionId);
+    };
+    if (layout.ungroupedTabIds.some(tabHasSession)) {
+      return scopeKeyFor(null);
+    }
+    for (const group of layout.groups) {
+      if (group.tabIds.some(tabHasSession)) {
+        return group.id;
+      }
+    }
+    return null;
+  }
+
+  /// Try CreateSession down a cwd candidate chain (ending in null = host
+  /// default dir) so a stale-but-remembered path can never fail creation on
+  /// its own. Throws only when every candidate fails.
+  private async createSessionDownChain(
+    profile: string | null,
+    candidates: ReadonlyArray<string | null>,
+  ): Promise<SessionInfo> {
+    let lastError: unknown = new Error("no cwd candidates");
+    for (const cwd of candidates) {
+      try {
+        return await createSessionWithCwd(this.client, { profile, cwd });
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
   }
 
   private sourceForTab(tabId: string): {

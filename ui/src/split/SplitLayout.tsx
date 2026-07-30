@@ -31,6 +31,7 @@ export interface SplitLayoutProps {
   focusedSessionId: number;
   dismissingSessionIds: ReadonlySet<number>;
   onFocusPane(sessionId: number): void;
+  onSessionCwd?: (sessionId: number, path: string, live: boolean) => void;
   actions: SplitLayoutActions;
 }
 
@@ -64,6 +65,7 @@ export function SplitLayout({
   focusedSessionId,
   dismissingSessionIds,
   onFocusPane,
+  onSessionCwd,
   actions,
 }: SplitLayoutProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -267,7 +269,11 @@ export function SplitLayout({
           >
             {state.status === "live" ? (
               <>
-                <TerminalPane client={client} sessionId={sessionId} />
+                <TerminalPane
+                  client={client}
+                  sessionId={sessionId}
+                  onCwd={(path, live) => onSessionCwd?.(sessionId, path, live)}
+                />
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
                   <button
                     type="button"

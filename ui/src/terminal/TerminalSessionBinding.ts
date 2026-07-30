@@ -47,6 +47,7 @@ export interface AttachmentClient {
 
 export type TerminalCleanupOperation =
   | "data_subscription"
+  | "cwd_subscription"
   | "replay_suppression"
   | "detach";
 
@@ -72,11 +73,18 @@ export interface TerminalSessionBindingOptions {
   fit: () => void;
   onStatus?: (status: TerminalSessionStatus) => void;
   onCleanupError?: (operation: TerminalCleanupOperation, error: unknown) => void;
+  /**
+   * OSC 9;9 working-directory report (host-injected shell integration).
+   * `live` is false while the report comes from replayed scrollback — replay
+   * re-derives a session's cwd but must never move group-level state.
+   */
+  onCwd?: (path: string, live: boolean) => void;
 }
 
 export class TerminalSessionBinding {
   private readonly decoder = new TextDecoder();
   private readonly dataSubscription: Disposable;
+  private readonly cwdSubscription: Disposable | null;
   private attachment: SessionAttachment | null = null;
   private lastDimensions: string | null = null;
   private acceptingInput = false;
@@ -100,6 +108,19 @@ export class TerminalSessionBinding {
         this.reportRuntimeError("input", error);
       }
     });
+    this.cwdSubscription = options.onCwd
+      ? options.terminal.parser.registerOscHandler(9, (data) => {
+          const path = parseOsc9CwdReport(data);
+          if (path === null) {
+            // Not a 9;9 cwd report (e.g. ConEmu progress) — leave it alone.
+            return false;
+          }
+          if (!this.disposed) {
+            this.options.onCwd?.(path, this.replayFinished);
+          }
+          return true;
+        })
+      : null;
   }
 
   async start(): Promise<void> {
@@ -196,6 +217,11 @@ export class TerminalSessionBinding {
       this.dataSubscription.dispose();
     } catch (error) {
       this.options.onCleanupError?.("data_subscription", error);
+    }
+    try {
+      this.cwdSubscription?.dispose();
+    } catch (error) {
+      this.options.onCleanupError?.("cwd_subscription", error);
     }
     try {
       attachment?.detach();
@@ -422,6 +448,40 @@ export class TerminalSessionBinding {
     }
     return true;
   }
+}
+
+/**
+ * Parse an OSC 9 payload as a 9;9 working-directory report (Windows Terminal
+ * convention: `ESC]9;9;<path>ST`, path optionally double-quoted). Returns the
+ * absolute Windows path, or null for anything else (other ConEmu OSC 9
+ * subcommands, relative junk, empty payloads).
+ */
+export function parseOsc9CwdReport(data: string): string | null {
+  if (!data.startsWith("9;")) {
+    return null;
+  }
+  let path = data.slice(2).trim();
+  if (path.length >= 2 && path.startsWith('"') && path.endsWith('"')) {
+    path = path.slice(1, -1);
+  }
+  if (path.length === 0 || hasControlCharacters(path)) {
+    return null;
+  }
+  const driveAbsolute = /^[A-Za-z]:[\\/]/.test(path) || /^[A-Za-z]:$/.test(path);
+  const uncAbsolute = path.startsWith("\\\\") && path.length > 2;
+  if (!driveAbsolute && !uncAbsolute) {
+    return null;
+  }
+  return path;
+}
+
+function hasControlCharacters(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) < 0x20) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isOscColorQuery(identifier: number, data: string): boolean {

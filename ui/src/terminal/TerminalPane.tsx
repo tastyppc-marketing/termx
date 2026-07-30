@@ -43,11 +43,13 @@ type TerminalPaneProps =
       client?: undefined;
       sessionId?: undefined;
       dependencies?: TerminalPaneDependencies;
+      onCwd?: (path: string, live: boolean) => void;
     }
   | {
       client: PaneHostClient;
       sessionId: number;
       dependencies?: TerminalPaneDependencies;
+      onCwd?: (path: string, live: boolean) => void;
     };
 
 type PaneState =
@@ -74,6 +76,10 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [linkNotice, setLinkNotice] = useState<string | null>(null);
   const dependencies = props.dependencies ?? defaultDependencies;
+  // Ref-isolated so a new callback identity never re-runs the bootstrap
+  // effect (which would tear down and remount the whole terminal).
+  const onCwdRef = useRef(props.onCwd);
+  onCwdRef.current = props.onCwd;
 
   useEffect(() => {
     const element = containerRef.current;
@@ -177,6 +183,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           fit: presentation.fit,
           onStatus: reportStatus,
           onCleanupError: reportCleanupError,
+          onCwd: (path, live) => onCwdRef.current?.(path, live),
         });
         const activeBinding = binding;
         stopObserving = dependencies.observeResize(element, () => activeBinding.fitAndResize());

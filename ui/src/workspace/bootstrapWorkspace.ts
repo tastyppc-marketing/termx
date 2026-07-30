@@ -4,6 +4,7 @@ import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
 import { SettingsStore, loadSettingsStore } from "../settings/SettingsStore";
+import { UiStateStore, loadUiStateStore } from "./uiState";
 import { parseLayout } from "../state/layout";
 import { reconcile } from "../state/reconcile";
 import { createLayoutStore } from "../state/store";
@@ -38,6 +39,8 @@ export interface BootstrappedWorkspace {
   controller: WorkspaceController;
   /** Absent only in legacy test fixtures; App falls back to an in-memory store. */
   settings?: SettingsStore;
+  /** Scope paths + recent folders; absent only in legacy test fixtures. */
+  uiState?: UiStateStore;
 }
 
 export function parseBootstrapHostResult(value: unknown): HostClientConnectOptions {
@@ -73,6 +76,10 @@ export async function bootstrapWorkspace(
       read: () => appFiles.read("settings_v1.json"),
       save: (text) => appFiles.write("settings_v1.json", text),
     });
+    const uiState = await loadUiStateStore({
+      read: () => appFiles.read("ui_state_v1.json"),
+      save: (text) => appFiles.write("ui_state_v1.json", text),
+    });
 
     const bootstrap = parseBootstrapHostResult(await invokeBootstrap());
     client = await connect(bootstrap);
@@ -92,6 +99,8 @@ export async function bootstrapWorkspace(
       persistence,
       attachments,
       sessions: state.sessions as readonly SessionInfo[],
+      settings,
+      uiState,
       ...(options.generateId ? { generateId: options.generateId } : {}),
       ...(options.pickFolder ? { pickFolder: options.pickFolder } : {}),
     };
@@ -116,7 +125,7 @@ export async function bootstrapWorkspace(
       await persistence.flush();
     }
 
-    return { client, controller, settings };
+    return { client, controller, settings, uiState };
   } catch {
     try {
       controller?.dispose();

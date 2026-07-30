@@ -9,6 +9,8 @@ import {
   type WorkspaceHostClient,
   type WorkspacePersistence,
 } from "../WorkspaceController";
+import { DEFAULT_SETTINGS, type TermxSettings } from "../../settings/settings";
+import { UiStateStore } from "../uiState";
 
 function session(id: number, overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -59,21 +61,32 @@ function harness(options: {
   initial?: LayoutV1;
   closeSession?: (sessionId: number) => Promise<void>;
   pickFolder?: () => Promise<string | null>;
-} = {}) {
-  const exitListeners = new Set<(event: { sessionId: number; exitCode: number | null }) => void>();
-  const closeListeners = new Set<(event: { sessionId: number }) => void>();
-  const errorListeners = new Set<(error: Error) => void>();
-  const createSession = vi.fn(async (createOptions: {
+  settings?: Partial<TermxSettings>;
+  uiState?: UiStateStore;
+  createSession?: (createOptions: {
     profile: string | null;
     cwd: string | null;
     cols: number;
     rows: number;
-  }) => session(50, {
-    profile: createOptions.profile ?? "powershell",
-    cwd: createOptions.cwd,
-    cols: createOptions.cols,
-    rows: createOptions.rows,
-  }));
+  }) => Promise<SessionInfo>;
+} = {}) {
+  const exitListeners = new Set<(event: { sessionId: number; exitCode: number | null }) => void>();
+  const closeListeners = new Set<(event: { sessionId: number }) => void>();
+  const errorListeners = new Set<(error: Error) => void>();
+  const createSession = vi.fn(
+    options.createSession ??
+      (async (createOptions: {
+        profile: string | null;
+        cwd: string | null;
+        cols: number;
+        rows: number;
+      }) => session(50, {
+        profile: createOptions.profile ?? "powershell",
+        cwd: createOptions.cwd,
+        cols: createOptions.cols,
+        rows: createOptions.rows,
+      })),
+  );
   const closeSession = vi.fn(options.closeSession ?? (async () => undefined));
   const client: WorkspaceHostClient = {
     createSession,
@@ -119,6 +132,8 @@ function harness(options: {
     close: vi.fn(),
   };
   const ids = ["new-tab", "new-group", "later-tab"];
+  const settingsValue: TermxSettings = { ...DEFAULT_SETTINGS, ...options.settings };
+  const uiState = options.uiState ?? new UiStateStore();
   const controller = new WorkspaceController({
     client,
     store: createLayoutStore(options.initial ?? layout()),
@@ -127,6 +142,8 @@ function harness(options: {
     sessions: options.sessions ?? [session(1), session(2), session(3)],
     generateId: () => ids.shift() ?? "fallback-id",
     pickFolder: options.pickFolder,
+    settings: { getSnapshot: () => settingsValue },
+    uiState,
   });
   return {
     controller,
@@ -136,6 +153,7 @@ function harness(options: {
     persistence,
     persistenceCalls,
     attachments,
+    uiState,
     setAttachmentSnapshot(value: typeof attachmentSnapshot) {
       attachmentSnapshot = value;
     },
@@ -219,6 +237,7 @@ describe("WorkspaceController mutations", () => {
   it("creates folder-backed tabs with the next palette color and target group", async () => {
     const { controller, createSession, attachments, persistenceCalls } = harness({
       pickFolder: async () => "D:\\chosen",
+      settings: { newTabPolicy: "ask-native" },
     });
 
     await controller.createTab({ groupId: "group", profile: "cmd" });
@@ -240,6 +259,7 @@ describe("WorkspaceController mutations", () => {
   it("treats folder-picker cancellation as a complete no-op", async () => {
     const { controller, createSession, persistenceCalls } = harness({
       pickFolder: async () => null,
+      settings: { newTabPolicy: "ask-native" },
     });
     await controller.createTab({ groupId: null, profile: null });
     expect(createSession).not.toHaveBeenCalled();
@@ -569,5 +589,167 @@ describe("WorkspaceController split actions", () => {
 
     controller.resizePane("tab-1", [], [0.3, 0.7]);
     expect(persistenceCalls.length).toBe(afterResize);
+  });
+});
+
+describe("WorkspaceController new-tab cwd policy (F1)", () => {
+  it("group-active opens instantly in the scope's active path — no picker", async () => {
+    const pickFolder = vi.fn(async () => "Z:\\never");
+    const { controller, createSession } = harness({ pickFolder });
+
+    controller.reportSessionCwd(2, "D:\\live-cd", true);
+    await controller.createTab({ groupId: "group", profile: null });
+
+    expect(pickFolder).not.toHaveBeenCalled();
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "D:\\live-cd", profile: "powershell" }),
+    );
+  });
+
+  it("falls back to the scope seed when there is no active path", async () => {
+    const { controller, createSession } = harness();
+
+    // Constructor seeding: group scope seeds from tab-2's primary session (2).
+    await controller.createTab({ groupId: "group", profile: null });
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "C:\\work\\project-2" }),
+    );
+  });
+
+  it("walks the candidate chain past stale paths the host rejects", async () => {
+    const attempts: Array<string | null> = [];
+    const { controller, uiState } = harness({
+      createSession: async (createOptions) => {
+        attempts.push(createOptions.cwd);
+        if (createOptions.cwd !== null) {
+          throw new Error("cwd does not exist");
+        }
+        return session(50, { cwd: null });
+      },
+    });
+
+    controller.reportSessionCwd(2, "D:\\deleted", true);
+    await controller.createTab({ groupId: "group", profile: null });
+
+    expect(attempts).toEqual(["D:\\deleted", "C:\\work\\project-2", null]);
+    expect(controller.getSnapshot().notice).toBeNull();
+    expect(uiState.getSnapshot().scopePaths.active["group"]).toBe("D:\\deleted");
+  });
+
+  it("active-tab policy prefers the focused tab's live cwd within the scope", async () => {
+    const { controller, createSession } = harness({
+      settings: { newTabPolicy: "active-tab" },
+    });
+
+    // active tab is tab-1 (ungrouped); its session's cwd leads the chain.
+    controller.reportSessionCwd(1, "C:\\focused-here", true);
+    await controller.createTab({ groupId: null, profile: null });
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "C:\\focused-here" }),
+    );
+  });
+
+  it("first-terminal policy ignores CDs and uses the seed", async () => {
+    const { controller, createSession } = harness({
+      settings: { newTabPolicy: "first-terminal" },
+    });
+
+    controller.reportSessionCwd(2, "D:\\wandered-off", true);
+    await controller.createTab({ groupId: "group", profile: null });
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "C:\\work\\project-2" }),
+    );
+  });
+
+  it("ask-searcher routes to the registered palette handler and creates nothing", async () => {
+    const opened: unknown[] = [];
+    const { controller, createSession } = harness({
+      settings: { newTabPolicy: "ask-searcher" },
+    });
+    controller.setFolderSearchHandler((target) => opened.push(target));
+
+    await controller.createTab({ groupId: "group", profile: null });
+
+    expect(opened).toEqual([{ groupId: "group", profile: "powershell" }]);
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("ask-searcher without a handler falls back to the native dialog", async () => {
+    const pickFolder = vi.fn(async () => "D:\\picked");
+    const { controller, createSession } = harness({
+      pickFolder,
+      settings: { newTabPolicy: "ask-searcher" },
+    });
+
+    await controller.createTab({ groupId: null, profile: null });
+
+    expect(pickFolder).toHaveBeenCalled();
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "D:\\picked" }),
+    );
+  });
+
+  it("null profile resolves to the settings default profile", async () => {
+    const { controller, createSession } = harness({
+      settings: { defaultProfile: "cmd" },
+    });
+
+    await controller.createTab({ groupId: null, profile: null });
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ profile: "cmd" }),
+    );
+  });
+
+  it("createTabWithCwd creates directly in the given folder and records recents", async () => {
+    const { controller, createSession, uiState } = harness();
+
+    await controller.createTabWithCwd({
+      groupId: "group",
+      profile: null,
+      cwd: "E:\\projects\\thing",
+    });
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "E:\\projects\\thing" }),
+    );
+    expect(uiState.getSnapshot().recentFolders[0]).toBe("E:\\projects\\thing");
+  });
+
+  it("replay-derived cwd reports update the session but never scope state", () => {
+    const { controller, uiState } = harness();
+
+    controller.reportSessionCwd(2, "D:\\old-replayed", false);
+
+    expect(uiState.getSnapshot().scopePaths.active["group"]).toBeUndefined();
+    expect(uiState.getSnapshot().recentFolders).toEqual([]);
+    const tab = controller.getSnapshot().groups[0]?.tabs[0];
+    expect(tab?.cwd).toBe("D:\\old-replayed");
+  });
+
+  it("live cwd reports keep duplicate-tab templates fresh", async () => {
+    const { controller, createSession } = harness();
+
+    controller.reportSessionCwd(2, "D:\\moved-here", true);
+    await controller.duplicateTab("tab-2");
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "D:\\moved-here" }),
+    );
+  });
+
+  it("closing a group forgets its scope paths", async () => {
+    const { controller, uiState } = harness();
+
+    controller.reportSessionCwd(2, "D:\\group-work", true);
+    expect(uiState.getSnapshot().scopePaths.active["group"]).toBe("D:\\group-work");
+
+    await controller.closeGroup("group");
+
+    expect(uiState.getSnapshot().scopePaths.active["group"]).toBeUndefined();
+    expect(uiState.getSnapshot().scopePaths.seeds["group"]).toBeUndefined();
   });
 });
