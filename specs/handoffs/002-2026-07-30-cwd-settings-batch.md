@@ -10,6 +10,17 @@ Warp-style folder searcher, F3 settings subsystem, F4 jump-to-last-input
 list (#1–#8, R1/R2/U1–U5/V1).
 
 ## Completed
+- **ALL FIVE UI TASKS COMMITTED** (ui suite 359 tests + tsc green at `8002572`):
+  U1 `77efbf0`, U2 `bb7a529`, U3 `2b91258` (scopePaths/uiState/OSC binding/
+  policy createTab), U4 `197b85c` (FolderSearch palette, ⌕ + menus +
+  Ctrl+Shift+O), U5 `8002572` (InputMarks + Ctrl+Shift+J via
+  termx:jump-last-input window event). Task-gate hook blocks task-tool
+  completion flags for #6/#7 while R1's host tree is mid-change — flip them
+  when host tests are green again.
+- R2 mid-work notes: `resolve_data_dir` ALREADY exists in
+  ui/src-tauri/src/paths.rs (no extraction needed); app-command permissions
+  are generated from build.rs `AppManifest::new().commands([...])` — new
+  commands must be added THERE. Baseline ui/src-tauri cargo test = 13 passed.
 - U1/F5 `77efbf0`: `.split-pane:has(.terminal-search)` drops the hover toolbar
   below the open search bar (they shared the top-right corner).
 - U2/F3 `bb7a529`: `ui\src\settings\` (types/parse, live SettingsStore,
