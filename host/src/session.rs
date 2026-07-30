@@ -319,6 +319,9 @@ impl Session {
 
         let mut cmd = CommandBuilder::new(profile.command.as_os_str());
         cmd.args(profile.args.iter());
+        for (key, value) in &profile.env {
+            cmd.env(key, value);
+        }
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }
@@ -724,7 +727,7 @@ mod tests {
 
     #[test]
     fn cmd_echo_round_trip() {
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec!["/c".into(), "echo termx_alive".into()];
         let s = Session::spawn(&p, None, 80, 25, 1024 * 1024).unwrap();
@@ -740,7 +743,7 @@ mod tests {
 
     #[test]
     fn exit_code_is_captured() {
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec!["/c".into(), "exit 7".into()];
         let s = Session::spawn(&p, None, 80, 25, 1024 * 1024).unwrap();
@@ -750,7 +753,7 @@ mod tests {
 
     #[test]
     fn exit_watch_fires() {
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec!["/c".into(), "echo done".into()];
         let s = Session::spawn(&p, None, 80, 25, 1024 * 1024).unwrap();
@@ -769,7 +772,7 @@ mod tests {
     #[test]
     fn respects_cwd() {
         let tmp = tempfile::tempdir().unwrap();
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec!["/c".into(), "cd".into()]; // `cd` with no args prints cwd
         let s = Session::spawn(&p, Some(tmp.path()), 80, 25, 1024 * 1024).unwrap();
@@ -785,7 +788,7 @@ mod tests {
 
     #[test]
     fn dsr_queries_never_reach_ring_or_subscribers() {
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec!["/c".into(), "echo clean_stream".into()];
         let s = Session::spawn(&p, None, 80, 25, 1024 * 1024).unwrap();
@@ -799,7 +802,7 @@ mod tests {
 
     #[test]
     fn write_input_drives_an_interactive_shell() {
-        let profile = profiles::resolve("cmd").unwrap(); // interactive cmd
+        let profile = profiles::resolve("cmd", false).unwrap(); // interactive cmd
         let s = Session::spawn(&profile, None, 80, 25, 1024 * 1024).unwrap();
         let mut rx = s.subscribe();
         s.write_input(b"echo in_band_marker\r\n").unwrap();
@@ -823,6 +826,150 @@ mod tests {
         assert!(s.wait_exit_blocking(Duration::from_secs(10)));
     }
 
+    /// Every complete OSC 9;9 payload in `text` (ST- or BEL-terminated). A
+    /// trailing partial sequence is ignored so a caller can keep pumping.
+    fn osc9_cwd_reports(text: &str) -> Vec<String> {
+        const INTRO: &str = "\x1b]9;9;";
+        let mut reports = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find(INTRO) {
+            let payload = &rest[start + INTRO.len()..];
+            let Some(end) = payload
+                .find("\x1b\\")
+                .or_else(|| payload.find('\x07'))
+                .or_else(|| payload.find("\u{9c}"))
+            else {
+                break;
+            };
+            reports.push(payload[..end].trim_matches('"').to_string());
+            rest = &payload[end..];
+        }
+        reports
+    }
+
+    /// True when some report is an absolute path whose last segment is `name`.
+    fn reported_dir(reports: &[String], name: &str) -> bool {
+        reports.iter().any(|path| {
+            let path = Path::new(path);
+            path.is_absolute()
+                && path
+                    .file_name()
+                    .is_some_and(|last| last.eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// Drain live output until `pred` holds over everything seen so far, or the
+    /// bound expires. Polls the broadcast rather than sleeping a fixed guess.
+    fn pump_until(
+        rx: &mut broadcast::Receiver<OutputChunk>,
+        seen: &mut String,
+        secs: u64,
+        pred: impl Fn(&str) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            if pred(seen) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            match rx.try_recv() {
+                Ok(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk.data)),
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Closed) => return pred(seen),
+            }
+        }
+    }
+
+    /// Real-shell contract behind F1 cwd tracking: the injected prompt hook must
+    /// put an OSC 9;9 report with an ABSOLUTE path on the wire at the first
+    /// prompt and again after a `cd` — through ConPTY, which re-renders child
+    /// output and is the reason this can only be proven by spawning.
+    fn shell_integration_follows_cd(profile_name: &str, ready_secs: u64) {
+        let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let child = tmp.path().join("termx_parent").join("termx_child");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let profile = profiles::resolve(profile_name, true).unwrap();
+        let s = Session::spawn(&profile, Some(&child), 120, 30, 1024 * 1024).unwrap();
+        let mut rx = s.subscribe();
+        let mut seen = String::new();
+
+        let saw_spawn_cwd = pump_until(&mut rx, &mut seen, ready_secs, |text| {
+            reported_dir(&osc9_cwd_reports(text), "termx_child")
+        });
+        assert!(
+            saw_spawn_cwd,
+            "{profile_name}: no OSC 9;9 report for the spawn cwd.\nreports={:?}\nraw={seen:?}",
+            osc9_cwd_reports(&seen)
+        );
+
+        // Only now is the shell known to be at a prompt, so the CD cannot race
+        // shell startup.
+        s.write_input(b"cd ..\r").unwrap();
+        let followed_cd = pump_until(&mut rx, &mut seen, 60, |text| {
+            reported_dir(&osc9_cwd_reports(text), "termx_parent")
+        });
+        assert!(
+            followed_cd,
+            "{profile_name}: prompt hook did not report the new cwd after `cd ..`.\nreports={:?}\nraw={seen:?}",
+            osc9_cwd_reports(&seen)
+        );
+
+        s.kill();
+        assert!(s.wait_exit_blocking(Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn powershell_shell_integration_reports_cwd_and_follows_cd() {
+        // PowerShell 5.1 startup (profile load + JIT) is the slow part here.
+        shell_integration_follows_cd("powershell", 120);
+    }
+
+    #[test]
+    fn cmd_shell_integration_reports_cwd_and_follows_cd() {
+        shell_integration_follows_cd("cmd", 60);
+    }
+
+    #[test]
+    fn shell_integration_off_emits_no_cwd_reports() {
+        let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
+        let profile = profiles::resolve("cmd", false).unwrap();
+        let s = Session::spawn(&profile, None, 120, 30, 1024 * 1024).unwrap();
+        let mut rx = s.subscribe();
+        let mut seen = String::new();
+        s.write_input(b"echo integration_off_marker\r").unwrap();
+        assert!(
+            pump_until(&mut rx, &mut seen, 60, |text| text
+                .contains("integration_off_marker")),
+            "shell never echoed; saw: {seen:?}"
+        );
+        assert!(
+            osc9_cwd_reports(&seen).is_empty(),
+            "integration off must stay byte-identical to the old behavior; got {:?}",
+            osc9_cwd_reports(&seen)
+        );
+        s.kill();
+        assert!(s.wait_exit_blocking(Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn osc9_reports_are_extracted_for_both_terminators_and_quoted_paths() {
+        assert_eq!(
+            osc9_cwd_reports("noise\x1b]9;9;C:\\a\x1b\\more\x1b]9;9;\"C:\\b c\"\x07tail"),
+            vec![r"C:\a".to_string(), r"C:\b c".to_string()]
+        );
+        assert!(
+            osc9_cwd_reports("\x1b]9;9;C:\\partial").is_empty(),
+            "an unterminated tail is not yet a report"
+        );
+    }
+
     /// Is a pid present in tasklist output?
     fn pid_alive(pid: u32) -> bool {
         let out = std::process::Command::new("tasklist")
@@ -837,7 +984,7 @@ mod tests {
         let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
         // The doc-claimed property of the /T tree kill: a process the SHELL
         // spawned (grandchild of the host) must die with the session.
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let s = Session::spawn(&profile, None, 80, 25, 1024 * 1024).unwrap();
         let shell_pid = s.pid().expect("shell pid");
         s.write_input(b"ping -n 60 127.0.0.1 >nul\r\n").unwrap();
@@ -881,7 +1028,7 @@ mod tests {
 
     #[test]
     fn kill_terminates_and_reports_exit() {
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let s = Session::spawn(&profile, None, 80, 25, 1024 * 1024).unwrap();
         assert!(s.exited().is_none(), "fresh interactive session is alive");
         s.kill();
@@ -893,7 +1040,7 @@ mod tests {
 
     #[test]
     fn write_input_errors_after_exit() {
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec!["/c".into(), "echo bye".into()];
         let s = Session::spawn(&p, None, 80, 25, 1024 * 1024).unwrap();
@@ -913,7 +1060,7 @@ mod tests {
 
     #[test]
     fn oversized_input_frame_is_rejected() {
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let s = Session::spawn(&profile, None, 80, 25, 1024 * 1024).unwrap();
         let big = vec![b'x'; MAX_INPUT_FRAME + 1];
         assert!(s.write_input(&big).is_err(), "over-cap frame must error");
@@ -927,7 +1074,7 @@ mod tests {
 
     #[test]
     fn resize_errors_after_exit() {
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec!["/c".into(), "echo bye".into()];
         let s = Session::spawn(&p, None, 80, 25, 1024 * 1024).unwrap();
@@ -941,7 +1088,7 @@ mod tests {
         // The spec's memory-soak: a real shell floods output; the ring must
         // stay at/under cap while total stream far exceeds it.
         let cap = 64 * 1024;
-        let profile = profiles::resolve("cmd").unwrap();
+        let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec![
             "/c".into(),

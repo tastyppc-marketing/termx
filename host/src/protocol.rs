@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 
 pub type SessionId = u32;
 
+fn shell_integration_default() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
@@ -26,6 +30,11 @@ pub enum ClientMsg {
         cwd: Option<String>,
         cols: u16,
         rows: u16,
+        /// Inject the shell's OSC 9;9 cwd-reporting prompt hook. Omitted means
+        /// ON: clients predating this field still get cwd tracking, and the
+        /// wire stays backward compatible.
+        #[serde(default = "shell_integration_default")]
+        shell_integration: bool,
     },
     Attach {
         session_id: SessionId,
@@ -184,6 +193,7 @@ mod tests {
             cwd: None,
             cols: 120,
             rows: 30,
+            shell_integration: false,
         };
         let text = serde_json::to_string(&m).unwrap();
         assert!(
@@ -197,11 +207,37 @@ mod tests {
                 cols,
                 rows,
                 cwd,
+                shell_integration,
             } => {
                 assert_eq!(profile.as_deref(), Some("powershell"));
                 assert_eq!((cols, rows), (120, 30));
                 assert!(cwd.is_none());
+                assert!(!shell_integration, "explicit false round-trips");
             }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// Wire compatibility: a client built before shell integration existed sends
+    /// no `shell_integration` key and must still get the prompt hooks.
+    #[test]
+    fn create_session_without_shell_integration_field_defaults_to_true() {
+        let legacy = r#"{"type":"create_session","profile":"cmd","cwd":null,"cols":80,"rows":25}"#;
+        match serde_json::from_str::<ClientMsg>(legacy).unwrap() {
+            ClientMsg::CreateSession {
+                shell_integration, ..
+            } => assert!(shell_integration, "omitted field must mean ON"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_session_honors_an_explicit_shell_integration_false() {
+        let text = r#"{"type":"create_session","cols":80,"rows":25,"shell_integration":false}"#;
+        match serde_json::from_str::<ClientMsg>(text).unwrap() {
+            ClientMsg::CreateSession {
+                shell_integration, ..
+            } => assert!(!shell_integration),
             other => panic!("wrong variant: {other:?}"),
         }
     }

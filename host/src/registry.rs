@@ -119,11 +119,12 @@ impl Registry {
         cwd: Option<&Path>,
         cols: u16,
         rows: u16,
+        shell_integration: bool,
     ) -> Result<(SessionInfo, Arc<Session>)> {
         validate_dims(cols, rows)?;
         let cwd = validate_cwd(cwd)?;
         let name = profile.unwrap_or(&self.config.default_profile);
-        let prof = profiles::resolve(name)?;
+        let prof = profiles::resolve(name, shell_integration)?;
         // Serialize spawn+registration with shutdown's transition. Once
         // shutdown_all holds this lock and flips the flag, no late ConPTY can
         // appear after its entries/graveyard drain.
@@ -357,7 +358,9 @@ mod tests {
     #[test]
     fn create_list_close_lifecycle() {
         let (_tmp, reg) = test_registry();
-        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         assert_eq!(info.id, 1);
         assert_eq!(info.profile, "cmd");
         let listed = reg.list();
@@ -372,8 +375,12 @@ mod tests {
     #[test]
     fn ids_are_unique_and_increasing() {
         let (_tmp, reg) = test_registry();
-        let (a, sa) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
-        let (b, sb) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (a, sa) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
+        let (b, sb) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         assert!(b.id > a.id);
         reg.close_session(a.id);
         reg.close_session(b.id);
@@ -391,7 +398,9 @@ mod tests {
         )
         .unwrap();
         let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
-        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         assert!(
             info.id > 41,
             "new ids must not collide with persisted layout references (got {})",
@@ -404,7 +413,9 @@ mod tests {
     #[test]
     fn unknown_profile_is_an_error() {
         let (_tmp, reg) = test_registry();
-        assert!(reg.create_session(Some("nope"), None, 80, 25).is_err());
+        assert!(reg
+            .create_session(Some("nope"), None, 80, 25, false)
+            .is_err());
     }
 
     #[test]
@@ -417,7 +428,7 @@ mod tests {
                 ..Config::default()
             },
         );
-        let (info, s) = reg.create_session(None, None, 80, 25).unwrap();
+        let (info, s) = reg.create_session(None, None, 80, 25, false).unwrap();
         assert_eq!(info.profile, "cmd", "config.json default_profile must win");
         assert!(info.pid.is_some(), "spawned session must report its pid");
         reg.close_session(info.id);
@@ -488,7 +499,9 @@ mod tests {
     #[test]
     fn resize_session_updates_pty_and_dims_atomically() {
         let (_tmp, reg) = test_registry();
-        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         reg.resize_session(info.id, 132, 43).unwrap();
         let listed = reg.list();
         assert_eq!((listed[0].cols, listed[0].rows), (132, 43));
@@ -505,7 +518,9 @@ mod tests {
         // The close-last-tab-then-quit flow: shutdown must not let the daemon
         // exit while the just-closed session's ConPTY teardown is in flight.
         let (_tmp, reg) = test_registry();
-        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         assert!(reg.close_session(info.id));
         reg.shutdown_all();
         assert!(
@@ -517,14 +532,19 @@ mod tests {
     #[test]
     fn absurd_dims_are_rejected() {
         let (_tmp, reg) = test_registry();
-        assert!(reg.create_session(Some("cmd"), None, 0, 25).is_err());
-        assert!(reg.create_session(Some("cmd"), None, 80, 0).is_err());
-        assert!(reg.create_session(Some("cmd"), None, 65535, 25).is_err());
+        assert!(reg.create_session(Some("cmd"), None, 0, 25, false).is_err());
+        assert!(reg.create_session(Some("cmd"), None, 80, 0, false).is_err());
+        assert!(reg
+            .create_session(Some("cmd"), None, 65535, 25, false)
+            .is_err());
         assert!(
-            reg.create_session(Some("cmd"), None, 1000, 500).is_err(),
+            reg.create_session(Some("cmd"), None, 1000, 500, false)
+                .is_err(),
             "individually plausible axes must still respect the cell-area cap"
         );
-        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         assert!(reg.resize_session(info.id, 0, 25).is_err());
         assert!(reg.resize_session(info.id, 80, 65535).is_err());
         assert!(reg.resize_session(info.id, 1000, 500).is_err());
@@ -549,17 +569,17 @@ mod tests {
     fn cwd_must_be_an_existing_absolute_directory() {
         let (_tmp, reg) = test_registry();
         assert!(
-            reg.create_session(Some("cmd"), Some(Path::new("relative")), 80, 25)
+            reg.create_session(Some("cmd"), Some(Path::new("relative")), 80, 25, false)
                 .is_err(),
             "relative cwd must never resolve against the daemon's own cwd"
         );
         let missing = std::env::temp_dir().join("termx-definitely-missing-cwd");
         assert!(reg
-            .create_session(Some("cmd"), Some(&missing), 80, 25)
+            .create_session(Some("cmd"), Some(&missing), 80, 25, false)
             .is_err());
         let file = tempfile::NamedTempFile::new().unwrap();
         assert!(reg
-            .create_session(Some("cmd"), Some(file.path()), 80, 25)
+            .create_session(Some("cmd"), Some(file.path()), 80, 25, false)
             .is_err());
     }
 
@@ -570,13 +590,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let first_id = {
             let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
-            let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+            let (info, s) = reg
+                .create_session(Some("cmd"), None, 80, 25, false)
+                .unwrap();
             reg.close_session(info.id); // persists with sessions: []
             assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
             info.id
         };
         let reg2 = Registry::new(tmp.path().to_path_buf(), Config::default());
-        let (info2, s2) = reg2.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info2, s2) = reg2
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         assert!(
             info2.id > first_id,
             "id {} recycled after empty-list persist (first was {})",
@@ -591,7 +615,7 @@ mod tests {
     fn create_session_after_shutdown_is_refused() {
         let (_tmp, reg) = test_registry();
         reg.shutdown_all();
-        let err = match reg.create_session(Some("cmd"), None, 80, 25) {
+        let err = match reg.create_session(Some("cmd"), None, 80, 25, false) {
             Ok(_) => panic!("create after shutdown must fail"),
             Err(e) => e,
         };
@@ -603,7 +627,9 @@ mod tests {
     fn shutdown_persists_sessions_as_not_alive() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
-        let (_info, session) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (_info, session) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
 
         reg.shutdown_all();
 
@@ -625,7 +651,9 @@ mod tests {
     fn repeated_shutdown_preserves_final_session_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
-        let (info, _session) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, _session) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
 
         reg.shutdown_all();
         reg.shutdown_all();
@@ -640,7 +668,9 @@ mod tests {
     #[test]
     fn persist_writes_sessions_snapshot() {
         let (tmp, reg) = test_registry();
-        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25).unwrap();
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         reg.persist().unwrap();
         let text = std::fs::read_to_string(tmp.path().join("state.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -660,7 +690,7 @@ mod tests {
             },
         );
         let (_info, session) = reg
-            .create_session(Some("cmd"), None, 80, 25)
+            .create_session(Some("cmd"), None, 80, 25, false)
             .expect("spawn");
         // Interactive cmd emits a banner + prompt; whatever arrives, the ring
         // must never exceed the configured cap.

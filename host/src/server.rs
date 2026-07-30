@@ -470,12 +470,14 @@ async fn handle_conn(
                         cwd,
                         cols,
                         rows,
+                        shell_integration,
                     } => {
                         let result = registry.create_session(
                             profile.as_deref(),
                             cwd.as_deref().map(std::path::Path::new),
                             cols,
                             rows,
+                            shell_integration,
                         );
                         let reply = match result {
                             Ok((info, _)) => HostMsg::SessionCreated { info },
@@ -762,13 +764,22 @@ mod tests {
     }
 
     async fn create_cmd(ws: &mut Ws) -> SessionId {
+        create_session(ws, Some("cmd"), false).await
+    }
+
+    async fn create_session(
+        ws: &mut Ws,
+        profile: Option<&str>,
+        shell_integration: bool,
+    ) -> SessionId {
         send_json(
             ws,
             &ClientMsg::CreateSession {
-                profile: Some("cmd".into()),
+                profile: profile.map(Into::into),
                 cwd: None,
                 cols: 100,
                 rows: 30,
+                shell_integration,
             },
         )
         .await;
@@ -846,6 +857,35 @@ mod tests {
         ws.send(Message::Binary(vec![9, 9, 9])).await.unwrap();
         let sessions = auth(&mut ws, &rt).await;
         assert!(sessions.is_empty());
+    }
+
+    /// End-to-end threading of the wire flag: CreateSession{shell_integration}
+    /// must reach profile resolution, so a client that asked for integration
+    /// sees OSC 9;9 cwd reports on its own socket.
+    #[tokio::test]
+    async fn shell_integration_flag_reaches_the_spawned_shell() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        let id = create_session(&mut ws, Some("cmd"), true).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+            },
+        )
+        .await;
+        ws.send(input_frame(id, b"cd \\\r\n")).await.unwrap();
+        let seen = pump_output_until(&mut ws, id, "\x1b]9;9;", 30).await;
+        assert!(
+            seen.contains("\x1b]9;9;"),
+            "no OSC 9;9 cwd report reached the client; saw: {seen:?}"
+        );
+
+        send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
+        shutdown_and_drain(&mut ws).await;
     }
 
     #[tokio::test]
@@ -1447,6 +1487,7 @@ mod tests {
                 cwd: None,
                 cols: 100,
                 rows: 30,
+                shell_integration: false,
             },
         )
         .await;
@@ -1494,7 +1535,7 @@ mod tests {
         let _serial = crate::HEAVY_PTY_TEST.lock().await;
         // Direct forward_session harness: a broadcast capacity of 2 plus a
         // deliberately slow consumer forces the Lagged path deterministically.
-        let profile = crate::profiles::resolve("cmd").unwrap();
+        let profile = crate::profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec![
             "/c".into(),
