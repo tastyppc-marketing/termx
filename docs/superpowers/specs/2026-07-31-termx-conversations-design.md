@@ -88,6 +88,10 @@ The sidebar gains a two-mode header switch: **Terminals | Conversations**
 (Terminals is today's view, unchanged). Conversations mode:
 
 - Provider filter chips: All / Claude / Codex.
+- Selecting a session opens a **detail pane** (below the list or as the rail's
+  lower half): title, full cwd, provider, last-active time, summary and recap
+  (whatever exists, regardless of the row display setting), the Resume button,
+  and the "Files touched" list (§11).
 - Search box filtering on title + cwd + summary + recap (case-insensitive
   substring; same debounce feel as the folder searcher).
 - Folder tree: user-created folders (create, rename, delete via header “+” and
@@ -190,8 +194,10 @@ New "Conversations" section in the existing SettingsDialog, instant-apply:
 - `summaryEngine`: radio, §6 (default `disk-first`).
 - `summaryContent`: radio, §6 (default `summary`).
 - `summaryDisplay`: radio, §6 (default `hover`).
+- `sleepHiddenTerminals`: radio `off | 5 | 15 | 60` minutes (default `15`),
+  §14.
 
-All five join `TermxSettings` with tolerant per-field parsing like the
+All six join `TermxSettings` with tolerant per-field parsing like the
 existing fields.
 
 ## 9. Error handling
@@ -217,14 +223,115 @@ existing fields.
 - Manual smoke (Michael): resume a real Claude and a real Codex session from
   the rail and the palette; flip all five settings live.
 
-## 11. Phasing
+## 11. Session artifacts ("Files touched")
+
+Claude transcripts record every `Write`/`Edit`/`MultiEdit`/`NotebookEdit`
+tool call with its target path. Tauri command
+`list_session_artifacts(file_path) -> Vec<Artifact>` streams the WHOLE
+transcript line-by-line (bounded memory; a 100 MB file streams in well under a
+second) and returns deduplicated
+`{ path, kind: "created" | "edited", exists: bool }` — `kind` is `created` if
+any Write targeted the path, else `edited`; `exists` is a stat at harvest
+time. Runs on `spawn_blocking`, never errors (unreadable → empty). Harvested
+**only when the detail pane's Files section is expanded**, then cached in
+`conversations_v1.json` under
+`artifacts: { "<provider>:<id>": { sourceMtimeMs, files: [...] } }` — re-run
+only when the transcript's mtime moves. Codex transcripts don't record edits
+comparably; artifacts are Claude-only in v1.
+
+Detail-pane UI: file rows grouped created/edited, shown with the same
+leaf-preserving truncation as the folder palette; vanished files grayed.
+Click → open in the viewer (§12); right-click → "Open folder in new tab"
+(create-with-cwd on the file's parent).
+
+## 12. Native file viewer
+
+A read-only viewer for looking at AI-produced files (specs, scripts, notes)
+without leaving TermX. Markdown renders properly (headings, lists, tables,
+fenced code); every other text file shows as clean monospace. One new Tauri
+command `read_text_file(path) -> { content, truncated }`: 2 MB cap (truncated
+flag set beyond), refuses binary (NUL-byte sniff in the first 8 KB), never
+follows the request into an error dialog — failures surface as a one-line
+notice in the viewer frame.
+
+Surfaces and movement (Adobe-lite docking, §14):
+
+- **Docked panel** (default): right side of the terminal area, drag-resizable;
+  a dock-position control moves it right / bottom.
+- **Overlay**: maximized reading mode. `Ctrl+Shift+M` toggles docked ↔
+  overlay.
+- **Tray**: minimizing collapses the viewer to a slim edge pill showing the
+  file name — accessible, out of the way, never lost. Click restores.
+- Entry points: artifacts list (§11), and terminal path links (the existing
+  link detector gains a "view file" action alongside today's copy-path).
+- Layout rule (F5 lesson, now a standing constraint): the viewer, pane
+  toolbars, search bar, and tray must never overlap one another; docking
+  reserves real space instead of floating over controls.
+
+Viewer geometry (dock side, sizes, tray state) persists in
+`ui_state_v1.json`.
+
+## 13. Terminal semi-sleep
+
+After a terminal tab has been hidden (not the visible tab) for
+`sleepHiddenTerminals` minutes, the UI disposes its xterm presentation — the
+expensive DOM/renderer — while the host keeps the session running untouched.
+Revealing the tab wakes it: reattach with replay, restoring scrollback and
+the live process sub-second. The sidebar marks sleeping tabs with a subtle
+"zZ" affordance; a sleeping tab's activity badge freezes until wake (accepted
+trade).
+
+**Resize discipline (the malformed-scrollback defense).** Replaying recorded
+bytes into a terminal sized differently from when they were produced is what
+garbles TUIs. Therefore, on EVERY reattach (wake, tab switch back, app
+relaunch): the terminal is created at the session's recorded cols×rows, the
+replay runs at those dims, and only then does fit-to-container resize the PTY
+— so full-screen apps (Claude Code) receive one clean resize signal and
+redraw themselves at the new width. Live resizes stay debounced through the
+existing fit path. xterm's own reflow handles soft-wrapped lines. V2's smoke
+explicitly includes: resize the window mid-Claude-Code-generation, scroll up,
+verify no interleaved-width garbage beyond what the app itself repaints.
+
+## 14. Performance principles and layout system
+
+Standing principles for this batch and after:
+
+- Nothing runs when unused: no scanning while the rail is closed; artifacts
+  harvest on expand only; LLM notes only for visible rows, rate-limited;
+  viewer loads one file; index is incremental; sleep reclaims renderers.
+- Target: comfortable on older hardware with many sessions indexed and many
+  tabs open (sleep bounds live renderers to roughly the visible set).
+- **Adobe-lite docking (this batch)**: the new surfaces are movable within
+  fixed slots — viewer docks right/bottom/overlay/tray, Conversations rail
+  docks left/right, all panel edges drag-resize, all geometry persists in
+  `ui_state_v1.json`. No overlapping controls, ever.
+- **North star (explicitly NOT this batch)**: full Adobe-style free docking —
+  tear-off floating trays, arbitrary panel nesting, saveable workspace
+  presets. Revisit once the fixed-slot system proves itself.
+
+## 15. Phasing
 
 - R3 (agent): `llm_sessions` adapters + index + `list_llm_sessions` +
   `generate_session_note` + allowlist additions + ACL/build.rs wiring.
 - R4 (agent, tiny): TERMX env stamp in host profiles + tests.
-- U6: settings fields + Conversations settings section.
-- U7: ConversationsStore + conversations_v1 storage + rail UI + folders.
+- R5 (agent): `list_session_artifacts` + `read_text_file` commands + ACL.
+- U6: settings fields (all six) + Conversations settings section.
+- U7: ConversationsStore + conversations_v1 storage + rail UI + folders +
+  detail pane shell.
 - U8: session palette (Ctrl+Shift+R).
 - U9: resume flow (prompt-ready wait, input injection, validation).
 - U10: LLM note scheduler.
-- V2: full gates, restage portable pair, live verification.
+- U11: artifacts UI in the detail pane (harvest-on-expand, cache).
+- U12: file viewer (markdown render, dock/overlay/tray, path-link entry,
+  geometry persistence).
+- U13: terminal semi-sleep + reattach resize discipline (replay at recorded
+  dims, then fit).
+- V2: full gates, restage portable pair, live verification incl. the
+  resize-mid-generation smoke.
+
+Additions to §10 testing, matching the new tasks: artifact-harvest fixtures
+(tool_use lines, dedupe, kind precedence, vanished files); viewer tests
+(markdown vs plaintext routing, truncation flag, binary refusal, dock/tray
+state transitions); sleep tests (timer → presentation disposed while
+attachment state survives; wake replays at recorded dims BEFORE fit —
+asserted via a fake presentation recording the dim sequence).
