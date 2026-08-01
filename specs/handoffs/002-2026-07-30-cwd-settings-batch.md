@@ -45,6 +45,37 @@ shortcut installed (%APPDATA%\...\Start Menu\Programs\TermX.lnk). Task #9
   to provider stores; ISO parser year/offset bounds; tauri crate 122).
   STILL RUNNING: U12 gpt-5.6 in worktree u12-viewer. U13 adversarial
   gpt-5.6 review still due (Wave C).
+- **Wave B COMPLETE (task #11 done)**: + U12 MERGED `00aa981` (viewer:
+  markdown.ts trust boundary, ViewerHost dock/overlay/tray + Ctrl+Shift+M,
+  TranscriptView mount seam via import.meta.glob — U14 exports named
+  `TranscriptView: ComponentType<{record}>` from
+  ui/src/viewer/transcript/TranscriptView.tsx; seam tests need await
+  setTimeout(0); uiState gains viewerGeometry + setViewerGeometry; App
+  wiring uses `.viewer-area` container + viewerLayoutDirection()). gpt-5.6
+  claude-x lane DIED TWICE on U12 (status killed, banner-only output,
+  proxy alive) → Opus fallback finished it in the same worktree. UI
+  baseline now **523**.
+- **Wave C ROUND 1 IN FLIGHT (dispatched 2026-08-01 ~00:15, task #12)**:
+  Agent-tool: u9-resume (Opus; resume.ts + WorkspaceController;
+  id-validated /^[A-Za-z0-9-]+$/, OSC-ready waiter 15s, integration-off
+  1.5s), u10-scheduler (Opus; noteScheduler.ts, structural store facade),
+  u16-close (Sonnet; close/ CloseGuard + decideOnClose). claude-x
+  worktrees (briefs TASK-U*.md at each root, npm pre-installed):
+  u8-palette (grok-4.5), u11-artifacts (grok-4.5; may minimally touch
+  store.ts — explicit exception), u14-transcript (gpt-5.6; native/
+  transcript.ts wrappers + viewer/transcript/). u13-review (gpt-5.6
+  adversarial lifecycle review of 9091457, brief REVIEW-U13.md).
+  FALLBACKS: U8/U11→Sonnet, U14→Opus. ROUND 2 after U9 merges: U17
+  merge/extract tabs (Opus) — serialized because U9+U17 both modify
+  WorkspaceController.ts. THEN: single main integration pass (App.tsx:
+  ViewerHost via .viewer-area, Sidebar conversations prop + tray adoption
+  + zZ badge via SleepController.getSnapshot (main must NOT call
+  observe()), Ctrl+Shift+R gated on conversationsPalette, resume/
+  transcript/artifact callbacks, CloseGuard + onCloseRequested +
+  client.shutdown() stop-all, NoteScheduler gated on engine) and V2
+  (gates → npx tauri build --no-bundle → restage 3 exes → PrintWindow
+  screenshot → live checks incl. generate_session_note (claude .cmd
+  resolution risk!) and resize-mid-generation → Michael's smoke list).
 - **Wave B dispatch details (dispatched 2026-07-31 ~23:45, task #11)**:
   u7-conversations (Opus agent, worktree, spec §3: ConversationsStore + rail
   + folders + DetailPane + Sidebar mode switch); u13-sleep (Opus agent,
