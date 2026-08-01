@@ -39,6 +39,7 @@
 | C | U11 artifacts UI | Grok-4.5 (fallback Sonnet) | `ui/src/conversations/DetailPane*` |
 | C | U14 transcript mode | GPT-5.6-sol (fallback Opus) | `ui/src/viewer/transcript/` |
 | C | U16 close behavior | Sonnet | `ui/src/close/` (new) |
+| C | U17 merge/extract tabs | Opus | `ui/src/workspace/layoutOperations.ts`, `WorkspaceController.ts` |
 | — | Reviews | Gemini-3.1-pro second-opinion on R3+U7; GPT-5.6-sol adversarial on U13; main line-by-line on ALL | — |
 | — | Integration + V2 | Fable (main) | registration files, App.tsx, tray adoption, link action |
 
@@ -293,6 +294,27 @@ export function decideOnClose(setting: TermxSettings["onWindowClose"], anyAlive:
 
 - [ ] Tests: decideOnClose matrix; dialog renders copy, buttons fire (decision, remember) pairs, focus trap, Esc = Keep running without remember.
 - [ ] Suite + tsc green.
+
+### Task U17: combine tabs side-by-side (spec §16)
+
+**Files:** Modify `ui/src/workspace/layoutOperations.ts`, `ui/src/workspace/WorkspaceController.ts`; tests in the existing `__tests__` files. (Sidebar menu item + pane-toolbar chip wiring = main at integration; you expose the controller methods and, if a menu-item seam already exists in the tab context menu contract, document it — do not edit Sidebar.tsx.)
+
+**Interfaces (Produces):**
+```ts
+// layoutOperations.ts (pure):
+export function mergeTabIntoTab(layout: LayoutV1, sourceTabId: string, targetTabId: string): LayoutV1 | null;
+// null = refused (missing tab, same tab, or combined depth would exceed the existing split-depth cap the file already enforces)
+export function extractSessionToTab(layout: LayoutV1, tabId: string, sessionId: number, newTabId: string): LayoutV1 | null;
+// null = refused (session not in tab, or it is the tab's only pane)
+// WorkspaceController gains:
+mergeTabs(sourceTabId: string, targetTabId: string): void;   // notice "The tabs could not be combined." on refusal
+popOutPane(tabId: string, sessionId: number): void;          // uses generateId for the new tab; same group; focus follows
+```
+
+**Behavior:** spec §16 — merge grafts the source tab's whole split subtree as a NEW right-hand sibling of the target root (sizes rebalanced equally at the graft point); source tab removed from its group/ungrouped list; active tab stays target with focus on the merged-in subtree's first session. Extract removes one session pane from its split (collapsing single-child splits, reusing the pruning helpers already in the file), creates a tab after the source tab in the same group. Persistence kind "structural". No session/attachment lifecycle changes whatsoever.
+
+- [ ] Tests: pure-fn matrix (merge into simple/split target; depth-cap refusal; unknown ids; same-tab; group membership after merge; extract restores a merged shape round-trip; only-pane refusal; split-collapse correctness); controller tests (notice on refusal, persistence recorded structural, focus follows, generateId used for pop-out tab).
+- [ ] Suite + tsc green. Report exact signatures + any depth-cap constant you relied on.
 
 ### Integration (main thread, after each wave)
 

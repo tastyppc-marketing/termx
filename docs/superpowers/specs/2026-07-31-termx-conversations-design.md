@@ -384,7 +384,28 @@ impossible to close TermX without understanding what happens.
   the background-behavior explanation.
 - No alive sessions → close is always silent.
 
-## 16. Phasing
+## 16. Combine tabs side-by-side (merge / extract)
+
+Two live sessions — often two agents' plans in one group — must be viewable
+side by side even though they live in different tabs. Because sessions are
+daemon-owned and panes are layout-tree positions, this is layout surgery
+with zero session disruption (scrollback replays on remount):
+
+- **Merge**: tab context menu (sidebar) gains "Side-by-side with active
+  tab": the source tab's entire split subtree becomes a new right-hand
+  sibling inside the active tab; the source tab disappears from the rail.
+  Refused with a notice when the combined split depth would exceed the
+  existing split-depth cap.
+- **Extract** (the undo): every pane's toolbar gains "Pop out to own tab"
+  (registered as a §14 action chip): the session leaves its split and
+  becomes its own tab in the same group, restoring the pre-merge shape.
+- Both are pure functions in `layoutOperations.ts` over `LayoutV1`,
+  persisted through the normal layout-persistence path. Focus follows the
+  merged-in pane. Sessions, attachments, and scrollback are untouched.
+- Drag-and-drop merging (drag a tab onto a pane) belongs to Wave 2 with the
+  rest of the drag system; v1 is menu-driven.
+
+## 17. Phasing
 
 - R3 (agent): `llm_sessions` adapters + index + `list_llm_sessions` +
   `generate_session_note` + allowlist additions + ACL/build.rs wiring.
