@@ -148,6 +148,29 @@ shortcut installed (%APPDATA%\...\Start Menu\Programs\TermX.lnk). Task #9
   still alive, worktree files mtime 01:05, uncommitted; contracts in "U14
   contract from R5" bullet + named export TranscriptView), then V2 verify
   + restage (checklist in ROUND 1 bullet; claude .cmd resolution risk).
+- **WAVE C + V2 COMPLETE (2026-08-01 ~03:20)**: U14 merged `261e287`
+  (transcript mode; gpt-5.6 lane killed near-done, Opus fallback finished
+  in same worktree; worktree removed, no junctions). DetailPane files CSS
+  `f79b55f`. V2 fixes found by live verification + Michael's smoke:
+  `ebd2b04` (Command::new("claude") can't spawn npm .cmd shims —
+  resolve_program probes PATH for .exe/.cmd/.bat), `3e30bd5` (Haiku was
+  ANSWERING transcripts, not labeling them — instruction moved to
+  --system-prompt with data-not-request guard; stdin now a dialogue
+  digest: user/assistant text from a 512KB tail, both provider shapes,
+  6KB budget newest-first; raw tail fallback), `349d299` (CREATE_NO_WINDOW
+  on note spawn — windowed app + cmd.exe child = a FOCUS-STEALING CONSOLE
+  PER GENERATION, 57 flashes made Michael's desktop unusable, killed his
+  UI mid-storm (daemon+sessions survived); summary spec now "two short
+  sentences, three max, 360 chars" per Michael, shape_note joins lines,
+  rail row title tooltip). Wiped 57 garbage notes from
+  %APPDATA%\TermX\conversations_v1.json (backup .bak). Baselines: ui
+  **661**, tauri crate **128**, host 118, e2e 5, clippy 0. Portable pair
+  RESTAGED 03:18 (TermX.exe/termx-ui.exe 5,900,800B + termx-host.exe
+  01:50; .old copies removed; custom_protocol verified). Michael's daemon
+  22712 runs the NEW host; UI awaiting his relaunch. Smoke-instance
+  leftovers live in scratchpad termx-v2-smoke (throwaway). NEXT: task #9
+  (WS reconnect) is the next batch; Michael's interactive smoke list
+  outstanding.
 - **Wave B dispatch details (dispatched 2026-07-31 ~23:45, task #11)**:
   u7-conversations (Opus agent, worktree, spec §3: ConversationsStore + rail
   + folders + DetailPane + Sidebar mode switch); u13-sleep (Opus agent,
