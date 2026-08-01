@@ -91,7 +91,8 @@ The sidebar gains a two-mode header switch: **Terminals | Conversations**
 - Selecting a session opens a **detail pane** (below the list or as the rail's
   lower half): title, full cwd, provider, last-active time, summary and recap
   (whatever exists, regardless of the row display setting), the Resume button,
-  and the "Files touched" list (§11).
+  an **Open transcript** button (§12 transcript mode — the complete
+  conversation, any size), and the "Files touched" list (§11).
 - Search box filtering on title + cwd + summary + recap (case-insensitive
   substring; same debounce feel as the folder searcher).
 - Folder tree: user-created folders (create, rename, delete via header “+” and
@@ -271,6 +272,29 @@ Surfaces and movement (Adobe-lite docking, §14):
 Viewer geometry (dock side, sizes, tray state) persists in
 `ui_state_v1.json`.
 
+**Transcript mode.** The viewer's second mode renders a session's COMPLETE
+conversation from its transcript file — the terminal scrollback ring never
+limits this, because the harness writes the full conversation to disk
+independently of the terminal. Guarantees:
+
+- Opens from the detail pane's "Open transcript" button, positioned at the
+  END (most recent turns) — the "where were we" view — with a "Load earlier"
+  control that pages backward.
+- Backed by a windowed Tauri command
+  `read_transcript_window(file_path, before_offset: Option<u64>, max_bytes: u32)
+  -> { lines: Vec<String>, next_before_offset: Option<u64> }`: reads one
+  bounded chunk ending at `before_offset` (default EOF), splits on newlines,
+  discards the leading partial line and reports its offset as the next
+  cursor. The full file is NEVER loaded; a 500 MB transcript costs the same
+  per page as a 1 MB one.
+- The UI parses each jsonl line tolerantly and renders user and assistant
+  turns as formatted blocks (markdown for text), with tool calls/results
+  collapsed to one-line stubs ("tool: Write ui/src/App.tsx") expandable in
+  place. Unrenderable lines are skipped silently.
+- Loaded chunks accumulate up to a memory guard (~10 MB parsed); loading
+  beyond it drops the farthest-away chunks (re-loadable by scrolling back —
+  offsets make this cheap).
+
 ## 13. Terminal semi-sleep
 
 After a terminal tab has been hidden (not the visible tab) for
@@ -305,9 +329,20 @@ Standing principles for this batch and after:
   fixed slots — viewer docks right/bottom/overlay/tray, Conversations rail
   docks left/right, all panel edges drag-resize, all geometry persists in
   `ui_state_v1.json`. No overlapping controls, ever.
-- **North star (explicitly NOT this batch)**: full Adobe-style free docking —
-  tear-off floating trays, arbitrary panel nesting, saveable workspace
-  presets. Revisit once the fixed-slot system proves itself.
+- **Action registry + editable trays (this batch, foundation)**: every
+  toolbar/rail button is registered as an action chip
+  `{ id, icon, label, run }` in one registry; each tray (sidebar footer, pane
+  toolbar, viewer header) renders a persisted, ordered chip list from
+  `ui_state_v1.json` rather than hardcoded buttons. Customization v1 is
+  menu-driven and dependency-free: right-click a chip → "Remove from tray";
+  a **Features dock** (opened from Settings or a rail button) lists every
+  registered action with "Add to <tray>" per tray. Config is a few small
+  string arrays — zero runtime cost; unknown ids in a stale config are
+  ignored, and a "Reset layout" restores defaults.
+- **Wave 2 (next batch, own design pass)**: true Adobe-grade manipulation on
+  top of the registry — drag chips off trays, drag between trays, drag from
+  the Features dock, floating tear-off trays, workspace presets. The registry
+  above is deliberately shaped so Wave 2 changes interaction, not data.
 
 ## 15. Phasing
 
@@ -326,6 +361,9 @@ Standing principles for this batch and after:
   geometry persistence).
 - U13: terminal semi-sleep + reattach resize discipline (replay at recorded
   dims, then fit).
+- U14: transcript mode (windowed `read_transcript_window` command joins R5;
+  paged rendering, collapsed tool stubs, memory guard).
+- U15: action registry + tray configs + Features dock (menu-driven v1).
 - V2: full gates, restage portable pair, live verification incl. the
   resize-mid-generation smoke.
 
