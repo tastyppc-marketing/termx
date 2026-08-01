@@ -196,7 +196,8 @@ function FilesTouchedSection({
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [fetchedFiles, setFetchedFiles] = useState<SessionArtifactFile[] | null>(null);
-  const [fetchedOnce, setFetchedOnce] = useState(false);
+  /** `record.updatedAtMs` at fetch start — a newer record makes a re-expand refetch. */
+  const [fetchedAtMs, setFetchedAtMs] = useState<number | null>(null);
   const [menu, setMenu] = useState<FileMenuState | null>(null);
   const cancelledRef = useRef(false);
 
@@ -211,8 +212,9 @@ function FilesTouchedSection({
   const handleToggle = () => {
     const next = !expanded;
     setExpanded(next);
-    if (next && files === null && !fetchedOnce) {
-      setFetchedOnce(true);
+    const stale = fetchedAtMs !== null && record.updatedAtMs > fetchedAtMs;
+    if (next && !loading && (files === null || stale)) {
+      setFetchedAtMs(record.updatedAtMs);
       setLoading(true);
       void listArtifacts(record.filePath).then((result) => {
         onArtifactsFetched?.(sessionKey(record), {

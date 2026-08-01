@@ -255,6 +255,37 @@ describe("DetailPane files-touched artifacts (§11)", () => {
     expect(listArtifacts).toHaveBeenCalledTimes(1);
   });
 
+  it("refetches on re-expand when the record updated after the completed fetch", async () => {
+    const listArtifacts = vi.fn(async () => []);
+    const before = record();
+    const after = record({ updatedAtMs: before.updatedAtMs + 1 });
+    const renderWith = async (rec: LlmSessionRecord) => {
+      await act(async () => {
+        root.render(
+          <DetailPane
+            record={rec}
+            note={{ summary: null, recap: null }}
+            onResume={vi.fn()}
+            onOpenTranscript={vi.fn()}
+            nowMs={NOW}
+            listArtifacts={listArtifacts}
+          />,
+        );
+      });
+    };
+    await renderWith(before);
+    await toggleFiles();
+    await flush();
+    expect(listArtifacts).toHaveBeenCalledTimes(1);
+
+    // Same sessionKey, newer transcript: no remount, but the next expand
+    // must notice the record moved past the fetch and refetch.
+    await renderWith(after);
+    await toggleFiles(); // collapse
+    await toggleFiles(); // expand again
+    expect(listArtifacts).toHaveBeenCalledTimes(2);
+  });
+
   it("uses a fresh cached harvest without ever fetching", async () => {
     const cached: SessionArtifacts = {
       sourceMtimeMs: UPDATED_AT,
