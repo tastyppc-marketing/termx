@@ -1,5 +1,49 @@
 # Session Handoff - 2026-07-30 (living; append as work lands)
 
+## CONVERSATIONS BATCH IN FLIGHT (2026-07-31 ~22:00) — READ FIRST
+Previous batch (cwd/settings) SHIPPED: V1 done, app restaged + Start Menu
+shortcut installed (%APPDATA%\...\Start Menu\Programs\TermX.lnk). Task #9
+(WS reconnect resilience) still pending, next batch.
+
+**Current work: TermX Conversations batch.**
+- Spec: `C:\Dev\TermX\docs\superpowers\specs\2026-07-31-termx-conversations-design.md`
+  (§1–§17: adapters, index, rail+folders+detail, palette, resume, summaries/
+  recaps, TERMX env, settings, artifacts, viewer+transcript+search, sleep,
+  registry/trays, close-safety, merge/extract tabs). Final commit `0de50e5`.
+- Plan: `C:\Dev\TermX\docs\superpowers\plans\2026-07-31-conversations-plan.md`
+  (`db165f0` + U17 in `0de50e5`) — Global Constraints, model routing table,
+  Waves A/B/C with disjoint file roots, exact interfaces per task. THE
+  contract for all agents; read it before dispatching anything.
+- Routing (Michael's directive + research): Opus bulk; Sonnet light; Grok-4.5
+  mid (claude-x); GPT-5.6-sol hardest UI (U12/U14) + adversarial U13 review;
+  Gemini-3.1-pro second-opinion reviews (R3+U7); Fable = contracts, reviews,
+  wiring (lib.rs/build.rs/capabilities/App.tsx/Sidebar), V2. claude-x lanes
+  SMOKE-VERIFIED (gpt-5.6 + grok-4.5 both replied OK via raine :18765).
+- **Wave A state**: R4 MERGED `4ac342a` (TERMX env stamp, 118 host tests).
+  U6 MERGED `a1a240a` (7 settings fields, 372 ui tests + tsc). STILL
+  RUNNING: r3-llm-sessions (Opus, worktree agent-ab4761da2c7c2b4f2),
+  r5-transcript-cmds (Opus, agent-ab23db09ae157990e), u15-actions (Opus,
+  agent-abd109d5cb08d870c) — worktrees under C:\Dev\TermX\.claude\worktrees\.
+- **Merge protocol**: agent commits once in its worktree ("wip: <task>") →
+  main reviews diff line-by-line → `git cherry-pick -n <sha>` on main →
+  run gates INDEPENDENTLY (host: cargo test -p termx-host; ui: npx tsc -b +
+  npx vitest run --reporter=dot from ui/) → commit with agent attribution +
+  standard trailers → `git worktree remove --force` + `branch -D`.
+- After R3+R5 merge: MAIN wires their 6 commands into lib.rs/build.rs/
+  capabilities/default.json (one commit; verify gen/schemas/acl-manifests
+  resolution). Then dispatch Wave B per plan table (U7 Opus, U12 gpt-5.6-sol
+  in claude-x worktree, U13 Opus). Wave C after B (incl. new U17
+  merge/extract tabs). Integration steps + V2 checklist are in the plan.
+- Task tool: #10 = Wave A (in_progress). Flip ONE task per message
+  (completion-gate hook runs full suite per flip; concurrent flips flake
+  registry shutdown-timing tests — pass in isolation).
+- Gotchas: agent worktrees lack node_modules (agents run npm install
+  themselves); ignore mid-work TS diagnostics streaming from
+  .claude/worktrees/*; compact-guard suggests a BOGUS handoff dir under
+  ui\ — THIS file is the handoff; claude-x needs profile (use
+  `powershell -Command`, NOT -NoProfile); daemon idle cost measured ~7MB/0
+  CPU (quotable); ui suite baseline now 372.
+
 ## SMOKE INCIDENT + E2E RUNTIME PROOF (2026-07-30 ~12:15) — READ FIRST
 - Michael's first smoke hit "The terminal session could not be created."
   ROOT CAUSE: the app instance had been up since 03:14; its control
