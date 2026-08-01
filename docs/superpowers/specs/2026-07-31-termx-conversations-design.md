@@ -197,8 +197,10 @@ New "Conversations" section in the existing SettingsDialog, instant-apply:
 - `summaryDisplay`: radio, §6 (default `hover`).
 - `sleepHiddenTerminals`: radio `off | 5 | 15 | 60` minutes (default `15`),
   §14.
+- `onWindowClose`: radio `ask | keep-running | stop-all` (default `ask`),
+  §15.
 
-All six join `TermxSettings` with tolerant per-field parsing like the
+All seven join `TermxSettings` with tolerant per-field parsing like the
 existing fields.
 
 ## 9. Error handling
@@ -295,6 +297,23 @@ independently of the terminal. Guarantees:
   beyond it drops the farthest-away chunks (re-loadable by scrolling back —
   offsets make this cheap).
 
+**Transcript search.** `Ctrl+F` while the transcript has focus opens a
+search bar with three modes — substring (default, case-insensitive),
+regex, and fuzzy (subsequence) — plus next/prev navigation. Search runs
+server-side so size never matters: Tauri command
+`search_transcript(file_path, query, mode, filter, max_results) ->
+Vec<{ offset: u64, snippet: String }>` streams the whole file in Rust
+(`filter: all | user` restricts matches to user-turn lines), capped at
+`max_results` (default 200) with a "more matches exist" flag. Selecting a
+match loads the chunk at that offset and highlights it. Invalid regex shows
+an inline error, never a crash.
+
+**Jump to last user message.** A dedicated control (and `Ctrl+Shift+J`, the
+same muscle memory as the terminal feature): first press jumps to the most
+recent user turn, repeats walk to earlier user turns, scrolling to the
+bottom resets the walk — implemented via `search_transcript` with
+`filter: user`.
+
 ## 13. Terminal semi-sleep
 
 After a terminal tab has been hidden (not the visible tab) for
@@ -344,7 +363,28 @@ Standing principles for this batch and after:
   the Features dock, floating tear-off trays, workspace presets. The registry
   above is deliberately shaped so Wave 2 changes interaction, not data.
 
-## 15. Phasing
+## 15. Window close: safety and clarity
+
+Closing the TermX window does NOT stop terminals — the host daemon keeps
+every session (and any agent running in one) alive in the background. That
+is the product's superpower (long-horizon tasks survive; measured daemon
+idle cost: ~7 MB RAM, ~0 CPU) and also a safety hazard: someone watching an
+agent misbehave may close the window expecting that to stop it. It must be
+impossible to close TermX without understanding what happens.
+
+- With `onWindowClose: ask` (the default), closing while any session is
+  alive shows a dialog: **"Your terminals keep running in the background"**
+  — body copy states that running programs and agents will continue and that
+  reopening TermX restores them; buttons **Keep running** and
+  **Stop everything** (sends the daemon Shutdown — the wire message already
+  exists — killing all session process trees), plus a "Remember my choice"
+  checkbox that writes `keep-running` or `stop-all` to settings.
+- `keep-running` / `stop-all` close silently with that behavior; the setting
+  can always be changed in the Settings pane, where the option text repeats
+  the background-behavior explanation.
+- No alive sessions → close is always silent.
+
+## 16. Phasing
 
 - R3 (agent): `llm_sessions` adapters + index + `list_llm_sessions` +
   `generate_session_note` + allowlist additions + ACL/build.rs wiring.
@@ -361,9 +401,11 @@ Standing principles for this batch and after:
   geometry persistence).
 - U13: terminal semi-sleep + reattach resize discipline (replay at recorded
   dims, then fit).
-- U14: transcript mode (windowed `read_transcript_window` command joins R5;
-  paged rendering, collapsed tool stubs, memory guard).
+- U14: transcript mode (windowed `read_transcript_window` and
+  `search_transcript` commands join R5; paged rendering, collapsed tool
+  stubs, memory guard, Ctrl+F search modes, jump-to-last-user-message).
 - U15: action registry + tray configs + Features dock (menu-driven v1).
+- U16: window-close behavior (§15 dialog, setting, Shutdown wiring).
 - V2: full gates, restage portable pair, live verification incl. the
   resize-mid-generation smoke.
 
