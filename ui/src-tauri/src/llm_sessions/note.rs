@@ -53,10 +53,25 @@ pub fn instruction(kind: &str) -> Option<&'static str> {
 }
 
 /// The command for a note kind, without running it.
+///
+/// The isolation flags are load-bearing: the transcript excerpt is untrusted
+/// model input, so the CLI runs with no tools (nothing an injected prompt
+/// could execute), no customizations (`--safe-mode`: no hooks, plugins,
+/// CLAUDE.md, or MCP servers), and no session persistence — otherwise every
+/// note would write a synthetic transcript under `~/.claude/projects` that
+/// our own scanner then lists, feeding the summarizer its own output.
 pub fn note_command(program: &str, kind: &str) -> Option<Command> {
     let instruction = instruction(kind)?;
     let mut command = Command::new(program);
-    command.arg("-p").arg("--model").arg(MODEL).arg(instruction);
+    command
+        .arg("-p")
+        .arg("--model")
+        .arg(MODEL)
+        .arg("--no-session-persistence")
+        .arg("--safe-mode")
+        .arg("--tools")
+        .arg("")
+        .arg(instruction);
     Some(command)
 }
 
@@ -231,11 +246,21 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(command.get_program().to_string_lossy(), "stub-cli");
-        assert_eq!(args[0], "-p");
-        assert_eq!(args[1], "--model");
-        assert_eq!(args[2], MODEL);
-        assert!(args[3].contains("ONE line"), "{args:?}");
-        assert_eq!(args.len(), 4, "no transcript on the command line: {args:?}");
+        assert_eq!(
+            &args[..7],
+            [
+                "-p",
+                "--model",
+                MODEL,
+                "--no-session-persistence",
+                "--safe-mode",
+                "--tools",
+                ""
+            ],
+            "isolation flags are load-bearing: {args:?}"
+        );
+        assert!(args[7].contains("ONE line"), "{args:?}");
+        assert_eq!(args.len(), 8, "no transcript on the command line: {args:?}");
     }
 
     #[test]

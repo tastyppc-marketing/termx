@@ -182,7 +182,14 @@ pub fn parse_iso8601_ms(text: &str) -> Option<u64> {
     let year: i64 = date_parts.next()?.parse().ok()?;
     let month: u32 = date_parts.next()?.parse().ok()?;
     let day: u32 = date_parts.next()?.parse().ok()?;
-    if date_parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    // The year bound is what keeps every multiplication below inside i64:
+    // an absurd year (or offset, checked in `split_offset`) must be a `None`,
+    // not a debug-build overflow panic inside a spawn_blocking task.
+    if date_parts.next().is_some()
+        || !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+    {
         return None;
     }
 
@@ -232,6 +239,11 @@ fn split_offset(rest: &str) -> Option<(&str, i64)> {
     let (hours, minutes) = offset[1..].split_once(':').unwrap_or((&offset[1..], "0"));
     let hours: i64 = hours.parse().ok()?;
     let minutes: i64 = minutes.parse().ok()?;
+    // No real zone is outside ±23:59; anything else would also overflow the
+    // arithmetic below on hostile input.
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
     let ms = (hours * 3_600_000) + (minutes * 60_000);
     Some((time, if negative { -ms } else { ms }))
 }
@@ -317,6 +329,12 @@ mod tests {
             "2026-03-12T00:61:00Z",
             "2026-03-12T00:00:00:00Z",
             "1960-01-01T00:00:00Z", // before the epoch: not representable
+            // Hostile numeric components must be None, never an overflow.
+            "9999999999999-01-01T00:00:00Z",
+            "10000-01-01T00:00:00Z",
+            "2026-03-12T00:00:00+9223372036854775807:00",
+            "2026-03-12T00:00:00+24:00",
+            "2026-03-12T00:00:00-00:99",
         ] {
             assert_eq!(parse_iso8601_ms(junk), None, "{junk:?} must not parse");
         }

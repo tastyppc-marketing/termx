@@ -274,15 +274,42 @@ pub fn list_sessions_now(force: bool) -> Vec<SessionRecord> {
     records
 }
 
+/// Only transcripts inside a provider's own store may be summarized. The
+/// renderer hands us a path, and without this check the command would read
+/// the tail of ANY file and pipe it to the CLI — canonicalize both sides
+/// (resolving symlinks and `..`) and require the target to live under
+/// `.claude\projects` or `.codex\sessions`.
+pub(crate) fn note_target_allowed(roots: &Roots, path: &Path) -> bool {
+    let Ok(target) = std::fs::canonicalize(path) else {
+        return false; // a transcript that cannot be resolved cannot be noted
+    };
+    [
+        roots.claude_projects.clone(),
+        roots.codex_home.join(codex::SESSIONS_DIR),
+    ]
+    .iter()
+    .any(|root| {
+        std::fs::canonicalize(root).is_ok_and(|root| target.starts_with(&root))
+    })
+}
+
 /// Tauri command: an LLM-written note for one session. `kind` is `"summary"`
-/// or `"recap"`. Any failure — unknown kind, missing binary, timeout, empty
-/// output — is `None`; the caller keeps whatever it already had.
+/// or `"recap"`. Any failure — unknown kind, path outside the provider
+/// stores, missing binary, timeout, empty output — is `None`; the caller
+/// keeps whatever it already had.
 #[tauri::command]
 pub async fn generate_session_note(file_path: String, kind: String) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let path = Path::new(&file_path);
+        let allowed = default_roots()
+            .map(|roots| note_target_allowed(&roots, path))
+            .unwrap_or(false);
+        if !allowed {
+            return None;
+        }
         note::generate_note_with(
             note::DEFAULT_PROGRAM,
-            Path::new(&file_path),
+            path,
             &kind,
             note::DEFAULT_TIMEOUT,
         )
@@ -539,6 +566,46 @@ mod tests {
         crate::storage::write_file_in(dir.path(), INDEX_FILE, &index.serialize()).unwrap();
         let text = crate::storage::read_file_in(dir.path(), INDEX_FILE).unwrap();
         assert_eq!(index::parse_index(text.as_deref()).entries, index.entries);
+    }
+
+    #[test]
+    fn note_targets_outside_the_provider_stores_are_refused() {
+        let home = fixture_home();
+        let roots = Roots::under_home(home.path());
+
+        let claude = claude_session(home.path());
+        assert!(note_target_allowed(&roots, &claude), "own store is allowed");
+        let codex_rollout = at(
+            home.path(),
+            &[
+                ".codex",
+                "sessions",
+                "2026",
+                "03",
+                "12",
+                "rollout-2026-03-12T18-34-21-019ce354-0101-7a92-9a4d-3123a993d4f9.jsonl",
+            ],
+        );
+        assert!(note_target_allowed(&roots, &codex_rollout));
+
+        // Outside both stores, a traversal that ends outside, the codex index
+        // (adjacent to but not inside sessions\), and a missing file.
+        let secret = home.path().join("secret.txt");
+        std::fs::write(&secret, b"nope").unwrap();
+        assert!(!note_target_allowed(&roots, &secret));
+        let traversal = at(
+            home.path(),
+            &[".claude", "projects", "C--Dev-Proj", "..", "..", "..", "secret.txt"],
+        );
+        assert!(!note_target_allowed(&roots, &traversal), "dot-dot escape");
+        assert!(!note_target_allowed(
+            &roots,
+            &at(home.path(), &[".codex", "session_index.jsonl"])
+        ));
+        assert!(!note_target_allowed(
+            &roots,
+            &at(home.path(), &[".claude", "projects", "gone", "x.jsonl"])
+        ));
     }
 
     #[test]
