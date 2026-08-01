@@ -68,6 +68,15 @@ fn validate_cwd(cwd: Option<&Path>) -> Result<Option<PathBuf>> {
     Ok(Some(cwd.to_path_buf()))
 }
 
+/// Stamps `TERMX=1` and `TERMX_SESSION_ID=<id>` onto a resolved profile's env
+/// so CLIs, CLAUDE.md rules, and hooks running inside the spawned shell can
+/// detect they are inside TermX (spec §7). Independent of
+/// `shell_integration` — this always runs, unlike the cmd PROMPT hook above.
+fn stamp_termx_env(env: &mut Vec<(String, String)>, id: SessionId) {
+    env.push(("TERMX".to_string(), "1".to_string()));
+    env.push(("TERMX_SESSION_ID".to_string(), id.to_string()));
+}
+
 impl Registry {
     pub fn new(data_dir: PathBuf, config: Config) -> Registry {
         // Load prior state: layout blob + the id watermark, so ids never
@@ -124,7 +133,7 @@ impl Registry {
         validate_dims(cols, rows)?;
         let cwd = validate_cwd(cwd)?;
         let name = profile.unwrap_or(&self.config.default_profile);
-        let prof = profiles::resolve(name, shell_integration)?;
+        let mut prof = profiles::resolve(name, shell_integration)?;
         // Serialize spawn+registration with shutdown's transition. Once
         // shutdown_all holds this lock and flips the flag, no late ConPTY can
         // appear after its entries/graveyard drain.
@@ -132,6 +141,12 @@ impl Registry {
         if self.shutting_down.load(Ordering::SeqCst) {
             bail!("host is shutting down");
         }
+        // Assigned before spawn (moved earlier than the old post-spawn id
+        // allocation) so it can be stamped into the child's own env below:
+        // CLIs/hooks that read TERMX_SESSION_ID must see it from process
+        // birth, independent of shell_integration (spec §7).
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        stamp_termx_env(&mut prof.env, id);
         let session = Arc::new(Session::spawn(
             &prof,
             cwd.as_deref(),
@@ -139,7 +154,6 @@ impl Registry {
             rows,
             self.config.scrollback_bytes,
         )?);
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let info = SessionInfo {
             id,
             profile: name.to_string(),
@@ -699,5 +713,48 @@ mod tests {
         assert!(bytes.len() <= 2048, "ring exceeded configured cap");
         session.kill();
         assert!(session.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn stamp_termx_env_appends_marker_and_session_id() {
+        let mut env = vec![("PROMPT".to_string(), "$P$G".to_string())];
+        stamp_termx_env(&mut env, 42);
+        assert_eq!(
+            env,
+            vec![
+                ("PROMPT".to_string(), "$P$G".to_string()),
+                ("TERMX".to_string(), "1".to_string()),
+                ("TERMX_SESSION_ID".to_string(), "42".to_string()),
+            ],
+            "TERMX vars must be appended, not replace existing profile env"
+        );
+    }
+
+    #[test]
+    fn termx_env_reaches_a_real_spawned_session() {
+        // Registry::create_session doesn't expose custom argv (profiles own
+        // their args), so the only way to observe the stamped env in a real
+        // child process is the same pattern the other registry tests use:
+        // spawn interactive cmd for real, then drive it with write_input and
+        // read back what the live process actually saw.
+        let (_tmp, reg) = test_registry();
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
+        s.write_input(b"echo TX:%TERMX_SESSION_ID%:%TERMX%\r\n")
+            .unwrap();
+        let marker = format!("TX:{}:1", info.id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut seen = String::new();
+        while std::time::Instant::now() < deadline && !seen.contains(&marker) {
+            seen = String::from_utf8_lossy(&s.snapshot().1).into_owned();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            seen.contains(&marker),
+            "TERMX/TERMX_SESSION_ID not observed in real spawned session; saw {seen:?}"
+        );
+        reg.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 }
