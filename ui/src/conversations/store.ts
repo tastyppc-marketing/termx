@@ -24,6 +24,7 @@ import {
   sessionKey,
   type ConversationsV1,
   type LlmSessionRecord,
+  type SessionArtifacts,
   type SessionKey,
   type SessionLister,
   type SessionNote,
@@ -166,6 +167,14 @@ export class ConversationsStore {
 
   assign = (key: SessionKey, folderId: string | null): void => {
     this.updateData((data) => assignSession(data, key, folderId));
+  };
+
+  /** Cache one record's "Files touched" harvest (§11), persisted like folders/notes. */
+  setArtifacts = (key: SessionKey, artifacts: SessionArtifacts): void => {
+    this.updateData((data) => ({
+      ...data,
+      artifacts: { ...data.artifacts, [key]: artifacts },
+    }));
   };
 
   select = (key: SessionKey | null): void => {
