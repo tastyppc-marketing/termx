@@ -1,0 +1,122 @@
+/* Session palette (Ctrl+Shift+R) — same overlay family as FolderSearch.css. */
+
+.session-palette-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding-top: 12vh;
+  background: rgb(5 7 10 / 62%);
+  backdrop-filter: blur(3px);
+}
+
+.session-palette {
+  width: min(560px, calc(100% - 32px));
+  overflow: hidden;
+  background: #1b202a;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 10px;
+  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+}
+
+.session-palette__input {
+  width: 100%;
+  padding: 13px 16px;
+  color: #f1f5f9;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgb(255 255 255 / 7%);
+  outline: 0;
+  font: 14px Inter, "Segoe UI", sans-serif;
+}
+
+.session-palette__input::placeholder {
+  color: #626b7f;
+}
+
+.session-palette__results {
+  max-height: min(380px, 52vh);
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.session-palette__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.session-palette__row--active {
+  color: #f1f5f9;
+  background: rgb(122 162 247 / 14%);
+}
+
+.session-palette__badge {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  place-items: center;
+  color: #0f1115;
+  background: #7dcfff;
+  border-radius: 5px;
+  font: 10px Inter, "Segoe UI", sans-serif;
+  font-weight: 700;
+}
+
+.session-palette__row[data-provider="claude"] .session-palette__badge {
+  background: #ff9e64;
+}
+
+.session-palette__content {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.session-palette__line {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.session-palette__title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font: 13px Inter, "Segoe UI", sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-palette__time {
+  flex: 0 0 auto;
+  color: #8b93a7;
+  font: 10px Inter, "Segoe UI", sans-serif;
+}
+
+.session-palette__cwd {
+  overflow: hidden;
+  color: #8b93a7;
+  font: 11px Consolas, "Cascadia Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-palette__empty {
+  padding: 14px 10px;
+  color: #8b93a7;
+  font: 12px Inter, "Segoe UI", sans-serif;
+  text-align: center;
+}
