@@ -4,6 +4,10 @@ import type {
   MouseEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
+import { ConversationsRail } from "../conversations/ConversationsRail";
+import type { ConversationsStore } from "../conversations/store";
+import type { LlmSessionRecord } from "../conversations/types";
+import type { TermxSettings } from "../settings/settings";
 import { PALETTE_HEX, PALETTE_IDS, type PaletteId } from "../state/layout";
 import type {
   SidebarGroupModel,
@@ -37,6 +41,18 @@ export interface SidebarActions {
   dismissDeadTab(tabId: string): Promise<void>;
 }
 
+/**
+ * Conversations mode (spec §3). Omitted — or disabled in settings — means the
+ * sidebar is Terminals-only and renders exactly as it always has: no mode
+ * switch, no rail, nothing mounted.
+ */
+export interface SidebarConversations {
+  store: ConversationsStore;
+  settings: TermxSettings;
+  onResume(record: LlmSessionRecord): void;
+  onOpenTranscript(record: LlmSessionRecord): void;
+}
+
 export interface SidebarProps {
   snapshot: WorkspaceSnapshot;
   actions: SidebarActions;
@@ -44,7 +60,10 @@ export interface SidebarProps {
   onOpenSettings?: () => void;
   /** Opens the folder-search palette targeting the given group. */
   onOpenFolderSearch?: (groupId: string | null) => void;
+  conversations?: SidebarConversations;
 }
+
+type SidebarMode = "terminals" | "conversations";
 
 type RenameTarget =
   | { kind: "tab"; id: string }
@@ -78,7 +97,9 @@ export function Sidebar({
   actions,
   onOpenSettings,
   onOpenFolderSearch,
+  conversations,
 }: SidebarProps) {
+  const [mode, setMode] = useState<SidebarMode>("terminals");
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [confirmClose, setConfirmClose] = useState<ConfirmClose | null>(null);
   const [busy, setBusy] = useState(false);
@@ -686,6 +707,12 @@ export function Sidebar({
     );
   })();
 
+  // The switch (and therefore the rail) only exists when the App supplies a
+  // conversations store and the setting is on; otherwise this is the sidebar
+  // exactly as it was.
+  const railEnabled = conversations !== undefined && conversations.settings.conversationsRail;
+  const showConversations = railEnabled && mode === "conversations";
+
   return (
     <aside
       className="sidebar"
@@ -706,6 +733,37 @@ export function Sidebar({
         <span>Sessions</span>
         {snapshot.persistence.saving ? <span className="sidebar__saving">Saving…</span> : null}
       </header>
+      {railEnabled ? (
+        <div className="sidebar__modes" role="tablist" aria-label="Sidebar mode">
+          <button
+            type="button"
+            role="tab"
+            className={`sidebar__mode${mode === "terminals" ? " sidebar__mode--active" : ""}`}
+            aria-selected={mode === "terminals"}
+            onClick={() => setMode("terminals")}
+          >
+            Terminals
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={`sidebar__mode${mode === "conversations" ? " sidebar__mode--active" : ""}`}
+            aria-selected={mode === "conversations"}
+            onClick={() => setMode("conversations")}
+          >
+            Conversations
+          </button>
+        </div>
+      ) : null}
+      {showConversations && conversations ? (
+        <ConversationsRail
+          store={conversations.store}
+          settings={conversations.settings}
+          onResume={conversations.onResume}
+          onOpenTranscript={conversations.onOpenTranscript}
+        />
+      ) : (
+      <>
       <div className="sidebar__scroll">
         <div
           className="sidebar__ungrouped"
@@ -782,6 +840,8 @@ export function Sidebar({
           </button>
         ) : null}
       </div>
+      </>
+      )}
       {snapshot.notice || snapshot.persistence.error ? (
         <div className="sidebar__notice" role="status">
           {snapshot.notice ?? snapshot.persistence.error}

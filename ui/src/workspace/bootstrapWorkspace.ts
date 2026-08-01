@@ -1,4 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  ConversationsStore,
+  loadConversationsStore,
+} from "../conversations/store";
+import { conversationsFileIo, tauriSessionLister } from "../conversations/storage";
+import type { SessionLister } from "../conversations/types";
 import { HostClient, type HostClientConnectOptions } from "../host/client";
 import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
@@ -32,6 +38,8 @@ export interface BootstrapWorkspaceOptions {
   generateId?: () => string;
   pickFolder?: FolderPicker;
   appFiles?: AppFileStore;
+  /** Injected `list_llm_sessions`; tests fake the scan. */
+  listSessions?: SessionLister;
 }
 
 export interface BootstrappedWorkspace {
@@ -41,6 +49,11 @@ export interface BootstrappedWorkspace {
   settings?: SettingsStore;
   /** Scope paths + recent folders; absent only in legacy test fixtures. */
   uiState?: UiStateStore;
+  /**
+   * Folders/assignments/notes for the Conversations rail (spec §3). Loading is
+   * file-only — no session scan happens until the rail asks for one.
+   */
+  conversations?: ConversationsStore;
 }
 
 export function parseBootstrapHostResult(value: unknown): HostClientConnectOptions {
@@ -79,6 +92,14 @@ export async function bootstrapWorkspace(
     const uiState = await loadUiStateStore({
       read: () => appFiles.read("ui_state_v1.json"),
       save: (text) => appFiles.write("ui_state_v1.json", text),
+    });
+    // Same optional-field contract as settings/ui-state: a read failure yields
+    // empty state and never blocks the workspace.
+    const conversationsIo = conversationsFileIo(appFiles);
+    const conversations = await loadConversationsStore({
+      read: () => conversationsIo.read(),
+      save: (text) => conversationsIo.write(text),
+      list: options.listSessions ?? tauriSessionLister,
     });
 
     const bootstrap = parseBootstrapHostResult(await invokeBootstrap());
@@ -125,7 +146,7 @@ export async function bootstrapWorkspace(
       await persistence.flush();
     }
 
-    return { client, controller, settings, uiState };
+    return { client, controller, settings, uiState, conversations };
   } catch {
     try {
       controller?.dispose();
