@@ -1,0 +1,329 @@
+/* Transcript mode lives inside Viewer.__body. It owns its scroll surface so
+   the toolbar and Ctrl+F row reserve normal-flow space and never overlap text. */
+.viewer__body:has(> .transcript) {
+  overflow: hidden;
+  padding: 0;
+}
+
+.transcript {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  color: var(--viewer-text, #e6e6e6);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 1.5%), transparent 120px),
+    var(--viewer-bg, #161a22);
+  outline: none;
+}
+
+.transcript:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--viewer-accent, #7aa2f7);
+}
+
+.transcript__toolbar,
+.transcript-search {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-bottom: 1px solid rgb(255 255 255 / 7%);
+}
+
+.transcript__toolbar {
+  background: rgb(18 22 29 / 72%);
+}
+
+.transcript__toolbar-spacer {
+  min-width: 8px;
+  flex: 1 1 auto;
+}
+
+.transcript__toolbar-button,
+.transcript-search__button,
+.transcript__evicted button {
+  min-height: 28px;
+  padding: 0 9px;
+  color: var(--viewer-muted, #8b93a7);
+  background: rgb(255 255 255 / 3%);
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 6px;
+  cursor: pointer;
+  font: 11px/1 Inter, "Segoe UI", sans-serif;
+  transition:
+    color 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease;
+}
+
+.transcript__toolbar-button:hover:not(:disabled),
+.transcript-search__button:hover:not(:disabled),
+.transcript__evicted button:hover {
+  color: #fff;
+  background: var(--viewer-raised, #232a36);
+  border-color: rgb(122 162 247 / 32%);
+}
+
+.transcript__toolbar-button:focus-visible,
+.transcript-search__button:focus-visible,
+.transcript__evicted button:focus-visible,
+.transcript-search__input:focus-visible,
+.transcript-search__mode:focus-visible,
+.transcript-tool__stub:focus-visible {
+  outline: 1px solid var(--viewer-accent, #7aa2f7);
+  outline-offset: 1px;
+}
+
+.transcript__toolbar-button:disabled,
+.transcript-search__button:disabled,
+.transcript__evicted button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.transcript-search {
+  flex-wrap: wrap;
+  background: #12161d;
+  box-shadow: 0 5px 18px rgb(0 0 0 / 16%);
+}
+
+.transcript-search__input {
+  width: min(330px, 100%);
+  min-width: 120px;
+  height: 30px;
+  flex: 1 1 180px;
+  padding: 0 9px;
+  color: #f1f3f6;
+  background: #0f131a;
+  border: 1px solid rgb(255 255 255 / 11%);
+  border-radius: 6px;
+  font: 12px/1.4 Inter, "Segoe UI", sans-serif;
+}
+
+.transcript-search__input::placeholder {
+  color: #697185;
+}
+
+.transcript-search__mode {
+  height: 30px;
+  padding: 0 24px 0 8px;
+  color: #cbd0db;
+  background: #1b202a;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 6px;
+  font: 11px/1 Inter, "Segoe UI", sans-serif;
+}
+
+.transcript-search__button {
+  width: 30px;
+  padding: 0;
+  font-size: 14px;
+}
+
+.transcript-search__button--close {
+  font-size: 16px;
+}
+
+.transcript-search__status {
+  min-width: 66px;
+  color: var(--viewer-muted, #8b93a7);
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.transcript__notice,
+.transcript__empty {
+  margin: 10px;
+  padding: 9px 11px;
+  color: var(--viewer-muted, #8b93a7);
+  background: rgb(255 255 255 / 3%);
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.transcript__notice {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+  color: #f0c99a;
+  border-color: rgb(224 175 104 / 25%);
+}
+
+.transcript__scroll {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: auto;
+  padding: 10px 0 28px;
+  scroll-behavior: smooth;
+  scrollbar-color: #3a4353 transparent;
+  scrollbar-width: thin;
+}
+
+.transcript-line {
+  width: min(86ch, calc(100% - 24px));
+  margin: 0 auto;
+  padding: 3px 0;
+  border-radius: 8px;
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.transcript-line--active-match {
+  background: rgb(122 162 247 / 10%);
+  box-shadow:
+    inset 3px 0 0 rgb(122 162 247 / 82%),
+    0 0 0 1px rgb(122 162 247 / 16%);
+}
+
+.transcript-turn {
+  margin: 5px 0;
+  padding: 11px 13px 12px;
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 8px;
+}
+
+.transcript-turn--user {
+  color: #eff1f5;
+  background: #202632;
+  border-color: rgb(255 255 255 / 9%);
+}
+
+.transcript-turn--assistant {
+  max-width: none;
+  color: #dfe2e8;
+  background: rgb(13 17 23 / 48%);
+}
+
+.transcript-turn__role {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--viewer-muted, #8b93a7);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.transcript-turn--user .transcript-turn__role {
+  color: #a9bde8;
+}
+
+.transcript-turn__user-text {
+  font: 12.5px/1.58 Inter, "Segoe UI", sans-serif;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.transcript-turn--assistant > :last-child {
+  margin-bottom: 0;
+}
+
+.transcript-tool {
+  margin: 4px 0;
+}
+
+.transcript-tool__stub {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  padding: 5px 10px;
+  color: #aeb5c4;
+  background: rgb(255 255 255 / 2.5%);
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 6px;
+  cursor: pointer;
+  font: 11px/1.4 "Cascadia Mono", Consolas, monospace;
+  text-align: left;
+}
+
+.transcript-tool__stub:hover {
+  color: #dce2ef;
+  background: rgb(255 255 255 / 5%);
+  border-color: rgb(255 255 255 / 12%);
+}
+
+.transcript-tool__stub span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transcript-tool__detail {
+  max-height: 320px;
+  margin: 3px 0 8px;
+  overflow: auto;
+  padding: 10px 12px;
+  color: #cfd5e2;
+  background: #0f1319;
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 6px;
+  font: 11px/1.5 "Cascadia Mono", Consolas, monospace;
+  tab-size: 2;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.transcript__evicted {
+  display: flex;
+  width: min(86ch, calc(100% - 24px));
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 7px auto;
+  padding: 6px 10px;
+  color: #747d90;
+  background: rgb(255 255 255 / 2%);
+  border: 1px dashed rgb(255 255 255 / 10%);
+  border-radius: 7px;
+  font-size: 11px;
+}
+
+@media (max-width: 520px) {
+  .transcript__toolbar,
+  .transcript-search {
+    padding-inline: 7px;
+  }
+
+  .transcript__toolbar-button {
+    padding-inline: 7px;
+  }
+
+  .transcript-line,
+  .transcript__evicted {
+    width: calc(100% - 14px);
+  }
+
+  .transcript-turn {
+    padding: 9px 10px 10px;
+  }
+
+  .transcript-search__status {
+    order: 3;
+    flex: 1 1 auto;
+    text-align: left;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcript__scroll {
+    scroll-behavior: auto;
+  }
+
+  .transcript-line,
+  .transcript__toolbar-button,
+  .transcript-search__button {
+    transition: none;
+  }
+}
