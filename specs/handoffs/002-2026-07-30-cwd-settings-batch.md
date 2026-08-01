@@ -20,10 +20,24 @@ shortcut installed (%APPDATA%\...\Start Menu\Programs\TermX.lnk). Task #9
   wiring (lib.rs/build.rs/capabilities/App.tsx/Sidebar), V2. claude-x lanes
   SMOKE-VERIFIED (gpt-5.6 + grok-4.5 both replied OK via raine :18765).
 - **Wave A state**: R4 MERGED `4ac342a` (TERMX env stamp, 118 host tests).
-  U6 MERGED `a1a240a` (7 settings fields, 372 ui tests + tsc). STILL
-  RUNNING: r3-llm-sessions (Opus, worktree agent-ab4761da2c7c2b4f2),
-  r5-transcript-cmds (Opus, agent-ab23db09ae157990e), u15-actions (Opus,
-  agent-abd109d5cb08d870c) — worktrees under C:\Dev\TermX\.claude\worktrees\.
+  U6 MERGED `a1a240a` (7 settings fields). U15 MERGED `adaf150` (action
+  registry + Tray + FeaturesDock + trayChips persistence + NEW
+  applyTrayConfigure(state, tray, ids|null) helper in uiState.ts — null =
+  reset sentinel deletes the tray key, field dropped when empty; adoption =
+  store.update(s => applyTrayConfigure(s, tray, ids)) at integration). UI
+  baseline now **400 tests** + tsc clean. STILL RUNNING: r3-llm-sessions
+  (Opus, worktree agent-ab4761da2c7c2b4f2), r5-transcript-cmds (Opus,
+  agent-ab23db09ae157990e) — worktrees under C:\Dev\TermX\.claude\worktrees\.
+- **JUNCTION HAZARD (2026-07-31 ~22:10, real incident)**: removing the U15
+  worktree with `git worktree remove --force` FOLLOWED the agent's
+  ui\node_modules junction and WIPED main's ui\node_modules (gates had just
+  passed). Restored via `npm ci` in ui\, both gates re-verified (400/400 +
+  tsc). RULE: before ANY worktree remove, probe for links —
+  `powershell -NoProfile -Command "Get-ChildItem '<wt>' -Recurse -Depth 3
+  -Directory -Force | ? { $_.LinkType }"` — and sever each with
+  `cmd /c rmdir "<junction>"` (removes link only) FIRST. R3/R5 worktrees
+  checked: no junctions (Rust tasks, no ui deps). Saved to memory as
+  worktree-remove-junction-hazard.md.
 - **Merge protocol**: agent commits once in its worktree ("wip: <task>") →
   main reviews diff line-by-line → `git cherry-pick -n <sha>` on main →
   run gates INDEPENDENTLY (host: cargo test -p termx-host; ui: npx tsc -b +
