@@ -22,6 +22,13 @@ describe("parseSettings", () => {
       newTabPolicy: "ask-searcher",
       shellIntegration: false,
       defaultProfile: "cmd",
+      conversationsRail: false,
+      conversationsPalette: false,
+      summaryEngine: "llm",
+      summaryContent: "both",
+      summaryDisplay: "under-title",
+      sleepHiddenTerminals: "60",
+      onWindowClose: "stop-all",
     } as const;
     expect(parseSettings(serializeSettings(settings))).toEqual(settings);
   });
@@ -32,12 +39,26 @@ describe("parseSettings", () => {
         newTabPolicy: "chaos-mode",
         shellIntegration: "yes",
         defaultProfile: "cmd",
+        conversationsRail: "nope",
+        conversationsPalette: 1,
+        summaryEngine: "chatgpt",
+        summaryContent: "everything",
+        summaryDisplay: "sidebar",
+        sleepHiddenTerminals: "30",
+        onWindowClose: "explode",
       }),
     );
     expect(parsed).toEqual({
       newTabPolicy: DEFAULT_SETTINGS.newTabPolicy,
       shellIntegration: DEFAULT_SETTINGS.shellIntegration,
       defaultProfile: "cmd",
+      conversationsRail: DEFAULT_SETTINGS.conversationsRail,
+      conversationsPalette: DEFAULT_SETTINGS.conversationsPalette,
+      summaryEngine: DEFAULT_SETTINGS.summaryEngine,
+      summaryContent: DEFAULT_SETTINGS.summaryContent,
+      summaryDisplay: DEFAULT_SETTINGS.summaryDisplay,
+      sleepHiddenTerminals: DEFAULT_SETTINGS.sleepHiddenTerminals,
+      onWindowClose: DEFAULT_SETTINGS.onWindowClose,
     });
   });
 
@@ -45,6 +66,66 @@ describe("parseSettings", () => {
     const parsed = parseSettings(
       JSON.stringify({ futureFeature: true, defaultProfile: "cmd" }),
     );
+    expect(parsed.defaultProfile).toBe("cmd");
+  });
+
+  it("conversationsRail: non-boolean falls back to default, other fields survive", () => {
+    const parsed = parseSettings(
+      JSON.stringify({ conversationsRail: "yes", defaultProfile: "cmd" }),
+    );
+    expect(parsed.conversationsRail).toBe(DEFAULT_SETTINGS.conversationsRail);
+    expect(parsed.defaultProfile).toBe("cmd");
+  });
+
+  it("conversationsPalette: non-boolean falls back to default, other fields survive", () => {
+    const parsed = parseSettings(
+      JSON.stringify({ conversationsPalette: 0, defaultProfile: "cmd" }),
+    );
+    expect(parsed.conversationsPalette).toBe(
+      DEFAULT_SETTINGS.conversationsPalette,
+    );
+    expect(parsed.defaultProfile).toBe("cmd");
+  });
+
+  it("summaryEngine: unknown value falls back to default, other fields survive", () => {
+    const parsed = parseSettings(
+      JSON.stringify({ summaryEngine: "vibes", defaultProfile: "cmd" }),
+    );
+    expect(parsed.summaryEngine).toBe(DEFAULT_SETTINGS.summaryEngine);
+    expect(parsed.defaultProfile).toBe("cmd");
+  });
+
+  it("summaryContent: unknown value falls back to default, other fields survive", () => {
+    const parsed = parseSettings(
+      JSON.stringify({ summaryContent: "everything", defaultProfile: "cmd" }),
+    );
+    expect(parsed.summaryContent).toBe(DEFAULT_SETTINGS.summaryContent);
+    expect(parsed.defaultProfile).toBe("cmd");
+  });
+
+  it("summaryDisplay: unknown value falls back to default, other fields survive", () => {
+    const parsed = parseSettings(
+      JSON.stringify({ summaryDisplay: "sidebar", defaultProfile: "cmd" }),
+    );
+    expect(parsed.summaryDisplay).toBe(DEFAULT_SETTINGS.summaryDisplay);
+    expect(parsed.defaultProfile).toBe("cmd");
+  });
+
+  it("sleepHiddenTerminals: unknown value falls back to default, other fields survive", () => {
+    const parsed = parseSettings(
+      JSON.stringify({ sleepHiddenTerminals: "30", defaultProfile: "cmd" }),
+    );
+    expect(parsed.sleepHiddenTerminals).toBe(
+      DEFAULT_SETTINGS.sleepHiddenTerminals,
+    );
+    expect(parsed.defaultProfile).toBe("cmd");
+  });
+
+  it("onWindowClose: unknown value falls back to default, other fields survive", () => {
+    const parsed = parseSettings(
+      JSON.stringify({ onWindowClose: "explode", defaultProfile: "cmd" }),
+    );
+    expect(parsed.onWindowClose).toBe(DEFAULT_SETTINGS.onWindowClose);
     expect(parsed.defaultProfile).toBe("cmd");
   });
 });
@@ -72,6 +153,41 @@ describe("SettingsStore", () => {
 
     expect(listener).not.toHaveBeenCalled();
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it("does not notify or save when a patch to a new (conversations/terminals) field changes nothing", async () => {
+    const save = vi.fn(() => Promise.resolve());
+    const store = new SettingsStore({ save });
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.update({
+      conversationsRail: DEFAULT_SETTINGS.conversationsRail,
+      conversationsPalette: DEFAULT_SETTINGS.conversationsPalette,
+      summaryEngine: DEFAULT_SETTINGS.summaryEngine,
+      summaryContent: DEFAULT_SETTINGS.summaryContent,
+      summaryDisplay: DEFAULT_SETTINGS.summaryDisplay,
+      sleepHiddenTerminals: DEFAULT_SETTINGS.sleepHiddenTerminals,
+      onWindowClose: DEFAULT_SETTINGS.onWindowClose,
+    });
+    await store.flush();
+
+    expect(listener).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("notifies and saves when only a new field actually changes", async () => {
+    const save = vi.fn(() => Promise.resolve());
+    const store = new SettingsStore({ save });
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.update({ onWindowClose: "stop-all" });
+    await store.flush();
+
+    expect(store.getSnapshot().onWindowClose).toBe("stop-all");
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledTimes(1);
   });
 
   it("serializes saves in update order", async () => {

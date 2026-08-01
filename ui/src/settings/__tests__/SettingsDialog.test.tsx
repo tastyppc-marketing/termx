@@ -56,6 +56,116 @@ describe("SettingsDialog", () => {
     expect(onChange).toHaveBeenCalledWith({ shellIntegration: false });
   });
 
+  it("fires exact one-field patches for the Conversations section controls", async () => {
+    const onChange = vi.fn();
+    await render(
+      <SettingsDialog
+        settings={DEFAULT_SETTINGS}
+        onChange={onChange}
+        onClose={() => undefined}
+      />,
+    );
+
+    const rail = container.querySelector<HTMLInputElement>(
+      "input[name='conversationsRail']",
+    );
+    expect(rail?.checked).toBe(true);
+    await act(async () => {
+      rail?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ conversationsRail: false });
+
+    const palette = container.querySelector<HTMLInputElement>(
+      "input[name='conversationsPalette']",
+    );
+    expect(palette?.checked).toBe(true);
+    await act(async () => {
+      palette?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ conversationsPalette: false });
+
+    const engineLlm = container.querySelector<HTMLInputElement>(
+      "input[name='summaryEngine'][value='llm']",
+    );
+    expect(engineLlm?.checked).toBe(false);
+    await act(async () => {
+      engineLlm?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ summaryEngine: "llm" });
+
+    const contentRecap = container.querySelector<HTMLInputElement>(
+      "input[name='summaryContent'][value='recap']",
+    );
+    await act(async () => {
+      contentRecap?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ summaryContent: "recap" });
+
+    const displayUnderTitle = container.querySelector<HTMLInputElement>(
+      "input[name='summaryDisplay'][value='under-title']",
+    );
+    await act(async () => {
+      displayUnderTitle?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ summaryDisplay: "under-title" });
+  });
+
+  it("fires exact one-field patches for the Terminals section controls", async () => {
+    const onChange = vi.fn();
+    await render(
+      <SettingsDialog
+        settings={DEFAULT_SETTINGS}
+        onChange={onChange}
+        onClose={() => undefined}
+      />,
+    );
+
+    const sleep15 = container.querySelector<HTMLInputElement>(
+      "input[name='sleepHiddenTerminals'][value='15']",
+    );
+    expect(sleep15?.checked).toBe(true);
+
+    const sleep60 = container.querySelector<HTMLInputElement>(
+      "input[name='sleepHiddenTerminals'][value='60']",
+    );
+    await act(async () => {
+      sleep60?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ sleepHiddenTerminals: "60" });
+
+    const sleepOff = container.querySelector<HTMLInputElement>(
+      "input[name='sleepHiddenTerminals'][value='off']",
+    );
+    await act(async () => {
+      sleepOff?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ sleepHiddenTerminals: "off" });
+
+    const closeAsk = container.querySelector<HTMLInputElement>(
+      "input[name='onWindowClose'][value='ask']",
+    );
+    expect(closeAsk?.checked).toBe(true);
+
+    const closeKeepRunning = container.querySelector<HTMLInputElement>(
+      "input[name='onWindowClose'][value='keep-running']",
+    );
+    expect(closeKeepRunning?.parentElement?.textContent).toContain(
+      "keeps terminals and agents running in the background",
+    );
+    await act(async () => {
+      closeKeepRunning?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ onWindowClose: "keep-running" });
+
+    const closeStopAll = container.querySelector<HTMLInputElement>(
+      "input[name='onWindowClose'][value='stop-all']",
+    );
+    await act(async () => {
+      closeStopAll?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ onWindowClose: "stop-all" });
+  });
+
   it("closes on Escape and via the Done button", async () => {
     const onClose = vi.fn();
     await render(

@@ -51,7 +51,14 @@ export class SettingsStore {
     if (
       next.newTabPolicy === this.current.newTabPolicy &&
       next.shellIntegration === this.current.shellIntegration &&
-      next.defaultProfile === this.current.defaultProfile
+      next.defaultProfile === this.current.defaultProfile &&
+      next.conversationsRail === this.current.conversationsRail &&
+      next.conversationsPalette === this.current.conversationsPalette &&
+      next.summaryEngine === this.current.summaryEngine &&
+      next.summaryContent === this.current.summaryContent &&
+      next.summaryDisplay === this.current.summaryDisplay &&
+      next.sleepHiddenTerminals === this.current.sleepHiddenTerminals &&
+      next.onWindowClose === this.current.onWindowClose
     ) {
       return;
     }

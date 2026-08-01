@@ -76,6 +76,24 @@
   line-height: 1.4;
 }
 
+.settings-subsection {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgb(255 255 255 / 6%);
+}
+
+.settings-subsection:first-of-type {
+  margin-top: 10px;
+}
+
+.settings-subsection__title {
+  padding: 0 4px 2px;
+  color: #8b93a7;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
 .settings-row {
   display: flex;
   align-items: center;

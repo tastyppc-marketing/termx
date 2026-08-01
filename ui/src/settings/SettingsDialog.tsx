@@ -1,6 +1,11 @@
 import { useEffect, useRef } from "react";
 import {
+  type CloseBehavior,
   type NewTabPolicy,
+  type SleepOption,
+  type SummaryContent,
+  type SummaryDisplay,
+  type SummaryEngine,
   type TermxSettings,
 } from "./settings";
 import "./SettingsDialog.css";
@@ -40,6 +45,101 @@ const POLICY_OPTIONS: ReadonlyArray<{
     value: "ask-native",
     label: "Ask every time — system dialog",
     hint: "Opens the Windows folder browser for each new terminal.",
+  },
+];
+
+const SUMMARY_ENGINE_OPTIONS: ReadonlyArray<{
+  value: SummaryEngine;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "disk-first",
+    label: "Disk first",
+    hint: "Harvested data wins; the LLM fills in only missing summaries/recaps.",
+  },
+  {
+    value: "disk-only",
+    label: "Disk only",
+    hint: "Only what's already on disk. No LLM calls; gaps stay empty.",
+  },
+  {
+    value: "llm",
+    label: "LLM",
+    hint: "The LLM (re)generates both kinds for every session as they go stale.",
+  },
+];
+
+const SUMMARY_CONTENT_OPTIONS: ReadonlyArray<{
+  value: SummaryContent;
+  label: string;
+  hint: string;
+}> = [
+  { value: "summary", label: "Summary only", hint: "A short one-line description." },
+  { value: "recap", label: "Recap only", hint: "A multi-line \"what was going on\"." },
+  { value: "both", label: "Summary and recap", hint: "Shows both, where available." },
+  { value: "none", label: "None", hint: "Rows show just the title and path." },
+];
+
+const SUMMARY_DISPLAY_OPTIONS: ReadonlyArray<{
+  value: SummaryDisplay;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "hover",
+    label: "On hover",
+    hint: "Shows as a tooltip when you hover the row.",
+  },
+  {
+    value: "under-title",
+    label: "Under the title",
+    hint: "Shows as a secondary line under the title (recap clamps to 3 lines).",
+  },
+];
+
+const SLEEP_OPTIONS_LIST: ReadonlyArray<{
+  value: SleepOption;
+  label: string;
+  hint: string;
+}> = [
+  { value: "off", label: "Never", hint: "Hidden terminals never sleep." },
+  {
+    value: "5",
+    label: "After 5 minutes",
+    hint: "Hidden terminals sleep after 5 minutes of being out of view.",
+  },
+  {
+    value: "15",
+    label: "After 15 minutes",
+    hint: "Hidden terminals sleep after 15 minutes of being out of view.",
+  },
+  {
+    value: "60",
+    label: "After 60 minutes",
+    hint: "Hidden terminals sleep after 60 minutes of being out of view.",
+  },
+];
+
+const CLOSE_BEHAVIOR_OPTIONS: ReadonlyArray<{
+  value: CloseBehavior;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "ask",
+    label: "Ask every time",
+    hint: "Shows a dialog when you close the window while terminals or agents are running, so you can choose what happens.",
+  },
+  {
+    value: "keep-running",
+    label: "Keep running",
+    hint: "Closes immediately. Closing the window keeps terminals and agents running in the background — reopening TermX restores them.",
+  },
+  {
+    value: "stop-all",
+    label: "Stop everything",
+    hint: "Closes immediately and stops every terminal and agent process.",
   },
 ];
 
@@ -143,6 +243,139 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
               <option value="cmd">Command Prompt</option>
             </select>
           </label>
+        </fieldset>
+
+        <fieldset className="settings-section">
+          <legend>Conversations</legend>
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              name="conversationsRail"
+              checked={settings.conversationsRail}
+              onChange={(event) =>
+                onChange({ conversationsRail: event.currentTarget.checked })}
+            />
+            <span className="settings-radio__text">
+              <span className="settings-radio__label">Show the Conversations rail</span>
+              <span className="settings-radio__hint">
+                Adds a Terminals | Conversations switch to the sidebar.
+              </span>
+            </span>
+          </label>
+          <label className="settings-check">
+            <input
+              type="checkbox"
+              name="conversationsPalette"
+              checked={settings.conversationsPalette}
+              onChange={(event) =>
+                onChange({ conversationsPalette: event.currentTarget.checked })}
+            />
+            <span className="settings-radio__text">
+              <span className="settings-radio__label">Enable the session palette</span>
+              <span className="settings-radio__hint">
+                Ctrl+Shift+R opens quick search across all sessions.
+              </span>
+            </span>
+          </label>
+
+          <div className="settings-subsection">
+            <div className="settings-subsection__title">Summary source</div>
+            {SUMMARY_ENGINE_OPTIONS.map((option) => (
+              <label className="settings-radio" key={option.value}>
+                <input
+                  type="radio"
+                  name="summaryEngine"
+                  value={option.value}
+                  checked={settings.summaryEngine === option.value}
+                  onChange={() => onChange({ summaryEngine: option.value })}
+                />
+                <span className="settings-radio__text">
+                  <span className="settings-radio__label">{option.label}</span>
+                  <span className="settings-radio__hint">{option.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <div className="settings-subsection">
+            <div className="settings-subsection__title">Summary content</div>
+            {SUMMARY_CONTENT_OPTIONS.map((option) => (
+              <label className="settings-radio" key={option.value}>
+                <input
+                  type="radio"
+                  name="summaryContent"
+                  value={option.value}
+                  checked={settings.summaryContent === option.value}
+                  onChange={() => onChange({ summaryContent: option.value })}
+                />
+                <span className="settings-radio__text">
+                  <span className="settings-radio__label">{option.label}</span>
+                  <span className="settings-radio__hint">{option.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <div className="settings-subsection">
+            <div className="settings-subsection__title">Summary display</div>
+            {SUMMARY_DISPLAY_OPTIONS.map((option) => (
+              <label className="settings-radio" key={option.value}>
+                <input
+                  type="radio"
+                  name="summaryDisplay"
+                  value={option.value}
+                  checked={settings.summaryDisplay === option.value}
+                  onChange={() => onChange({ summaryDisplay: option.value })}
+                />
+                <span className="settings-radio__text">
+                  <span className="settings-radio__label">{option.label}</span>
+                  <span className="settings-radio__hint">{option.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        <fieldset className="settings-section">
+          <legend>Terminals</legend>
+          <div className="settings-subsection">
+            <div className="settings-subsection__title">Sleep hidden terminals</div>
+            {SLEEP_OPTIONS_LIST.map((option) => (
+              <label className="settings-radio" key={option.value}>
+                <input
+                  type="radio"
+                  name="sleepHiddenTerminals"
+                  value={option.value}
+                  checked={settings.sleepHiddenTerminals === option.value}
+                  onChange={() =>
+                    onChange({ sleepHiddenTerminals: option.value })}
+                />
+                <span className="settings-radio__text">
+                  <span className="settings-radio__label">{option.label}</span>
+                  <span className="settings-radio__hint">{option.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <div className="settings-subsection">
+            <div className="settings-subsection__title">When closing the window</div>
+            {CLOSE_BEHAVIOR_OPTIONS.map((option) => (
+              <label className="settings-radio" key={option.value}>
+                <input
+                  type="radio"
+                  name="onWindowClose"
+                  value={option.value}
+                  checked={settings.onWindowClose === option.value}
+                  onChange={() => onChange({ onWindowClose: option.value })}
+                />
+                <span className="settings-radio__text">
+                  <span className="settings-radio__label">{option.label}</span>
+                  <span className="settings-radio__hint">{option.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
         </fieldset>
 
         <div className="settings-dialog__actions">
