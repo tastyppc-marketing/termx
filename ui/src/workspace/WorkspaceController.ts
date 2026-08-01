@@ -11,6 +11,14 @@ import {
   pickFolderAndCreateSession,
 } from "../native/folderSession";
 import type { FolderPicker } from "../native/dialog";
+import {
+  RESUME_FIXED_DELAY_MS,
+  RESUME_PROMPT_TIMEOUT_MS,
+  resumeCommand,
+  tauriDirExists,
+  type DirExists,
+} from "../conversations/resume";
+import type { LlmSessionRecord } from "../conversations/types";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
 import {
   dropScope,
@@ -63,6 +71,14 @@ export interface WorkspaceAttachmentHub {
     callbacks?: SessionAttachmentCallbacks,
     replay?: boolean,
   ): Promise<SessionAttachment>;
+  /**
+   * Direct write into a session's host attachment, WITHOUT taking ownership of
+   * its terminal callbacks (`attach` refuses a second terminal). This is the
+   * seam the resume flow types its command through; AttachmentHub implements
+   * it. Optional so existing hub fakes keep type-checking — a hub without it
+   * degrades to a "could not be typed" notice, never to a silent no-op.
+   */
+  sendInput?(sessionId: number, data: string | Uint8Array): boolean;
   onError(listener: (error: Error) => void): () => void;
   close(): void;
 }
@@ -136,6 +152,17 @@ export interface WorkspaceControllerOptions {
   pickFolder?: FolderPicker;
   settings?: SettingsReader;
   uiState?: UiStateStore;
+  /** Directory probe for the resume flow (spec §5); defaults to `list_dirs`. */
+  dirExists?: DirExists;
+}
+
+/** How a resume's wait for the new session's prompt ended. */
+type ResumeWaitOutcome = "ready" | "elapsed" | "gone";
+
+interface ResumeWaiter {
+  settle: (outcome: ResumeWaitOutcome) => void;
+  /** False for the fixed-delay path: cwd reports must not shorten the wait. */
+  awaitPrompt: boolean;
 }
 
 export class WorkspaceController {
@@ -148,7 +175,10 @@ export class WorkspaceController {
   private readonly pickFolder?: FolderPicker;
   private readonly settings: SettingsReader;
   private readonly uiState: UiStateStore;
+  private readonly dirExists: DirExists;
   private folderSearchHandler: ((target: FolderSearchTarget) => void) | null = null;
+  /// One-shot resume waiters keyed by the session the resume just created.
+  private readonly resumeWaiters = new Map<number, ResumeWaiter>();
   private readonly sessions = new Map<number, SessionInfo>();
   private readonly listeners = new Set<() => void>();
   private readonly cleanups: Array<() => void> = [];
@@ -185,6 +215,7 @@ export class WorkspaceController {
     this.pickFolder = options.pickFolder;
     this.settings = options.settings ?? { getSnapshot: () => DEFAULT_SETTINGS };
     this.uiState = options.uiState ?? new UiStateStore();
+    this.dirExists = options.dirExists ?? tauriDirExists;
     for (const session of options.sessions) {
       this.sessions.set(session.id, session);
     }
@@ -226,6 +257,7 @@ export class WorkspaceController {
           this.sessions.set(sessionId, { ...existing, alive: false });
           this.sessionsRevision += 1;
         }
+        this.settleResumeWait(sessionId, "gone");
         this.attachments.markExited(sessionId, exitCode);
         this.publish();
       }),
@@ -233,6 +265,7 @@ export class WorkspaceController {
         if (this.sessions.delete(sessionId)) {
           this.sessionsRevision += 1;
         }
+        this.settleResumeWait(sessionId, "gone");
         this.attachments.forgetSession(sessionId);
         this.publish();
       }),
@@ -439,6 +472,75 @@ export class WorkspaceController {
     }
   };
 
+  /// Resume an LLM session (spec §5): validate, open a tab in the session's
+  /// directory, wait for the shell's prompt, then type the resume command.
+  ///
+  /// The command is built from the record's provider and id ALONE, and only
+  /// after `resumeCommand` validates the id — a record whose id is anything
+  /// but `[A-Za-z0-9-]+` is refused here, before a terminal exists. Claude
+  /// sessions are keyed to their project directory, so a vanished cwd is a
+  /// refusal; codex threads are keyed globally, so theirs degrades to the host
+  /// default directory.
+  resumeSession = async (record: LlmSessionRecord): Promise<void> => {
+    this.setNotice(null);
+    const command = resumeCommand(record);
+    if (command === null) {
+      this.setNotice("That session cannot be resumed: its id is not valid.");
+      return;
+    }
+
+    const recorded = record.cwd && record.cwd.length > 0 ? record.cwd : null;
+    const cwd = recorded !== null && (await this.probeDir(recorded))
+      ? recorded
+      : null;
+    if (cwd === null && record.provider === "claude") {
+      this.setNotice(
+        recorded === null
+          ? "This session has no recorded folder, so it cannot be resumed."
+          : `The session's folder no longer exists (${recorded}).`,
+      );
+      return;
+    }
+
+    const profile = this.settings.getSnapshot().defaultProfile;
+    let created: SessionInfo;
+    try {
+      created = await this.createSessionDownChain(
+        profile,
+        cwd === null ? [null] : [cwd, null],
+      );
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+      return;
+    }
+
+    // Arm the waiter before the session is attached: once a terminal binds to
+    // it, its first OSC 9;9 report can land inside any later await.
+    const awaitPrompt = this.settings.getSnapshot().shellIntegration;
+    const ready = this.armResumeWait(
+      created.id,
+      awaitPrompt ? RESUME_PROMPT_TIMEOUT_MS : RESUME_FIXED_DELAY_MS,
+      awaitPrompt,
+    );
+    try {
+      await this.addSessionTab(created, null);
+    } catch {
+      this.settleResumeWait(created.id, "gone");
+      await ready;
+      this.setNotice("The terminal session could not be created.");
+      return;
+    }
+
+    if ((await ready) === "gone") {
+      this.setNotice("The terminal ended before the session could be resumed.");
+      return;
+    }
+    const sent = this.attachments.sendInput?.(created.id, `${command}\r`) ?? false;
+    if (!sent) {
+      this.setNotice("The resume command could not be sent to the terminal.");
+    }
+  };
+
   /// The UI registers the folder-search palette opener here; without one the
   /// ask-searcher policy falls back to the native dialog.
   setFolderSearchHandler = (
@@ -460,6 +562,9 @@ export class WorkspaceController {
     if (!live) {
       return;
     }
+    // A LIVE report is the prompt-ready signal a pending resume waits for
+    // (spec §5 step 3); replayed reports say nothing about the prompt.
+    this.settleResumeWait(sessionId, "ready");
     const key = this.scopeKeyOfSession(sessionId);
     if (key === null) {
       return;
@@ -653,6 +758,9 @@ export class WorkspaceController {
       return;
     }
     this.disposed = true;
+    for (const sessionId of [...this.resumeWaiters.keys()]) {
+      this.settleResumeWait(sessionId, "gone");
+    }
     for (const cleanup of this.cleanups.splice(0)) {
       try {
         cleanup();
@@ -691,6 +799,51 @@ export class WorkspaceController {
       );
     }
     this.publish();
+  }
+
+  /// The injected probe is renderer code that can throw; a resume must never
+  /// surface an exception, and an unanswerable probe means "not there".
+  private async probeDir(path: string): Promise<boolean> {
+    try {
+      return await this.dirExists(path);
+    } catch {
+      return false;
+    }
+  }
+
+  /// One-shot prompt waiter for a just-created session. Settles on the first
+  /// LIVE cwd report (`awaitPrompt`), on the timer, or on the session dying —
+  /// whichever comes first — and always unregisters itself, so nothing is left
+  /// holding a timer or a promise once the resume is over.
+  private armResumeWait(
+    sessionId: number,
+    timeoutMs: number,
+    awaitPrompt: boolean,
+  ): Promise<ResumeWaitOutcome> {
+    this.settleResumeWait(sessionId, "gone");
+    return new Promise<ResumeWaitOutcome>((resolve) => {
+      const timer = setTimeout(
+        () => this.settleResumeWait(sessionId, "elapsed"),
+        timeoutMs,
+      );
+      const waiter: ResumeWaiter = {
+        awaitPrompt,
+        settle: (outcome) => {
+          clearTimeout(timer);
+          resolve(outcome);
+        },
+      };
+      this.resumeWaiters.set(sessionId, waiter);
+    });
+  }
+
+  private settleResumeWait(sessionId: number, outcome: ResumeWaitOutcome): void {
+    const waiter = this.resumeWaiters.get(sessionId);
+    if (!waiter || (outcome === "ready" && !waiter.awaitPrompt)) {
+      return;
+    }
+    this.resumeWaiters.delete(sessionId);
+    waiter.settle(outcome);
   }
 
   /// Cwd of the globally active tab, when that tab belongs to the scope a

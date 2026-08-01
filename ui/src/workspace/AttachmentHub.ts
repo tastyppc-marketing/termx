@@ -204,6 +204,24 @@ export class AttachmentHub implements AttachmentClient {
     return handle;
   }
 
+  /// Write into a session's host attachment without owning its terminal
+  /// callbacks — `attach` refuses a second terminal, and the resume flow types
+  /// into a tab whose xterm is already bound. Returns false when there is no
+  /// live host attachment to write to, so the caller can say so out loud
+  /// instead of dropping the input on the floor.
+  sendInput(sessionId: number, data: string | Uint8Array): boolean {
+    const record = this.records.get(sessionId);
+    if (this.closed || !record?.physical) {
+      return false;
+    }
+    try {
+      record.physical.sendInput(data);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   onError(listener: (error: Error) => void): () => void {
     this.errorListeners.add(listener);
     return () => this.errorListeners.delete(listener);
