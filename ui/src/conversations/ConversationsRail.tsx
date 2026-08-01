@@ -13,6 +13,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { SummaryContent, TermxSettings } from "../settings/settings";
 import { ContextMenu, type MenuPoint } from "../sidebar/ContextMenu";
 import { InlineRename } from "../sidebar/InlineRename";
+import type { ArtifactLister } from "./artifacts";
 import { DetailPane } from "./DetailPane";
 import {
   filterRecords,
@@ -38,6 +39,18 @@ export interface ConversationsRailProps {
   settings: TermxSettings;
   onResume(record: LlmSessionRecord): void;
   onOpenTranscript(record: LlmSessionRecord): void;
+  /** Injected `list_session_artifacts` for the detail pane (§11); absent = static hint. */
+  listArtifacts?: ArtifactLister;
+  /** Detail-pane file row click (§11). */
+  onOpenFile?(path: string): void;
+  /** Detail-pane "Open folder in new tab" (§11); receives the parent dir. */
+  onOpenFolder?(parentDir: string): void;
+  /**
+   * Reports the session keys currently on screen after each list change —
+   * the NoteScheduler's visibility feed (§6). Fired from an effect, never
+   * during render.
+   */
+  onVisibleRecords?(keys: readonly SessionKey[]): void;
   /** Search debounce; tests pass 0. */
   debounceMs?: number;
   /** Injected clock for relative times; tests pass a fixed value. */
@@ -72,6 +85,10 @@ export function ConversationsRail({
   settings,
   onResume,
   onOpenTranscript,
+  listArtifacts,
+  onOpenFile,
+  onOpenFolder,
+  onVisibleRecords,
   debounceMs = 120,
   nowMs,
 }: ConversationsRailProps) {
@@ -128,7 +145,21 @@ export function ConversationsRail({
     [sections],
   );
 
+  // The scheduler's visibility feed (§6): report after commit, re-firing only
+  // when the actual key list changes, not on every parent render.
+  const visibleKeysSignature = visibleKeys.join("\n");
+  const onVisibleRecordsRef = useRef(onVisibleRecords);
+  onVisibleRecordsRef.current = onVisibleRecords;
+  const visibleKeysRef = useRef(visibleKeys);
+  visibleKeysRef.current = visibleKeys;
+  useEffect(() => {
+    onVisibleRecordsRef.current?.(visibleKeysRef.current);
+  }, [visibleKeysSignature]);
+
   const selected = findRecord(snapshot.records, snapshot.selectedKey);
+  const selectedArtifacts = selected
+    ? snapshot.data.artifacts?.[sessionKey(selected)]
+    : undefined;
   const closeMenu = () => {
     setMenu(null);
     setMenuPanel("root");
@@ -533,6 +564,11 @@ export function ConversationsRail({
           onResume={onResume}
           onOpenTranscript={onOpenTranscript}
           nowMs={now}
+          {...(selectedArtifacts ? { artifacts: selectedArtifacts } : {})}
+          onArtifactsFetched={store.setArtifacts}
+          {...(listArtifacts ? { listArtifacts } : {})}
+          {...(onOpenFile ? { onOpenFile } : {})}
+          {...(onOpenFolder ? { onOpenFolder } : {})}
         />
       ) : null}
 

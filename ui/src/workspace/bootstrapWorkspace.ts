@@ -30,7 +30,10 @@ export type BootstrapWorkspaceClient = Pick<
   | "onSessionClosed"
   | "onSessionExited"
   | "setLayout"
->;
+> &
+  // Optional so existing fixtures keep type-checking: a client without it
+  // degrades stop-all to a plain window close, never a crash (spec §15).
+  Partial<Pick<HostClient, "shutdown">>;
 
 export interface BootstrapWorkspaceOptions {
   invokeBootstrap?: () => Promise<unknown>;

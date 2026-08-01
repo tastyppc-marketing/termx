@@ -14,8 +14,8 @@ let root: Root;
 beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true;
-  registerAction({ id: "settings", icon: "⚙", label: "Settings", run: vi.fn() });
-  registerAction({ id: "search", icon: "⌕", label: "Folder search", run: vi.fn() });
+  registerAction({ id: "t-settings", icon: "⚙", label: "Settings", run: vi.fn() });
+  registerAction({ id: "t-search", icon: "⌕", label: "Folder search", run: vi.fn() });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -80,25 +80,25 @@ describe("FeaturesDock", () => {
     ).toEqual(["Settings", "Folder search"]);
     expect(
       rows.map((row) => row.querySelector(".features-dock__id")?.textContent),
-    ).toEqual(["settings", "search"]);
+    ).toEqual(["t-settings", "t-search"]);
     expect(buttonsLabelled(/^Add /)).toHaveLength(6); // 2 actions x 3 trays
   });
 
   it("adds an action to a tray, appending to the existing ids", async () => {
     const { onConfigure } = await renderDock({
-      uiState: { ...DEFAULT_UI_STATE, trayChips: { "sidebar-footer": ["search"] } },
+      uiState: { ...DEFAULT_UI_STATE, trayChips: { "sidebar-footer": ["t-search"] } },
     });
 
     await act(async () => {
       addButton("Add Settings", "Sidebar footer").click();
     });
     expect(onConfigure).toHaveBeenCalledTimes(1);
-    expect(onConfigure).toHaveBeenCalledWith("sidebar-footer", ["search", "settings"]);
+    expect(onConfigure).toHaveBeenCalledWith("sidebar-footer", ["t-search", "t-settings"]);
   });
 
   it("marks an action already in a tray and treats a second add as a no-op", async () => {
     const { onConfigure } = await renderDock({
-      uiState: { ...DEFAULT_UI_STATE, trayChips: { "viewer-header": ["settings"] } },
+      uiState: { ...DEFAULT_UI_STATE, trayChips: { "viewer-header": ["t-settings"] } },
     });
 
     const button = addButton("Settings", "Viewer header");
@@ -113,7 +113,7 @@ describe("FeaturesDock", () => {
 
   it("Reset layout restores defaults for every tray via a null sentinel", async () => {
     const { onConfigure } = await renderDock({
-      uiState: { ...DEFAULT_UI_STATE, trayChips: { "sidebar-footer": ["settings"] } },
+      uiState: { ...DEFAULT_UI_STATE, trayChips: { "sidebar-footer": ["t-settings"] } },
     });
 
     const reset = container.querySelector<HTMLButtonElement>(".features-dock__reset");

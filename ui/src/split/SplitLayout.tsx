@@ -23,6 +23,8 @@ export interface SplitLayoutActions {
   closePane(paneSessionId: number): void | Promise<void>;
   dismissPane(paneSessionId: number): void | Promise<void>;
   resizePane(path: number[], sizes: [number, number]): void;
+  /** Spec §16: extract this pane into its own tab. Absent hides the chip. */
+  popOutPane?(paneSessionId: number): void;
 }
 
 export interface SplitLayoutProps {
@@ -339,6 +341,14 @@ export function SplitLayout({
                     disabled={!splittable}
                     onClick={() => actions.splitPane(sessionId, "col")}
                   >⊟</button>
+                  {actions.popOutPane && root.kind === "split" ? (
+                    <button
+                      type="button"
+                      aria-label="Pop out to own tab"
+                      title="Pop out to own tab"
+                      onClick={() => actions.popOutPane?.(sessionId)}
+                    >⇱</button>
+                  ) : null}
                   <button
                     type="button"
                     aria-label="Close pane"

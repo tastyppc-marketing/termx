@@ -3,8 +3,12 @@ import type {
   KeyboardEvent,
   MouseEvent,
   PointerEvent as ReactPointerEvent,
+  ReactNode,
 } from "react";
-import { ConversationsRail } from "../conversations/ConversationsRail";
+import {
+  ConversationsRail,
+  type ConversationsRailProps,
+} from "../conversations/ConversationsRail";
 import type { ConversationsStore } from "../conversations/store";
 import type { LlmSessionRecord } from "../conversations/types";
 import type { TermxSettings } from "../settings/settings";
@@ -34,6 +38,8 @@ export interface SidebarActions {
   renameGroup(groupId: string, name: string): void;
   toggleGroup(groupId: string): void;
   createTab(options: { groupId: string | null; profile: string | null }): Promise<void>;
+  /** Spec §16: graft `sourceTabId`'s panes into `targetTabId` side-by-side. */
+  mergeTabs(sourceTabId: string, targetTabId: string): void;
   duplicateTab(tabId: string): Promise<void>;
   openFolderHere(tabId: string): Promise<void>;
   closeLiveTab(tabId: string): Promise<void>;
@@ -51,6 +57,12 @@ export interface SidebarConversations {
   settings: TermxSettings;
   onResume(record: LlmSessionRecord): void;
   onOpenTranscript(record: LlmSessionRecord): void;
+  /** Detail-pane artifacts IO (§11), forwarded verbatim to the rail. */
+  listArtifacts?: ConversationsRailProps["listArtifacts"];
+  onOpenFile?(path: string): void;
+  onOpenFolder?(parentDir: string): void;
+  /** NoteScheduler visibility feed (§6), forwarded verbatim to the rail. */
+  onVisibleRecords?: ConversationsRailProps["onVisibleRecords"];
 }
 
 export interface SidebarProps {
@@ -61,6 +73,14 @@ export interface SidebarProps {
   /** Opens the folder-search palette targeting the given group. */
   onOpenFolderSearch?: (groupId: string | null) => void;
   conversations?: SidebarConversations;
+  /** Sessions currently asleep (spec §13) — tabs holding one show a zZ badge. */
+  sleeping?: ReadonlySet<number>;
+  /**
+   * Action tray for the footer (spec §14). When provided it REPLACES the
+   * hardcoded folder-search/settings chrome buttons; the New-terminal button
+   * and its options menu stay native (they carry busy state a chip cannot).
+   */
+  footerTray?: ReactNode;
 }
 
 type SidebarMode = "terminals" | "conversations";
@@ -98,6 +118,8 @@ export function Sidebar({
   onOpenSettings,
   onOpenFolderSearch,
   conversations,
+  sleeping,
+  footerTray,
 }: SidebarProps) {
   const [mode, setMode] = useState<SidebarMode>("terminals");
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
@@ -439,6 +461,14 @@ export function Sidebar({
           {tab.status === "attach_error" ? (
             <span className="sidebar-tab__badge sidebar-tab__badge--error">Attach error</span>
           ) : null}
+          {!ended && sleeping && tab.sessionIds.some((id) => sleeping.has(id)) ? (
+            <span
+              className="sidebar-tab__badge sidebar-tab__badge--sleep"
+              title="Sleeping — the terminal keeps running"
+            >
+              zZ
+            </span>
+          ) : null}
         </span>
         <span
           className="sidebar-tab__activity"
@@ -618,6 +648,20 @@ export function Sidebar({
           }}>Open folder here</button>
           <button type="button" role="menuitem" onClick={() => setMenuPanel("color")}>Color</button>
           <button type="button" role="menuitem" onClick={() => setMenuPanel("move")}>Move to group</button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={snapshot.activeTabId === null || tab.id === snapshot.activeTabId}
+            onClick={() => {
+              const target = snapshot.activeTabId;
+              closeMenu();
+              if (target !== null && target !== tab.id) {
+                actions.mergeTabs(tab.id, target);
+              }
+            }}
+          >
+            Side-by-side with active tab
+          </button>
           <button type="button" role="menuitem" className="context-menu__danger" onClick={() => {
             closeMenu();
             requestTabClose(tab, tabRefs.current.get(tab.id));
@@ -761,6 +805,18 @@ export function Sidebar({
           settings={conversations.settings}
           onResume={conversations.onResume}
           onOpenTranscript={conversations.onOpenTranscript}
+          {...(conversations.listArtifacts
+            ? { listArtifacts: conversations.listArtifacts }
+            : {})}
+          {...(conversations.onOpenFile
+            ? { onOpenFile: conversations.onOpenFile }
+            : {})}
+          {...(conversations.onOpenFolder
+            ? { onOpenFolder: conversations.onOpenFolder }
+            : {})}
+          {...(conversations.onVisibleRecords
+            ? { onVisibleRecords: conversations.onVisibleRecords }
+            : {})}
         />
       ) : (
       <>
@@ -817,28 +873,32 @@ export function Sidebar({
         >
           ▴
         </button>
-        {onOpenFolderSearch ? (
-          <button
-            type="button"
-            className="sidebar-create__options"
-            aria-label="New terminal in folder"
-            title="New terminal in folder (Ctrl+Shift+O)"
-            onClick={() => onOpenFolderSearch(null)}
-          >
-            ⌕
-          </button>
-        ) : null}
-        {onOpenSettings ? (
-          <button
-            type="button"
-            className="sidebar-create__options"
-            aria-label="Settings"
-            title="Settings"
-            onClick={onOpenSettings}
-          >
-            ⚙
-          </button>
-        ) : null}
+        {footerTray ?? (
+          <>
+            {onOpenFolderSearch ? (
+              <button
+                type="button"
+                className="sidebar-create__options"
+                aria-label="New terminal in folder"
+                title="New terminal in folder (Ctrl+Shift+O)"
+                onClick={() => onOpenFolderSearch(null)}
+              >
+                ⌕
+              </button>
+            ) : null}
+            {onOpenSettings ? (
+              <button
+                type="button"
+                className="sidebar-create__options"
+                aria-label="Settings"
+                title="Settings"
+                onClick={onOpenSettings}
+              >
+                ⚙
+              </button>
+            ) : null}
+          </>
+        )}
       </div>
       </>
       )}

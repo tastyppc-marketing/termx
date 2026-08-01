@@ -244,6 +244,11 @@
   color: #f7768e;
 }
 
+.sidebar-tab__badge--sleep {
+  color: #7aa2f7;
+  font-style: italic;
+}
+
 .sidebar-tab__activity {
   width: 6px;
   height: 6px;

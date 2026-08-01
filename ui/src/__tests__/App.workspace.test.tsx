@@ -131,6 +131,10 @@ function controllerHarness(initial = snapshot()): ControllerHarness {
     setFolderSearchHandler: vi.fn(),
     createTabWithCwd: vi.fn(async () => undefined),
     createTabViaNativeDialog: vi.fn(async () => undefined),
+    mergeTabs: vi.fn(),
+    popOutPane: vi.fn(),
+    resumeSession: vi.fn(async () => undefined),
+    sessionDims: vi.fn(() => ({})),
   };
   const client = {
     close: vi.fn(() => order.push("client.close")),

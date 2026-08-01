@@ -27,11 +27,14 @@ export interface ActionChip {
 export type TrayId = "sidebar-footer" | "pane-toolbar" | "viewer-header";
 
 /**
- * Shipped layout. Empty for now — the App fills these when it adopts trays;
- * until then every tray renders empty and no existing surface changes.
+ * Shipped layout. The sidebar footer mirrors its pre-tray chrome
+ * (folder-search + settings); `new-tab` is registered but not shown by
+ * default because the footer's primary New-terminal button stays native
+ * (it carries busy state a chip cannot) — the Features dock can add it to
+ * any tray. The other trays start empty.
  */
 export const DEFAULT_TRAYS: Record<TrayId, readonly string[]> = {
-  "sidebar-footer": [],
+  "sidebar-footer": ["folder-search", "settings", "features"],
   "pane-toolbar": [],
   "viewer-header": [],
 };

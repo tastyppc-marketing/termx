@@ -53,15 +53,20 @@ describe("action registry", () => {
     expect(allActions().map((entry) => entry.id)).toEqual(["one", "two"]);
   });
 
-  it("ships empty default trays for all three slots", () => {
+  it("ships the adopted default trays", () => {
     expect(Object.keys(DEFAULT_TRAYS).sort()).toEqual([
       "pane-toolbar",
       "sidebar-footer",
       "viewer-header",
     ]);
-    for (const ids of Object.values(DEFAULT_TRAYS)) {
-      expect(ids).toEqual([]);
-    }
+    // The sidebar footer mirrors its pre-tray chrome; the others start empty.
+    expect(DEFAULT_TRAYS["sidebar-footer"]).toEqual([
+      "folder-search",
+      "settings",
+      "features",
+    ]);
+    expect(DEFAULT_TRAYS["pane-toolbar"]).toEqual([]);
+    expect(DEFAULT_TRAYS["viewer-header"]).toEqual([]);
   });
 
   it("trayChipIds falls back to DEFAULT_TRAYS when the tray is unconfigured", () => {

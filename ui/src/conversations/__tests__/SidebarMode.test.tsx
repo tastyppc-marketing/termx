@@ -79,6 +79,7 @@ function actions(): SidebarActions {
     renameGroup: vi.fn(),
     toggleGroup: vi.fn(),
     createTab: vi.fn(async () => undefined),
+    mergeTabs: vi.fn(),
     duplicateTab: vi.fn(async () => undefined),
     openFolderHere: vi.fn(async () => undefined),
     closeLiveTab: vi.fn(async () => undefined),
