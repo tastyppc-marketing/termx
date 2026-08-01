@@ -123,6 +123,31 @@ shortcut installed (%APPDATA%\...\Start Menu\Programs\TermX.lnk). Task #9
   Opus fallback into same worktree). NEXT: main integration pass (list
   below + U17 seams + NoteScheduler adapter + sessionDims-from-hub), then
   V2.
+- **INTEGRATION PASS DONE (2026-08-01 ~01:10)**: `c52ea01` (plumbing:
+  native/sessionData.ts tolerant invoke wrappers tauriReadTextFile/
+  tauriListArtifacts/tauriGenerateNote; store.setGeneratedNote; controller
+  sessionDims(ids) = hub.lastDims ?? SessionInfo cols/rows;
+  BootstrapWorkspaceClient + Partial<Pick<HostClient,"shutdown">>) +
+  `aca6371` (App.tsx rewritten: ALL tabs stay mounted — active wrapper
+  display:contents, hidden display:none; SplitLayout keydown guards
+  !visible; ONE window SleepController, SplitLayout sole visibility writer,
+  App never observe(); sessionDims passed per tab; NoteScheduler wired with
+  writeGeneratedNote=store.setGeneratedNote, reconcile from rail
+  onVisibleRecords; Ctrl+Shift+R gated on conversationsPalette; CloseGuard
+  + onCloseRequested decideOnClose + client.shutdown() stop-all + remember
+  writes onWindowClose; module-scope action chips new-tab/folder-search/
+  settings/features, sidebar-footer tray replaces ⌕/⚙ chrome, New-terminal
+  stays native; viewer .viewer-area + ViewerHost; sidebar zZ badge from
+  SleepController.getSnapshot; U17 menu item "Side-by-side with active
+  tab" + pane pop-out ⇱ chip) + `e8b70e7` (App-level two-tab sleep
+  lifecycle test — hidden tab stays MOUNTED under display:none, sleeps at
+  15-min default, visible never sleeps, activation wakes; fake timers
+  scoped to setTimeout/clearTimeout/Date so React scheduling stays real).
+  Baselines: ui **639**, tauri 122, host 118, tsc clean; PostToolUse hook
+  full-suite PASS. REMAINING for task #12: U14 merge (task bx1m9jt9i
+  still alive, worktree files mtime 01:05, uncommitted; contracts in "U14
+  contract from R5" bullet + named export TranscriptView), then V2 verify
+  + restage (checklist in ROUND 1 bullet; claude .cmd resolution risk).
 - **Wave B dispatch details (dispatched 2026-07-31 ~23:45, task #11)**:
   u7-conversations (Opus agent, worktree, spec §3: ConversationsStore + rail
   + folders + DetailPane + Sidebar mode switch); u13-sleep (Opus agent,
