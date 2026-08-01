@@ -81,6 +81,12 @@ export interface WorkspaceAttachmentHub {
    * degrades to a "could not be typed" notice, never to a silent no-op.
    */
   sendInput?(sessionId: number, data: string | Uint8Array): boolean;
+  /**
+   * Last dims a terminal pushed to the host for this session (spec §13);
+   * AttachmentHub implements it. Optional so existing hub fakes keep
+   * type-checking — absent means "no recorded dims", never an error.
+   */
+  lastDims?(sessionId: number): { cols: number; rows: number } | null;
   onError(listener: (error: Error) => void): () => void;
   close(): void;
 }
@@ -541,6 +547,26 @@ export class WorkspaceController {
     if (!sent) {
       this.setNotice("The resume command could not be sent to the terminal.");
     }
+  };
+
+  /// Recorded dims per session for reattach-before-replay (spec §13): the
+  /// hub's live resize record wins (the dims the pty actually ran at), the
+  /// host's creation-time SessionInfo is the fallback for sessions no
+  /// terminal has resized yet this run.
+  sessionDims = (
+    sessionIds: readonly number[],
+  ): Readonly<Record<number, { cols: number; rows: number }>> => {
+    const dims: Record<number, { cols: number; rows: number }> = {};
+    for (const sessionId of sessionIds) {
+      const recorded = this.attachments.lastDims?.(sessionId) ?? null;
+      const info = this.sessions.get(sessionId);
+      const chosen =
+        recorded ?? (info ? { cols: info.cols, rows: info.rows } : null);
+      if (chosen !== null) {
+        dims[sessionId] = chosen;
+      }
+    }
+    return dims;
   };
 
   /// The UI registers the folder-search palette opener here; without one the

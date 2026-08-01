@@ -857,3 +857,24 @@ describe("WorkspaceController new-tab cwd policy (F1)", () => {
     expect(uiState.getSnapshot().scopePaths.seeds["group"]).toBeUndefined();
   });
 });
+
+describe("WorkspaceController sessionDims (spec §13)", () => {
+  it("prefers the hub's recorded resize dims, falls back to SessionInfo, drops unknowns", () => {
+    const { controller, attachments } = harness({
+      sessions: [session(1), session(2, { cols: 80, rows: 24 })],
+    });
+    // The hub recorded a live resize for session 1 only.
+    attachments.lastDims = (sessionId: number) =>
+      sessionId === 1 ? { cols: 200, rows: 50 } : null;
+
+    expect(controller.sessionDims([1, 2, 99])).toEqual({
+      1: { cols: 200, rows: 50 },
+      2: { cols: 80, rows: 24 },
+    });
+  });
+
+  it("works against a hub without the lastDims seam", () => {
+    const { controller } = harness({ sessions: [session(3)] });
+    expect(controller.sessionDims([3])).toEqual({ 3: { cols: 120, rows: 30 } });
+  });
+});

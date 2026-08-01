@@ -23,6 +23,7 @@ import {
   hasTranscript,
   sessionKey,
   type ConversationsV1,
+  type GeneratedNote,
   type LlmSessionRecord,
   type SessionArtifacts,
   type SessionKey,
@@ -174,6 +175,14 @@ export class ConversationsStore {
     this.updateData((data) => ({
       ...data,
       artifacts: { ...data.artifacts, [key]: artifacts },
+    }));
+  };
+
+  /** Cache one freshly generated LLM note (§6) — the NoteScheduler's write. */
+  setGeneratedNote = (key: SessionKey, note: GeneratedNote): void => {
+    this.updateData((data) => ({
+      ...data,
+      generated: { ...data.generated, [key]: note },
     }));
   };
 

@@ -264,3 +264,27 @@ describe("loadConversationsStore", () => {
     expect(list).not.toHaveBeenCalled();
   });
 });
+
+describe("setGeneratedNote", () => {
+  it("caches the note under its key and persists it", async () => {
+    const saves: string[] = [];
+    const store = makeStore({ save: async (text) => void saves.push(text) });
+
+    store.setGeneratedNote("claude:a", {
+      summary: "did the thing",
+      recap: null,
+      generatedAtMs: 1_000,
+      sourceMtimeMs: 900,
+    });
+
+    expect(store.getSnapshot().data.generated["claude:a"]).toEqual({
+      summary: "did the thing",
+      recap: null,
+      generatedAtMs: 1_000,
+      sourceMtimeMs: 900,
+    });
+    await store.flush();
+    expect(saves.length).toBeGreaterThan(0);
+    expect(saves.at(-1)).toContain("did the thing");
+  });
+});

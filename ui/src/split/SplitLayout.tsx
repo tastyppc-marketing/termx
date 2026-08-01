@@ -125,6 +125,12 @@ export function SplitLayout({
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
+      // Every tab's layout stays mounted for the sleep lifecycle (spec §13),
+      // and each mounts this window listener — only the on-screen layout may
+      // act on shortcuts, or a hidden tab would split/close its own panes.
+      if (!visible) {
+        return;
+      }
       if (event.key === "Escape") {
         const current = dragRef.current;
         if (current) {
