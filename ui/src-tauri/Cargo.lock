@@ -3289,6 +3289,7 @@ dependencies = [
 name = "termx-ui"
 version = "0.1.0"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "tauri",
