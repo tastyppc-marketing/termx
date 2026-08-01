@@ -1,0 +1,94 @@
+.close-guard-backdrop {
+  position: fixed;
+  z-index: 200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(5 7 10 / 62%);
+  backdrop-filter: blur(3px);
+}
+
+.close-guard {
+  width: min(420px, calc(100% - 32px));
+  padding: 20px;
+  color: #e6e6e6;
+  background: #1b202a;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 8px;
+  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+}
+
+.close-guard h2 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.close-guard__body {
+  margin: 0 0 16px;
+  color: #b7bdca;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.close-guard__remember {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 4px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.close-guard__remember:hover {
+  background: rgb(255 255 255 / 4%);
+}
+
+.close-guard__remember input {
+  accent-color: #7aa2f7;
+}
+
+.close-guard__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.close-guard__actions button {
+  min-height: 34px;
+  padding: 0 16px;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 7px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.close-guard__keep {
+  color: #10151d;
+  font-weight: 600;
+  background: #7aa2f7;
+  border: 1px solid #7aa2f7;
+}
+
+.close-guard__keep:hover {
+  background: #8db2ff;
+  border-color: #8db2ff;
+}
+
+.close-guard__stop {
+  color: #e6e6e6;
+  background: #7e3544;
+  border: 1px solid #a4485b;
+}
+
+.close-guard__stop:hover {
+  background: #8f3d4e;
+  border-color: #b45367;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .close-guard__actions button {
+    transition: none;
+  }
+}
