@@ -10,8 +10,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The only names `read_app_file` / `write_app_file` will accept.
-pub const ALLOWED_FILES: [&str; 2] = ["settings_v1.json", "ui_state_v1.json"];
+/// The only names `read_app_file` / `write_app_file` will accept. The last
+/// two arrived with the conversations work: `llm_sessions` persists its scan
+/// index through this same path, so both sides share one allowlist and one
+/// atomic write rather than growing a second storage API.
+pub const ALLOWED_FILES: [&str; 4] = [
+    "settings_v1.json",
+    "ui_state_v1.json",
+    "sessions_index_v1.json",
+    "conversations_v1.json",
+];
 
 /// Keeps concurrent temp files distinct within one process (two debounced
 /// writes landing together must not share a temp path and clobber each other).
@@ -95,8 +103,29 @@ mod tests {
     const SETTINGS: &str = "settings_v1.json";
 
     #[test]
-    fn allowlist_is_exactly_the_two_renderer_files() {
-        assert_eq!(ALLOWED_FILES, ["settings_v1.json", "ui_state_v1.json"]);
+    fn allowlist_is_exactly_the_four_app_files() {
+        assert_eq!(
+            ALLOWED_FILES,
+            [
+                "settings_v1.json",
+                "ui_state_v1.json",
+                "sessions_index_v1.json",
+                "conversations_v1.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_conversations_files_read_and_write_like_the_originals() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["sessions_index_v1.json", "conversations_v1.json"] {
+            assert_eq!(read_file_in(tmp.path(), name).unwrap(), None);
+            write_file_in(tmp.path(), name, "{\"version\":1}").unwrap();
+            assert_eq!(
+                read_file_in(tmp.path(), name).unwrap().as_deref(),
+                Some("{\"version\":1}")
+            );
+        }
     }
 
     #[test]
