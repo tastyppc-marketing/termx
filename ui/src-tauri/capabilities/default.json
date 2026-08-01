@@ -9,6 +9,12 @@
     "allow-read-app-file",
     "allow-write-app-file",
     "allow-list-dirs",
+    "allow-list-llm-sessions",
+    "allow-generate-session-note",
+    "allow-list-session-artifacts",
+    "allow-read-text-file",
+    "allow-read-transcript-window",
+    "allow-search-transcript",
     "dialog:allow-open"
   ]
 }

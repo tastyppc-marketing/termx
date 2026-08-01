@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-llm-sessions"
+description = "Enables the list_llm_sessions command without any pre-configured scope."
+commands.allow = ["list_llm_sessions"]
+
+[[permission]]
+identifier = "deny-list-llm-sessions"
+description = "Denies the list_llm_sessions command without any pre-configured scope."
+commands.deny = ["list_llm_sessions"]

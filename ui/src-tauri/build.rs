@@ -8,6 +8,12 @@ fn main() {
                 "read_app_file",
                 "write_app_file",
                 "list_dirs",
+                "list_llm_sessions",
+                "generate_session_note",
+                "list_session_artifacts",
+                "read_text_file",
+                "read_transcript_window",
+                "search_transcript",
             ]),
         ),
     )

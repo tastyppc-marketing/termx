@@ -1,7 +1,11 @@
+mod artifacts;
 mod bootstrap;
+mod file_view;
 mod folders;
+mod llm_sessions;
 mod paths;
 mod storage;
+mod transcript;
 
 pub use bootstrap::{bootstrap_host, bootstrap_with, BootstrapOptions, BootstrapResult};
 
@@ -17,6 +21,12 @@ pub fn run() {
             storage::read_app_file,
             storage::write_app_file,
             folders::list_dirs,
+            llm_sessions::list_llm_sessions,
+            llm_sessions::generate_session_note,
+            artifacts::list_session_artifacts,
+            file_view::read_text_file,
+            transcript::read_transcript_window,
+            transcript::search_transcript,
         ])
         .run(tauri::generate_context!())
         .expect("error while running TermX");

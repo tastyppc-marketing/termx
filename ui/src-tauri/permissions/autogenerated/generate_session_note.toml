@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-generate-session-note"
+description = "Enables the generate_session_note command without any pre-configured scope."
+commands.allow = ["generate_session_note"]
+
+[[permission]]
+identifier = "deny-generate-session-note"
+description = "Denies the generate_session_note command without any pre-configured scope."
+commands.deny = ["generate_session_note"]

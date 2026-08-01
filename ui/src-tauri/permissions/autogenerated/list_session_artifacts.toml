@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-session-artifacts"
+description = "Enables the list_session_artifacts command without any pre-configured scope."
+commands.allow = ["list_session_artifacts"]
+
+[[permission]]
+identifier = "deny-list-session-artifacts"
+description = "Denies the list_session_artifacts command without any pre-configured scope."
+commands.deny = ["list_session_artifacts"]
