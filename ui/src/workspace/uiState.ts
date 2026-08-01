@@ -9,6 +9,7 @@
  * disk writes.
  */
 
+import { DEFAULT_TRAYS, type TrayId } from "../actions/registry";
 import { EMPTY_SCOPE_PATHS, type ScopePathsState } from "./scopePaths";
 
 export const RECENT_FOLDERS_CAP = 50;
@@ -16,6 +17,11 @@ export const RECENT_FOLDERS_CAP = 50;
 export interface UiStateV1 {
   readonly scopePaths: ScopePathsState;
   readonly recentFolders: readonly string[];
+  /**
+   * Per-tray chip order (spec §14). Absent — or unparseable — means "use the
+   * registry defaults"; a tray missing from the record falls back on its own.
+   */
+  readonly trayChips?: Partial<Record<TrayId, readonly string[]>>;
 }
 
 export const DEFAULT_UI_STATE: UiStateV1 = {
@@ -34,6 +40,33 @@ function parsePathRecord(value: unknown): Readonly<Record<string, string>> {
     }
   }
   return result;
+}
+
+/**
+ * Tray config is optional: anything that is not an object of known tray ids
+ * mapping to string arrays degrades to `undefined` (= registry defaults),
+ * and junk entries inside a good array are dropped.
+ */
+function parseTrayChips(
+  value: unknown,
+): Partial<Record<TrayId, readonly string[]>> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const result: Partial<Record<TrayId, readonly string[]>> = {};
+  let found = false;
+  for (const tray of Object.keys(DEFAULT_TRAYS) as TrayId[]) {
+    const ids = record[tray];
+    if (!Array.isArray(ids)) {
+      continue;
+    }
+    result[tray] = ids.filter(
+      (id): id is string => typeof id === "string" && id.length > 0,
+    );
+    found = true;
+  }
+  return found ? result : undefined;
 }
 
 /** Parse ui-state text (null = missing file). Never throws. */
@@ -60,12 +93,14 @@ export function parseUiState(text: string | null): UiStateV1 {
         .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
         .slice(0, RECENT_FOLDERS_CAP)
     : [];
+  const trayChips = parseTrayChips(record.trayChips);
   return {
     scopePaths: {
       seeds: parsePathRecord(scopePathsRaw.seeds),
       active: parsePathRecord(scopePathsRaw.active),
     },
     recentFolders: recents,
+    ...(trayChips ? { trayChips } : {}),
   };
 }
 
@@ -97,6 +132,54 @@ export function updateScopePaths(
 ): UiStateV1 {
   const next = update(state.scopePaths);
   return next === state.scopePaths ? state : { ...state, scopePaths: next };
+}
+
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return (
+    left.length === right.length && left.every((id, index) => id === right[index])
+  );
+}
+
+/**
+ * Write one tray's chip list (spec §14). This is the only correct way to
+ * apply a `Tray`/`FeaturesDock` `onConfigure` callback: `null` is the reset
+ * sentinel — it deletes that tray's key so `trayChipIds` falls back on
+ * `DEFAULT_TRAYS`, and the whole `trayChips` field disappears once no tray is
+ * configured (a full "Reset layout" round-trips as an absent field). An empty
+ * array is a real configuration ("user emptied this tray"), not a reset.
+ * Same-ref return when the stored config already matches.
+ */
+export function applyTrayConfigure(
+  state: UiStateV1,
+  tray: TrayId,
+  ids: readonly string[] | null,
+): UiStateV1 {
+  const current = state.trayChips?.[tray];
+
+  if (ids === null) {
+    if (current === undefined) {
+      return state;
+    }
+    const rest: Partial<Record<TrayId, readonly string[]>> = {};
+    for (const key of Object.keys(state.trayChips ?? {}) as TrayId[]) {
+      const value = state.trayChips?.[key];
+      if (key !== tray && value !== undefined) {
+        rest[key] = value;
+      }
+    }
+    if (Object.keys(rest).length > 0) {
+      return { ...state, trayChips: rest };
+    }
+    // Spread-then-delete keeps any unrelated fields this state may carry.
+    const next: { -readonly [K in keyof UiStateV1]: UiStateV1[K] } = { ...state };
+    delete next.trayChips;
+    return next;
+  }
+
+  if (current !== undefined && sameIds(current, ids)) {
+    return state;
+  }
+  return { ...state, trayChips: { ...state.trayChips, [tray]: [...ids] } };
 }
 
 export interface UiStateStoreOptions {

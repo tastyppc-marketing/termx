@@ -1,0 +1,35 @@
+/* Chips reuse the sidebar footer button aesthetic (.sidebar-create button /
+   .sidebar-create__options) so a tray reads as part of the same toolbar. */
+
+.tray {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.tray__chip {
+  display: flex;
+  width: 34px;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: #dfe2e8;
+  background: #232a36;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 7px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tray__chip:hover {
+  color: #fff;
+  background: #2b3442;
+  border-color: rgb(122 162 247 / 24%);
+}
+
+.tray__chip:focus-visible {
+  outline: 1px solid var(--sidebar-accent, #7aa2f7);
+  outline-offset: 1px;
+}
