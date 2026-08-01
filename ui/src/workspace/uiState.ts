@@ -10,6 +10,7 @@
  */
 
 import { DEFAULT_TRAYS, type TrayId } from "../actions/registry";
+import type { ViewerGeometry } from "../viewer/viewerState";
 import { EMPTY_SCOPE_PATHS, type ScopePathsState } from "./scopePaths";
 
 export const RECENT_FOLDERS_CAP = 50;
@@ -22,6 +23,8 @@ export interface UiStateV1 {
    * registry defaults"; a tray missing from the record falls back on its own.
    */
   readonly trayChips?: Partial<Record<TrayId, readonly string[]>>;
+  /** Native viewer placement and visibility. Absent means the viewer defaults. */
+  readonly viewerGeometry?: ViewerGeometry;
 }
 
 export const DEFAULT_UI_STATE: UiStateV1 = {
@@ -69,6 +72,29 @@ function parseTrayChips(
   return found ? result : undefined;
 }
 
+function parseViewerGeometry(value: unknown): ViewerGeometry | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const dock = record.dock;
+  const sizePx = record.sizePx;
+  const state = record.state;
+  if (
+    (dock !== "right" && dock !== "bottom") ||
+    typeof sizePx !== "number" ||
+    !Number.isFinite(sizePx) ||
+    sizePx <= 0 ||
+    (state !== "hidden" &&
+      state !== "docked" &&
+      state !== "overlay" &&
+      state !== "tray")
+  ) {
+    return undefined;
+  }
+  return { dock, sizePx, state };
+}
+
 /** Parse ui-state text (null = missing file). Never throws. */
 export function parseUiState(text: string | null): UiStateV1 {
   if (text === null) {
@@ -94,6 +120,7 @@ export function parseUiState(text: string | null): UiStateV1 {
         .slice(0, RECENT_FOLDERS_CAP)
     : [];
   const trayChips = parseTrayChips(record.trayChips);
+  const viewerGeometry = parseViewerGeometry(record.viewerGeometry);
   return {
     scopePaths: {
       seeds: parsePathRecord(scopePathsRaw.seeds),
@@ -101,6 +128,7 @@ export function parseUiState(text: string | null): UiStateV1 {
     },
     recentFolders: recents,
     ...(trayChips ? { trayChips } : {}),
+    ...(viewerGeometry ? { viewerGeometry } : {}),
   };
 }
 
@@ -180,6 +208,27 @@ export function applyTrayConfigure(
     return state;
   }
   return { ...state, trayChips: { ...state.trayChips, [tray]: [...ids] } };
+}
+
+/**
+ * Store the viewer's placement (spec §12). Same-ref when nothing actually
+ * moved: the viewer reports geometry on every surface change, and an
+ * unchanged report must not schedule a disk write.
+ */
+export function setViewerGeometry(
+  state: UiStateV1,
+  geometry: ViewerGeometry,
+): UiStateV1 {
+  const current = state.viewerGeometry;
+  if (
+    current !== undefined &&
+    current.dock === geometry.dock &&
+    current.sizePx === geometry.sizePx &&
+    current.state === geometry.state
+  ) {
+    return state;
+  }
+  return { ...state, viewerGeometry: geometry };
 }
 
 export interface UiStateStoreOptions {
