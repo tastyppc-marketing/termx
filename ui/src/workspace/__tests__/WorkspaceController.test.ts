@@ -596,6 +596,92 @@ describe("WorkspaceController split actions", () => {
   });
 });
 
+describe("WorkspaceController combine tabs (spec §16)", () => {
+  it("grafts the source tab beside the target without any session lifecycle call", () => {
+    const { controller, createSession, closeSession, attachments, persistenceCalls } =
+      harness();
+
+    controller.mergeTabs("tab-2", "tab-1");
+
+    const after = controller.getSnapshot().layout;
+    expect(after.tabs["tab-1"]?.split).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [{ kind: "pane", sessionId: 1 }, layout().tabs["tab-2"]!.split],
+    });
+    expect(after.tabs["tab-2"]).toBeUndefined();
+    expect(after.groups[0]?.tabIds).toEqual([]);
+    expect(persistenceCalls.at(-1)?.kind).toBe("structural");
+    expect(createSession).not.toHaveBeenCalled();
+    expect(closeSession).not.toHaveBeenCalled();
+    expect(attachments.attachSession).not.toHaveBeenCalled();
+    expect(attachments.forgetSession).not.toHaveBeenCalled();
+  });
+
+  it("leaves the target active when the source tab was the active one", () => {
+    const { controller } = harness();
+
+    // Fixture: tab-1 is active and is the tab being merged AWAY.
+    controller.mergeTabs("tab-1", "tab-2");
+
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.activeTabId).toBe("tab-2");
+    expect(snapshot.activeSessionId).toBe(2);
+    expect(snapshot.layout.tabs["tab-2"]?.split).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [layout().tabs["tab-2"]!.split, { kind: "pane", sessionId: 1 }],
+    });
+  });
+
+  it("notices a refused combine and writes nothing", () => {
+    const { controller, persistenceCalls } = harness();
+    const before = controller.getSnapshot().layout;
+
+    controller.mergeTabs("tab-1", "tab-1");
+    expect(controller.getSnapshot().notice).toBe("The tabs could not be combined.");
+
+    controller.mergeTabs("gone", "tab-1");
+    expect(controller.getSnapshot().notice).toBe("The tabs could not be combined.");
+    expect(controller.getSnapshot().layout).toBe(before);
+    expect(persistenceCalls).toEqual([]);
+  });
+
+  it("pops a pane out into a generated tab after its source, which takes focus", () => {
+    const { controller, createSession, closeSession, persistenceCalls } = harness();
+
+    controller.popOutPane("tab-2", 3);
+
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.layout.tabs["tab-2"]?.split).toEqual({ kind: "pane", sessionId: 2 });
+    // "new-tab" is the harness's first generateId() value.
+    expect(snapshot.layout.tabs["new-tab"]?.split).toEqual({ kind: "pane", sessionId: 3 });
+    expect(snapshot.layout.groups[0]?.tabIds).toEqual(["tab-2", "new-tab"]);
+    expect(snapshot.activeTabId).toBe("new-tab");
+    expect(snapshot.activeSessionId).toBe(3);
+    expect(snapshot.groups[0]?.tabs.at(-1)).toMatchObject({
+      id: "new-tab",
+      primarySessionId: 3,
+    });
+    expect(persistenceCalls.at(-1)?.kind).toBe("structural");
+    expect(createSession).not.toHaveBeenCalled();
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+
+  it("refuses to pop out a tab's only pane, silently and without a write", () => {
+    const { controller, persistenceCalls } = harness();
+    const before = controller.getSnapshot().layout;
+
+    controller.popOutPane("tab-1", 1);
+
+    expect(controller.getSnapshot().layout).toBe(before);
+    expect(controller.getSnapshot().notice).toBeNull();
+    expect(persistenceCalls).toEqual([]);
+  });
+});
+
 describe("WorkspaceController new-tab cwd policy (F1)", () => {
   it("group-active opens instantly in the scope's active path — no picker", async () => {
     const pickFolder = vi.fn(async () => "Z:\\never");

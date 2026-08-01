@@ -43,7 +43,9 @@ import type {
 } from "./LayoutPersistence";
 import {
   canSplitPane,
+  extractSessionToTab,
   firstSessionId,
+  mergeTabIntoTab,
   nextTabColor,
   pruneSessionIds,
   removeGroupAndTabs,
@@ -749,6 +751,46 @@ export class WorkspaceController {
   /// this only on release, so every call is a real structural write.
   resizePane = (tabId: string, path: number[], sizes: [number, number]): void => {
     this.mutate("structural", () => this.store.resizePane(tabId, path, sizes));
+  };
+
+  /// Spec §16 merge: the source tab's whole split subtree becomes a new
+  /// right-hand sibling inside the target tab, and the source tab leaves the
+  /// rail. Pure layout surgery — NO session is created, killed, attached, or
+  /// detached; the moved panes remount and replay their scrollback. The target
+  /// stays the active tab; UI pane focus belongs on the merged-in subtree,
+  /// which is always `tabs[targetTabId].split.children[1]`.
+  mergeTabs = (sourceTabId: string, targetTabId: string): void => {
+    const merged = mergeTabIntoTab(this.store.getState(), sourceTabId, targetTabId);
+    if (merged === null) {
+      this.setNotice("The tabs could not be combined.");
+      return;
+    }
+    this.setNotice(null);
+    this.mutate("structural", () => this.store.replaceState(merged));
+  };
+
+  /// Spec §16 extract, the undo of a merge: the pane leaves its split (single
+  /// -child splits collapse) and becomes its own tab right after the source, in
+  /// the same group, which then takes focus. Sessions are untouched here too.
+  ///
+  /// A refusal (unknown tab/session, or the tab's only pane — which is already
+  /// its own tab) is a silent no-op: the affordance is hidden for a lone pane,
+  /// so there is nothing to explain.
+  popOutPane = (tabId: string, sessionId: number): void => {
+    const newTabId = this.generateId();
+    const extracted = extractSessionToTab(
+      this.store.getState(),
+      tabId,
+      sessionId,
+      newTabId,
+    );
+    if (extracted === null) {
+      return;
+    }
+    this.setNotice(null);
+    this.mutate("structural", () =>
+      this.store.replaceState({ ...extracted, activeTabId: newTabId })
+    );
   };
 
   flush = (): Promise<void> => this.persistence.flush();

@@ -7,8 +7,10 @@ import {
 } from "../../state/layout";
 import {
   canSplitPane,
+  extractSessionToTab,
   firstSessionId,
   flattenTabIds,
+  mergeTabIntoTab,
   nextTabColor,
   pathToPaneNode,
   pruneSessionIds,
@@ -110,6 +112,187 @@ describe("layoutOperations", () => {
     expect(removed.ungroupedTabIds).toEqual(["t1"]);
     expect(removed.activeTabId).toBe("t3");
     expect(validateInvariants(removed)).toEqual([]);
+  });
+});
+
+/// Depth fixtures for the §16 cap: "deep" is exactly MAX_SPLIT_DEPTH (4), so
+/// grafting anything beside it would make 5; "three" is 3, so a pane grafted
+/// beside it lands exactly ON the cap.
+function depthLayout(): LayoutV1 {
+  const depth4: SplitNode = {
+    kind: "split",
+    dir: "row",
+    sizes: [0.5, 0.5],
+    children: [
+      { kind: "pane", sessionId: 10 },
+      {
+        kind: "split",
+        dir: "col",
+        sizes: [0.5, 0.5],
+        children: [
+          { kind: "pane", sessionId: 11 },
+          {
+            kind: "split",
+            dir: "row",
+            sizes: [0.5, 0.5],
+            children: [
+              { kind: "pane", sessionId: 12 },
+              {
+                kind: "split",
+                dir: "col",
+                sizes: [0.5, 0.5],
+                children: [
+                  { kind: "pane", sessionId: 13 },
+                  { kind: "pane", sessionId: 14 },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const depth3: SplitNode = {
+    kind: "split",
+    dir: "row",
+    sizes: [0.5, 0.5],
+    children: [
+      { kind: "pane", sessionId: 16 },
+      {
+        kind: "split",
+        dir: "col",
+        sizes: [0.5, 0.5],
+        children: [
+          { kind: "pane", sessionId: 17 },
+          {
+            kind: "split",
+            dir: "row",
+            sizes: [0.5, 0.5],
+            children: [
+              { kind: "pane", sessionId: 18 },
+              { kind: "pane", sessionId: 19 },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  return {
+    version: 1,
+    groups: [],
+    ungroupedTabIds: ["deep", "three", "simple"],
+    tabs: {
+      deep: { id: "deep", title: null, color: "blue", split: depth4 },
+      three: { id: "three", title: null, color: "cyan", split: depth3 },
+      simple: {
+        id: "simple",
+        title: null,
+        color: "green",
+        split: { kind: "pane", sessionId: 15 },
+      },
+    },
+    activeTabId: "deep",
+  };
+}
+
+describe("combine tabs side-by-side (spec §16)", () => {
+  it("grafts the source subtree as the target root's right-hand sibling", () => {
+    const state = layout();
+    const merged = mergeTabIntoTab(state, "t3", "t1")!;
+
+    expect(merged.tabs.t1?.split).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 1 },
+        { kind: "pane", sessionId: 5 },
+      ],
+    });
+    expect(merged.tabs.t3).toBeUndefined();
+    expect(merged.activeTabId).toBe("t1");
+    expect(validateInvariants(merged)).toEqual([]);
+  });
+
+  it("merges into a split target, rebalancing only the graft point", () => {
+    const state = layout();
+    const merged = mergeTabIntoTab(state, "t1", "t2")!;
+
+    expect(merged.tabs.t2?.split).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [state.tabs.t2!.split, { kind: "pane", sessionId: 1 }],
+    });
+    expect(sessionIdsInTab(merged.tabs.t2!)).toEqual([2, 3, 4, 1]);
+    expect(validateInvariants(merged)).toEqual([]);
+  });
+
+  it("removes the source tab from whichever container held it", () => {
+    const fromGroup = mergeTabIntoTab(layout(), "t2", "t1")!;
+    expect(fromGroup.groups.find((group) => group.id === "g1")?.tabIds).toEqual([]);
+    expect(fromGroup.ungroupedTabIds).toEqual(["t1"]);
+
+    const fromUngrouped = mergeTabIntoTab(layout(), "t1", "t3")!;
+    expect(fromUngrouped.ungroupedTabIds).toEqual([]);
+    expect(fromUngrouped.groups.find((group) => group.id === "g2")?.tabIds).toEqual(["t3"]);
+    expect(validateInvariants(fromUngrouped)).toEqual([]);
+  });
+
+  it("refuses a merge past the split-depth cap but allows landing exactly on it", () => {
+    expect(mergeTabIntoTab(depthLayout(), "simple", "deep")).toBeNull();
+    expect(mergeTabIntoTab(depthLayout(), "deep", "simple")).toBeNull();
+
+    const onCap = mergeTabIntoTab(depthLayout(), "simple", "three")!;
+    expect(onCap.tabs.simple).toBeUndefined();
+    expect(validateInvariants(onCap)).toEqual([]);
+  });
+
+  it("refuses unknown tabs and merging a tab into itself", () => {
+    const state = layout();
+    expect(mergeTabIntoTab(state, "nope", "t1")).toBeNull();
+    expect(mergeTabIntoTab(state, "t1", "nope")).toBeNull();
+    expect(mergeTabIntoTab(state, "t1", "t1")).toBeNull();
+  });
+
+  it("extracts a merged pane back into its own tab, restoring the shape", () => {
+    const state = layout();
+    const merged = mergeTabIntoTab(state, "t3", "t1")!;
+    const restored = extractSessionToTab(merged, "t1", 5, "t4")!;
+
+    expect(restored.tabs.t1?.split).toEqual(state.tabs.t1!.split);
+    expect(restored.tabs.t4?.split).toEqual({ kind: "pane", sessionId: 5 });
+    expect(restored.tabs.t4?.title).toBeNull();
+    expect(restored.ungroupedTabIds).toEqual(["t1", "t4"]);
+    expect(validateInvariants(restored)).toEqual([]);
+  });
+
+  it("collapses the emptied split and lands the new tab after its source in the group", () => {
+    const state = layout();
+    const extracted = extractSessionToTab(state, "t2", 3, "t4")!;
+
+    expect(extracted.tabs.t2?.split).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 2 },
+        { kind: "pane", sessionId: 4 },
+      ],
+    });
+    expect(extracted.groups.find((group) => group.id === "g1")?.tabIds).toEqual(["t2", "t4"]);
+    // New tabs continue the palette rotation, like every other created tab.
+    expect(extracted.tabs.t4?.color).toBe(nextTabColor(state));
+    expect(validateInvariants(extracted)).toEqual([]);
+  });
+
+  it("refuses extracting a tab's only pane, an absent session, or a taken id", () => {
+    const state = layout();
+    expect(extractSessionToTab(state, "t1", 1, "t4")).toBeNull();
+    expect(extractSessionToTab(state, "t2", 99, "t4")).toBeNull();
+    expect(extractSessionToTab(state, "nope", 1, "t4")).toBeNull();
+    expect(extractSessionToTab(state, "t2", 3, "t1")).toBeNull();
+    expect(extractSessionToTab(state, "t2", 3, "")).toBeNull();
   });
 });
 
