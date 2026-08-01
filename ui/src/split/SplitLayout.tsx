@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { SplitDir, SplitNode } from "../state/layout";
-import type { PaneHostClient } from "../terminal/TerminalPane";
+import { SleepingPane } from "../terminal/SleepingPane";
+import { useSleepingSessions, type SleepController } from "../terminal/sleep";
+import type { PaneHostClient, TerminalDimensions } from "../terminal/TerminalPane";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { canSplitPane } from "../workspace/layoutOperations";
 import type { PaneSessionState } from "../workspace/WorkspaceController";
@@ -33,6 +35,22 @@ export interface SplitLayoutProps {
   onFocusPane(sessionId: number): void;
   onSessionCwd?: (sessionId: number, path: string, live: boolean) => void;
   actions: SplitLayoutActions;
+  /**
+   * Whether this layout's tab is on screen. Panes of a visible layout NEVER
+   * sleep. Defaults to true, so a caller that does not track tab visibility
+   * keeps every pane awake.
+   */
+  visible?: boolean;
+  /**
+   * Window-wide sleep state (spec §13). Without it nothing sleeps. The layout
+   * only REPORTS its panes' visibility here and reads the verdict back.
+   */
+  sleep?: SleepController | null;
+  /**
+   * Host-recorded cols/rows per session (SessionInfo), used to size a
+   * terminal before replay on every attach.
+   */
+  sessionDims?: Readonly<Record<number, TerminalDimensions>>;
 }
 
 interface DividerDrag {
@@ -67,6 +85,9 @@ export function SplitLayout({
   onFocusPane,
   onSessionCwd,
   actions,
+  visible = true,
+  sleep,
+  sessionDims,
 }: SplitLayoutProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [drag, setDrag] = useState<DividerDrag | null>(null);
@@ -252,6 +273,12 @@ export function SplitLayout({
     [root, drag],
   );
 
+  const paneSessionIds = useMemo(
+    () => rects.panes.map((pane) => pane.sessionId),
+    [rects],
+  );
+  const sleepingSessions = useSleepingSessions(sleep, paneSessionIds, visible);
+
   return (
     <div
       ref={containerRef}
@@ -276,11 +303,21 @@ export function SplitLayout({
           >
             {state.status === "live" ? (
               <>
-                <TerminalPane
-                  client={client}
-                  sessionId={sessionId}
-                  onCwd={(path, live) => onSessionCwd?.(sessionId, path, live)}
-                />
+                {sleepingSessions.has(sessionId) ? (
+                  // Presentation + attachment released by unmounting the pane;
+                  // the host session itself keeps running untouched.
+                  <SleepingPane
+                    sessionId={sessionId}
+                    onWake={() => sleep?.wake(sessionId)}
+                  />
+                ) : (
+                  <TerminalPane
+                    client={client}
+                    sessionId={sessionId}
+                    recordedDims={sessionDims?.[sessionId] ?? null}
+                    onCwd={(path, live) => onSessionCwd?.(sessionId, path, live)}
+                  />
+                )}
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
                   <button
                     type="button"

@@ -23,9 +23,22 @@ export interface PaneHostClient extends AttachmentClient {
   close(): void;
 }
 
+/** Host-recorded terminal size (SessionInfo cols/rows). */
+export interface TerminalDimensions {
+  cols: number;
+  rows: number;
+}
+
 export interface TerminalPresentation {
   terminal: TerminalPort;
   fit(): void;
+  /**
+   * Size the terminal to exact cols/rows, bypassing fit-to-container. Used to
+   * restore the host-recorded dims BEFORE replay (spec §13). Optional so
+   * existing presentations/fakes stay valid; without it the pane keeps the
+   * legacy fit-first behaviour.
+   */
+  resize?(cols: number, rows: number): void;
   findNext(query: string): boolean;
   findPrevious(query: string): boolean;
   focus(): void;
@@ -50,12 +63,19 @@ type TerminalPaneProps =
       sessionId?: undefined;
       dependencies?: TerminalPaneDependencies;
       onCwd?: (path: string, live: boolean) => void;
+      recordedDims?: TerminalDimensions | null;
     }
   | {
       client: PaneHostClient;
       sessionId: number;
       dependencies?: TerminalPaneDependencies;
       onCwd?: (path: string, live: boolean) => void;
+      /**
+       * The session's host-recorded cols/rows (SessionInfo). When known the
+       * terminal is sized to them before replay and only fits to the container
+       * afterwards — the malformed-scrollback defense (spec §13).
+       */
+      recordedDims?: TerminalDimensions | null;
     };
 
 type PaneState =
@@ -86,6 +106,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   // effect (which would tear down and remount the whole terminal).
   const onCwdRef = useRef(props.onCwd);
   onCwdRef.current = props.onCwd;
+  // Read at attach time only: a dims change must not remount the terminal.
+  const recordedDimsRef = useRef(props.recordedDims);
+  recordedDimsRef.current = props.recordedDims;
 
   useEffect(() => {
     const element = containerRef.current;
@@ -184,6 +207,27 @@ export function TerminalPane(props: TerminalPaneProps) {
             });
           }
         });
+        // Replay has to land in a terminal shaped exactly as the host recorded
+        // it; replaying into a differently sized grid is what garbles TUIs
+        // (spec §13). Fit-to-container is deferred until replay finishes so a
+        // full-screen app receives ONE clean resize and redraws itself.
+        const recordedDims = normalizeDimensions(recordedDimsRef.current);
+        const sizedToRecord =
+          recordedDims !== null && applyRecordedDimensions(presentation, recordedDims);
+        let replayFinished = false;
+        let attachResolved = false;
+        let postReplayFitDone = false;
+        // The single fit + host resize the recorded-dims path is allowed to
+        // run: after replay AND after the binding owns the attachment (only
+        // then can the resize reach the host). Runs exactly once.
+        const fitAfterReplay = () => {
+          if (postReplayFitDone || cancelled || !replayFinished || !attachResolved) {
+            return;
+          }
+          postReplayFitDone = true;
+          binding?.fitAndResize();
+        };
+
         binding = new TerminalSessionBinding({
           client: supplied.client,
           sessionId: supplied.sessionId,
@@ -194,6 +238,14 @@ export function TerminalPane(props: TerminalPaneProps) {
           onCwd: (path, live) => onCwdRef.current?.(path, live),
           onUserInput: (data) =>
             inputMarks.onUserInput(data, () => presentation.registerInputMarker()),
+          onReplayFinished: () => {
+            replayFinished = true;
+            // Only the recorded-dims path defers its fit; without dims the
+            // pane keeps its original fit-after-attach behaviour exactly.
+            if (sizedToRecord) {
+              fitAfterReplay();
+            }
+          },
         });
         const onJumpToLastInput = (event: Event) => {
           const detail = (event as CustomEvent<{ sessionId?: number }>).detail;
@@ -209,12 +261,27 @@ export function TerminalPane(props: TerminalPaneProps) {
         stopJumpListener = () =>
           window.removeEventListener("termx:jump-last-input", onJumpToLastInput);
         const activeBinding = binding;
-        stopObserving = dependencies.observeResize(element, () => activeBinding.fitAndResize());
+        stopObserving = dependencies.observeResize(element, () => {
+          if (sizedToRecord && !replayFinished) {
+            // Never retarget the grid mid-replay; the post-replay fit reads
+            // the container's final size anyway.
+            return;
+          }
+          activeBinding.fitAndResize();
+        });
         await activeBinding.start();
         if (cancelled) {
           return;
         }
-        activeBinding.fitAndResize();
+        attachResolved = true;
+        if (sizedToRecord) {
+          // A resolved attach means the host delivered the whole replay. If no
+          // live frame closed it, close it here so the post-replay fit runs.
+          activeBinding.markReplayBoundary();
+          fitAfterReplay();
+        } else {
+          activeBinding.fitAndResize();
+        }
         presentation.focus();
       } catch (error) {
         attemptCleanup("resize_observer", stopObserving);
@@ -435,6 +502,7 @@ function createPresentation(
   return {
     terminal: port,
     fit: () => fit.fit(),
+    resize: (cols, rows) => terminal.resize(cols, rows),
     findNext: (query) => search.findNext(query, searchOptions),
     findPrevious: (query) => search.findPrevious(query, searchOptions),
     focus: () => terminal.focus(),
@@ -448,6 +516,41 @@ function createPresentation(
     scrollToLine: (line) => terminal.scrollToLine(line),
     viewportY: () => terminal.buffer.active.viewportY,
   };
+}
+
+/** Host dims are u16 on the wire; anything else is treated as unknown. */
+function normalizeDimensions(
+  value: TerminalDimensions | null | undefined,
+): TerminalDimensions | null {
+  if (!value) {
+    return null;
+  }
+  const cols = Math.trunc(value.cols);
+  const rows = Math.trunc(value.rows);
+  if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 1 || rows < 1) {
+    return null;
+  }
+  return { cols, rows };
+}
+
+/**
+ * Pre-size the terminal to the host-recorded dims. Returns false when the
+ * presentation cannot be pre-sized, which keeps the pane on the legacy
+ * fit-then-replay path rather than losing the terminal.
+ */
+function applyRecordedDimensions(
+  presentation: TerminalPresentation,
+  dimensions: TerminalDimensions,
+): boolean {
+  if (!presentation.resize) {
+    return false;
+  }
+  try {
+    presentation.resize(dimensions.cols, dimensions.rows);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function observeResize(element: HTMLElement, listener: () => void): () => void {

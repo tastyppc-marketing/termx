@@ -81,6 +81,12 @@ export interface TerminalSessionBindingOptions {
   onCwd?: (path: string, live: boolean) => void;
   /** User keystrokes actually forwarded to the PTY (input-mark tracking). */
   onUserInput?: (data: string) => void;
+  /**
+   * Fires once, after every replayed byte has been parsed and the held live
+   * output has been flushed. The reattach-dims rule (spec §13) hangs off this:
+   * fit-to-container and the host resize may only run AFTER replay.
+   */
+  onReplayFinished?: () => void;
 }
 
 export class TerminalSessionBinding {
@@ -182,6 +188,20 @@ export class TerminalSessionBinding {
 
   reportHostError(error: Error): void {
     this.reportRuntimeError("host", error);
+  }
+
+  /**
+   * Declare that the host has delivered every replay byte — a resolved attach
+   * means exactly that. The first live frame normally closes replay first;
+   * this keeps a session that produced no output after attach from stranding
+   * post-replay work forever. Idempotent.
+   */
+  markReplayBoundary(): void {
+    if (this.replayFinished || this.disposed) {
+      return;
+    }
+    this.replayBoundaryReached = true;
+    this.finishReplayWhenParsed();
   }
 
   fitAndResize(): void {
@@ -363,6 +383,16 @@ export class TerminalSessionBinding {
         return;
       }
       this.writeLive(text);
+    }
+
+    if (this.disposed) {
+      return;
+    }
+    try {
+      this.options.onReplayFinished?.();
+    } catch {
+      // A consumer failure must never leave the binding half-attached; the
+      // consumer owns reporting its own errors.
     }
   }
 
