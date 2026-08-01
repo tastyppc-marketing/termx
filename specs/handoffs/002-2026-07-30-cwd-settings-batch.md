@@ -55,6 +55,25 @@ shortcut installed (%APPDATA%\...\Start Menu\Programs\TermX.lnk). Task #9
   claude-x lane DIED TWICE on U12 (status killed, banner-only output,
   proxy alive) → Opus fallback finished it in the same worktree. UI
   baseline now **523**.
+- **Wave C DELTA (2026-08-01 ~00:20, pre-compaction)**: U16 MERGED
+  `43b7895` (close/ CloseGuard + decideOnClose; ui suite **533**; Tauri
+  onCloseRequested wiring = integration). BOTH grok-4.5 lanes DIED
+  ("API Error: Server error mid-response", nothing written) → Sonnet
+  fallback agents u8-palette-sonnet + u11-artifacts-sonnet now working IN
+  the prepared worktrees `.claude/worktrees/u8-palette` and
+  `.claude/worktrees/u11-artifacts` (briefs TASK-U8.md / TASK-U11.md at
+  worktree roots; npm preinstalled; commit "wip: U8 palette" / "wip: U11
+  artifacts"). NOTE mailbox-spawned fallback agents may idle without
+  starting — if an idle_notification arrives with no report, SendMessage
+  them "begin your assigned task" (worked for u12). STILL RUNNING:
+  u9-resume (Opus), u10-scheduler (Opus), U14 gpt-5.6 in worktree
+  u14-transcript, U13 adversarial review gpt-5.6 in worktree u13-review
+  (REVIEW-U13.md). Diagnostics stream showed REAL type errors in
+  u8-palette's SessionPalette.test.tsx (vi.fn Mock typing) — agent's own
+  tsc gate must catch them; verify at review. Merge order so far: U16
+  done; merge others as they report; U17 (Opus) dispatches ONLY after U9
+  merges (WorkspaceController conflict). Baselines now: ui **533**, tauri
+  122, host 118.
 - **Wave C ROUND 1 IN FLIGHT (dispatched 2026-08-01 ~00:15, task #12)**:
   Agent-tool: u9-resume (Opus; resume.ts + WorkspaceController;
   id-validated /^[A-Za-z0-9-]+$/, OSC-ready waiter 15s, integration-off
