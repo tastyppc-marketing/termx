@@ -52,6 +52,45 @@ pub fn instruction(kind: &str) -> Option<&'static str> {
     }
 }
 
+/// A bare program name resolved to something `Command::new` can actually
+/// spawn. On Windows, CreateProcess only appends `.exe` while searching PATH,
+/// so the npm-installed CLI — a `claude.cmd` shim with no `claude.exe` beside
+/// it — is invisible to a bare `Command::new("claude")`. Probing PATH
+/// ourselves and handing back the shim's full path works because Rust's std
+/// detects the `.cmd` extension and runs it through `cmd.exe` with safe
+/// argument escaping. Order mirrors Windows resolution: first PATH directory
+/// wins, `.exe` beats `.cmd`/`.bat` within a directory.
+#[cfg(windows)]
+pub fn resolve_program(program: &str) -> String {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    resolve_in_paths(program, &path)
+        .map(|found| found.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.to_string())
+}
+
+#[cfg(not(windows))]
+pub fn resolve_program(program: &str) -> String {
+    program.to_string()
+}
+
+#[cfg(windows)]
+fn resolve_in_paths(
+    program: &str,
+    path_var: &std::ffi::OsStr,
+) -> Option<std::path::PathBuf> {
+    let candidates = [
+        format!("{program}.exe"),
+        format!("{program}.cmd"),
+        format!("{program}.bat"),
+    ];
+    std::env::split_paths(path_var).find_map(|dir| {
+        candidates
+            .iter()
+            .map(|candidate| dir.join(candidate))
+            .find(|full| full.is_file())
+    })
+}
+
 /// The command for a note kind, without running it.
 ///
 /// The isolation flags are load-bearing: the transcript excerpt is untrusted
@@ -186,6 +225,60 @@ pub fn generate_note_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    mod resolve {
+        use super::super::{resolve_in_paths, resolve_program};
+        use std::path::Path;
+
+        fn touch(dir: &Path, name: &str) {
+            std::fs::write(dir.join(name), "@echo off\r\n").unwrap();
+        }
+
+        fn path_var(dirs: &[&Path]) -> std::ffi::OsString {
+            std::env::join_paths(dirs.iter().copied()).unwrap()
+        }
+
+        #[test]
+        fn finds_a_cmd_shim_the_bare_name_cannot_spawn() {
+            let dir = tempfile::tempdir().unwrap();
+            touch(dir.path(), "fake-cli.cmd");
+            let found = resolve_in_paths("fake-cli", &path_var(&[dir.path()])).unwrap();
+            assert_eq!(found, dir.path().join("fake-cli.cmd"));
+        }
+
+        #[test]
+        fn prefers_exe_over_cmd_within_one_directory() {
+            let dir = tempfile::tempdir().unwrap();
+            touch(dir.path(), "fake-cli.cmd");
+            touch(dir.path(), "fake-cli.exe");
+            let found = resolve_in_paths("fake-cli", &path_var(&[dir.path()])).unwrap();
+            assert_eq!(found, dir.path().join("fake-cli.exe"));
+        }
+
+        #[test]
+        fn earlier_path_directory_wins() {
+            let first = tempfile::tempdir().unwrap();
+            let second = tempfile::tempdir().unwrap();
+            touch(first.path(), "fake-cli.cmd");
+            touch(second.path(), "fake-cli.exe");
+            let found =
+                resolve_in_paths("fake-cli", &path_var(&[first.path(), second.path()]))
+                    .unwrap();
+            assert_eq!(found, first.path().join("fake-cli.cmd"));
+        }
+
+        #[test]
+        fn unresolvable_name_falls_back_to_the_bare_program() {
+            assert!(
+                resolve_in_paths("termx-no-such-cli", &path_var(&[])).is_none()
+            );
+            assert_eq!(
+                resolve_program("termx-no-such-cli"),
+                "termx-no-such-cli",
+            );
+        }
+    }
 
     /// Echoes stdin back on stdout. Stands in for the real CLI.
     #[cfg(windows)]

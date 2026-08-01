@@ -308,7 +308,7 @@ pub async fn generate_session_note(file_path: String, kind: String) -> Option<St
             return None;
         }
         note::generate_note_with(
-            note::DEFAULT_PROGRAM,
+            &note::resolve_program(note::DEFAULT_PROGRAM),
             path,
             &kind,
             note::DEFAULT_TIMEOUT,
