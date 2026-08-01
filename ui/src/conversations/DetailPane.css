@@ -99,6 +99,82 @@
   font-size: 11px;
 }
 
+.conversation-detail__files-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  color: var(--sidebar-muted, #8b93a7);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.conversation-detail__files-toggle:hover {
+  color: #dfe2e8;
+}
+
+.conversation-detail__files-chevron {
+  flex: none;
+  width: 10px;
+  text-align: center;
+}
+
+.conversation-detail__file-group h4 {
+  margin: 2px 0;
+  color: #6f7789;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.conversation-detail__file-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  gap: 1px;
+  list-style: none;
+}
+
+/* The parent segment truncates; the file name always stays visible. */
+.conversation-detail__file-row {
+  display: flex;
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.conversation-detail__file-row:hover,
+.conversation-detail__file-row:focus-visible {
+  background: rgb(255 255 255 / 6%);
+}
+
+.conversation-detail__file-row--missing {
+  opacity: 0.55;
+}
+
+.conversation-detail__file-parent {
+  overflow: hidden;
+  color: var(--sidebar-muted, #8b93a7);
+  text-overflow: ellipsis;
+}
+
+.conversation-detail__file-leaf {
+  flex: none;
+  color: inherit;
+}
+
 .conversation-detail__actions {
   display: flex;
   gap: 6px;

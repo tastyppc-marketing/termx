@@ -328,7 +328,6 @@ function ArtifactGroup({
               className={`conversation-detail__file-row${
                 file.exists ? "" : " conversation-detail__file-row--missing"
               }`}
-              style={file.exists ? undefined : { opacity: 0.55 }}
               data-path={file.path}
               data-exists={file.exists}
               title={file.path}
