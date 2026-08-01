@@ -95,6 +95,34 @@ shortcut installed (%APPDATA%\...\Start Menu\Programs\TermX.lnk). Task #9
   (gates → npx tauri build --no-bundle → restage 3 exes → PrintWindow
   screenshot → live checks incl. generate_session_note (claude .cmd
   resolution risk!) and resize-mid-generation → Michael's smoke list).
+- **Wave C NEARLY COMPLETE (2026-08-01 ~00:40, post-compaction)**: merged
+  in order — U9 `3c9fe69` (resume flow; AttachmentHub.sendInput seam;
+  controller resumeSession + one-shot prompt waiter; dirExists injected,
+  default list_dirs-probe; known miss: dot-leaf dirs w/o visible subdirs
+  read absent → refusal notice), U8 `abd7663` (SessionPalette overlay,
+  props {store, open, onClose, onResume, nowMs?}; main wires Ctrl+Shift+R
+  + setting gate), U11 `5254c38` + hardening `181970c` (Files-touched in
+  DetailPane; injected listArtifacts; store.setArtifacts; refetch when
+  updatedAtMs moves even while same session selected), U10 `ea4ea7e`
+  (NoteScheduler; INTEGRATION MUST wire writeGeneratedNote adapter —
+  facade documented in noteScheduler.ts; reconcile(visibleKeys) from
+  rail; NOTE_WINDOW_MS=600_000), U17 `e04f711` (mergeTabIntoTab/
+  extractSessionToTab + controller mergeTabs/popOutPane; menu seams: add
+  mergeTabs to SidebarActions + "Side-by-side with active tab" item
+  (disabled when tab==active); pane-toolbar pop-out chip; focus after
+  merge = firstSessionId(tabs[target].split.children[1])), U13-review
+  hardening `03c32ce` (gpt-5.6 FIX-FIRST verdict; 3 real fixes:
+  onReplayFinished now parse-gated on held live output; hub disconnect
+  with no terminal marks physical gone + wake re-attaches;
+  hub.lastDims(sessionId) getter records last resize — INTEGRATION: build
+  SplitLayout sessionDims from hub.lastDims, fallback SessionInfo
+  cols/rows; also add the review's App-level two-tab lifecycle test).
+  ALL worktrees removed + node_modules(74) verified except u14-transcript.
+  Baselines: ui **635**, tauri 122, host 118. STILL RUNNING: U14 gpt-5.6
+  (task bx1m9jt9i; banner-only output is NORMAL for -p mode; if killed →
+  Opus fallback into same worktree). NEXT: main integration pass (list
+  below + U17 seams + NoteScheduler adapter + sessionDims-from-hub), then
+  V2.
 - **Wave B dispatch details (dispatched 2026-07-31 ~23:45, task #11)**:
   u7-conversations (Opus agent, worktree, spec §3: ConversationsStore + rail
   + folders + DetailPane + Sidebar mode switch); u13-sleep (Opus agent,
