@@ -357,3 +357,59 @@ describe("AttachmentHub replay bounds", () => {
     expect(replayEvents[0]?.data).toHaveLength(2);
   });
 });
+
+describe("AttachmentHub disconnect and recorded dims", () => {
+  it("marks the host attachment gone on disconnect with no terminal bound, and re-attaches on wake", async () => {
+    const host = createFakeHost();
+    const hub = new AttachmentHub(host);
+    const attaching = hub.attachAll([5]);
+    resolvePhysical(host, 5);
+    await attaching;
+    expect(hub.getSnapshot().sessions[5]?.hostAttached).toBe(true);
+
+    // A sleeping pane holds no terminal callbacks when the host side dies;
+    // the hub must not keep advertising the dead handle.
+    host.physical.get(5)!.callbacks.onDisconnect?.();
+    expect(hub.getSnapshot().sessions[5]?.hostAttached).toBe(false);
+
+    // The wake re-attaches through the client instead of reusing the handle.
+    const waking = hub.attach(5);
+    await flushMicrotasks();
+    resolvePhysical(host, 5);
+    const handle = await waking;
+    expect(host.attachCalls).toEqual([5, 5]);
+    expect(handle.sessionId).toBe(5);
+  });
+
+  it("still forwards a disconnect to a bound terminal and drops the handle", async () => {
+    const host = createFakeHost();
+    const hub = new AttachmentHub(host);
+    const attaching = hub.attachAll([6]);
+    resolvePhysical(host, 6);
+    await attaching;
+    const onDisconnect = vi.fn();
+    await hub.attach(6, { onDisconnect });
+
+    host.physical.get(6)!.callbacks.onDisconnect?.();
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+    expect(hub.getSnapshot().sessions[6]?.hostAttached).toBe(false);
+  });
+
+  it("records the last resize dims per session, surviving terminal detach", async () => {
+    const host = createFakeHost();
+    const hub = new AttachmentHub(host);
+    const attaching = hub.attachAll([5]);
+    resolvePhysical(host, 5);
+    await attaching;
+    expect(hub.lastDims(5)).toBeNull();
+    expect(hub.lastDims(99)).toBeNull();
+
+    const handle = await hub.attach(5);
+    handle.resize(140, 42);
+    expect(hub.lastDims(5)).toEqual({ cols: 140, rows: 42 });
+
+    // Sleep detaches the terminal; the recorded dims survive for the wake.
+    handle.detach();
+    expect(hub.lastDims(5)).toEqual({ cols: 140, rows: 42 });
+  });
+});

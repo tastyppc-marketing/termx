@@ -377,15 +377,36 @@ export class TerminalSessionBinding {
       return;
     }
 
-    const held = this.heldLiveOutput.splice(0);
+    const held = this.heldLiveOutput.splice(0).filter((text) => text.length > 0);
+    if (held.length === 0) {
+      this.fireReplayFinished();
+      return;
+    }
+    // Held live output was produced by the pty at the recorded dimensions, so
+    // the consumer must not fit/resize until xterm has PARSED it — queued is
+    // not parsed. Gate the callback on the held writes' parse callbacks, the
+    // same way the replay writes themselves were gated.
+    let remaining = held.length;
     for (const text of held) {
       if (this.outputDisabled) {
         return;
       }
-      this.writeLive(text);
+      try {
+        this.options.terminal.write(text, () => {
+          remaining -= 1;
+          if (remaining === 0) {
+            this.fireReplayFinished();
+          }
+        });
+      } catch (error) {
+        this.failOutput(error);
+        return;
+      }
     }
+  }
 
-    if (this.disposed) {
+  private fireReplayFinished(): void {
+    if (this.disposed || this.outputDisabled) {
       return;
     }
     try {

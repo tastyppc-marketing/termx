@@ -56,6 +56,10 @@ interface SessionRecord {
   lostRange: LostRange | null;
   attachError: string | null;
   activityTimer: ReturnType<typeof setTimeout> | null;
+  /** Last dimensions a terminal successfully pushed to the host — the dims a
+   * sleeping pane's scrollback was produced at, so the dims a wake must
+   * re-apply before its replay (spec §13). */
+  lastDims: { cols: number; rows: number } | null;
 }
 
 export class AttachmentHub implements AttachmentClient {
@@ -189,6 +193,7 @@ export class AttachmentHub implements AttachmentClient {
           throw new Error("Session attachment is detached");
         }
         physical.resize(cols, rows);
+        record.lastDims = { cols, rows };
       },
       detach: () => {
         if (detached) {
@@ -222,6 +227,15 @@ export class AttachmentHub implements AttachmentClient {
     }
   }
 
+  /// The dimensions the session's pty last ran at, from the terminal's own
+  /// resize calls — the recorded dims a wake must re-apply before replay
+  /// (spec §13). Null until a terminal has resized the session, or when the
+  /// session is unknown. Deliberately a getter, not a snapshot field: resizes
+  /// are drag-frequent and must not churn subscribers.
+  lastDims(sessionId: number): { cols: number; rows: number } | null {
+    return this.records.get(sessionId)?.lastDims ?? null;
+  }
+
   onError(listener: (error: Error) => void): () => void {
     this.errorListeners.add(listener);
     return () => this.errorListeners.delete(listener);
@@ -249,6 +263,7 @@ export class AttachmentHub implements AttachmentClient {
 
   private async attachPhysical(record: SessionRecord): Promise<void> {
     try {
+      let dead = false;
       const physical = await this.client.attach(
         record.sessionId,
         {
@@ -259,7 +274,19 @@ export class AttachmentHub implements AttachmentClient {
             this.publish();
           },
           onExit: (exitCode) => this.markExited(record.sessionId, exitCode),
-          onDisconnect: () => invokeConsumer(record.terminalCallbacks?.onDisconnect),
+          onDisconnect: () => {
+            // The host-side attachment is gone. Record that even when no
+            // terminal is bound (a sleeping pane), or the hub keeps
+            // advertising a dead handle and a later wake reuses it instead
+            // of re-attaching through attachSession.
+            dead = true;
+            if (this.closed || this.records.get(record.sessionId) !== record) {
+              return;
+            }
+            record.physical = null;
+            invokeConsumer(record.terminalCallbacks?.onDisconnect);
+            this.publish();
+          },
         },
         true,
       );
@@ -267,7 +294,7 @@ export class AttachmentHub implements AttachmentClient {
         invokeCleanup(() => physical.detach());
         return;
       }
-      record.physical = physical;
+      record.physical = dead ? null : physical;
       record.nextOffset = physical.nextOffset;
       record.attachError = null;
     } catch (error) {
@@ -382,6 +409,7 @@ export class AttachmentHub implements AttachmentClient {
       lostRange: null,
       attachError: null,
       activityTimer: null,
+      lastDims: null,
     };
     this.records.set(sessionId, record);
     this.publish();

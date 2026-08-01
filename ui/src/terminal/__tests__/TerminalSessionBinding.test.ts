@@ -329,4 +329,49 @@ describe("TerminalSessionBinding", () => {
     expect(() => binding.dispose()).not.toThrow();
     expect(onCleanupError).toHaveBeenCalledWith("detach", expect.any(Error));
   });
+
+  it("fires onReplayFinished only after held live output has parsed", async () => {
+    const terminal = new FakeTerminal();
+    const parseCallbacks: Array<() => void> = [];
+    terminal.write = (data: string, callback?: () => void) => {
+      terminal.writes.push(data);
+      if (callback) {
+        parseCallbacks.push(callback);
+      }
+    };
+    const fixture = attachmentFixture();
+    const onReplayFinished = vi.fn();
+    const binding = new TerminalSessionBinding({
+      client: fixture.client,
+      sessionId: 7,
+      terminal,
+      fit: vi.fn(),
+      onReplayFinished,
+    });
+
+    await binding.start();
+    fixture.callbacks.onOutput?.({
+      offset: 0n,
+      data: new TextEncoder().encode("REPLAY"),
+      source: "replay",
+    });
+    // Live output during replay is held; it was produced at the recorded dims.
+    fixture.callbacks.onOutput?.({
+      offset: 6n,
+      data: new TextEncoder().encode("HELD"),
+      source: "live",
+    });
+
+    // Replay parses: the held output is now QUEUED to xterm but not parsed —
+    // a fit/resize here would reflow those recorded-width bytes.
+    parseCallbacks.shift()?.();
+    expect(terminal.writes).toEqual(["REPLAY", "HELD"]);
+    expect(onReplayFinished).not.toHaveBeenCalled();
+
+    // Only once xterm has parsed the held output may the consumer resize.
+    parseCallbacks.shift()?.();
+    expect(onReplayFinished).toHaveBeenCalledTimes(1);
+
+    binding.dispose();
+  });
 });
