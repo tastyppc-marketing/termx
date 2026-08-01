@@ -257,7 +257,9 @@ export function ConversationsRail({
             {shortenCwd(record.cwd)}
           </span>
           {underTitle && note.summary ? (
-            <span className="conversation-row__summary">{note.summary}</span>
+            <span className="conversation-row__summary" title={note.summary}>
+              {note.summary}
+            </span>
           ) : null}
           {underTitle && note.recap ? (
             <span className="conversation-row__recap">{note.recap}</span>
