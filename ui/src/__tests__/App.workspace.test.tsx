@@ -289,3 +289,83 @@ describe("App workspace lifecycle", () => {
     expect(harness.order).toEqual(["controller.dispose", "client.close"]);
   });
 });
+
+function twoTabSnapshot(activeTabId: "tab-a" | "tab-b"): WorkspaceSnapshot {
+  const tabA = tab({ id: "tab-a", primarySessionId: 1, sessionIds: [1] });
+  const tabB = tab({ id: "tab-b", primarySessionId: 2, sessionIds: [2] });
+  const layout: LayoutV1 = {
+    version: 1,
+    groups: [],
+    ungroupedTabIds: ["tab-a", "tab-b"],
+    tabs: {
+      "tab-a": { id: "tab-a", title: tabA.title, color: tabA.color, split: { kind: "pane", sessionId: 1 } },
+      "tab-b": { id: "tab-b", title: tabB.title, color: tabB.color, split: { kind: "pane", sessionId: 2 } },
+    },
+    activeTabId,
+  };
+  return {
+    layout,
+    ungroupedTabs: [tabA, tabB],
+    groups: [],
+    paneStates: {
+      1: { status: "live", exitCode: null },
+      2: { status: "live", exitCode: null },
+    },
+    activeTabId,
+    activeSessionId: activeTabId === "tab-a" ? 1 : 2,
+    persistence: { saving: false, error: null },
+    notice: null,
+  };
+}
+
+describe("App sleep lifecycle across hidden tabs (spec §13)", () => {
+  // Only what the sleep path touches: SleepController's setTimeout schedule
+  // and the tracker's Date.now idle clock. React's own scheduling stays real.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps the hidden tab mounted, sleeps it after the threshold, and wakes it on activation", async () => {
+    const harness = controllerHarness(twoTabSnapshot("tab-a"));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<App bootstrap={async () => harness.workspace} />));
+
+    // Both tabs are mounted; the inactive one is hidden, never unmounted.
+    const terminals = [...container.querySelectorAll("[data-testid='workspace-terminal']")];
+    expect(terminals.map((el) => el.getAttribute("data-session-id"))).toEqual(["1", "2"]);
+    const wrapperOf = (tabId: string) =>
+      container.querySelector(`[data-testid='split-layout-${tabId}']`)?.parentElement as HTMLElement;
+    expect(wrapperOf("tab-a").style.display).toBe("contents");
+    expect(wrapperOf("tab-b").style.display).toBe("none");
+    expect(container.querySelector("[data-testid='sleeping-pane-2']")).toBeNull();
+
+    // 15 idle minutes later (default setting) the hidden pane sleeps; the
+    // visible pane never does.
+    await act(async () => {
+      vi.advanceTimersByTime(15 * 60_000 + 1);
+    });
+    expect(container.querySelector("[data-testid='sleeping-pane-2']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='sleeping-pane-1']")).toBeNull();
+    expect(
+      container.querySelector("[data-testid='workspace-terminal'][data-session-id='1']"),
+    ).not.toBeNull();
+
+    // Activating the tab wakes it: the placeholder yields back to a terminal
+    // fed with recorded dims from the controller.
+    harness.setSnapshot(twoTabSnapshot("tab-b"));
+    await act(async () => harness.emit());
+    expect(container.querySelector("[data-testid='sleeping-pane-2']")).toBeNull();
+    expect(
+      container.querySelector("[data-testid='workspace-terminal'][data-session-id='2']"),
+    ).not.toBeNull();
+    expect(harness.workspace.controller.sessionDims).toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+  });
+});
