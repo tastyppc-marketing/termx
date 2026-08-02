@@ -101,6 +101,7 @@ function parseGenerated(value: unknown): Record<SessionKey, GeneratedNote> {
       continue;
     }
     generated[key] = {
+      title: optionalText(note.title),
       summary: optionalText(note.summary),
       recap: optionalText(note.recap),
       generatedAtMs: finiteNumber(note.generatedAtMs),
@@ -216,6 +217,7 @@ export function parseSessionRecords(value: unknown): LlmSessionRecord[] {
       updatedAtMs: finiteNumber(entry.updatedAtMs),
       summary: optionalText(entry.summary),
       recap: optionalText(entry.recap),
+      titleSource: entry.titleSource === "derived" ? "derived" : "named",
     });
   }
   return records;

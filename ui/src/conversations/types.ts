@@ -27,6 +27,13 @@ export interface LlmSessionRecord {
   updatedAtMs: number;
   summary: string | null;
   recap: string | null;
+  /**
+   * Whether `title` was deliberately given (Claude summary line, Codex index
+   * title) or derived (first-message fragment, bare id). Absent — e.g. a
+   * fixture or an older host — means `"named"`: a generated title must never
+   * displace a title we are not sure is derived (spec P2).
+   */
+  titleSource?: "named" | "derived";
 }
 
 /** `${provider}:${id}` — stable identity across rescans. */
@@ -50,10 +57,27 @@ export interface ConversationFolder {
 
 /** One cached LLM-generated note (§6); `sourceMtimeMs` drives staleness. */
 export interface GeneratedNote {
+  /** Generated session name (polish spec P2). Absent on pre-bundle caches. */
+  title?: string | null;
   summary: string | null;
   recap: string | null;
   generatedAtMs: number;
   sourceMtimeMs: number;
+}
+
+/** Wire shape of `generate_session_bundle` (polish spec P2). */
+export interface BundleNote {
+  title: string | null;
+  summary: string | null;
+  recap: string | null;
+}
+
+/** Wire shape of `list_session_outputs` rows (polish spec P4). */
+export interface OutputEntry {
+  path: string;
+  label: string | null;
+  atMs: number;
+  exists: boolean;
 }
 
 export interface SessionArtifactFile {
