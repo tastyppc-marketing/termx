@@ -63,6 +63,7 @@ type TerminalPaneProps =
       sessionId?: undefined;
       dependencies?: TerminalPaneDependencies;
       onCwd?: (path: string, live: boolean) => void;
+      onOutput?: (path: string) => void;
       recordedDims?: TerminalDimensions | null;
     }
   | {
@@ -70,6 +71,8 @@ type TerminalPaneProps =
       sessionId: number;
       dependencies?: TerminalPaneDependencies;
       onCwd?: (path: string, live: boolean) => void;
+      /** OSC 9;77 deliverable report (polish P4); live registrations only. */
+      onOutput?: (path: string) => void;
       /**
        * The session's host-recorded cols/rows (SessionInfo). When known the
        * terminal is sized to them before replay and only fits to the container
@@ -106,6 +109,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   // effect (which would tear down and remount the whole terminal).
   const onCwdRef = useRef(props.onCwd);
   onCwdRef.current = props.onCwd;
+  const onOutputRef = useRef(props.onOutput);
+  onOutputRef.current = props.onOutput;
   // Read at attach time only: a dims change must not remount the terminal.
   const recordedDimsRef = useRef(props.recordedDims);
   recordedDimsRef.current = props.recordedDims;
@@ -236,6 +241,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           onStatus: reportStatus,
           onCleanupError: reportCleanupError,
           onCwd: (path, live) => onCwdRef.current?.(path, live),
+          onOutputRegistered: (path) => onOutputRef.current?.(path),
           onUserInput: (data) =>
             inputMarks.onUserInput(data, () => presentation.registerInputMarker()),
           onReplayFinished: () => {

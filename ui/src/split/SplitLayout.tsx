@@ -36,6 +36,8 @@ export interface SplitLayoutProps {
   dismissingSessionIds: ReadonlySet<number>;
   onFocusPane(sessionId: number): void;
   onSessionCwd?: (sessionId: number, path: string, live: boolean) => void;
+  /** OSC 9;77 deliverable report (polish P4); fires for live output only. */
+  onSessionOutput?: (sessionId: number, path: string) => void;
   actions: SplitLayoutActions;
   /**
    * Whether this layout's tab is on screen. Panes of a visible layout NEVER
@@ -86,6 +88,7 @@ export function SplitLayout({
   dismissingSessionIds,
   onFocusPane,
   onSessionCwd,
+  onSessionOutput,
   actions,
   visible = true,
   sleep,
@@ -324,6 +327,7 @@ export function SplitLayout({
                     sessionId={sessionId}
                     recordedDims={sessionDims?.[sessionId] ?? null}
                     onCwd={(path, live) => onSessionCwd?.(sessionId, path, live)}
+                    onOutput={(path) => onSessionOutput?.(sessionId, path)}
                   />
                 )}
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">

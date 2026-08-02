@@ -64,6 +64,9 @@ export interface SidebarConversations {
   onOpenFolder?(parentDir: string): void;
   /** NoteScheduler visibility feed (§6), forwarded verbatim to the rail. */
   onVisibleRecords?: ConversationsRailProps["onVisibleRecords"];
+  /** Detail-pane outputs IO (polish P4), forwarded verbatim to the rail. */
+  listOutputs?: ConversationsRailProps["listOutputs"];
+  dismissOutput?: ConversationsRailProps["dismissOutput"];
 }
 
 export interface SidebarProps {
@@ -923,6 +926,12 @@ export function Sidebar({
             : {})}
           {...(conversations.onVisibleRecords
             ? { onVisibleRecords: conversations.onVisibleRecords }
+            : {})}
+          {...(conversations.listOutputs
+            ? { listOutputs: conversations.listOutputs }
+            : {})}
+          {...(conversations.dismissOutput
+            ? { dismissOutput: conversations.dismissOutput }
             : {})}
         />
       ) : (

@@ -15,9 +15,9 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { scoreFolder } from "../../folders/fuzzyScore";
-import { relativeTime, shortenCwd } from "../folderOps";
+import { effectiveTitle, relativeTime, shortenCwd } from "../folderOps";
 import type { ConversationsStore } from "../store";
-import type { LlmSessionRecord } from "../types";
+import { sessionKey, type GeneratedNote, type LlmSessionRecord, type SessionKey } from "../types";
 import "./SessionPalette.css";
 
 export interface SessionPaletteProps {
@@ -32,15 +32,30 @@ export interface SessionPaletteProps {
 
 const ROW_CAP = 12;
 
+/** One display row: the record plus the title the user actually sees (P2). */
+interface PaletteRow {
+  record: LlmSessionRecord;
+  displayTitle: string;
+}
+
 /**
  * Fuzzy-ranks a record against the query using the folder searcher's scorer
  * (per-token, leaf-aware) applied to each of title/cwd/summary independently,
  * since `scoreFolder` requires every token to land in one string and a query
  * word may legitimately target any one of the three fields. A match in the
- * title outranks a cwd-only match, which outranks a summary-only match.
+ * title — the raw record title OR the displayed generated one (polish P2), so
+ * a session is findable by whichever name the user saw — outranks a cwd-only
+ * match, which outranks a summary-only match.
  */
-function scoreSession(query: string, record: LlmSessionRecord): number | null {
-  const titleScore = scoreFolder(query, record.title);
+function scoreSession(query: string, row: PaletteRow): number | null {
+  const { record, displayTitle } = row;
+  const rawScore = scoreFolder(query, record.title);
+  const shownScore =
+    displayTitle === record.title ? null : scoreFolder(query, displayTitle);
+  const titleScore =
+    rawScore !== null && shownScore !== null
+      ? Math.max(rawScore, shownScore)
+      : rawScore ?? shownScore;
   if (titleScore !== null) {
     return titleScore + 20_000;
   }
@@ -59,20 +74,25 @@ function scoreSession(query: string, record: LlmSessionRecord): number | null {
 function rankSessions(
   query: string,
   records: readonly LlmSessionRecord[],
-): LlmSessionRecord[] {
+  generated: Readonly<Record<SessionKey, GeneratedNote>>,
+): PaletteRow[] {
+  const rows = records.map((record) => ({
+    record,
+    displayTitle: effectiveTitle(record, generated[sessionKey(record)]),
+  }));
   const trimmed = query.trim();
   if (trimmed.length === 0) {
-    return records.slice(0, ROW_CAP);
+    return rows.slice(0, ROW_CAP);
   }
-  return records
-    .map((record) => ({ record, score: scoreSession(trimmed, record) }))
+  return rows
+    .map((row) => ({ row, score: scoreSession(trimmed, row) }))
     .filter(
-      (entry): entry is { record: LlmSessionRecord; score: number } =>
+      (entry): entry is { row: PaletteRow; score: number } =>
         entry.score !== null,
     )
     .sort((a, b) => b.score - a.score)
     .slice(0, ROW_CAP)
-    .map((entry) => entry.record);
+    .map((entry) => entry.row);
 }
 
 export function SessionPalette({
@@ -103,7 +123,11 @@ export function SessionPalette({
   // first refresh landed — still populates the list live.
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const records = snapshot.records;
-  const rows = useMemo(() => rankSessions(query, records), [query, records]);
+  const generated = snapshot.data.generated;
+  const rows = useMemo(
+    () => rankSessions(query, records, generated),
+    [query, records, generated],
+  );
   const rowCount = rows.length;
   const clampedHighlight = rowCount > 0 ? Math.min(highlight, rowCount - 1) : -1;
   const now = nowMs ?? Date.now();
@@ -113,9 +137,9 @@ export function SessionPalette({
   }
 
   const activate = (index: number) => {
-    const record = rows[index];
-    if (record) {
-      onResume(record);
+    const row = rows[index];
+    if (row) {
+      onResume(row.record);
     }
   };
 
@@ -176,7 +200,7 @@ export function SessionPalette({
           role="listbox"
           aria-label="Sessions"
         >
-          {rows.map((record, index) => (
+          {rows.map(({ record, displayTitle }, index) => (
             <li
               key={`${record.provider}:${record.id}`}
               id={`session-palette-option-${index}`}
@@ -199,7 +223,7 @@ export function SessionPalette({
               <span className="session-palette__content">
                 <span className="session-palette__line">
                   <span className="session-palette__title" title={record.title}>
-                    {record.title}
+                    {displayTitle}
                   </span>
                   <span className="session-palette__time">
                     {relativeTime(record.updatedAtMs, now)}

@@ -14,16 +14,24 @@ import { FeaturesDock } from "./actions/FeaturesDock";
 import { Tray } from "./actions/Tray";
 import { CloseGuard } from "./close/CloseGuard";
 import { decideOnClose, type CloseDecision } from "./close/closeBehavior";
+import { AlreadyOpenDialog } from "./conversations/AlreadyOpenDialog";
+import { ConversationsFullscreen } from "./conversations/ConversationsFullscreen";
+import { ConversationsRail } from "./conversations/ConversationsRail";
 import { NoteScheduler } from "./conversations/noteScheduler";
 import { SessionPalette } from "./conversations/palette/SessionPalette";
+import type { LlmSessionRecord } from "./conversations/types";
 import { FolderSearch } from "./folders/FolderSearch";
 import { isEditableElement } from "./keyboard";
 import { tauriListDirs } from "./native/folders";
 import {
+  tauriDismissOutput,
   tauriGenerateBundle,
   tauriListArtifacts,
+  tauriListOutputs,
   tauriReadTextFile,
 } from "./native/sessionData";
+import { OutputPane, type LiveOutputRow } from "./outputs/OutputPane";
+import { OutputsStore } from "./outputs/outputsStore";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
@@ -44,8 +52,10 @@ import {
 import type { FolderSearchTarget } from "./workspace/WorkspaceController";
 import { firstSessionId } from "./workspace/layoutOperations";
 import {
+  DEFAULT_SIDEBAR_WIDTH,
   UiStateStore,
   applyTrayConfigure,
+  setSidebarWidth,
   setViewerGeometry,
 } from "./workspace/uiState";
 import { useWorkspace } from "./workspace/useWorkspace";
@@ -86,6 +96,14 @@ registerAction({
   label: "Features…",
   run: (ctx) => (ctx.openFeatures as (() => void) | undefined)?.(),
 });
+registerAction({
+  id: "outputs",
+  icon: "▤",
+  label: "Outputs",
+  run: (ctx) => (ctx.toggleOutputs as (() => void) | undefined)?.(),
+});
+
+const NO_LIVE_OUTPUTS: readonly LiveOutputRow[] = [];
 
 export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
   const [state, setState] = useState<AppState>({ type: "loading" });
@@ -166,6 +184,12 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
   const [folderSearch, setFolderSearch] = useState<FolderSearchTarget | null>(null);
+  const [conversationsFull, setConversationsFull] = useState(false);
+  const [outputsOpen, setOutputsOpen] = useState(false);
+  const [alreadyOpen, setAlreadyOpen] = useState<{
+    record: LlmSessionRecord;
+    tabId: string;
+  } | null>(null);
   // Focused pane per tab is ephemeral UI state (layout spec: never persisted).
   const [focusByTab, setFocusByTab] = useState<Record<string, number>>({});
   const [dismissing, setDismissing] = useState<ReadonlySet<number>>(new Set());
@@ -218,6 +242,41 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     });
   }, [conversationsStore, settingsStore]);
   useEffect(() => () => noteScheduler?.dispose(), [noteScheduler]);
+
+  // Live OSC 9;77 output registrations (polish P4), keyed by termx session.
+  // The dock follows the focused pane of the active tab; sidecar history is
+  // keyed by conversation and lives in the DetailPane instead.
+  const outputsStore = useMemo(() => new OutputsStore(), []);
+  const activeTab = activeTabId ? snapshot.layout.tabs[activeTabId] : undefined;
+  const focusedSessionId = activeTab
+    ? resolveFocusedSession(activeTab.split, focusByTab[activeTab.id])
+    : null;
+  const liveOutputs = useSyncExternalStore(
+    outputsStore.subscribe,
+    () =>
+      focusedSessionId !== null
+        ? outputsStore.snapshotFor(focusedSessionId)
+        : NO_LIVE_OUTPUTS,
+  );
+  const handleSessionOutput = (sessionId: number, path: string) => {
+    outputsStore.register(sessionId, path, Date.now());
+    // A deliverable just landed — surface the dock like Claude Code's output
+    // section does, instead of leaving it behind a chip the user must know.
+    setOutputsOpen(true);
+  };
+
+  // Resume with dedupe (polish P6): "already-open" raises the dialog; a
+  // resume that actually opened a tab drops the full-screen overlay so the
+  // new terminal is visible.
+  const handleResume = (record: LlmSessionRecord) => {
+    void controller.resumeSession(record).then((outcome) => {
+      if (outcome.kind === "already-open") {
+        setAlreadyOpen({ record, tabId: outcome.tabId });
+      } else if (outcome.kind === "opened") {
+        setConversationsFull(false);
+      }
+    });
+  };
 
   // The controller routes the ask-searcher policy through this handler.
   useEffect(() => {
@@ -401,6 +460,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       openFolderSearch: () => setFolderSearch({ groupId: activeGroupId, profile: null }),
       openSettings: () => setSettingsOpen(true),
       openFeatures: () => setFeaturesOpen(true),
+      toggleOutputs: () => setOutputsOpen((open) => !open),
     }),
     [controller, activeGroupId],
   );
@@ -412,7 +472,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     return {
       store: conversationsStore,
       settings,
-      onResume: (record) => void controller.resumeSession(record),
+      onResume: handleResume,
       onOpenTranscript: (record) => viewerRef.current?.openTranscript(record),
       listArtifacts: tauriListArtifacts,
       onOpenFile: (path) => viewerRef.current?.openFile(path),
@@ -423,7 +483,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           cwd: parentDir,
         }),
       onVisibleRecords: (keys) => noteScheduler?.reconcile([...keys]),
+      listOutputs: tauriListOutputs,
+      dismissOutput: tauriDismissOutput,
     };
+    // handleResume is recreated per render but closes only over stable refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationsStore, settings, controller, activeGroupId, noteScheduler]);
 
   return (
@@ -435,6 +499,12 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         onOpenFolderSearch={(groupId) =>
           setFolderSearch({ groupId, profile: null })}
         {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
+        width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
+        onResize={(width) =>
+          uiStateStore.update((current) => setSidebarWidth(current, width))}
+        {...(sidebarConversations
+          ? { onExpandConversations: () => setConversationsFull(true) }
+          : {})}
         sleeping={sleeping}
         footerTray={
           <Tray
@@ -475,6 +545,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                   )}
                   dismissingSessionIds={dismissing}
                   onSessionCwd={controller.reportSessionCwd}
+                  onSessionOutput={handleSessionOutput}
                   onFocusPane={(sessionId) =>
                     setFocusByTab((prev) =>
                       prev[tab.id] === sessionId
@@ -497,6 +568,17 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           onGeometry={onViewerGeometry}
         />
       </div>
+      {outputsOpen ? (
+        <div className="app-outputs-dock">
+          <OutputPane
+            sessionId={focusedSessionId}
+            sessionKey={null}
+            live={liveOutputs}
+            onOpenFile={(path) => viewerRef.current?.openFile(path)}
+            onClose={() => setOutputsOpen(false)}
+          />
+        </div>
+      ) : null}
       {settingsOpen ? (
         <SettingsDialog
           settings={settings}
@@ -517,10 +599,61 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           onClose={() => setPaletteOpen(false)}
           onResume={(record) => {
             setPaletteOpen(false);
-            void controller.resumeSession(record);
+            handleResume(record);
           }}
         />
       ) : null}
+      {conversationsFull && sidebarConversations ? (
+        <ConversationsFullscreen onClose={() => setConversationsFull(false)}>
+          <ConversationsRail
+            variant="expanded"
+            store={sidebarConversations.store}
+            settings={sidebarConversations.settings}
+            onResume={sidebarConversations.onResume}
+            onOpenTranscript={sidebarConversations.onOpenTranscript}
+            {...(sidebarConversations.listArtifacts
+              ? { listArtifacts: sidebarConversations.listArtifacts }
+              : {})}
+            {...(sidebarConversations.onOpenFile
+              ? { onOpenFile: sidebarConversations.onOpenFile }
+              : {})}
+            {...(sidebarConversations.onOpenFolder
+              ? { onOpenFolder: sidebarConversations.onOpenFolder }
+              : {})}
+            {...(sidebarConversations.onVisibleRecords
+              ? { onVisibleRecords: sidebarConversations.onVisibleRecords }
+              : {})}
+            {...(sidebarConversations.listOutputs
+              ? { listOutputs: sidebarConversations.listOutputs }
+              : {})}
+            {...(sidebarConversations.dismissOutput
+              ? { dismissOutput: sidebarConversations.dismissOutput }
+              : {})}
+          />
+        </ConversationsFullscreen>
+      ) : null}
+      <AlreadyOpenDialog
+        open={alreadyOpen !== null}
+        onSwitch={() => {
+          if (alreadyOpen) {
+            controller.activateTab(alreadyOpen.tabId);
+            setAlreadyOpen(null);
+            setConversationsFull(false);
+          }
+        }}
+        onOpenAnyway={() => {
+          if (alreadyOpen) {
+            const record = alreadyOpen.record;
+            setAlreadyOpen(null);
+            void controller.resumeSession(record, { force: true }).then((outcome) => {
+              if (outcome.kind === "opened") {
+                setConversationsFull(false);
+              }
+            });
+          }
+        }}
+        onCancel={() => setAlreadyOpen(null)}
+      />
       <CloseGuard open={closeGuardOpen} onDecide={handleCloseDecision} />
       {folderSearch ? (
         <FolderSearch
