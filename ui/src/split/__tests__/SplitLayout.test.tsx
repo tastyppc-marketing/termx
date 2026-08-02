@@ -65,6 +65,7 @@ function actions(): SplitLayoutActions {
     splitPane: vi.fn(),
     closePane: vi.fn(async () => undefined),
     dismissPane: vi.fn(async () => undefined),
+    restartPane: vi.fn(async () => undefined),
     resizePane: vi.fn(),
   };
 }
@@ -74,6 +75,7 @@ interface RenderOptions {
   states?: Record<number, PaneSessionState>;
   focused?: number;
   dismissing?: ReadonlySet<number>;
+  restarting?: ReadonlySet<number>;
   onFocusPane?: (sessionId: number) => void;
 }
 
@@ -91,6 +93,7 @@ async function renderLayout(
         paneStates={options.states ?? paneStates()}
         focusedSessionId={options.focused ?? 1}
         dismissingSessionIds={options.dismissing ?? new Set()}
+        restartingSessionIds={options.restarting ?? new Set()}
         onFocusPane={options.onFocusPane ?? (() => undefined)}
         actions={layoutActions}
       />,
@@ -181,6 +184,31 @@ describe("SplitLayout rendering", () => {
     const dismiss = container.querySelector<HTMLButtonElement>(".dead-pane__dismiss")!;
     await act(async () => dismiss.click());
     expect(layoutActions.dismissPane).toHaveBeenCalledWith(2);
+  });
+
+  it("offers restart and new-session on a dead pane, routed by mode", async () => {
+    const layoutActions = await renderLayout(actions(), {
+      states: paneStates({ 2: { status: "dead", exitCode: 3 } }),
+    });
+    const restart = container.querySelector<HTMLButtonElement>(".dead-pane__restart")!;
+    await act(async () => restart.click());
+    expect(layoutActions.restartPane).toHaveBeenCalledWith(2, "restart");
+    const fresh = container.querySelector<HTMLButtonElement>(".dead-pane__new-session")!;
+    await act(async () => fresh.click());
+    expect(layoutActions.restartPane).toHaveBeenCalledWith(2, "fresh");
+  });
+
+  it("disables every dead-pane action while a relaunch is in flight", async () => {
+    await renderLayout(actions(), {
+      states: paneStates({ 2: { status: "dead", exitCode: 3 } }),
+      restarting: new Set([2]),
+    });
+    const buttons = container.querySelectorAll<HTMLButtonElement>(".dead-pane__action");
+    expect(buttons.length).toBe(3);
+    for (const button of buttons) {
+      expect(button.disabled).toBe(true);
+    }
+    expect(container.querySelector(".dead-pane__restart")?.textContent).toBe("Restarting…");
   });
 
   it("disables split affordances for panes at the depth cap", async () => {

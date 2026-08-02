@@ -596,6 +596,121 @@ describe("WorkspaceController split actions", () => {
   });
 });
 
+describe("WorkspaceController dead-pane relaunch", () => {
+  it("restarts a dead pane in place with its own profile and cwd", async () => {
+    const { controller, createSession, closeSession, attachments, persistenceCalls } =
+      harness({
+        sessions: [session(1), session(2), session(3, { alive: false, pid: null })],
+      });
+
+    const created = await controller.restartPane("tab-2", 3, "restart");
+
+    expect(created).toBe(50);
+    expect(createSession).toHaveBeenCalledWith({
+      profile: "powershell",
+      cwd: "C:\\work\\project-3",
+      cols: 120,
+      rows: 30,
+      shellIntegration: true,
+    });
+    expect(attachments.attachSession).toHaveBeenCalledWith(50);
+    expect(controller.getSnapshot().layout.tabs["tab-2"]?.split).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 2 },
+        { kind: "pane", sessionId: 50 },
+      ],
+    });
+    expect(closeSession).toHaveBeenCalledWith(3);
+    expect(persistenceCalls.at(-1)?.kind).toBe("structural");
+    expect(controller.getSnapshot().paneStates[50]).toEqual({
+      status: "live",
+      exitCode: null,
+    });
+  });
+
+  it("launches workspace defaults for a fresh session instead", async () => {
+    const { controller, createSession } = harness({
+      sessions: [
+        session(1),
+        session(2),
+        session(3, { alive: false, pid: null, profile: "cmd" }),
+      ],
+    });
+
+    const created = await controller.restartPane("tab-2", 3, "fresh");
+
+    expect(created).toBe(50);
+    expect(createSession).toHaveBeenCalledWith({
+      profile: "powershell",
+      cwd: null,
+      cols: 120,
+      rows: 30,
+      shellIntegration: true,
+    });
+  });
+
+  it("falls back to the host default dir when the remembered cwd fails", async () => {
+    const { controller, createSession } = harness({
+      sessions: [session(1), session(2), session(3, { alive: false, pid: null })],
+      createSession: async (createOptions) => {
+        if (createOptions.cwd !== null) {
+          throw new Error("stale cwd");
+        }
+        return session(50, { cwd: null });
+      },
+    });
+
+    const created = await controller.restartPane("tab-2", 3, "restart");
+
+    expect(created).toBe(50);
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(createSession.mock.calls[1]?.[0]).toMatchObject({ cwd: null });
+  });
+
+  it("refuses while the pane's session is still alive", async () => {
+    const { controller, createSession } = harness();
+
+    const created = await controller.restartPane("tab-1", 1, "restart");
+
+    expect(created).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().notice).toBe("This terminal is still running.");
+  });
+
+  it("refuses a session that is not one of the tab's panes", async () => {
+    const { controller, createSession } = harness({
+      sessions: [session(1), session(2, { alive: false, pid: null }), session(3)],
+    });
+
+    const created = await controller.restartPane("tab-1", 2, "restart");
+
+    expect(created).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("surfaces creation failure without touching the layout", async () => {
+    const { controller, closeSession } = harness({
+      sessions: [session(1), session(2), session(3, { alive: false, pid: null })],
+      createSession: async () => {
+        throw new Error("host refused");
+      },
+    });
+    const before = controller.getSnapshot().layout;
+
+    const created = await controller.restartPane("tab-2", 3, "restart");
+
+    expect(created).toBeNull();
+    expect(controller.getSnapshot().notice).toBe(
+      "The terminal session could not be created.",
+    );
+    expect(controller.getSnapshot().layout).toBe(before);
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+});
+
 describe("WorkspaceController combine tabs (spec §16)", () => {
   it("grafts the source tab beside the target without any session lifecycle call", () => {
     const { controller, createSession, closeSession, attachments, persistenceCalls } =

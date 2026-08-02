@@ -193,6 +193,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   // Focused pane per tab is ephemeral UI state (layout spec: never persisted).
   const [focusByTab, setFocusByTab] = useState<Record<string, number>>({});
   const [dismissing, setDismissing] = useState<ReadonlySet<number>>(new Set());
+  const [restarting, setRestarting] = useState<ReadonlySet<number>>(new Set());
   const viewerRef = useRef<ViewerApi | null>(null);
 
   const activeTabId = snapshot.activeTabId;
@@ -435,6 +436,21 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
               });
             }
           },
+          async restartPane(sessionId, mode) {
+            setRestarting((prev) => new Set(prev).add(sessionId));
+            try {
+              const created = await controller.restartPane(tabId, sessionId, mode);
+              if (created !== null) {
+                setFocusByTab((prev) => ({ ...prev, [tabId]: created }));
+              }
+            } finally {
+              setRestarting((prev) => {
+                const next = new Set(prev);
+                next.delete(sessionId);
+                return next;
+              });
+            }
+          },
           resizePane(path, sizes) {
             controller.resizePane(tabId, path, sizes);
           },
@@ -544,6 +560,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     focusByTab[tab.id],
                   )}
                   dismissingSessionIds={dismissing}
+                  restartingSessionIds={restarting}
                   onSessionCwd={controller.reportSessionCwd}
                   onSessionOutput={handleSessionOutput}
                   onFocusPane={(sessionId) =>

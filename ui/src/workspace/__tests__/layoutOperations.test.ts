@@ -16,6 +16,7 @@ import {
   pruneSessionIds,
   removeGroupAndTabs,
   reorderGroup,
+  replaceSessionInTab,
   sessionIdsInTab,
 } from "../layoutOperations";
 
@@ -194,6 +195,32 @@ function depthLayout(): LayoutV1 {
     activeTabId: "deep",
   };
 }
+
+describe("replaceSessionInTab (dead-pane relaunch)", () => {
+  it("swaps a nested pane's session id without touching geometry or other tabs", () => {
+    const state = layout();
+    const replaced = replaceSessionInTab(state, "t2", 3, 99);
+    expect(replaced).not.toBeNull();
+    expect(sessionIdsInTab(replaced!.tabs.t2!)).toEqual([2, 99, 4]);
+    const split = replaced!.tabs.t2!.split;
+    expect(split.kind).toBe("split");
+    expect(split.kind === "split" && split.sizes).toEqual([0.5, 0.5]);
+    expect(replaced!.tabs.t1).toBe(state.tabs.t1);
+    expect(replaced!.tabs.t3).toBe(state.tabs.t3);
+    expect(validateInvariants(replaced!)).toEqual([]);
+  });
+
+  it("refuses unknown tabs, sessions not in the tab, and no-op swaps", () => {
+    const state = layout();
+    expect(replaceSessionInTab(state, "missing", 1, 99)).toBeNull();
+    expect(replaceSessionInTab(state, "t1", 2, 99)).toBeNull();
+    expect(replaceSessionInTab(state, "t1", 1, 1)).toBeNull();
+  });
+
+  it("refuses a swap onto a session id already living in another pane", () => {
+    expect(replaceSessionInTab(layout(), "t2", 3, 5)).toBeNull();
+  });
+});
 
 describe("combine tabs side-by-side (spec §16)", () => {
   it("grafts the source subtree as the target root's right-hand sibling", () => {

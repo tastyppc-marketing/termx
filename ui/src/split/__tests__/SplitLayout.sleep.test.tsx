@@ -41,6 +41,7 @@ function actions(): SplitLayoutActions {
     splitPane: vi.fn(),
     closePane: vi.fn(async () => undefined),
     dismissPane: vi.fn(async () => undefined),
+    restartPane: vi.fn(async () => undefined),
     resizePane: vi.fn(),
   };
 }

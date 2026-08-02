@@ -250,6 +250,54 @@ export function extractSessionToTab(
   });
 }
 
+/// Dead-pane relaunch: swap one pane's session id in place, leaving the tab's
+/// split geometry (and every other tab) untouched. Pure layout surgery — the
+/// caller owns creating the replacement session and closing the old one.
+///
+/// Returns null (a refusal the caller surfaces) when the tab is unknown, the
+/// old session is not one of its panes, or the swap would violate an invariant
+/// (e.g. the new session id already lives in another pane).
+export function replaceSessionInTab(
+  layout: LayoutV1,
+  tabId: string,
+  oldSessionId: number,
+  newSessionId: number,
+): LayoutV1 | null {
+  const tab = layout.tabs[tabId];
+  if (!tab || oldSessionId === newSessionId) {
+    return null;
+  }
+  const split = replaceInNode(tab.split, oldSessionId, newSessionId);
+  if (split === null) {
+    return null;
+  }
+  return admitOrNull({
+    ...layout,
+    tabs: { ...layout.tabs, [tabId]: { ...tab, split } },
+  });
+}
+
+function replaceInNode(
+  node: SplitNode,
+  oldSessionId: number,
+  newSessionId: number,
+): SplitNode | null {
+  if (node.kind === "pane") {
+    return node.sessionId === oldSessionId
+      ? { ...node, sessionId: newSessionId }
+      : null;
+  }
+  const first = replaceInNode(node.children[0], oldSessionId, newSessionId);
+  if (first !== null) {
+    return { ...node, children: [first, node.children[1]] };
+  }
+  const second = replaceInNode(node.children[1], oldSessionId, newSessionId);
+  if (second !== null) {
+    return { ...node, children: [node.children[0], second] };
+  }
+  return null;
+}
+
 function insertAfter(list: readonly string[], index: number, id: string): string[] {
   const next = [...list];
   next.splice(index + 1, 0, id);

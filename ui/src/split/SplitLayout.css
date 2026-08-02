@@ -180,9 +180,16 @@
   line-height: 1.5;
 }
 
-.dead-pane__dismiss {
-  min-height: 30px;
+.dead-pane__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
   margin-top: 10px;
+}
+
+.dead-pane__action {
+  min-height: 30px;
   padding: 0 14px;
   color: #e6e6e6;
   background: #1b202a;
@@ -192,14 +199,23 @@
   transition: border-color 120ms ease, background 120ms ease;
 }
 
-.dead-pane__dismiss:hover:not(:disabled) {
+.dead-pane__action:hover:not(:disabled) {
   background: #232a36;
   border-color: rgb(122 162 247 / 55%);
 }
 
-.dead-pane__dismiss:disabled {
+.dead-pane__action:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.dead-pane__action--primary {
+  background: #22304a;
+  border-color: rgb(122 162 247 / 35%);
+}
+
+.dead-pane__action--primary:hover:not(:disabled) {
+  background: #2a3b5c;
 }
 
 .split-dialog-backdrop {
@@ -273,7 +289,7 @@
   .split-pane__toolbar,
   .split-pane__toolbar button,
   .split-divider::before,
-  .dead-pane__dismiss {
+  .dead-pane__action {
     transition: none;
   }
 }

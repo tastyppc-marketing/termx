@@ -22,6 +22,11 @@ export interface SplitLayoutActions {
   splitPane(paneSessionId: number, dir: SplitDir): void;
   closePane(paneSessionId: number): void | Promise<void>;
   dismissPane(paneSessionId: number): void | Promise<void>;
+  /**
+   * Dead-pane relaunch: "restart" reuses the dead session's profile + cwd,
+   * "fresh" launches workspace defaults, both in this pane's slot.
+   */
+  restartPane(paneSessionId: number, mode: "restart" | "fresh"): void | Promise<void>;
   resizePane(path: number[], sizes: [number, number]): void;
   /** Spec §16: extract this pane into its own tab. Absent hides the chip. */
   popOutPane?(paneSessionId: number): void;
@@ -34,6 +39,8 @@ export interface SplitLayoutProps {
   paneStates: Readonly<Record<number, PaneSessionState>>;
   focusedSessionId: number;
   dismissingSessionIds: ReadonlySet<number>;
+  /** Dead panes with a relaunch in flight; defaults to none. */
+  restartingSessionIds?: ReadonlySet<number>;
   onFocusPane(sessionId: number): void;
   onSessionCwd?: (sessionId: number, path: string, live: boolean) => void;
   /** OSC 9;77 deliverable report (polish P4); fires for live output only. */
@@ -86,6 +93,7 @@ export function SplitLayout({
   paneStates,
   focusedSessionId,
   dismissingSessionIds,
+  restartingSessionIds,
   onFocusPane,
   onSessionCwd,
   onSessionOutput,
@@ -366,7 +374,10 @@ export function SplitLayout({
                 exitCode={state.exitCode}
                 known={state.status === "dead"}
                 dismissing={dismissingSessionIds.has(sessionId)}
+                restarting={restartingSessionIds?.has(sessionId) ?? false}
                 onDismiss={() => void actions.dismissPane(sessionId)}
+                onRestart={() => void actions.restartPane(sessionId, "restart")}
+                onNewSession={() => void actions.restartPane(sessionId, "fresh")}
               />
             )}
           </section>

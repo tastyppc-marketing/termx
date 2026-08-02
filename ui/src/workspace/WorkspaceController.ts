@@ -47,9 +47,11 @@ import {
   firstSessionId,
   mergeTabIntoTab,
   nextTabColor,
+  pathToPaneNode,
   pruneSessionIds,
   removeGroupAndTabs,
   reorderGroup as reorderLayoutGroup,
+  replaceSessionInTab,
   sessionIdsInTab,
 } from "./layoutOperations";
 
@@ -747,6 +749,84 @@ export class WorkspaceController {
     if (failed) {
       this.setNotice("The ended terminal could not be dismissed.");
     }
+  };
+
+  /// Dead-pane "Restart session" / "New session": create a replacement
+  /// session — the dead pane's own profile + cwd for "restart" (falling back
+  /// to the host default dir if the cwd went stale), workspace defaults for
+  /// "fresh" — swap it into the dead pane's slot, then release the dead
+  /// session's scrollback on the host. Returns the new session id so the
+  /// caller can focus it, or null on refusal.
+  restartPane = async (
+    tabId: string,
+    deadSessionId: number,
+    mode: "restart" | "fresh",
+  ): Promise<number | null> => {
+    const tab = this.store.getState().tabs[tabId];
+    if (!tab || pathToPaneNode(tab.split, deadSessionId) === null) {
+      return null;
+    }
+    const dead = this.sessions.get(deadSessionId);
+    if (dead?.alive === true) {
+      this.setNotice("This terminal is still running.");
+      return null;
+    }
+    this.setNotice(null);
+    const defaultProfile = this.settings.getSnapshot().defaultProfile;
+    const profile = mode === "restart"
+      ? (dead?.profile ?? defaultProfile)
+      : defaultProfile;
+    const cwd = mode === "restart" ? (dead?.cwd ?? null) : null;
+    let created: SessionInfo;
+    try {
+      created = await this.createSessionDownChain(
+        profile,
+        cwd === null ? [null] : [cwd, null],
+      );
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+      this.publish();
+      return null;
+    }
+    this.sessions.set(created.id, created);
+    this.sessionsRevision += 1;
+    try {
+      await this.attachments.attachSession(created.id);
+    } catch {
+      // The hub records the attach error; the new pane surfaces it inline.
+    }
+    const replaced = replaceSessionInTab(
+      this.store.getState(),
+      tabId,
+      deadSessionId,
+      created.id,
+    );
+    if (replaced === null) {
+      // The layout moved underneath the createSession await: roll the new
+      // session back the same way splitPane does, so no orphan outlives the
+      // refusal (a failed close keeps it tracked for restore reconciliation).
+      let rolledBack = true;
+      try {
+        await this.client.closeSession(created.id);
+      } catch {
+        rolledBack = false;
+      }
+      if (rolledBack) {
+        this.sessions.delete(created.id);
+        this.sessionsRevision += 1;
+        this.attachments.forgetSession(created.id);
+      }
+      this.setNotice("The pane could not be restarted.");
+      this.publish();
+      return null;
+    }
+    this.mutate("structural", () => this.store.replaceState(replaced));
+    // Free the dead session's ring. It is already out of the layout, so a
+    // close failure only leaves a host-side record that restore
+    // reconciliation reaps later — not worth a notice on a successful swap.
+    await this.closeSessions([deadSessionId]);
+    this.publish();
+    return created.id;
   };
 
   /// Split a live pane: duplicate its session (same profile + cwd), attach it
