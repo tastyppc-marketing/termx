@@ -101,6 +101,7 @@ mod tests {
             provider: "claude".to_string(),
             id: "abc".to_string(),
             title: title.to_string(),
+            title_source: crate::llm_sessions::TITLE_SOURCE_NAMED.to_string(),
             cwd: Some(r"C:\Dev".to_string()),
             file_path: r"C:\s\abc.jsonl".to_string(),
             updated_at_ms: 1_700_000_000_000,

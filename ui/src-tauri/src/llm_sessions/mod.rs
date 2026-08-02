@@ -9,8 +9,9 @@
 //! index.
 //!
 //! Registration lives in `lib.rs` (main thread owns that file): the commands
-//! are `llm_sessions::list_llm_sessions` and
-//! `llm_sessions::generate_session_note`.
+//! are `llm_sessions::list_llm_sessions`,
+//! `llm_sessions::generate_session_note` and
+//! `llm_sessions::generate_session_bundle`.
 
 pub mod claude;
 pub mod codex;
@@ -28,6 +29,19 @@ use index::SessionIndex;
 /// `storage::ALLOWED_FILES` or the index silently stops persisting.
 pub const INDEX_FILE: &str = "sessions_index_v1.json";
 
+/// The session carries a title its own harness shows; nothing generated may
+/// replace it.
+pub const TITLE_SOURCE_NAMED: &str = "named";
+/// The title is our own fallback — a fragment of the first message, or the
+/// bare id — so a generated name is an improvement.
+pub const TITLE_SOURCE_DERIVED: &str = "derived";
+
+/// The conservative default for a record that predates the field: never
+/// replace a title we are not sure we invented.
+fn default_title_source() -> String {
+    TITLE_SOURCE_NAMED.to_string()
+}
+
 /// One discovered session, in the shape the renderer consumes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +52,11 @@ pub struct SessionRecord {
     pub id: String,
     /// Never empty — falls back through summary to the id.
     pub title: String,
+    /// `"named"` when `title` is the session's own name, `"derived"` when it
+    /// is our fallback and the UI may show a generated name in its place.
+    /// Defaulted on read so an index written before the field still loads.
+    #[serde(default = "default_title_source")]
+    pub title_source: String,
     /// Absolute directory the session ran in, when it could be determined.
     pub cwd: Option<String>,
     /// Absolute path of the source transcript. Empty when the provider index
@@ -211,9 +230,11 @@ fn scan_codex(
             None => rollout.and_then(|path| codex::rollout_cwd_of(path)),
         };
 
+        let (title, title_source) = title_with_source(&entry.title, &entry.id);
         let record = SessionRecord {
             provider: "codex".to_string(),
-            title: non_empty_title(&entry.title, &entry.id),
+            title,
+            title_source: title_source.to_string(),
             id: entry.id,
             cwd,
             file_path,
@@ -235,12 +256,15 @@ fn has_jsonl_extension(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("jsonl"))
 }
 
-fn non_empty_title(candidate: &str, id: &str) -> String {
+/// A Codex thread name and where it came from: the provider index's
+/// `thread_name` is a name the session was given, so it is `named`; falling
+/// back to the bare id is `derived`.
+fn title_with_source(candidate: &str, id: &str) -> (String, &'static str) {
     let cleaned = claude::clean_text(candidate, claude::TITLE_MAX_CHARS);
     if cleaned.is_empty() {
-        id.to_string()
+        (id.to_string(), TITLE_SOURCE_DERIVED)
     } else {
-        cleaned
+        (cleaned, TITLE_SOURCE_NAMED)
     }
 }
 
@@ -311,6 +335,36 @@ pub async fn generate_session_note(file_path: String, kind: String) -> Option<St
             &note::resolve_program(note::DEFAULT_PROGRAM),
             path,
             &kind,
+            note::DEFAULT_TIMEOUT,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Tauri command: title, description and recap for one session in a single
+/// generation. Same allowlist guard as `generate_session_note` — the renderer
+/// hands us a path, and only a transcript inside a provider's own store may
+/// be read and piped to the CLI. Any failure is `None`.
+///
+/// `allow(dead_code)`: `lib.rs` (main thread's file) registers this in the
+/// invoke handler; until that lands nothing in the crate references it, and
+/// without the seed the whole bundle path below reads as dead code.
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn generate_session_bundle(file_path: String) -> Option<note::BundleNote> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = Path::new(&file_path);
+        let allowed = default_roots()
+            .map(|roots| note_target_allowed(&roots, path))
+            .unwrap_or(false);
+        if !allowed {
+            return None;
+        }
+        note::generate_bundle_with(
+            &note::resolve_program(note::DEFAULT_PROGRAM),
+            path,
             note::DEFAULT_TIMEOUT,
         )
     })
@@ -395,10 +449,18 @@ mod tests {
         let claude = got.iter().find(|r| r.provider == "claude").unwrap();
         assert_eq!(claude.id, "aaaa-1111");
         assert_eq!(claude.title, "build the thing");
+        assert_eq!(
+            claude.title_source, TITLE_SOURCE_DERIVED,
+            "a first-message fragment is not a name the session was given"
+        );
         assert_eq!(claude.cwd.as_deref(), Some(r"C:\Dev\Proj"));
 
         let codex = got.iter().find(|r| r.provider == "codex").unwrap();
         assert_eq!(codex.title, "Audit repo");
+        assert_eq!(
+            codex.title_source, TITLE_SOURCE_NAMED,
+            "a Codex thread_name is the session's own title"
+        );
         assert_eq!(codex.cwd.as_deref(), Some(r"C:\Dev\Audit"));
         assert!(codex.file_path.ends_with(".jsonl"));
 
@@ -432,6 +494,7 @@ mod tests {
             provider: "claude".to_string(),
             id: "aaaa-1111".to_string(),
             title: "FROM THE INDEX".to_string(),
+            title_source: TITLE_SOURCE_DERIVED.to_string(),
             cwd: None,
             file_path: path.to_string_lossy().into_owned(),
             updated_at_ms: 42,
@@ -471,6 +534,7 @@ mod tests {
                 provider: "claude".to_string(),
                 id: "aaaa-1111".to_string(),
                 title: "FROM THE INDEX".to_string(),
+                title_source: TITLE_SOURCE_DERIVED.to_string(),
                 cwd: None,
                 file_path: path.to_string_lossy().into_owned(),
                 updated_at_ms: 42,
@@ -520,6 +584,10 @@ mod tests {
             got[0].title, "no-rollout-id",
             "blank thread name falls back"
         );
+        assert_eq!(
+            got[0].title_source, TITLE_SOURCE_DERIVED,
+            "a bare id is our fallback, not a name"
+        );
         assert!(index.entries.contains_key("codex:no-rollout-id"));
     }
 
@@ -556,6 +624,7 @@ mod tests {
                 provider: "claude".to_string(),
                 id: "id".to_string(),
                 title: "t".to_string(),
+                title_source: TITLE_SOURCE_NAMED.to_string(),
                 cwd: None,
                 file_path: "p".to_string(),
                 updated_at_ms: 5,
@@ -610,19 +679,45 @@ mod tests {
 
     #[test]
     fn records_serialize_in_camel_case() {
-        let json = serde_json::to_string(&SessionRecord {
+        let record = SessionRecord {
             provider: "claude".to_string(),
             id: "id".to_string(),
             title: "t".to_string(),
+            title_source: TITLE_SOURCE_DERIVED.to_string(),
             cwd: Some(r"C:\Dev".to_string()),
+            file_path: "p".to_string(),
+            updated_at_ms: 5,
+            summary: None,
+            recap: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("\"filePath\":\"p\""), "{json}");
+        assert!(json.contains("\"updatedAtMs\":5"), "{json}");
+        assert!(json.contains("\"summary\":null"), "{json}");
+        assert!(json.contains("\"titleSource\":\"derived\""), "{json}");
+    }
+
+    #[test]
+    fn a_record_stored_before_title_source_existed_reads_back_as_named() {
+        // Conservative on purpose: an index written by the previous build has
+        // no provenance for its titles, and showing a generated name over a
+        // real one is the worse mistake.
+        let mut value = serde_json::to_value(SessionRecord {
+            provider: "claude".to_string(),
+            id: "id".to_string(),
+            title: "given name".to_string(),
+            title_source: TITLE_SOURCE_DERIVED.to_string(),
+            cwd: None,
             file_path: "p".to_string(),
             updated_at_ms: 5,
             summary: None,
             recap: None,
         })
         .unwrap();
-        assert!(json.contains("\"filePath\":\"p\""), "{json}");
-        assert!(json.contains("\"updatedAtMs\":5"), "{json}");
-        assert!(json.contains("\"summary\":null"), "{json}");
+        value.as_object_mut().unwrap().remove("titleSource");
+
+        let back: SessionRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(back.title_source, TITLE_SOURCE_NAMED);
+        assert_eq!(back.title, "given name");
     }
 }

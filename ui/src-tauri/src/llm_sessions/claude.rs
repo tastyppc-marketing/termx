@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::SessionRecord;
+use super::{SessionRecord, TITLE_SOURCE_DERIVED, TITLE_SOURCE_NAMED};
 
 /// Bytes read from each end of a transcript.
 pub const EXCERPT_BYTES: u64 = 256 * 1024;
@@ -64,16 +64,26 @@ pub fn harvest_claude_excerpts(
     scan_lines(head, &mut acc);
     scan_lines(tail, &mut acc);
 
-    let title = acc
-        .title
-        .or_else(|| acc.summary.clone())
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| id.to_string());
+    // The `summary` line is the name Claude Code itself shows for the
+    // session, so when one exists it IS the title and nothing generated may
+    // replace it. Without one, the best we can do is a fragment of the first
+    // thing the user typed (or the bare id) — a derived title, and the only
+    // case the UI is allowed to show a generated name instead.
+    let (title, title_source) = match acc.summary.clone().filter(|s| !s.is_empty()) {
+        Some(summary) => (summary, TITLE_SOURCE_NAMED),
+        None => (
+            acc.title
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| id.to_string()),
+            TITLE_SOURCE_DERIVED,
+        ),
+    };
 
     SessionRecord {
         provider: "claude".to_string(),
         id: id.to_string(),
         title,
+        title_source: title_source.to_string(),
         // Slug decoding is ambiguous (a real directory name may contain
         // dashes), so it is only ever a fallback for a transcript that never
         // recorded its cwd.
@@ -375,11 +385,35 @@ mod tests {
     }
 
     #[test]
-    fn title_falls_back_to_the_summary_then_to_the_id() {
-        let summary_only = "{\"type\":\"summary\",\"summary\":\"Refactor the host registry\"}";
-        assert_eq!(harvest(summary_only).title, "Refactor the host registry");
+    fn the_summary_line_is_the_title_and_outranks_the_first_message() {
+        // Claude Code shows this line as the session's name, so it IS the
+        // title — and being a given name, nothing generated may replace it.
+        let body = [
+            user_line("go and fix the resize bug"),
+            "{\"type\":\"summary\",\"summary\":\"Refactor the host registry\"}".to_string(),
+        ]
+        .join("\n");
+        let got = harvest(&body);
+        assert_eq!(got.title, "Refactor the host registry");
+        assert_eq!(got.title_source, TITLE_SOURCE_NAMED);
+        assert_eq!(got.summary.as_deref(), Some("Refactor the host registry"));
+    }
+
+    #[test]
+    fn without_a_summary_line_the_title_is_derived_from_the_first_message_then_the_id() {
+        let from_message = harvest(&user_line("go and fix the resize bug"));
+        assert_eq!(from_message.title, "go and fix the resize bug");
+        assert_eq!(
+            from_message.title_source,
+            TITLE_SOURCE_DERIVED
+        );
+
+        for empty in ["", "   "] {
+            let got = harvest(&user_line(empty));
+            assert_eq!(got.title, "the-id", "{empty:?}");
+            assert_eq!(got.title_source, TITLE_SOURCE_DERIVED);
+        }
         assert_eq!(harvest("").title, "the-id");
-        assert_eq!(harvest(&user_line("   ")).title, "the-id");
     }
 
     #[test]
@@ -413,7 +447,10 @@ mod tests {
 
         // head | 600 KB of filler holding a poison line | tail
         let mut body = String::new();
-        body.push_str(&user_line("the opening request"));
+        // The head's evidence is the cwd it records: content beats the slug.
+        body.push_str(
+            "{\"type\":\"user\",\"cwd\":\"C:\\\\Dev\\\\Big-Real\",\"message\":{\"role\":\"user\",\"content\":\"the opening request\"}}",
+        );
         body.push('\n');
         while body.len() < 400 * 1024 {
             body.push_str("{\"type\":\"other\",\"pad\":\"");
@@ -435,14 +472,22 @@ mod tests {
 
         let got = harvest_claude_file(&path).expect("harvested");
         assert_eq!(got.id, "11112222-3333");
-        assert_eq!(got.title, "the opening request", "head was read");
+        assert_eq!(
+            got.cwd.as_deref(),
+            Some(r"C:\Dev\Big-Real"),
+            "head was read (its cwd outranks the slug, which decodes to C:\\Dev\\Big)"
+        );
         assert_eq!(
             got.summary.as_deref(),
             Some("the tail summary"),
-            "tail was read"
+            "tail was read, and the middle stayed unread"
         );
+        assert_eq!(
+            got.title, "the tail summary",
+            "the summary line is the session's own name"
+        );
+        assert_eq!(got.title_source, TITLE_SOURCE_NAMED);
         assert!(got.updated_at_ms > 0, "mtime stamped");
-        assert_eq!(got.cwd.as_deref(), Some(r"C:\Dev\Big"), "slug fallback");
         assert_eq!(got.file_path, path.to_string_lossy());
     }
 
