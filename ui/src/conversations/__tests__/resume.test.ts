@@ -67,6 +67,7 @@ function harness(options: {
   >();
   const closeListeners = new Set<(event: { sessionId: number }) => void>();
   const createdCwds: Array<string | null> = [];
+  const createdSessionIds: number[] = [];
   const writes: Array<[number, string | Uint8Array]> = [];
   let nextSessionId = 50;
 
@@ -78,18 +79,19 @@ function harness(options: {
       rows: number;
     }): Promise<SessionInfo> => {
       createdCwds.push(createOptions.cwd);
-      if (options.createSession) {
-        return options.createSession(createOptions.cwd);
-      }
-      return {
-        id: nextSessionId++,
-        profile: createOptions.profile ?? "powershell",
-        cwd: createOptions.cwd,
-        cols: createOptions.cols,
-        rows: createOptions.rows,
-        alive: true,
-        pid: 4242,
-      };
+      const created = options.createSession
+        ? await options.createSession(createOptions.cwd)
+        : {
+            id: nextSessionId++,
+            profile: createOptions.profile ?? "powershell",
+            cwd: createOptions.cwd,
+            cols: createOptions.cols,
+            rows: createOptions.rows,
+            alive: true,
+            pid: 4242,
+          };
+      createdSessionIds.push(created.id);
+      return created;
     },
   );
 
@@ -139,13 +141,14 @@ function harness(options: {
   }
 
   const dirExists = vi.fn(options.dirExists ?? (async () => true));
+  let nextTabId = 1;
   const controller = new WorkspaceController({
     client,
     store: createLayoutStore(emptyLayout()),
     persistence,
     attachments,
     sessions: [],
-    generateId: () => "resumed-tab",
+    generateId: () => `resumed-tab-${nextTabId++}`,
     settings: { getSnapshot: () => ({ ...DEFAULT_SETTINGS, ...options.settings }) },
     dirExists,
   });
@@ -154,10 +157,12 @@ function harness(options: {
     controller,
     createSession,
     createdCwds,
+    createdSessionIds,
     dirExists,
     writes,
     notice: () => controller.getSnapshot().notice,
     tabCount: () => controller.getSnapshot().ungroupedTabs.length,
+    tabIds: () => controller.getSnapshot().ungroupedTabs.map((tab) => tab.id),
     emitExit(sessionId: number) {
       for (const listener of exitListeners) {
         listener({ sessionId, exitCode: 1 });
@@ -465,6 +470,144 @@ describe("WorkspaceController.resumeSession", () => {
 
     expect(h.writes).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+/** Drive one resume through its cwd-report wait and return its outcome. */
+async function resumeAndSettle(
+  h: ReturnType<typeof harness>,
+  overrides: Partial<LlmSessionRecord> = {},
+  options?: { force?: boolean },
+) {
+  const done = h.controller.resumeSession(record(overrides), options);
+  await settleMicrotasks();
+  const sessionId = h.createdSessionIds.at(-1);
+  if (sessionId !== undefined) {
+    h.controller.reportSessionCwd(sessionId, "C:\\Dev\\TermX", true);
+  }
+  return done;
+}
+
+describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("answers already-open for a second resume while the first tab is still live, creating nothing", async () => {
+    const h = harness();
+
+    const first = await resumeAndSettle(h);
+    expect(first).toEqual({ kind: "opened" });
+    expect(h.tabCount()).toBe(1);
+    const openTabId = h.tabIds()[0]!;
+
+    const second = await resumeAndSettle(h);
+    expect(second).toEqual({ kind: "already-open", tabId: openTabId });
+    expect(h.tabCount()).toBe(1);
+    expect(h.createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the mapping once the tab closes, so the next resume opens a fresh tab", async () => {
+    const h = harness();
+
+    const first = await resumeAndSettle(h);
+    expect(first).toEqual({ kind: "opened" });
+    const openTabId = h.tabIds()[0]!;
+
+    await h.controller.closeLiveTab(openTabId);
+    expect(h.tabCount()).toBe(0);
+
+    const second = await resumeAndSettle(h);
+    expect(second).toEqual({ kind: "opened" });
+    expect(h.tabCount()).toBe(1);
+    expect(h.tabIds()[0]).not.toBe(openTabId);
+    expect(h.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops the mapping once the resumed session's pane dies, even though the dead tab stays in the layout", async () => {
+    const h = harness();
+
+    const first = await resumeAndSettle(h);
+    expect(first).toEqual({ kind: "opened" });
+    const openTabId = h.tabIds()[0]!;
+    const openSessionId = h.createdSessionIds[0]!;
+
+    // The shell exits; the tab is still present (nothing dismissed it) but
+    // is no longer live.
+    h.emitExit(openSessionId);
+    expect(h.tabCount()).toBe(1);
+    expect(h.tabIds()[0]).toBe(openTabId);
+
+    const second = await resumeAndSettle(h);
+    expect(second).toEqual({ kind: "opened" });
+    expect(h.tabCount()).toBe(2);
+    expect(h.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops the mapping when the host closes the session out from under the tab", async () => {
+    const h = harness();
+
+    const first = await resumeAndSettle(h);
+    expect(first).toEqual({ kind: "opened" });
+    const openSessionId = h.createdSessionIds[0]!;
+
+    h.emitClosed(openSessionId);
+
+    const second = await resumeAndSettle(h);
+    expect(second).toEqual({ kind: "opened" });
+    expect(h.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("force skips the already-open check and opens a second tab while the first is still live", async () => {
+    const h = harness();
+
+    const first = await resumeAndSettle(h);
+    expect(first).toEqual({ kind: "opened" });
+    const firstTabId = h.tabIds()[0]!;
+
+    const forced = await resumeAndSettle(h, {}, { force: true });
+    expect(forced).toEqual({ kind: "opened" });
+    expect(h.tabCount()).toBe(2);
+    expect(h.createSession).toHaveBeenCalledTimes(2);
+    const secondTabId = h.tabIds().find((id) => id !== firstTabId)!;
+
+    // A later, unforced resume now dedupes against the NEWEST tab.
+    const third = await resumeAndSettle(h);
+    expect(third).toEqual({ kind: "already-open", tabId: secondTabId });
+    expect(h.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("passes refused straight through without ever touching the dedupe map", async () => {
+    const h = harness();
+
+    const refused = await h.controller.resumeSession(record({ id: "../evil" }));
+    expect(refused).toEqual({ kind: "refused" });
+    expect(h.tabCount()).toBe(0);
+
+    // Refusal never created anything to dedupe against — the next call
+    // resumes normally.
+    const opened = await resumeAndSettle(h);
+    expect(opened).toEqual({ kind: "opened" });
+    expect(h.tabCount()).toBe(1);
+  });
+
+  it("returns refused when the terminal ends before the prompt arrives, without leaving a stale mapping", async () => {
+    const h = harness();
+
+    const dying = h.controller.resumeSession(record());
+    await settleMicrotasks();
+    h.emitExit(h.createdSessionIds.at(-1)!);
+    expect(await dying).toEqual({ kind: "refused" });
+
+    // The dead tab is still in the layout (nothing dismissed it), but it is
+    // not live, so a fresh resume must open a new tab rather than dedupe.
+    const opened = await resumeAndSettle(h);
+    expect(opened).toEqual({ kind: "opened" });
+    expect(h.createSession).toHaveBeenCalledTimes(2);
   });
 });
 

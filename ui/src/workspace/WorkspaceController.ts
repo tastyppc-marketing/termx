@@ -18,7 +18,7 @@ import {
   tauriDirExists,
   type DirExists,
 } from "../conversations/resume";
-import type { LlmSessionRecord } from "../conversations/types";
+import { sessionKey, type LlmSessionRecord, type SessionKey } from "../conversations/types";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
 import {
   dropScope,
@@ -167,6 +167,21 @@ export interface WorkspaceControllerOptions {
 /** How a resume's wait for the new session's prompt ended. */
 type ResumeWaitOutcome = "ready" | "elapsed" | "gone";
 
+/**
+ * Outcome of `resumeSession` (polish spec P6). "refused" covers every
+ * pre-existing validation/notice failure (bad id, vanished folder, creation
+ * failure, the terminal dying before the prompt arrived) — the caller still
+ * reads the notice for the reason; "already-open" means a live tab from an
+ * earlier resume of the same session was found and nothing new was created;
+ * "opened" means a fresh tab now holds this resume (whether or not the
+ * resume command itself was successfully typed into it — a `notice` still
+ * reports that failure separately).
+ */
+export type ResumeOutcome =
+  | { kind: "opened" }
+  | { kind: "already-open"; tabId: string }
+  | { kind: "refused" };
+
 interface ResumeWaiter {
   settle: (outcome: ResumeWaitOutcome) => void;
   /** False for the fixed-delay path: cwd reports must not shorten the wait. */
@@ -187,6 +202,13 @@ export class WorkspaceController {
   private folderSearchHandler: ((target: FolderSearchTarget) => void) | null = null;
   /// One-shot resume waiters keyed by the session the resume just created.
   private readonly resumeWaiters = new Map<number, ResumeWaiter>();
+  /// spec P6 dedupe: session key → the tab a successful resume opened for it.
+  /// An entry is only ever trusted after re-checking the tab is still live
+  /// (`isTabLive`); it is also proactively dropped the moment that stops
+  /// being true — see `purgeResumedTabsNotIn` (every structural mutation)
+  /// and `purgeResumedTabForSession` (the exited/closed session listeners) —
+  /// so a stale mapping never outlives the tab it names.
+  private readonly resumedTabs = new Map<SessionKey, string>();
   private readonly sessions = new Map<number, SessionInfo>();
   private readonly listeners = new Set<() => void>();
   private readonly cleanups: Array<() => void> = [];
@@ -267,6 +289,10 @@ export class WorkspaceController {
         }
         this.settleResumeWait(sessionId, "gone");
         this.attachments.markExited(sessionId, exitCode);
+        // Pane death (spec P6): the tab may still be sitting in the layout as
+        // "dead" (nothing dismissed it yet), so the generic post-mutation
+        // purge in `mutate()` never sees this — check it directly.
+        this.purgeResumedTabForSession(sessionId);
         this.publish();
       }),
       this.client.onSessionClosed(({ sessionId }) => {
@@ -275,6 +301,7 @@ export class WorkspaceController {
         }
         this.settleResumeWait(sessionId, "gone");
         this.attachments.forgetSession(sessionId);
+        this.purgeResumedTabForSession(sessionId);
         this.publish();
       }),
       this.client.onError(() => {
@@ -480,8 +507,9 @@ export class WorkspaceController {
     }
   };
 
-  /// Resume an LLM session (spec §5): validate, open a tab in the session's
-  /// directory, wait for the shell's prompt, then type the resume command.
+  /// Resume an LLM session (spec §5, dedupe spec P6): validate, open a tab in
+  /// the session's directory, wait for the shell's prompt, then type the
+  /// resume command.
   ///
   /// The command is built from the record's provider and id ALONE, and only
   /// after `resumeCommand` validates the id — a record whose id is anything
@@ -489,12 +517,35 @@ export class WorkspaceController {
   /// sessions are keyed to their project directory, so a vanished cwd is a
   /// refusal; codex threads are keyed globally, so theirs degrades to the host
   /// default directory.
-  resumeSession = async (record: LlmSessionRecord): Promise<void> => {
+  ///
+  /// Without `options.force`, a session already mapped to a still-live tab
+  /// short-circuits to `already-open` and creates nothing; `force` (the
+  /// dialog's "Open anyway") skips that check entirely. Every existing
+  /// validation/notice failure now returns `refused` — behavior otherwise
+  /// unchanged, including the exact notice text.
+  resumeSession = async (
+    record: LlmSessionRecord,
+    options?: { force?: boolean },
+  ): Promise<ResumeOutcome> => {
     this.setNotice(null);
+    const key = sessionKey(record);
+    if (!options?.force) {
+      const existingTabId = this.resumedTabs.get(key);
+      if (existingTabId !== undefined) {
+        if (this.isTabLive(existingTabId)) {
+          return { kind: "already-open", tabId: existingTabId };
+        }
+        // Stale: the tab closed or its pane died without this map entry
+        // having been proactively purged yet (e.g. a mutation this instance
+        // never observed). Drop it and fall through to a normal resume.
+        this.resumedTabs.delete(key);
+      }
+    }
+
     const command = resumeCommand(record);
     if (command === null) {
       this.setNotice("That session cannot be resumed: its id is not valid.");
-      return;
+      return { kind: "refused" };
     }
 
     const recorded = record.cwd && record.cwd.length > 0 ? record.cwd : null;
@@ -507,7 +558,7 @@ export class WorkspaceController {
           ? "This session has no recorded folder, so it cannot be resumed."
           : `The session's folder no longer exists (${recorded}).`,
       );
-      return;
+      return { kind: "refused" };
     }
 
     const profile = this.settings.getSnapshot().defaultProfile;
@@ -519,7 +570,7 @@ export class WorkspaceController {
       );
     } catch {
       this.setNotice("The terminal session could not be created.");
-      return;
+      return { kind: "refused" };
     }
 
     // Arm the waiter before the session is attached: once a terminal binds to
@@ -530,23 +581,30 @@ export class WorkspaceController {
       awaitPrompt ? RESUME_PROMPT_TIMEOUT_MS : RESUME_FIXED_DELAY_MS,
       awaitPrompt,
     );
+    let tabId: string;
     try {
-      await this.addSessionTab(created, null);
+      tabId = await this.addSessionTab(created, null);
     } catch {
       this.settleResumeWait(created.id, "gone");
       await ready;
       this.setNotice("The terminal session could not be created.");
-      return;
+      return { kind: "refused" };
     }
+    // The tab is live in the layout from this point on — record it before
+    // awaiting further so a session death mid-wait purges itself through the
+    // normal onSessionExited/onSessionClosed path instead of needing a
+    // special case here.
+    this.resumedTabs.set(key, tabId);
 
     if ((await ready) === "gone") {
       this.setNotice("The terminal ended before the session could be resumed.");
-      return;
+      return { kind: "refused" };
     }
     const sent = this.attachments.sendInput?.(created.id, `${command}\r`) ?? false;
     if (!sent) {
       this.setNotice("The resume command could not be sent to the terminal.");
     }
+    return { kind: "opened" };
   };
 
   /// Recorded dims per session for reattach-before-replay (spec §13): the
@@ -841,7 +899,9 @@ export class WorkspaceController {
     this.attachments.close();
   }
 
-  private async addSessionTab(session: SessionInfo, groupId: string | null): Promise<void> {
+  /// Returns the id of the tab it just created (the resume flow records it
+  /// for dedupe tracking; every other caller ignores the return value).
+  private async addSessionTab(session: SessionInfo, groupId: string | null): Promise<string> {
     this.sessions.set(session.id, session);
     this.sessionsRevision += 1;
     await this.attachments.attachSession(session.id);
@@ -849,8 +909,9 @@ export class WorkspaceController {
     const targetGroupId = groupId !== null && layout.groups.some((group) => group.id === groupId)
       ? groupId
       : null;
+    const tabId = this.generateId();
     this.mutate("structural", () => this.store.createTab({
-      id: this.generateId(),
+      id: tabId,
       sessionId: session.id,
       color: nextTabColor(layout),
       groupId: targetGroupId,
@@ -867,6 +928,7 @@ export class WorkspaceController {
       );
     }
     this.publish();
+    return tabId;
   }
 
   /// The injected probe is renderer code that can throw; a resume must never
@@ -1034,7 +1096,55 @@ export class WorkspaceController {
     const after = mutation();
     if (after !== before) {
       this.persistence.record(after, kind);
+      // Spec P6: every structural tab removal — closeLiveTab, closeGroup,
+      // dismissDeadTab, closePane's last-pane case, mergeTabs folding the
+      // source tab away — flows through here, so one generic sweep catches
+      // all of them instead of a bespoke call at each site.
+      this.purgeResumedTabsNotIn(after);
     }
+  }
+
+  /// Drops any resume-dedupe entry whose tab id no longer exists in `layout`.
+  private purgeResumedTabsNotIn(layout: LayoutV1): void {
+    if (this.resumedTabs.size === 0) {
+      return;
+    }
+    for (const [key, tabId] of this.resumedTabs) {
+      if (!layout.tabs[tabId]) {
+        this.resumedTabs.delete(key);
+      }
+    }
+  }
+
+  /// Pane death (spec P6): `sessionId` just went dead or was forgotten by the
+  /// host while its tab is still sitting in the layout (nothing dismissed
+  /// it), so `purgeResumedTabsNotIn` never fires. Find the resumed tab that
+  /// owns this session, if any, and drop its entry once the tab is no longer
+  /// live overall (a split tab with a surviving sibling pane stays mapped).
+  private purgeResumedTabForSession(sessionId: number): void {
+    if (this.resumedTabs.size === 0) {
+      return;
+    }
+    const layout = this.store.getState();
+    for (const [key, tabId] of this.resumedTabs) {
+      const tab = layout.tabs[tabId];
+      if (!tab || !sessionIdsInTab(tab).includes(sessionId)) {
+        continue;
+      }
+      if (!this.isTabLive(tabId)) {
+        this.resumedTabs.delete(key);
+      }
+    }
+  }
+
+  /// True when `tabId` still exists and at least one of its panes is alive —
+  /// the same liveness rule `getSnapshot`'s projection uses.
+  private isTabLive(tabId: string): boolean {
+    const tab = this.store.getState().tabs[tabId];
+    if (!tab) {
+      return false;
+    }
+    return sessionIdsInTab(tab).some((id) => this.sessions.get(id)?.alive === true);
   }
 
   private setNotice(notice: string | null): void {

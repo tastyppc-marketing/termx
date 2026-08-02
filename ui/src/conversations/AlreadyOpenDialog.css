@@ -1,0 +1,75 @@
+.already-open-dialog-backdrop {
+  position: fixed;
+  z-index: 200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(5 7 10 / 62%);
+  backdrop-filter: blur(3px);
+}
+
+.already-open-dialog {
+  width: min(380px, calc(100% - 32px));
+  padding: 20px;
+  color: #e6e6e6;
+  background: #1b202a;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 8px;
+  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+}
+
+.already-open-dialog h2 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.already-open-dialog__body {
+  margin: 0 0 18px;
+  color: #b7bdca;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.already-open-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.already-open-dialog__actions button {
+  min-height: 34px;
+  padding: 0 16px;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 7px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.already-open-dialog__switch {
+  color: #10151d;
+  font-weight: 600;
+  background: #7aa2f7;
+  border: 1px solid #7aa2f7;
+}
+
+.already-open-dialog__switch:hover {
+  background: #8db2ff;
+  border-color: #8db2ff;
+}
+
+.already-open-dialog__open-anyway {
+  color: #e6e6e6;
+  background: transparent;
+  border: 1px solid rgb(255 255 255 / 16%);
+}
+
+.already-open-dialog__open-anyway:hover {
+  background: rgb(255 255 255 / 6%);
+  border-color: rgb(255 255 255 / 26%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .already-open-dialog__actions button {
+    transition: none;
+  }
+}
