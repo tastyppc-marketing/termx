@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-session-outputs"
+description = "Enables the list_session_outputs command without any pre-configured scope."
+commands.allow = ["list_session_outputs"]
+
+[[permission]]
+identifier = "deny-list-session-outputs"
+description = "Denies the list_session_outputs command without any pre-configured scope."
+commands.deny = ["list_session_outputs"]

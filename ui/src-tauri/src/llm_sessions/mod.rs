@@ -347,11 +347,6 @@ pub async fn generate_session_note(file_path: String, kind: String) -> Option<St
 /// generation. Same allowlist guard as `generate_session_note` — the renderer
 /// hands us a path, and only a transcript inside a provider's own store may
 /// be read and piped to the CLI. Any failure is `None`.
-///
-/// `allow(dead_code)`: `lib.rs` (main thread's file) registers this in the
-/// invoke handler; until that lands nothing in the crate references it, and
-/// without the seed the whole bundle path below reads as dead code.
-#[allow(dead_code)]
 #[tauri::command]
 pub async fn generate_session_bundle(file_path: String) -> Option<note::BundleNote> {
     tauri::async_runtime::spawn_blocking(move || {

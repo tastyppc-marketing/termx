@@ -3,10 +3,7 @@ mod bootstrap;
 mod file_view;
 mod folders;
 mod llm_sessions;
-// `pub` only so the module is reachable while its two commands are not yet in
-// `invoke_handler` (main thread owns that wiring): without it every function
-// here is dead code. Safe to demote to `mod` once they are registered.
-pub mod outputs;
+mod outputs;
 mod paths;
 mod storage;
 mod transcript;
@@ -27,6 +24,9 @@ pub fn run() {
             folders::list_dirs,
             llm_sessions::list_llm_sessions,
             llm_sessions::generate_session_note,
+            llm_sessions::generate_session_bundle,
+            outputs::list_session_outputs,
+            outputs::dismiss_session_output,
             artifacts::list_session_artifacts,
             file_view::read_text_file,
             transcript::read_transcript_window,
