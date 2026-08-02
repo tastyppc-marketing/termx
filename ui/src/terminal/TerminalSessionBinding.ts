@@ -79,6 +79,14 @@ export interface TerminalSessionBindingOptions {
    * re-derives a session's cwd but must never move group-level state.
    */
   onCwd?: (path: string, live: boolean) => void;
+  /**
+   * OSC `9;77;output;<path>` deliverable report (spec P4, emitted by the
+   * `termx-output` helper). LIVE ONLY: replayed scrollback re-plays every
+   * registration a session ever made, and those are already in the sidecar —
+   * the same live-vs-replay discipline the cwd report follows, except here a
+   * replayed report is dropped outright rather than flagged.
+   */
+  onOutputRegistered?: (path: string) => void;
   /** User keystrokes actually forwarded to the PTY (input-mark tracking). */
   onUserInput?: (data: string) => void;
   /**
@@ -92,6 +100,11 @@ export interface TerminalSessionBindingOptions {
 export class TerminalSessionBinding {
   private readonly decoder = new TextDecoder();
   private readonly dataSubscription: Disposable;
+  /**
+   * The single OSC 9 registration: both the 9;9 cwd report and the 9;77
+   * output report arrive through it. Named for the cwd case because the
+   * cleanup-operation contract (`"cwd_subscription"`) is public API.
+   */
   private readonly cwdSubscription: Disposable | null;
   private attachment: SessionAttachment | null = null;
   private lastDimensions: string | null = null;
@@ -117,19 +130,28 @@ export class TerminalSessionBinding {
         this.reportRuntimeError("input", error);
       }
     });
-    this.cwdSubscription = options.onCwd
-      ? options.terminal.parser.registerOscHandler(9, (data) => {
-          const path = parseOsc9CwdReport(data);
-          if (path === null) {
-            // Not a 9;9 cwd report (e.g. ConEmu progress) — leave it alone.
-            return false;
-          }
-          if (!this.disposed) {
-            this.options.onCwd?.(path, this.replayFinished);
-          }
-          return true;
-        })
-      : null;
+    this.cwdSubscription =
+      options.onCwd || options.onOutputRegistered
+        ? options.terminal.parser.registerOscHandler(9, (data) => {
+            const output = parseOsc9OutputReport(data);
+            if (output !== null) {
+              // Replayed registrations are history the sidecar already holds.
+              if (!this.disposed && this.replayFinished) {
+                this.options.onOutputRegistered?.(output);
+              }
+              return true;
+            }
+            const path = parseOsc9CwdReport(data);
+            if (path === null) {
+              // Not a 9;9 cwd report (e.g. ConEmu progress) — leave it alone.
+              return false;
+            }
+            if (!this.disposed) {
+              this.options.onCwd?.(path, this.replayFinished);
+            }
+            return true;
+          })
+        : null;
   }
 
   async start(): Promise<void> {
@@ -524,6 +546,29 @@ export function parseOsc9CwdReport(data: string): string | null {
   const driveAbsolute = /^[A-Za-z]:[\\/]/.test(path) || /^[A-Za-z]:$/.test(path);
   const uncAbsolute = path.startsWith("\\\\") && path.length > 2;
   if (!driveAbsolute && !uncAbsolute) {
+    return null;
+  }
+  return path;
+}
+
+/**
+ * Parse an OSC 9 payload as a TermX deliverable report (spec P4:
+ * `ESC]9;77;output;<path>ST`, path optionally double-quoted). Returns the
+ * reported path, or null for every other OSC 9 subcommand and for malformed
+ * payloads (missing path, control characters). Paths are NOT required to be
+ * absolute here — the emitter resolves them and the pane only ever displays
+ * or hands them to the file opener, never executes them.
+ */
+export function parseOsc9OutputReport(data: string): string | null {
+  const prefix = "77;output;";
+  if (!data.startsWith(prefix)) {
+    return null;
+  }
+  let path = data.slice(prefix.length).trim();
+  if (path.length >= 2 && path.startsWith('"') && path.endsWith('"')) {
+    path = path.slice(1, -1);
+  }
+  if (path.length === 0 || hasControlCharacters(path)) {
     return null;
   }
   return path;

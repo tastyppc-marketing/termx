@@ -1,0 +1,201 @@
+/* Output pane (spec P4). Palette, radii and the header/action treatment come
+   from Viewer.css so a docked outputs panel reads as the same shell surface.
+
+   Geometry is NOT this file's business: the pane fills whatever box the app
+   gives it (right dock, tray expansion, test container). No fixed widths, no
+   positioning — the mounting slot owns placement. */
+
+.output-pane {
+  --output-bg: #161a22;
+  --output-raised: #232a36;
+  --output-text: #e6e6e6;
+  --output-muted: #8b93a7;
+  --output-accent: #7aa2f7;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--output-text);
+  background: var(--output-bg);
+  border-left: 1px solid rgb(255 255 255 / 8%);
+  font: 12px/1.5 Inter, "Segoe UI", sans-serif;
+}
+
+.output-pane__header {
+  display: flex;
+  min-height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid rgb(255 255 255 / 6%);
+  user-select: none;
+}
+
+.output-pane__title {
+  flex: 0 0 auto;
+  color: #f2f3f5;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.output-pane__context {
+  overflow: hidden;
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--output-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.output-pane__action {
+  display: flex;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  padding: 0;
+  color: var(--output-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.output-pane__action:hover {
+  color: #fff;
+  background: var(--output-raised);
+  border-color: rgb(255 255 255 / 8%);
+}
+
+.output-pane__action:focus-visible {
+  outline: 1px solid var(--output-accent);
+  outline-offset: 1px;
+}
+
+.output-pane__action--close:hover {
+  color: #ffd7d7;
+  background: rgb(224 108 117 / 22%);
+  border-color: rgb(224 108 117 / 32%);
+}
+
+.output-pane__body {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px;
+  scrollbar-color: #3a4353 transparent;
+  scrollbar-width: thin;
+}
+
+.output-pane__hint {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--output-muted);
+  background: rgb(255 255 255 / 3%);
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.output-pane__hint code {
+  padding: 1px 5px;
+  color: #d7e0f5;
+  background: rgb(255 255 255 / 6%);
+  border-radius: 4px;
+  font: 0.92em/1.4 "Cascadia Mono", Consolas, monospace;
+}
+
+.output-pane__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.output-pane__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: #cbd5e1;
+}
+
+.output-pane__row:hover {
+  background: rgb(255 255 255 / 5%);
+}
+
+.output-pane__row--missing {
+  color: var(--output-muted);
+  text-decoration: line-through;
+}
+
+/* The parent segment truncates; the file name always stays visible. */
+.output-pane__path {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  cursor: pointer;
+  font: 12px "Cascadia Mono", Consolas, monospace;
+  white-space: nowrap;
+}
+
+.output-pane__path:focus-visible {
+  outline: 1px solid var(--output-accent);
+  outline-offset: 1px;
+}
+
+.output-pane__parent {
+  overflow: hidden;
+  color: var(--output-muted);
+  text-overflow: ellipsis;
+}
+
+.output-pane__leaf {
+  flex: none;
+  color: inherit;
+  font-weight: 600;
+}
+
+.output-pane__time {
+  flex: none;
+  color: var(--output-muted);
+  font-size: 11px;
+}
+
+.output-pane__dismiss {
+  display: flex;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--output-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.output-pane__dismiss:hover {
+  color: #ffd7d7;
+  background: rgb(224 108 117 / 22%);
+}
+
+.output-pane__dismiss:focus-visible {
+  outline: 1px solid var(--output-accent);
+  outline-offset: 1px;
+}
