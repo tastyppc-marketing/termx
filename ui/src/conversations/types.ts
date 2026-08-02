@@ -53,6 +53,11 @@ export function hasTranscript(record: LlmSessionRecord): boolean {
 export interface ConversationFolder {
   id: string;
   name: string;
+  /**
+   * Collapsed in the rail (polish spec P7). Absent = expanded; only ever
+   * written as `true` so a folder nobody collapsed stays a two-field object.
+   */
+  collapsed?: boolean;
 }
 
 /** One cached LLM-generated note (§6); `sourceMtimeMs` drives staleness. */

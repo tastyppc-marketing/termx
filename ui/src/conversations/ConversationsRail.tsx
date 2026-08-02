@@ -16,6 +16,7 @@ import { InlineRename } from "../sidebar/InlineRename";
 import type { ArtifactLister } from "./artifacts";
 import { DetailPane } from "./DetailPane";
 import {
+  effectiveTitle,
   filterRecords,
   folderIdFor,
   groupSessions,
@@ -27,8 +28,10 @@ import {
   hasTranscript,
   sessionKey,
   EMPTY_NOTE,
+  type GeneratedNote,
   type LlmProvider,
   type LlmSessionRecord,
+  type OutputEntry,
   type SessionKey,
   type SessionNote,
 } from "./types";
@@ -45,6 +48,10 @@ export interface ConversationsRailProps {
   onOpenFile?(path: string): void;
   /** Detail-pane "Open folder in new tab" (§11); receives the parent dir. */
   onOpenFolder?(parentDir: string): void;
+  /** Injected `list_session_outputs` for the detail pane (P4); absent hides Outputs. */
+  listOutputs?(key: SessionKey): Promise<readonly OutputEntry[]>;
+  /** Injected `dismiss_session_output` for the detail pane (P4). */
+  dismissOutput?(key: SessionKey, path: string): Promise<unknown>;
   /**
    * Reports the session keys currently on screen after each list change —
    * the NoteScheduler's visibility feed (§6). Fired from an effect, never
@@ -95,6 +102,8 @@ export function ConversationsRail({
   onOpenFile,
   onOpenFolder,
   onVisibleRecords,
+  listOutputs,
+  dismissOutput,
   debounceMs = 120,
   nowMs,
   variant = "sidebar",
@@ -103,10 +112,19 @@ export function ConversationsRail({
   const [provider, setProvider] = useState<ProviderFilter>("all");
   const [query, setQuery] = useState("");
   const [appliedQuery, setAppliedQuery] = useState("");
-  const [creatingFolder, setCreatingFolder] = useState(false);
+  /** Non-null while the inline "new folder" input is open; `assignTo` is the
+   *  row waiting for it ("Move to folder ▸ New group…"), else null. */
+  const [creatingFolder, setCreatingFolder] = useState<{
+    assignTo: SessionKey | null;
+  } | null>(null);
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [menu, setMenu] = useState<RailMenu | null>(null);
   const [menuPanel, setMenuPanel] = useState<"root" | "move">("root");
+  /** Session key being dragged (HTML5 drag; the ref survives the event trip). */
+  const dragKeyRef = useRef<SessionKey | null>(null);
+  const [draggingKey, setDraggingKey] = useState<SessionKey | null>(null);
+  /** Folder header currently under the pointer: `undefined` none, `null` Unfiled. */
+  const [dropFolderId, setDropFolderId] = useState<string | null | undefined>(undefined);
   const rowRefs = useRef(new Map<SessionKey, HTMLDivElement>());
   const startedRef = useRef(false);
 
@@ -138,17 +156,35 @@ export function ConversationsRail({
     [store, settings],
   );
 
+  /** Cached generated note per record — the P2 title source. */
+  const generatedFor = useMemo(
+    () =>
+      (record: LlmSessionRecord): GeneratedNote | undefined =>
+        snapshot.data.generated[sessionKey(record)],
+    [snapshot.data],
+  );
+
   const filtered = useMemo(
-    () => filterRecords(snapshot.records, { provider, query: appliedQuery, noteFor }),
-    [snapshot.records, provider, appliedQuery, noteFor],
+    () =>
+      filterRecords(snapshot.records, {
+        provider,
+        query: appliedQuery,
+        noteFor,
+        generatedFor,
+      }),
+    [snapshot.records, provider, appliedQuery, noteFor, generatedFor],
   );
   const sections = useMemo(
     () => groupSessions(filtered, snapshot.data),
     [filtered, snapshot.data],
   );
+  // Rows inside a collapsed folder are not on screen: they leave the roving
+  // tab order and the scheduler's visibility feed alike.
   const visibleKeys = useMemo(
     () =>
-      sections.flatMap((section) => section.records.map((record) => sessionKey(record))),
+      sections
+        .filter((section) => !section.collapsed)
+        .flatMap((section) => section.records.map((record) => sessionKey(record))),
     [sections],
   );
 
@@ -166,6 +202,9 @@ export function ConversationsRail({
   const selected = findRecord(snapshot.records, snapshot.selectedKey);
   const selectedArtifacts = selected
     ? snapshot.data.artifacts?.[sessionKey(selected)]
+    : undefined;
+  const selectedGenerated = selected
+    ? snapshot.data.generated[sessionKey(selected)]
     : undefined;
   const closeMenu = () => {
     setMenu(null);
@@ -199,8 +238,39 @@ export function ConversationsRail({
     }
   };
 
+  /**
+   * Create a folder and (for "New group…") drop the pending row into it. The
+   * store owns id generation, so the new folder is spotted by diffing the
+   * snapshot rather than by guessing an id.
+   */
+  const commitNewFolder = (name: string, assignTo: SessionKey | null) => {
+    const before = new Set(store.getSnapshot().data.folders.map((folder) => folder.id));
+    store.createFolder(name);
+    if (assignTo === null) {
+      return;
+    }
+    const created = store
+      .getSnapshot()
+      .data.folders.find((folder) => !before.has(folder.id));
+    if (created) {
+      store.assign(assignTo, created.id);
+    }
+  };
+
+  /** HTML5 drop onto a folder header; `folderId: null` drops back to Unfiled. */
+  const handleFolderDrop = (folderId: string | null) => {
+    const key = dragKeyRef.current;
+    dragKeyRef.current = null;
+    setDraggingKey(null);
+    setDropFolderId(undefined);
+    if (key !== null) {
+      store.assign(key, folderId);
+    }
+  };
+
   const renderRow = (record: LlmSessionRecord) => {
     const key = sessionKey(record);
+    const title = effectiveTitle(record, generatedFor(record));
     const isSelected = key === snapshot.selectedKey;
     const note = visibleNote(noteFor(record), settings.summaryContent);
     const noteText = [note.summary, note.recap]
@@ -216,7 +286,9 @@ export function ConversationsRail({
           if (node) rowRefs.current.set(key, node);
           else rowRefs.current.delete(key);
         }}
-        className={`conversation-row${isSelected ? " conversation-row--selected" : ""}`}
+        className={`conversation-row${isSelected ? " conversation-row--selected" : ""}${
+          draggingKey === key ? " conversation-row--dragging" : ""
+        }`}
         role="option"
         aria-selected={isSelected}
         // Roving tab stop: the selection, or the first row when nothing is
@@ -229,6 +301,23 @@ export function ConversationsRail({
         data-session-key={key}
         data-provider={record.provider}
         {...(hover ? { title: noteText } : {})}
+        // Drag-to-group (P7): same affordance as a sidebar tab drag — the row
+        // dims while it travels and the folder header lights up as a target.
+        draggable
+        onDragStart={(event) => {
+          dragKeyRef.current = key;
+          setDraggingKey(key);
+          store.select(key);
+          event.dataTransfer?.setData("text/plain", key);
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "move";
+          }
+        }}
+        onDragEnd={() => {
+          dragKeyRef.current = null;
+          setDraggingKey(null);
+          setDropFolderId(undefined);
+        }}
         onClick={() => store.select(key)}
         onDoubleClick={(event) => {
           event.preventDefault();
@@ -253,8 +342,14 @@ export function ConversationsRail({
         </span>
         <span className="conversation-row__content">
           <span className="conversation-row__line">
-            <span className="conversation-row__title" title={record.title}>
-              {record.title}
+            {/* P2: a generated name may be shown, but the tooltip keeps the
+                raw record title so nothing is silently replaced. */}
+            <span
+              className="conversation-row__title"
+              title={record.title}
+              data-generated={title === record.title ? undefined : "true"}
+            >
+              {title}
             </span>
             <span className="conversation-row__time">
               {relativeTime(record.updatedAtMs, now)}
@@ -276,7 +371,7 @@ export function ConversationsRail({
           <button
             type="button"
             className="conversation-row__resume"
-            aria-label={`Resume ${record.title}`}
+            aria-label={`Resume ${title}`}
             onClick={(event) => {
               event.stopPropagation();
               onResume(record);
@@ -334,9 +429,10 @@ export function ConversationsRail({
       return null;
     }
     const currentFolder = folderIdFor(snapshot.data, menu.key);
+    const menuTitle = effectiveTitle(record, generatedFor(record));
     if (menuPanel === "move") {
       return (
-        <ContextMenu label={`Move ${record.title}`} point={menu.point} onClose={closeMenu}>
+        <ContextMenu label={`Move ${menuTitle}`} point={menu.point} onClose={closeMenu}>
           <button type="button" role="menuitem" onClick={() => setMenuPanel("root")}>
             ← Back
           </button>
@@ -355,21 +451,28 @@ export function ConversationsRail({
                 {folder.name}
               </button>
             ))}
+          {/* Tab-group parity (P7): name a new group and land in it. */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const key = menu.key;
+              closeMenu();
+              setCreatingFolder({ assignTo: key });
+            }}
+          >
+            New group…
+          </button>
         </ContextMenu>
       );
     }
     return (
       <ContextMenu
-        label={`Actions for ${record.title}`}
+        label={`Actions for ${menuTitle}`}
         point={menu.point}
         onClose={closeMenu}
       >
-        <button
-          type="button"
-          role="menuitem"
-          disabled={snapshot.data.folders.length === 0}
-          onClick={() => setMenuPanel("move")}
-        >
+        <button type="button" role="menuitem" onClick={() => setMenuPanel("move")}>
           Move to folder
         </button>
         <button
@@ -420,150 +523,195 @@ export function ConversationsRail({
         event.stopPropagation();
       }}
     >
-      <div className="conversations__filters" role="group" aria-label="Provider filter">
-        {PROVIDER_FILTERS.map((filter) => (
+      {/* The list column: in the sidebar it is the whole rail; under
+          `variant="expanded"` it becomes the left pane with the detail
+          pane beside it (CSS only — the tree below is identical). */}
+      <div className="conversations__list">
+        <div className="conversations__filters" role="group" aria-label="Provider filter">
+          {PROVIDER_FILTERS.map((filter) => (
+            <button
+              type="button"
+              key={filter.id}
+              className={`conversations__chip${
+                provider === filter.id ? " conversations__chip--active" : ""
+              }`}
+              aria-pressed={provider === filter.id}
+              onClick={() => setProvider(filter.id)}
+            >
+              {filter.label}
+            </button>
+          ))}
           <button
             type="button"
-            key={filter.id}
-            className={`conversations__chip${
-              provider === filter.id ? " conversations__chip--active" : ""
-            }`}
-            aria-pressed={provider === filter.id}
-            onClick={() => setProvider(filter.id)}
+            className="conversations__new-folder"
+            aria-label="New folder"
+            title="New folder"
+            onClick={() => setCreatingFolder({ assignTo: null })}
           >
-            {filter.label}
+            ＋
           </button>
-        ))}
-        <button
-          type="button"
-          className="conversations__new-folder"
-          aria-label="New folder"
-          title="New folder"
-          onClick={() => setCreatingFolder(true)}
-        >
-          ＋
-        </button>
-      </div>
-
-      <input
-        className="conversations__search"
-        type="search"
-        aria-label="Search conversations"
-        placeholder="Search title, folder, summary…"
-        value={query}
-        onChange={(event) => setQuery(event.currentTarget.value)}
-      />
-
-      {creatingFolder ? (
-        <div className="conversations__new-folder-row">
-          <InlineRename
-            value="New folder"
-            ariaLabel="Name new folder"
-            onCommit={(name) => {
-              store.createFolder(name);
-              setCreatingFolder(false);
-            }}
-            onCancel={() => setCreatingFolder(false)}
-          />
         </div>
-      ) : null}
 
-      <div className="conversations__scroll">
-        {visibleKeys.length === 0 && snapshot.data.folders.length === 0 ? (
-          <p className="conversations__empty">
-            {snapshot.refreshing ? "Scanning sessions…" : "No conversations found."}
-          </p>
+        <input
+          className="conversations__search"
+          type="search"
+          aria-label="Search conversations"
+          placeholder="Search title, folder, summary…"
+          value={query}
+          onChange={(event) => setQuery(event.currentTarget.value)}
+        />
+
+        {creatingFolder ? (
+          <div className="conversations__new-folder-row">
+            <InlineRename
+              value={creatingFolder.assignTo === null ? "New folder" : "New group"}
+              ariaLabel="Name new folder"
+              onCommit={(name) => {
+                commitNewFolder(name, creatingFolder.assignTo);
+                setCreatingFolder(null);
+              }}
+              onCancel={() => setCreatingFolder(null)}
+            />
+          </div>
         ) : null}
-        {sections.map((section) =>
-          section.id === null && section.records.length === 0 ? null : (
-            <section
-              className="conversations__folder"
-              key={section.id ?? "__unfiled"}
-              data-folder-id={section.id ?? ""}
-            >
-              <header
-                className="conversations__folder-header"
-                onContextMenu={(event) => {
-                  if (section.id === null) {
-                    return;
-                  }
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setMenuPanel("root");
-                  setMenu({
-                    kind: "folder",
-                    id: section.id,
-                    point: { x: event.clientX, y: event.clientY },
-                  });
-                }}
-              >
-                <span className="conversations__folder-name">
-                  {section.id !== null && renamingFolderId === section.id ? (
-                    <InlineRename
-                      value={section.name}
-                      ariaLabel={`Rename ${section.name}`}
-                      onCommit={(name) => {
-                        store.renameFolder(section.id!, name);
-                        setRenamingFolderId(null);
-                      }}
-                      onCancel={() => setRenamingFolderId(null)}
-                    />
-                  ) : (
-                    section.name
-                  )}
-                </span>
-                <span className="conversations__folder-count">
-                  {section.records.length}
-                </span>
-                {section.id !== null ? (
-                  <button
-                    type="button"
-                    className="conversations__folder-menu"
-                    aria-label={`Folder actions for ${section.name}`}
-                    onClick={(event) => {
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      setMenuPanel("root");
-                      setMenu({
-                        kind: "folder",
-                        id: section.id!,
-                        point: { x: rect.right, y: rect.bottom },
-                      });
-                    }}
-                  >
-                    ⋯
-                  </button>
-                ) : null}
-              </header>
-              <div
-                className="conversations__rows"
-                role="listbox"
-                aria-label={`${section.name} conversations`}
-              >
-                {section.records.map(renderRow)}
-              </div>
-            </section>
-          ),
-        )}
-      </div>
 
-      <div className="conversations__footer">
-        <span className="conversations__count" role="status">
-          {`${filtered.length} session${filtered.length === 1 ? "" : "s"} · refreshed ${
-            snapshot.refreshedAtMs === null
-              ? "never"
-              : relativeTime(snapshot.refreshedAtMs, now)
-          }`}
-        </span>
-        <button
-          type="button"
-          className="conversations__refresh"
-          aria-label="Refresh sessions"
-          title="Rescan sessions"
-          disabled={snapshot.refreshing}
-          onClick={() => void store.refresh(true)}
-        >
-          ⟳
-        </button>
+        <div className="conversations__scroll">
+          {visibleKeys.length === 0 && snapshot.data.folders.length === 0 ? (
+            <p className="conversations__empty">
+              {snapshot.refreshing ? "Scanning sessions…" : "No conversations found."}
+            </p>
+          ) : null}
+          {sections.map((section) =>
+            section.id === null && section.records.length === 0 ? null : (
+              <section
+                className="conversations__folder"
+                key={section.id ?? "__unfiled"}
+                data-folder-id={section.id ?? ""}
+                data-collapsed={section.collapsed ? "true" : undefined}
+              >
+                <header
+                  className={`conversations__folder-header${
+                    dropFolderId !== undefined && dropFolderId === section.id
+                      ? " conversations__folder-header--drop-target"
+                      : ""
+                  }`}
+                  // Drop target for row drags (P7). Unfiled (`id: null`)
+                  // un-groups whatever lands on it.
+                  onDragOver={(event) => {
+                    if (dragKeyRef.current === null) {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (event.dataTransfer) {
+                      event.dataTransfer.dropEffect = "move";
+                    }
+                    setDropFolderId(section.id);
+                  }}
+                  onDragLeave={() => setDropFolderId(undefined)}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    handleFolderDrop(section.id);
+                  }}
+                  onContextMenu={(event) => {
+                    if (section.id === null) {
+                      return;
+                    }
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setMenuPanel("root");
+                    setMenu({
+                      kind: "folder",
+                      id: section.id,
+                      point: { x: event.clientX, y: event.clientY },
+                    });
+                  }}
+                >
+                  {section.id !== null ? (
+                    <button
+                      type="button"
+                      className="conversations__folder-chevron"
+                      aria-label={`${section.collapsed ? "Expand" : "Collapse"} ${
+                        section.name
+                      }`}
+                      aria-expanded={!section.collapsed}
+                      onClick={() =>
+                        store.updateFolder(section.id!, { collapsed: !section.collapsed })
+                      }
+                    >
+                      <span aria-hidden="true">{section.collapsed ? "▸" : "▾"}</span>
+                    </button>
+                  ) : null}
+                  <span className="conversations__folder-name">
+                    {section.id !== null && renamingFolderId === section.id ? (
+                      <InlineRename
+                        value={section.name}
+                        ariaLabel={`Rename ${section.name}`}
+                        onCommit={(name) => {
+                          store.renameFolder(section.id!, name);
+                          setRenamingFolderId(null);
+                        }}
+                        onCancel={() => setRenamingFolderId(null)}
+                      />
+                    ) : (
+                      section.name
+                    )}
+                  </span>
+                  <span className="conversations__folder-count">
+                    {section.records.length}
+                  </span>
+                  {section.id !== null ? (
+                    <button
+                      type="button"
+                      className="conversations__folder-menu"
+                      aria-label={`Folder actions for ${section.name}`}
+                      onClick={(event) => {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setMenuPanel("root");
+                        setMenu({
+                          kind: "folder",
+                          id: section.id!,
+                          point: { x: rect.right, y: rect.bottom },
+                        });
+                      }}
+                    >
+                      ⋯
+                    </button>
+                  ) : null}
+                </header>
+                {section.collapsed ? null : (
+                  <div
+                    className="conversations__rows"
+                    role="listbox"
+                    aria-label={`${section.name} conversations`}
+                  >
+                    {section.records.map(renderRow)}
+                  </div>
+                )}
+              </section>
+            ),
+          )}
+        </div>
+
+        <div className="conversations__footer">
+          <span className="conversations__count" role="status">
+            {`${filtered.length} session${filtered.length === 1 ? "" : "s"} · refreshed ${
+              snapshot.refreshedAtMs === null
+                ? "never"
+                : relativeTime(snapshot.refreshedAtMs, now)
+            }`}
+          </span>
+          <button
+            type="button"
+            className="conversations__refresh"
+            aria-label="Refresh sessions"
+            title="Rescan sessions"
+            disabled={snapshot.refreshing}
+            onClick={() => void store.refresh(true)}
+          >
+            ⟳
+          </button>
+        </div>
       </div>
 
       {selected ? (
@@ -578,6 +726,9 @@ export function ConversationsRail({
           {...(listArtifacts ? { listArtifacts } : {})}
           {...(onOpenFile ? { onOpenFile } : {})}
           {...(onOpenFolder ? { onOpenFolder } : {})}
+          {...(selectedGenerated ? { generated: selectedGenerated } : {})}
+          {...(listOutputs ? { listOutputs } : {})}
+          {...(dismissOutput ? { dismissOutput } : {})}
         />
       ) : null}
 

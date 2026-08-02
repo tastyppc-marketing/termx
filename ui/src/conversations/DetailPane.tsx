@@ -22,11 +22,13 @@ import {
   parentDirOf,
   type ArtifactLister,
 } from "./artifacts";
-import { relativeTime } from "./folderOps";
+import { effectiveTitle, relativeTime } from "./folderOps";
 import {
   hasTranscript,
   sessionKey,
+  type GeneratedNote,
   type LlmSessionRecord,
+  type OutputEntry,
   type SessionArtifactFile,
   type SessionArtifacts,
   type SessionKey,
@@ -54,6 +56,17 @@ export interface DetailPaneProps {
   onOpenFile?(path: string): void;
   /** "Open folder in new tab" context-menu action; already resolved to the parent directory. */
   onOpenFolder?(parentDir: string): void;
+
+  /**
+   * Cached generated note for this record (polish P2). Only its `title` is
+   * read here — the summary/recap still arrive via `note`, already resolved
+   * against the `summaryEngine` setting by the caller.
+   */
+  generated?: GeneratedNote | null;
+  /** Injected `list_session_outputs` (P4). Absent = the Outputs section is hidden. */
+  listOutputs?(key: SessionKey): Promise<readonly OutputEntry[]>;
+  /** Injected `dismiss_session_output` (P4); the list refreshes once it settles. */
+  dismissOutput?(key: SessionKey, path: string): Promise<unknown>;
 }
 
 export function DetailPane({
@@ -68,9 +81,13 @@ export function DetailPane({
   onArtifactsFetched,
   onOpenFile,
   onOpenFolder,
+  generated,
+  listOutputs,
+  dismissOutput,
 }: DetailPaneProps) {
   const transcript = hasTranscript(record);
   const now = nowMs ?? Date.now();
+  const title = effectiveTitle(record, generated);
 
   return (
     <section className="conversation-detail" aria-label="Conversation details">
@@ -81,8 +98,14 @@ export function DetailPane({
         >
           {record.provider}
         </span>
-        <h2 className="conversation-detail__title" title={record.title}>
-          {record.title}
+        {/* The tooltip always carries the raw record title, so a generated
+            name never hides what the provider actually stored. */}
+        <h2
+          className="conversation-detail__title"
+          title={record.title}
+          data-generated={title === record.title ? undefined : "true"}
+        >
+          {title}
         </h2>
       </header>
 
@@ -97,11 +120,37 @@ export function DetailPane({
         </dd>
       </dl>
 
+      {/* P3: description and recap are their own labelled sections, in the
+          spec's order — title → Description → Recap → Outputs → Files. */}
       {note.summary ? (
-        <p className="conversation-detail__summary">{note.summary}</p>
+        <section
+          className="conversation-detail__section"
+          aria-label="Description"
+          data-slot="description"
+        >
+          <h3>Description</h3>
+          <p className="conversation-detail__summary">{note.summary}</p>
+        </section>
       ) : null}
       {note.recap ? (
-        <p className="conversation-detail__recap">{note.recap}</p>
+        <section
+          className="conversation-detail__section"
+          aria-label="Recap"
+          data-slot="recap"
+        >
+          <h3>Recap</h3>
+          <p className="conversation-detail__recap">{note.recap}</p>
+        </section>
+      ) : null}
+
+      {listOutputs ? (
+        <OutputsSection
+          key={sessionKey(record)}
+          sessionKey={sessionKey(record)}
+          listOutputs={listOutputs}
+          {...(dismissOutput ? { dismissOutput } : {})}
+          {...(onOpenFile ? { onOpenFile } : {})}
+        />
       ) : null}
 
       <section
@@ -161,6 +210,110 @@ export function DetailPane({
           Open transcript
         </button>
       </div>
+    </section>
+  );
+}
+
+interface OutputsSectionProps {
+  sessionKey: SessionKey;
+  listOutputs(key: SessionKey): Promise<readonly OutputEntry[]>;
+  dismissOutput?(key: SessionKey, path: string): Promise<unknown>;
+  onOpenFile?(path: string): void;
+}
+
+/**
+ * The Outputs section (spec P4): deliverables a session explicitly registered
+ * through `termx-output`, newest first. Keyed by session key in the parent, so
+ * changing the selection remounts it with a fresh fetch. A dismissal is a
+ * tombstone in the sidecar — the file on disk is never touched — and the list
+ * refetches once the injected call settles.
+ *
+ * Renders nothing (not even a header) while the list is empty: the section is
+ * hidden when unwired or when a session produced no deliverables.
+ */
+function OutputsSection({
+  sessionKey: key,
+  listOutputs,
+  dismissOutput,
+  onOpenFile,
+}: OutputsSectionProps) {
+  const [entries, setEntries] = useState<readonly OutputEntry[]>([]);
+  /** Bumped after a dismissal to re-run the fetch effect. */
+  const [reloads, setReloads] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listOutputs(key).then((result) => {
+      if (!cancelled) {
+        setEntries(result);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, listOutputs, reloads]);
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  return (
+    <section
+      className="conversation-detail__section conversation-detail__outputs"
+      aria-label="Outputs"
+      data-slot="outputs"
+    >
+      <h3>Outputs</h3>
+      <ul className="conversation-detail__file-list">
+        {entries.map((entry) => {
+          const { parent, leaf } = splitForDisplay(entry.path);
+          return (
+            <li
+              key={entry.path}
+              className={`conversation-detail__file-row conversation-detail__output-row${
+                entry.exists ? "" : " conversation-detail__file-row--missing"
+              }`}
+              data-path={entry.path}
+              data-exists={entry.exists}
+            >
+              <span
+                className="conversation-detail__output-open"
+                title={entry.label ?? entry.path}
+                role="button"
+                tabIndex={0}
+                onClick={() => onOpenFile?.(entry.path)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onOpenFile?.(entry.path);
+                  }
+                }}
+              >
+                {parent ? (
+                  <span className="conversation-detail__file-parent">{parent}</span>
+                ) : null}
+                <span className="conversation-detail__file-leaf">{leaf}</span>
+              </span>
+              {dismissOutput ? (
+                <button
+                  type="button"
+                  className="conversation-detail__output-dismiss"
+                  aria-label={`Dismiss ${entry.path}`}
+                  title="Remove from this list (the file is kept)"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void Promise.resolve(dismissOutput(key, entry.path)).then(() =>
+                      setReloads((count) => count + 1),
+                    );
+                  }}
+                >
+                  ✕
+                </button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }

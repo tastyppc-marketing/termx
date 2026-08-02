@@ -12,6 +12,7 @@ import { splitForDisplay } from "../folders/fuzzyScore";
 import {
   sessionKey,
   type ConversationsV1,
+  type GeneratedNote,
   type LlmSessionRecord,
   type SessionKey,
   type SessionNote,
@@ -21,6 +22,8 @@ import {
 export interface FolderSection {
   id: string | null;
   name: string;
+  /** P7 collapse state; the Unfiled bucket is never collapsed. */
+  collapsed: boolean;
   records: readonly LlmSessionRecord[];
 }
 
@@ -56,6 +59,42 @@ export function renameFolder(
     folders: data.folders.map((folder) =>
       folder.id === id ? { ...folder, name: trimmed } : folder,
     ),
+  };
+}
+
+/** Fields of a folder that `updateFolder` may patch (P7 adds `collapsed`). */
+export interface FolderPatch {
+  name?: string;
+  collapsed?: boolean;
+}
+
+/**
+ * Patch one folder in place (order preserved). `collapsed: false` drops the
+ * field rather than storing it, so an untouched folder round-trips as
+ * `{id, name}`. Unknown folder or no observable change → the same reference.
+ */
+export function updateFolder(
+  data: ConversationsV1,
+  id: string,
+  patch: FolderPatch,
+): ConversationsV1 {
+  const current = data.folders.find((folder) => folder.id === id);
+  if (!current) {
+    return data;
+  }
+  const name = patch.name === undefined ? current.name : patch.name.trim();
+  if (name.length === 0) {
+    return data;
+  }
+  const collapsed =
+    patch.collapsed === undefined ? current.collapsed === true : patch.collapsed;
+  if (name === current.name && collapsed === (current.collapsed === true)) {
+    return data;
+  }
+  const next = { id: current.id, name, ...(collapsed ? { collapsed: true } : {}) };
+  return {
+    ...data,
+    folders: data.folders.map((folder) => (folder.id === id ? next : folder)),
   };
 }
 
@@ -112,19 +151,48 @@ export function folderIdFor(
 }
 
 /**
+ * The title to display for a record (polish spec P2): a generated title only
+ * ever replaces a title the host derived (first-message fragment, bare id) —
+ * a deliberately given name always wins, and a record whose `titleSource` we
+ * cannot read counts as given. The record itself is never rewritten.
+ */
+export function effectiveTitle(
+  record: Pick<LlmSessionRecord, "title" | "titleSource">,
+  generated?: Pick<GeneratedNote, "title"> | null,
+): string {
+  if (record.titleSource !== "derived") {
+    return record.title;
+  }
+  const candidate = generated?.title;
+  if (typeof candidate !== "string" || candidate.trim().length === 0) {
+    return record.title;
+  }
+  return candidate.trim();
+}
+
+/**
  * Case-insensitive substring match over title + cwd + summary + recap (§3).
+ * The generated title (when there is one) is searched **as well as** the raw
+ * record title, so a session is findable by whichever name the user saw.
  * An empty query matches everything.
  */
 export function matchesQuery(
   query: string,
   record: LlmSessionRecord,
   note: SessionNote,
+  generatedTitle?: string | null,
 ): boolean {
   const needle = query.trim().toLowerCase();
   if (needle.length === 0) {
     return true;
   }
-  const haystack = [record.title, record.cwd, note.summary, note.recap]
+  const haystack = [
+    record.title,
+    generatedTitle,
+    record.cwd,
+    note.summary,
+    note.recap,
+  ]
     .filter((value): value is string => typeof value === "string")
     .join("\n")
     .toLowerCase();
@@ -137,12 +205,19 @@ export function filterRecords(
     provider: "all" | LlmSessionRecord["provider"];
     query: string;
     noteFor: (record: LlmSessionRecord) => SessionNote;
+    /** Cached generated note per record; its title joins the haystack (P2). */
+    generatedFor?: (record: LlmSessionRecord) => GeneratedNote | undefined;
   },
 ): LlmSessionRecord[] {
   return records.filter(
     (record) =>
       (options.provider === "all" || record.provider === options.provider) &&
-      matchesQuery(options.query, record, options.noteFor(record)),
+      matchesQuery(
+        options.query,
+        record,
+        options.noteFor(record),
+        options.generatedFor?.(record)?.title ?? null,
+      ),
   );
 }
 
@@ -169,9 +244,10 @@ export function groupSessions(
     ...data.folders.map((folder) => ({
       id: folder.id,
       name: folder.name,
+      collapsed: folder.collapsed === true,
       records: buckets.get(folder.id) ?? [],
     })),
-    { id: null, name: UNFILED_NAME, records: unfiled },
+    { id: null, name: UNFILED_NAME, collapsed: false, records: unfiled },
   ];
 }
 

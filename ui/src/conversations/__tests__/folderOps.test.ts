@@ -3,6 +3,7 @@ import {
   assignSession,
   createFolder,
   deleteFolder,
+  effectiveTitle,
   filterRecords,
   folderIdFor,
   groupSessions,
@@ -10,8 +11,20 @@ import {
   relativeTime,
   renameFolder,
   shortenCwd,
+  updateFolder,
 } from "../folderOps";
-import type { ConversationsV1, LlmSessionRecord } from "../types";
+import type { ConversationsV1, GeneratedNote, LlmSessionRecord } from "../types";
+
+function generated(overrides: Partial<GeneratedNote> = {}): GeneratedNote {
+  return {
+    title: "Tokenizer rewrite",
+    summary: null,
+    recap: null,
+    generatedAtMs: 0,
+    sourceMtimeMs: 0,
+    ...overrides,
+  };
+}
 
 function base(): ConversationsV1 {
   return { version: 1, folders: [], assignments: {}, generated: {} };
@@ -64,6 +77,26 @@ describe("folder mutations", () => {
     expect(deleteFolder(after, "f1")).toBe(after);
   });
 
+  it("collapses and expands a folder, storing only a literal true (P7)", () => {
+    const data = createFolder(base(), "Work", "f1");
+
+    const collapsed = updateFolder(data, "f1", { collapsed: true });
+    expect(collapsed.folders).toEqual([{ id: "f1", name: "Work", collapsed: true }]);
+    // Idempotent: collapsing an already-collapsed folder changes nothing.
+    expect(updateFolder(collapsed, "f1", { collapsed: true })).toBe(collapsed);
+
+    const expanded = updateFolder(collapsed, "f1", { collapsed: false });
+    expect(expanded.folders).toEqual([{ id: "f1", name: "Work" }]);
+    expect(updateFolder(expanded, "f1", { collapsed: false })).toBe(expanded);
+
+    // Unknown folder and blank rename are refused; collapse survives a rename.
+    expect(updateFolder(data, "ghost", { collapsed: true })).toBe(data);
+    expect(updateFolder(collapsed, "f1", { name: "  " })).toBe(collapsed);
+    expect(updateFolder(collapsed, "f1", { name: " Client " }).folders).toEqual([
+      { id: "f1", name: "Client", collapsed: true },
+    ]);
+  });
+
   it("assigns, re-assigns, unfiles, and refuses unknown folders", () => {
     let data = createFolder(base(), "Work", "f1");
     data = createFolder(data, "Play", "f2");
@@ -79,6 +112,42 @@ describe("folder mutations", () => {
     expect(unfiled.assignments).toEqual({});
     expect(assignSession(unfiled, "claude:a", null)).toBe(unfiled);
     expect(assignSession(unfiled, "claude:a", "ghost")).toBe(unfiled);
+  });
+});
+
+describe("effectiveTitle (P2)", () => {
+  it("shows a generated title only for a derived record title", () => {
+    expect(
+      effectiveTitle(record({ title: "abc-123", titleSource: "derived" }), generated()),
+    ).toBe("Tokenizer rewrite");
+  });
+
+  it("never lets a generated title displace a named one", () => {
+    expect(
+      effectiveTitle(record({ title: "Parser work", titleSource: "named" }), generated()),
+    ).toBe("Parser work");
+    // Absent titleSource is treated as named — the conservative default.
+    const untagged: Pick<LlmSessionRecord, "title" | "titleSource"> = {
+      title: "Parser work",
+    };
+    expect(effectiveTitle(untagged, generated())).toBe("Parser work");
+  });
+
+  it("falls back to the record title when there is nothing generated", () => {
+    const derived = record({ title: "abc-123", titleSource: "derived" });
+    expect(effectiveTitle(derived)).toBe("abc-123");
+    expect(effectiveTitle(derived, null)).toBe("abc-123");
+    expect(effectiveTitle(derived, generated({ title: null }))).toBe("abc-123");
+    expect(effectiveTitle(derived, generated({ title: "   " }))).toBe("abc-123");
+  });
+
+  it("trims the generated title it shows", () => {
+    expect(
+      effectiveTitle(
+        record({ title: "abc-123", titleSource: "derived" }),
+        generated({ title: "  Tokenizer rewrite  " }),
+      ),
+    ).toBe("Tokenizer rewrite");
   });
 });
 
@@ -109,6 +178,34 @@ describe("query and grouping", () => {
     ).toEqual(["c"]);
   });
 
+  it("searches the generated title as well as the record title (P2)", () => {
+    const row = record({ title: "abc-123", titleSource: "derived" });
+    const note = { summary: null, recap: null };
+    expect(matchesQuery("tokenizer", row, note, "Tokenizer rewrite")).toBe(true);
+    // The raw title stays searchable even while the generated one is displayed.
+    expect(matchesQuery("abc-123", row, note, "Tokenizer rewrite")).toBe(true);
+    expect(matchesQuery("tokenizer", row, note)).toBe(false);
+    expect(matchesQuery("tokenizer", row, note, null)).toBe(false);
+  });
+
+  it("feeds generated titles through filterRecords", () => {
+    const rows = [
+      record({ id: "a", title: "abc-123", titleSource: "derived" }),
+      record({ id: "b", title: "Deploy script" }),
+    ];
+    const noteFor = () => ({ summary: null, recap: null });
+    const generatedFor = (row: LlmSessionRecord) =>
+      row.id === "a" ? generated() : undefined;
+    expect(
+      filterRecords(rows, {
+        provider: "all",
+        query: "tokenizer",
+        noteFor,
+        generatedFor,
+      }).map((row) => row.id),
+    ).toEqual(["a"]);
+  });
+
   it("groups into folders in order with Unfiled last, keeping empty folders", () => {
     let data = createFolder(base(), "Work", "f1");
     data = createFolder(data, "Empty", "f2");
@@ -124,6 +221,15 @@ describe("query and grouping", () => {
       [null, 1],
     ]);
     expect(sections[2]!.name).toBe("Unfiled");
+  });
+
+  it("carries each folder's collapse state onto its section (P7)", () => {
+    let data = createFolder(base(), "Work", "f1");
+    data = createFolder(data, "Play", "f2");
+    data = updateFolder(data, "f1", { collapsed: true });
+
+    const sections = groupSessions([record({ id: "a" })], data);
+    expect(sections.map((section) => section.collapsed)).toEqual([true, false, false]);
   });
 });
 

@@ -49,6 +49,25 @@ describe("parseConversations", () => {
     ]);
   });
 
+  it("keeps a literal collapsed flag and ignores every other value (P7)", () => {
+    const parsed = parseConversations(
+      JSON.stringify({
+        folders: [
+          { id: "f1", name: "Collapsed", collapsed: true },
+          { id: "f2", name: "Open", collapsed: false },
+          { id: "f3", name: "Truthy junk", collapsed: "true" },
+          { id: "f4", name: "Plain" },
+        ],
+      }),
+    );
+    expect(parsed.folders).toEqual([
+      { id: "f1", name: "Collapsed", collapsed: true },
+      { id: "f2", name: "Open" },
+      { id: "f3", name: "Truthy junk" },
+      { id: "f4", name: "Plain" },
+    ]);
+  });
+
   it("drops assignments pointing at unknown folders", () => {
     const parsed = parseConversations(
       JSON.stringify({
@@ -123,11 +142,11 @@ describe("parseConversations", () => {
   it("round-trips through serialize", () => {
     const value: ConversationsV1 = {
       version: 1,
-      folders: [{ id: "f1", name: "Work" }],
+      folders: [{ id: "f1", name: "Work", collapsed: true }],
       assignments: { "codex:x": "f1" },
       generated: {
         "codex:x": {
-          title: null,
+          title: "Shipped the parser",
           summary: "s",
           recap: "r",
           generatedAtMs: 1,

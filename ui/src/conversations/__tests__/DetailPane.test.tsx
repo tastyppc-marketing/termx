@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DetailPane, type DetailPaneProps } from "../DetailPane";
 import type {
+  GeneratedNote,
   LlmSessionRecord,
   SessionArtifactFile,
   SessionArtifacts,
@@ -41,6 +42,17 @@ function record(overrides: Partial<LlmSessionRecord> = {}): LlmSessionRecord {
   };
 }
 
+function generatedNote(overrides: Partial<GeneratedNote> = {}): GeneratedNote {
+  return {
+    title: "Tokenizer rewrite",
+    summary: null,
+    recap: null,
+    generatedAtMs: NOW,
+    sourceMtimeMs: NOW,
+    ...overrides,
+  };
+}
+
 async function renderPane(
   overrides: {
     record?: LlmSessionRecord;
@@ -48,6 +60,9 @@ async function renderPane(
     filesSlot?: React.ReactNode;
     listArtifacts?: DetailPaneProps["listArtifacts"];
     artifacts?: SessionArtifacts;
+    generated?: GeneratedNote;
+    listOutputs?: DetailPaneProps["listOutputs"];
+    dismissOutput?: DetailPaneProps["dismissOutput"];
   } = {},
 ) {
   const onResume = vi.fn();
@@ -69,6 +84,9 @@ async function renderPane(
         {...(overrides.filesSlot ? { filesSlot: overrides.filesSlot } : {})}
         {...(overrides.listArtifacts ? { listArtifacts: overrides.listArtifacts } : {})}
         {...(overrides.artifacts ? { artifacts: overrides.artifacts } : {})}
+        {...(overrides.generated ? { generated: overrides.generated } : {})}
+        {...(overrides.listOutputs ? { listOutputs: overrides.listOutputs } : {})}
+        {...(overrides.dismissOutput ? { dismissOutput: overrides.dismissOutput } : {})}
       />,
     );
   });
@@ -174,6 +192,138 @@ describe("DetailPane", () => {
     const files = container.querySelector("[data-slot='files-touched']")!;
     expect(files.querySelector(".files-probe")!.textContent).toBe("two files");
     expect(container.querySelector(".conversation-detail__hint")).toBeNull();
+  });
+});
+
+describe("DetailPane header title (P2)", () => {
+  function heading(): HTMLElement {
+    return container.querySelector<HTMLElement>(".conversation-detail__title")!;
+  }
+
+  it("shows the generated title for a derived record and keeps the raw one as tooltip", async () => {
+    await renderPane({
+      record: record({ title: "abc-123", titleSource: "derived" }),
+      generated: generatedNote(),
+    });
+    expect(heading().textContent).toBe("Tokenizer rewrite");
+    expect(heading().getAttribute("title")).toBe("abc-123");
+    expect(heading().dataset.generated).toBe("true");
+  });
+
+  it("keeps a named title even when a generated one exists", async () => {
+    await renderPane({
+      record: record({ title: "Parser work", titleSource: "named" }),
+      generated: generatedNote(),
+    });
+    expect(heading().textContent).toBe("Parser work");
+    expect(heading().dataset.generated).toBeUndefined();
+  });
+});
+
+describe("DetailPane section order (P3)", () => {
+  function slots(): (string | undefined)[] {
+    return [...container.querySelectorAll<HTMLElement>("[data-slot]")].map(
+      (node) => node.dataset.slot,
+    );
+  }
+
+  it("orders Description, Recap, Outputs, then Files touched", async () => {
+    const listOutputs = vi.fn(async () => [
+      { path: "C:\\out\\report.xlsx", label: null, atMs: NOW, exists: true },
+    ]);
+    await renderPane({
+      note: { summary: "Short line", recap: "- one\n- two" },
+      listOutputs,
+    });
+    await flush();
+    expect(slots()).toEqual(["description", "recap", "outputs", "files-touched"]);
+  });
+
+  it("gives description and recap their own headings", async () => {
+    await renderPane({ note: { summary: "Short line", recap: "- one" } });
+    const description = container.querySelector<HTMLElement>("[data-slot='description']")!;
+    const recap = container.querySelector<HTMLElement>("[data-slot='recap']")!;
+    expect(description.querySelector("h3")!.textContent).toBe("Description");
+    expect(recap.querySelector("h3")!.textContent).toBe("Recap");
+    expect(description.querySelector(".conversation-detail__summary")!.textContent).toBe(
+      "Short line",
+    );
+  });
+
+  it("omits a section whose note kind is missing", async () => {
+    await renderPane({ note: { summary: null, recap: "- one" } });
+    expect(slots()).toEqual(["recap", "files-touched"]);
+  });
+});
+
+describe("DetailPane outputs (P4)", () => {
+  const ENTRY = { path: "C:\\out\\report.xlsx", label: null, atMs: NOW, exists: true };
+  const OTHER = { path: "C:\\out\\deck.pptx", label: "Deck", atMs: NOW, exists: false };
+
+  function outputRows(): HTMLElement[] {
+    return [...container.querySelectorAll<HTMLElement>(".conversation-detail__output-row")];
+  }
+
+  it("hides the section entirely when unwired", async () => {
+    await renderPane();
+    expect(container.querySelector("[data-slot='outputs']")).toBeNull();
+  });
+
+  it("hides the section when the session has no outputs", async () => {
+    const listOutputs = vi.fn(async () => []);
+    await renderPane({ listOutputs });
+    await flush();
+    expect(listOutputs).toHaveBeenCalledWith("claude:a");
+    expect(container.querySelector("[data-slot='outputs']")).toBeNull();
+  });
+
+  it("renders one row per output and opens the file on click", async () => {
+    const listOutputs = vi.fn(async () => [ENTRY, OTHER]);
+    const { onOpenFile } = await renderPane({ listOutputs });
+    await flush();
+
+    expect(outputRows().map((row) => row.dataset.path)).toEqual([
+      "C:\\out\\report.xlsx",
+      "C:\\out\\deck.pptx",
+    ]);
+    expect(outputRows()[1]!.className).toContain("conversation-detail__file-row--missing");
+    expect(outputRows()[0]!.textContent).toContain("report.xlsx");
+
+    await click(
+      outputRows()[0]!.querySelector(".conversation-detail__output-open")!,
+    );
+    expect(onOpenFile).toHaveBeenCalledWith("C:\\out\\report.xlsx");
+  });
+
+  it("dismisses an entry and refreshes the list from the injected call", async () => {
+    let entries = [ENTRY, OTHER];
+    const listOutputs = vi.fn(async () => entries);
+    const dismissOutput = vi.fn(async (_key: string, path: string) => {
+      entries = entries.filter((entry) => entry.path !== path);
+      return true;
+    });
+    const { onOpenFile } = await renderPane({ listOutputs, dismissOutput });
+    await flush();
+    expect(outputRows()).toHaveLength(2);
+
+    await click(
+      outputRows()[0]!.querySelector(".conversation-detail__output-dismiss")!,
+    );
+    await flush();
+
+    expect(dismissOutput).toHaveBeenCalledWith("claude:a", "C:\\out\\report.xlsx");
+    expect(listOutputs).toHaveBeenCalledTimes(2);
+    expect(outputRows().map((row) => row.dataset.path)).toEqual(["C:\\out\\deck.pptx"]);
+    // Dismissing must not double as "open this file".
+    expect(onOpenFile).not.toHaveBeenCalled();
+  });
+
+  it("offers no dismiss affordance when no dismiss call is wired", async () => {
+    const listOutputs = vi.fn(async () => [ENTRY]);
+    await renderPane({ listOutputs });
+    await flush();
+    expect(outputRows()).toHaveLength(1);
+    expect(container.querySelector(".conversation-detail__output-dismiss")).toBeNull();
   });
 });
 

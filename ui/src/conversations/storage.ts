@@ -65,7 +65,13 @@ function parseFolders(value: unknown): ConversationFolder[] {
       continue;
     }
     seen.add(id);
-    folders.push({ id, name: name.trim() });
+    // `collapsed` (P7) is tolerant: only a literal `true` collapses a folder;
+    // anything else (missing, "true", 1) leaves it expanded.
+    folders.push({
+      id,
+      name: name.trim(),
+      ...(entry.collapsed === true ? { collapsed: true } : {}),
+    });
   }
   return folders;
 }

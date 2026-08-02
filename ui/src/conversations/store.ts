@@ -17,6 +17,8 @@ import {
   createFolder as createFolderIn,
   deleteFolder as deleteFolderIn,
   renameFolder as renameFolderIn,
+  updateFolder as updateFolderIn,
+  type FolderPatch,
 } from "./folderOps";
 import { parseConversations, serializeConversations } from "./storage";
 import {
@@ -155,6 +157,11 @@ export class ConversationsStore {
 
   createFolder = (name: string): void => {
     this.updateData((data) => createFolderIn(data, name, this.generateId()));
+  };
+
+  /** Patch a folder's own fields — P7's persisted collapse state. */
+  updateFolder = (id: string, patch: FolderPatch): void => {
+    this.updateData((data) => updateFolderIn(data, id, patch));
   };
 
   renameFolder = (id: string, name: string): void => {
