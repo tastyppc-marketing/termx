@@ -55,6 +55,12 @@ export interface ConversationsRailProps {
   debounceMs?: number;
   /** Injected clock for relative times; tests pass a fixed value. */
   nowMs?: number;
+  /**
+   * Layout variant (polish P5): "sidebar" (default) is the compact rail;
+   * "expanded" is the full-window two-pane layout. Purely presentational —
+   * same behavior in both.
+   */
+  variant?: "sidebar" | "expanded";
 }
 
 type ProviderFilter = "all" | LlmProvider;
@@ -91,6 +97,7 @@ export function ConversationsRail({
   onVisibleRecords,
   debounceMs = 120,
   nowMs,
+  variant = "sidebar",
 }: ConversationsRailProps) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [provider, setProvider] = useState<ProviderFilter>("all");
@@ -403,7 +410,7 @@ export function ConversationsRail({
 
   return (
     <div
-      className="conversations"
+      className={`conversations${variant === "expanded" ? " conversations--expanded" : ""}`}
       aria-label="Conversations"
       onContextMenu={(event) => {
         // Rows and folder headers handle their own menus (and stop here); a
