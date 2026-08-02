@@ -391,3 +391,57 @@ list (#1–#8, R1/R2/U1–U5/V1).
 - Shell cwd in Bash tool drifts; use `git -C /c/Dev/TermX` for commits.
 - Commit trailers required (Co-Authored-By Fable + Claude-Session URL of this
   session). Michael's standing bar: UI must feel great, not just good.
+
+---
+
+## Delta 2026-08-01 ~04:00 — POLISH BATCH DISPATCHED
+
+Conversations Polish batch (spec `docs/superpowers/specs/2026-08-01-conversations-polish-design.md` P1-P7, plan `docs/superpowers/plans/2026-08-01-conversations-polish-plan.md`) is in flight.
+
+**Main-thread pre-work done (all gates green at each commit):**
+- `8ba376b` spec, `92a5154` plan
+- `ce4b679` PU1 plumbing: `titleSource` on LlmSessionRecord, `GeneratedNote.title?`, `BundleNote`, `OutputEntry`, wrappers `tauriGenerateBundle`/`tauriListOutputs`/`tauriDismissOutput` (`ui/src/native/sessionData.ts`), storage parse updates
+- `cc00105` = HEAD: ConversationsRail `variant?: "sidebar"|"expanded"` prop stub (contract seam so PU2/PU3 lanes don't collide)
+
+**Seven agent lanes dispatched in parallel worktrees (isolation:worktree), each commits once "wip: <task>":**
+- pn1-notes (Opus) — Rust: head_excerpt + dialogue_digest_v2 sections, bundle instruction/parse/generate + `generate_session_bundle` command, titleSource in claude.rs/codex.rs. NO lib.rs wiring.
+- pn2-outputs (Opus) — termx-output bin (host crate) + `ui/src-tauri/src/outputs.rs` (list/dismiss, sidecar `%APPDATA%\TermX\outputs_v1.jsonl`, tombstones). NO wiring.
+- pu2-detail (Opus) — effectiveTitle, DetailPane Description/Recap/Outputs sections, P7 folder ergonomics (collapse persisted, New group…, drag-onto-folder), expanded-variant CSS.
+- pu3-layout (Opus) — uiState.sidebarWidth (200-480, default 260) + Sidebar drag handle, ConversationsFullscreen.tsx (children pattern, Esc/⛶), Sidebar expand button.
+- pu4-dedupe (Sonnet) — WorkspaceController resumedTabs map, `resumeSession(record, {force?}) -> ResumeOutcome`, AlreadyOpenDialog.tsx.
+- pu5-outputpane (Opus) — OSC `9;77;output;<path>` in TerminalSessionBinding (live-only), outputsStore.ts, OutputPane.tsx (merge sidecar+live, dismiss, empty-state).
+- pu6-scheduler (Opus) — NoteScheduler reworked to one bundle call per session (deps.generateBundle), all throttle/staleness semantics preserved, tests ported.
+
+**Baselines lanes gate against:** ui vitest 661, tauri crate 128, host 118. Merge per Wave-C protocol (junction probe → review → cherry-pick -n → gates → attributed commit → worktree remove → node_modules=74 check).
+
+**Main-thread queue after lanes:** Rust wiring (lib.rs/build.rs/capabilities for 3 new commands + generated TOMLs), App integration pass (sidebar width, fullscreen, resume dialog, Output pane dock + binding callback, detail outputs props, palette effective titles), PH1 hook via harness-lab deploy.ps1 (Michael approves diff), V3 verify (gates, builds incl. termx-output.exe, restage 4 exes, live checks), handoff.
+
+## Delta 2026-08-02 ~00:20 — ALL SEVEN POLISH LANES MERGED
+
+All lanes reviewed, cherry-picked, gated, committed on main; all worktrees removed (junction-probed first — only cargo file hardlinks, zero junctions), branches deleted, main ui/node_modules verified 74 each time, shared-stash leftover dropped.
+
+Merge commits (order): `6425a82` PU3 (sidebar resize + ConversationsFullscreen), `fba3247` PN1 (digest v2 + bundle + titleSource; NOTE: bundle prompt is single-line — newlines in args cannot spawn .cmd shims), `3a0a01e` PN2 (termx-output + outputs.rs; env var is TERMX_SESSION_ID not TERMX_SESSION; commands NOT yet registered), `9ec7652` PU4 (resume dedupe + AlreadyOpenDialog; addSessionTab now returns tabId), `521c6b4` PU5 (OSC 9;77 + outputsStore + OutputPane), `59720b2` PU6 (scheduler bundle rework + 2-line App.tsx wiring), `10fd754` PU2 (effective titles + detail sections + outputs UI + folder collapse/drag/New group + expanded CSS). Also `191242f` storage fixture fix (PU1 miss).
+
+Gate state on main after `10fd754`: ui vitest **740**, tsc clean; tauri crate **157** + clippy clean; host workspace **130**; termx-output.exe builds.
+
+Incidents this window: (1) ~3h platform outage stalled all 7 agents mid-task — all resumed from transcripts successfully. (2) SHARED GIT STASH across worktrees: pu2/pu4 concurrent `git stash` swapped their stashes; both recovered, no contamination committed (verified in review). RULE: never `git stash` in agent worktrees — use `git diff > patch`.
+
+Open judgment items from lanes: (a) PU6: under disk-first, a derived-title session with both notes on disk never gets a generated title (title not in eligibility gate) — product gap, revisit; (b) PU6: summaryContent no longer narrows kinds (bundle indivisible) — content stays a display filter; (c) PU3: App should pass `uiState.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH` (CSS baseline is 252px); (d) PN2: records without --session are invisible to list_session_outputs by design (live OSC path covers them).
+
+NEXT: (1) Rust wiring — lib.rs invoke_handler + build.rs + capabilities for generate_session_bundle / list_session_outputs / dismiss_session_output + commit generated TOMLs; (2) App integration — sidebar width prop + drag wiring, fullscreen state + <ConversationsFullscreen><ConversationsRail variant="expanded"/></>, resume-outcome dialog wiring, OutputPane dock + binding onOutputRegistered + outputsStore, DetailPane/Rail listOutputs+dismissOutput+generated props, palette effective titles; (3) PH1 hook via harness-lab deploy.ps1 (Michael approves diff); (4) V3 builds + restage 4 exes + live checks; handoff.
+
+## Delta 2026-08-02 ~02:10 — POLISH BATCH SHIPPED (V3 complete except Michael-gated items)
+
+**Main-thread commits after lane merges:** `38dfbbf` Rust wiring (3 commands registered: invoke_handler + build.rs + capabilities + committed permission TOMLs, dead_code seed removed), `700f6f2` App integration (sidebar width 260-default + drag persist, ConversationsFullscreen hosting expanded rail, resume dedupe -> AlreadyOpenDialog with Switch/Open-anyway, Outputs dock auto-opens on live OSC + "Outputs" action chip, rail/detail listOutputs+dismissOutput via SidebarConversations forwarding, palette effective titles searchable by both names). HEAD = `700f6f2`.
+
+**V3 gates all green at HEAD:** ui vitest 740 + e2e 5, tsc clean; tauri crate 157 + clippy 0; host workspace 130 (109+6+12+3).
+
+**Builds + restage done 02:05:** `npx tauri build --no-bundle` (termx-ui.exe 5,974,016) + `cargo build --release -p termx-host --bins` (termx-host 2,982,912 unchanged-size, termx-output 203,776). dist-portable\TermX\ restaged: TermX.exe/termx-ui.exe new, termx-host.exe recopied, termx-output.exe NEW (4th exe). Michael's live TermX (PID 42184) + daemon (22712) untouched — locked exes parked as .old (delete after his next restart).
+
+**Live checks done:** release termx-output end-to-end (OSC + sidecar record with label/sessionKey, exit 0); bundle quality on 2 real transcripts via the exact CLI invocation (both excellent: correct TITLE/DESCRIPTION/RECAP shape, accurate content). Codex-transcript bundle + in-app UI checks (resize, fullscreen, dedupe dialog, output pane) need the restarted app = Michael's smoke.
+
+**PH1 PREPARED, NOT DEPLOYED (needs Michael):** harness-lab commit `a3386d7` — live/hooks/termx-output-register.py (smoke-tested: output-dir Write/SendUserFile register with --session <claude-id>; src edits + no-TERMX_SESSION_ID no-op; exit 0 always) + rig/fixtures/post_tool_use_output.json + MANIFEST entry (+8 lines). To ship: (1) harness-lab tree has UNRELATED dirty files from another session — resolve before deploy.ps1 (refuses dirty tree); (2) run deploy.ps1; (3) register in settings.json via `python rig/register_hook.py --settings <home>\.claude\settings.json --event PostToolUse --matcher "Write|Edit|SendUserFile|Artifact" --command "python ~/.claude/hooks/termx-output-register.py" --timeout 10`; (4) optional CLAUDE.md convention line: "When a file is a final deliverable, register it with `termx-output <path> [--label <text>]` so TermX shows it in the Output pane." Design note: hook stdout can't reach the PTY, so the hook feeds the sidecar/detail-pane (stamped with claude session id); the OSC/live-dock path is for direct shell calls of termx-output.
+
+**Open product items:** PU6 title-gap under disk-first (derived-title session with both notes on disk never gets a generated title); summaryContent is now display-only (bundle indivisible); conversations_v1.json old caches lack titles until next regeneration window.
+
+**NEXT SESSION:** Michael smoke (resize/fullscreen/dedupe/outputs/titles), PH1 deploy approval, delete .old exes, then Task #9 (WS reconnect resilience) is the next batch.
