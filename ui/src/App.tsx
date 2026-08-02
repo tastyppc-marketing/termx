@@ -20,7 +20,7 @@ import { FolderSearch } from "./folders/FolderSearch";
 import { isEditableElement } from "./keyboard";
 import { tauriListDirs } from "./native/folders";
 import {
-  tauriGenerateNote,
+  tauriGenerateBundle,
   tauriListArtifacts,
   tauriReadTextFile,
 } from "./native/sessionData";
@@ -208,7 +208,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       return null;
     }
     return new NoteScheduler({
-      generate: tauriGenerateNote,
+      generateBundle: tauriGenerateBundle,
       store: {
         getSnapshot: conversationsStore.getSnapshot,
         writeGeneratedNote: conversationsStore.setGeneratedNote,

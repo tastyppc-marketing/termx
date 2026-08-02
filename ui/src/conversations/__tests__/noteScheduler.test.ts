@@ -2,11 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   NOTE_WINDOW_MS,
   NoteScheduler,
-  type NoteKind,
   type NoteSchedulerStore,
 } from "../noteScheduler";
 import type { SummaryContent, SummaryEngine } from "../../settings/settings";
-import type { GeneratedNote, LlmSessionRecord, SessionKey } from "../types";
+import type {
+  BundleNote,
+  GeneratedNote,
+  LlmSessionRecord,
+  SessionKey,
+} from "../types";
 
 function record(overrides: Partial<LlmSessionRecord> = {}): LlmSessionRecord {
   return {
@@ -32,6 +36,15 @@ function note(overrides: Partial<GeneratedNote> = {}): GeneratedNote {
   };
 }
 
+/** What the default fake generator produces for a transcript path. */
+function bundleFor(filePath: string): BundleNote {
+  return {
+    title: `title of ${filePath}`,
+    summary: `summary of ${filePath}`,
+    recap: `recap of ${filePath}`,
+  };
+}
+
 /** The minimal store facade U10 depends on (main wires the real adapter). */
 class FakeStore implements NoteSchedulerStore {
   records: LlmSessionRecord[] = [];
@@ -51,16 +64,18 @@ class FakeStore implements NoteSchedulerStore {
 interface Harness {
   readonly scheduler: NoteScheduler;
   readonly store: FakeStore;
-  readonly calls: Array<{ filePath: string; kind: NoteKind }>;
-  readonly generate: ReturnType<typeof vi.fn>;
+  /** Transcript paths passed to `generateBundle`, in call order. */
+  readonly calls: string[];
+  readonly generateBundle: ReturnType<typeof vi.fn>;
   setClock(value: number): void;
   advance(deltaMs: number): void;
 }
 
 /**
  * `result` decides what each generation resolves to; the default is a
- * synchronous success. The scheduler owns no timers, so the injected clock is
- * the only source of time and a single macrotask tick drains the pump.
+ * synchronous success carrying all three bundle fields. The scheduler owns no
+ * timers, so the injected clock is the only source of time and a single
+ * macrotask tick drains the pump.
  */
 function makeScheduler(options: {
   records: LlmSessionRecord[];
@@ -68,22 +83,22 @@ function makeScheduler(options: {
   engine?: SummaryEngine;
   content?: SummaryContent;
   now?: number;
-  result?: (filePath: string, kind: NoteKind) => Promise<string | null>;
+  result?: (filePath: string) => Promise<BundleNote | null>;
 }): Harness {
   const store = new FakeStore();
   store.records = options.records;
   store.generated = options.generated ?? {};
   let clock = options.now ?? 0;
-  const calls: Array<{ filePath: string; kind: NoteKind }> = [];
-  const generate = vi.fn(async (filePath: string, kind: NoteKind) => {
-    calls.push({ filePath, kind });
+  const calls: string[] = [];
+  const generateBundle = vi.fn(async (filePath: string) => {
+    calls.push(filePath);
     if (options.result) {
-      return await options.result(filePath, kind);
+      return await options.result(filePath);
     }
-    return `${kind} of ${filePath}`;
+    return bundleFor(filePath);
   });
   const scheduler = new NoteScheduler({
-    generate,
+    generateBundle,
     store,
     settings: {
       getSnapshot: () => ({
@@ -97,7 +112,7 @@ function makeScheduler(options: {
     scheduler,
     store,
     calls,
-    generate,
+    generateBundle,
     setClock: (value) => {
       clock = value;
     },
@@ -133,14 +148,19 @@ describe("engine matrix", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generateBundle).not.toHaveBeenCalled();
     expect(harness.store.writes).toEqual([]);
   });
 
-  it("generates under disk-first only for a kind missing on disk", async () => {
+  it("generates under disk-first only for a session with a gap on disk", async () => {
     const harness = makeScheduler({
       records: [
-        record({ id: "has", summary: "harvested", filePath: "C:\\has.jsonl" }),
+        record({
+          id: "has",
+          summary: "harvested",
+          recap: "harvested recap",
+          filePath: "C:\\has.jsonl",
+        }),
         record({ id: "gap", summary: null, filePath: "C:\\gap.jsonl" }),
       ],
       engine: "disk-first",
@@ -150,15 +170,19 @@ describe("engine matrix", () => {
     harness.scheduler.reconcile(["claude:has", "claude:gap"]);
     await tick();
 
-    expect(harness.calls).toEqual([
-      { filePath: "C:\\gap.jsonl", kind: "summary" },
-    ]);
+    expect(harness.calls).toEqual(["C:\\gap.jsonl"]);
   });
 
-  it("skips a disk-first gap that the generated cache already fills", async () => {
+  it("skips a disk-first session that the generated cache already fills", async () => {
     const harness = makeScheduler({
       records: [record()],
-      generated: { "claude:a": note({ summary: "cached", sourceMtimeMs: 1 }) },
+      generated: {
+        "claude:a": note({
+          summary: "cached",
+          recap: "cached recap",
+          sourceMtimeMs: 1,
+        }),
+      },
       engine: "disk-first",
       content: "summary",
     });
@@ -166,12 +190,12 @@ describe("engine matrix", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generateBundle).not.toHaveBeenCalled();
   });
 
-  it("generates under llm for a kind present on disk but never generated", async () => {
+  it("generates under llm for a session present on disk but never generated", async () => {
     const harness = makeScheduler({
-      records: [record({ summary: "harvested" })],
+      records: [record({ summary: "harvested", recap: "harvested recap" })],
       engine: "llm",
       content: "summary",
     });
@@ -179,14 +203,14 @@ describe("engine matrix", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.calls).toEqual([{ filePath: "C:\\a.jsonl", kind: "summary" }]);
+    expect(harness.calls).toEqual(["C:\\a.jsonl"]);
   });
 
-  it("generates the missing kind under llm when the cache holds only the other", async () => {
+  it("regenerates under llm when the cache holds only one of the two kinds", async () => {
     const harness = makeScheduler({
       records: [record({ updatedAtMs: 100 })],
       generated: {
-        "claude:a": note({ summary: "cached", sourceMtimeMs: 100 }),
+        "claude:a": note({ summary: "cached", recap: null, sourceMtimeMs: 100 }),
       },
       engine: "llm",
       content: "both",
@@ -195,7 +219,10 @@ describe("engine matrix", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.calls).toEqual([{ filePath: "C:\\a.jsonl", kind: "recap" }]);
+    expect(harness.calls).toEqual(["C:\\a.jsonl"]);
+    expect(harness.store.generated["claude:a"]?.recap).toBe(
+      "recap of C:\\a.jsonl",
+    );
   });
 
   it("generates nothing when summaryContent is none", async () => {
@@ -208,10 +235,10 @@ describe("engine matrix", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generateBundle).not.toHaveBeenCalled();
   });
 
-  it("generates only recaps when summaryContent is recap", async () => {
+  it("schedules the same single bundle when summaryContent is recap", async () => {
     const harness = makeScheduler({
       records: [record()],
       engine: "disk-first",
@@ -221,10 +248,10 @@ describe("engine matrix", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.calls).toEqual([{ filePath: "C:\\a.jsonl", kind: "recap" }]);
+    expect(harness.calls).toEqual(["C:\\a.jsonl"]);
   });
 
-  it("generates summary then recap when summaryContent is both", async () => {
+  it("makes exactly one call per session and stores all three bundle fields", async () => {
     const harness = makeScheduler({
       records: [record()],
       engine: "disk-first",
@@ -234,11 +261,9 @@ describe("engine matrix", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.calls).toEqual([
-      { filePath: "C:\\a.jsonl", kind: "summary" },
-      { filePath: "C:\\a.jsonl", kind: "recap" },
-    ]);
+    expect(harness.calls).toEqual(["C:\\a.jsonl"]);
     expect(harness.store.generated["claude:a"]).toEqual({
+      title: "title of C:\\a.jsonl",
       summary: "summary of C:\\a.jsonl",
       recap: "recap of C:\\a.jsonl",
       generatedAtMs: 0,
@@ -249,7 +274,12 @@ describe("engine matrix", () => {
 
 describe("staleness math", () => {
   const stale = { updatedAtMs: 5_000 };
-  const cached = { summary: "cached", sourceMtimeMs: 4_000, generatedAtMs: 0 };
+  const cached = {
+    summary: "cached",
+    recap: "cached recap",
+    sourceMtimeMs: 4_000,
+    generatedAtMs: 0,
+  };
 
   it("regenerates at exactly the 10-minute boundary", async () => {
     const harness = makeScheduler({
@@ -262,7 +292,7 @@ describe("staleness math", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.calls).toEqual([{ filePath: "C:\\a.jsonl", kind: "summary" }]);
+    expect(harness.calls).toEqual(["C:\\a.jsonl"]);
   });
 
   it("does not regenerate one millisecond before the boundary", async () => {
@@ -276,14 +306,18 @@ describe("staleness math", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generateBundle).not.toHaveBeenCalled();
   });
 
   it("never regenerates a note whose source mtime already covers the record", async () => {
     const harness = makeScheduler({
       records: [record({ updatedAtMs: 5_000 })],
       generated: {
-        "claude:a": note({ summary: "cached", sourceMtimeMs: 5_000 }),
+        "claude:a": note({
+          summary: "cached",
+          recap: "cached recap",
+          sourceMtimeMs: 5_000,
+        }),
       },
       engine: "llm",
       now: NOTE_WINDOW_MS * 100,
@@ -292,12 +326,14 @@ describe("staleness math", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generateBundle).not.toHaveBeenCalled();
   });
 
-  it("leaves a stale note under disk-first alone when disk already has the kind", async () => {
+  it("leaves a stale note under disk-first alone when disk already has both kinds", async () => {
     const harness = makeScheduler({
-      records: [record({ ...stale, summary: "harvested" })],
+      records: [
+        record({ ...stale, summary: "harvested", recap: "harvested recap" }),
+      ],
       generated: { "claude:a": note(cached) },
       engine: "disk-first",
       now: NOTE_WINDOW_MS,
@@ -306,7 +342,7 @@ describe("staleness math", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generateBundle).not.toHaveBeenCalled();
   });
 });
 
@@ -321,26 +357,26 @@ describe("queue", () => {
         record({ id: "b", filePath: "C:\\b.jsonl", updatedAtMs: 2 }),
         record({ id: "c", filePath: "C:\\c.jsonl", updatedAtMs: 1 }),
       ],
-      result: async () => {
+      result: async (filePath) => {
         active += 1;
         peak = Math.max(peak, active);
         await new Promise<void>((resolve) => gates.push(resolve));
         active -= 1;
-        return "note";
+        return bundleFor(filePath);
       },
     });
 
     harness.scheduler.reconcile(["claude:a", "claude:b", "claude:c"]);
     await tick();
-    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(1);
 
     gates[0]?.();
     await tick();
-    expect(harness.generate).toHaveBeenCalledTimes(2);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(2);
 
     gates[1]?.();
     await tick();
-    expect(harness.generate).toHaveBeenCalledTimes(3);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(3);
 
     gates[2]?.();
     await tick();
@@ -360,7 +396,7 @@ describe("queue", () => {
     harness.scheduler.reconcile(["claude:old", "claude:new", "claude:mid"]);
     await tick();
 
-    expect(harness.calls.map((call) => call.filePath)).toEqual([
+    expect(harness.calls).toEqual([
       "C:\\new.jsonl",
       "C:\\mid.jsonl",
       "C:\\old.jsonl",
@@ -368,7 +404,7 @@ describe("queue", () => {
   });
 
   it("does not enqueue the same session twice across reconciles", async () => {
-    const gate = deferred<string | null>();
+    const gate = deferred<BundleNote | null>();
     const harness = makeScheduler({
       records: [record()],
       result: () => gate.promise,
@@ -377,45 +413,41 @@ describe("queue", () => {
     harness.scheduler.reconcile(["claude:a"]);
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
-    gate.resolve("note");
+    gate.resolve(bundleFor("C:\\a.jsonl"));
     await tick();
 
-    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("visibility gating", () => {
   it("skips a queued key that the latest reconcile dropped", async () => {
-    const gate = deferred<string | null>();
+    const gate = deferred<BundleNote | null>();
     let first = true;
     const harness = makeScheduler({
       records: [
         record({ id: "a", filePath: "C:\\a.jsonl", updatedAtMs: 200 }),
         record({ id: "b", filePath: "C:\\b.jsonl", updatedAtMs: 100 }),
       ],
-      result: () => {
+      result: (filePath) => {
         if (first) {
           first = false;
           return gate.promise;
         }
-        return Promise.resolve("note");
+        return Promise.resolve(bundleFor(filePath));
       },
     });
 
     harness.scheduler.reconcile(["claude:a", "claude:b"]);
     await tick();
-    expect(harness.calls).toEqual([
-      { filePath: "C:\\a.jsonl", kind: "summary" },
-    ]);
+    expect(harness.calls).toEqual(["C:\\a.jsonl"]);
 
     // "b" scrolls out of view while "a" is still generating.
     harness.scheduler.reconcile(["claude:a"]);
-    gate.resolve("note");
+    gate.resolve(bundleFor("C:\\a.jsonl"));
     await tick();
 
-    expect(harness.calls).toEqual([
-      { filePath: "C:\\a.jsonl", kind: "summary" },
-    ]);
+    expect(harness.calls).toEqual(["C:\\a.jsonl"]);
     expect(harness.store.writes.map((write) => write.key)).toEqual(["claude:a"]);
   });
 
@@ -429,7 +461,7 @@ describe("visibility gating", () => {
     harness.scheduler.reconcile(["claude:ghost"]);
     await tick();
 
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generateBundle).not.toHaveBeenCalled();
   });
 
   it("ignores a visible key with no matching record", async () => {
@@ -438,7 +470,7 @@ describe("visibility gating", () => {
     harness.scheduler.reconcile(["claude:a", "codex:missing"]);
     await tick();
 
-    expect(harness.calls).toEqual([{ filePath: "C:\\a.jsonl", kind: "summary" }]);
+    expect(harness.calls).toEqual(["C:\\a.jsonl"]);
   });
 });
 
@@ -456,7 +488,7 @@ describe("failures", () => {
 
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
-    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(1);
     expect(harness.store.writes).toEqual([]);
     expect(harness.store.generated).toEqual({});
 
@@ -466,12 +498,12 @@ describe("failures", () => {
     harness.advance(NOTE_WINDOW_MS - 1);
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
-    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(1);
 
     harness.advance(1);
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
-    expect(harness.generate).toHaveBeenCalledTimes(2);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(2);
   });
 
   it("treats a rejected generation as a silent failure and keeps draining", async () => {
@@ -482,19 +514,19 @@ describe("failures", () => {
         record({ id: "a", filePath: "C:\\a.jsonl", updatedAtMs: 200 }),
         record({ id: "b", filePath: "C:\\b.jsonl", updatedAtMs: 100 }),
       ],
-      result: () => {
+      result: (filePath) => {
         if (first) {
           first = false;
           return Promise.reject(new Error("spawn failed"));
         }
-        return Promise.resolve("note");
+        return Promise.resolve(bundleFor(filePath));
       },
     });
 
     harness.scheduler.reconcile(["claude:a", "claude:b"]);
     await tick();
 
-    expect(harness.generate).toHaveBeenCalledTimes(2);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(2);
     expect(harness.store.writes.map((write) => write.key)).toEqual(["claude:b"]);
     expect(warn).toHaveBeenCalledTimes(1);
   });
@@ -502,7 +534,7 @@ describe("failures", () => {
 
 describe("success", () => {
   it("writes sourceMtimeMs captured at generation start, not completion", async () => {
-    const gate = deferred<string | null>();
+    const gate = deferred<BundleNote | null>();
     const harness = makeScheduler({
       records: [record({ updatedAtMs: 5_000 })],
       now: 1_000,
@@ -515,15 +547,20 @@ describe("success", () => {
     // The transcript grows and the clock moves while the model is thinking.
     harness.store.records = [record({ updatedAtMs: 9_999 })];
     harness.setClock(4_000);
-    gate.resolve("fresh summary");
+    gate.resolve({
+      title: "fresh title",
+      summary: "fresh summary",
+      recap: "fresh recap",
+    });
     await tick();
 
     expect(harness.store.writes).toEqual([
       {
         key: "claude:a",
         note: {
+          title: "fresh title",
           summary: "fresh summary",
-          recap: null,
+          recap: "fresh recap",
           generatedAtMs: 4_000,
           sourceMtimeMs: 5_000,
         },
@@ -531,13 +568,14 @@ describe("success", () => {
     ]);
   });
 
-  it("preserves the other cached kind when writing one kind", async () => {
+  it("replaces the whole cached note with the bundle it just generated", async () => {
     const harness = makeScheduler({
       records: [record({ updatedAtMs: 5_000 })],
       generated: {
         "claude:a": note({
+          title: "old title",
           summary: "old summary",
-          recap: "kept recap",
+          recap: "old recap",
           sourceMtimeMs: 4_000,
           generatedAtMs: 0,
         }),
@@ -551,17 +589,40 @@ describe("success", () => {
     await tick();
 
     expect(harness.store.generated["claude:a"]).toEqual({
+      title: "title of C:\\a.jsonl",
       summary: "summary of C:\\a.jsonl",
-      recap: "kept recap",
+      recap: "recap of C:\\a.jsonl",
       generatedAtMs: NOTE_WINDOW_MS,
       sourceMtimeMs: 5_000,
+    });
+  });
+
+  it("stores a partial bundle verbatim, nulls included", async () => {
+    const harness = makeScheduler({
+      records: [record()],
+      result: async () => ({
+        title: null,
+        summary: "only a summary",
+        recap: null,
+      }),
+    });
+
+    harness.scheduler.reconcile(["claude:a"]);
+    await tick();
+
+    expect(harness.store.generated["claude:a"]).toEqual({
+      title: null,
+      summary: "only a summary",
+      recap: null,
+      generatedAtMs: 0,
+      sourceMtimeMs: 100,
     });
   });
 });
 
 describe("dispose", () => {
   function pending() {
-    const gate = deferred<string | null>();
+    const gate = deferred<BundleNote | null>();
     const harness = makeScheduler({
       records: [
         record({ id: "a", filePath: "C:\\a.jsonl", updatedAtMs: 300 }),
@@ -579,7 +640,7 @@ describe("dispose", () => {
     await tick();
 
     harness.scheduler.dispose();
-    gate.resolve("note");
+    gate.resolve(bundleFor("C:\\a.jsonl"));
     await tick();
 
     expect(harness.store.writes).toEqual([]);
@@ -589,13 +650,13 @@ describe("dispose", () => {
     const { gate, harness } = pending();
     harness.scheduler.reconcile(["claude:a", "claude:b", "claude:c"]);
     await tick();
-    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(1);
 
     harness.scheduler.dispose();
-    gate.resolve("note");
+    gate.resolve(bundleFor("C:\\a.jsonl"));
     await tick();
 
-    expect(harness.generate).toHaveBeenCalledTimes(1);
+    expect(harness.generateBundle).toHaveBeenCalledTimes(1);
   });
 
   it("ignores reconcile after dispose", async () => {
@@ -605,6 +666,6 @@ describe("dispose", () => {
     harness.scheduler.reconcile(["claude:a"]);
     await tick();
 
-    expect(harness.generate).not.toHaveBeenCalled();
+    expect(harness.generateBundle).not.toHaveBeenCalled();
   });
 });

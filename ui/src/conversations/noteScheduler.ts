@@ -1,19 +1,26 @@
 /**
- * NoteScheduler — the UI-side driver for LLM summaries and recaps (spec §6).
+ * NoteScheduler — the UI-side driver for LLM session notes (spec §6, polish P2).
  *
  * The rail and the palette know which sessions are on screen; this scheduler
  * turns that visibility into a *lazy*, throttled stream of
- * `generate_session_note(file_path, kind)` calls:
+ * `generate_session_bundle(file_path)` calls — **one call per session**, which
+ * yields the title, the description and the recap together (polish P2: one
+ * Haiku call, three mutually consistent fields, a third of the cost):
  *
  * - concurrency 1 (one `claude -p` child at a time, never a fan-out),
  * - ordered most-recently-updated first (the session the user is watching wins),
  * - only sessions in the LATEST `reconcile` call (a row scrolled away mid-queue
  *   is dropped when it reaches the head),
- * - at most one attempt per session+kind per 10 minutes — so an active chat,
- *   whose transcript keeps changing, refreshes its note "every so often"
- *   instead of on every rescan,
- * - silent on failure (§9): the cache is left untouched and the pair is retried
- *   only after the same 10-minute window.
+ * - at most one attempt per session per 10 minutes — so an active chat, whose
+ *   transcript keeps changing, refreshes its note "every so often" instead of
+ *   on every rescan,
+ * - silent on failure (§9): the cache is left untouched and the session is
+ *   retried only after the same 10-minute window.
+ *
+ * Because the bundle is indivisible, the queue unit is the session key alone
+ * and `summaryContent` is only a boolean gate here ("none" = schedule nothing);
+ * which fields the user actually *sees* is a display decision made downstream,
+ * and a stored bundle always carries all three fields.
  *
  * Everything with a side effect is injected (the generator, the store facade,
  * the settings reader, the clock), so tests drive the whole world. The
@@ -24,13 +31,20 @@ import type { SummaryContent, SummaryEngine } from "../settings/settings";
 import {
   hasTranscript,
   sessionKey,
+  type BundleNote,
   type GeneratedNote,
   type LlmSessionRecord,
   type SessionKey,
 } from "./types";
 
-/** The two note kinds `generate_session_note` understands (§6). */
+/**
+ * The two note kinds a session can carry (§6). The scheduler no longer asks
+ * for one kind at a time — the bundle produces both — but the legacy per-kind
+ * `generate_session_note` wrapper still speaks this vocabulary.
+ */
 export type NoteKind = "summary" | "recap";
+
+const NOTE_KINDS: readonly NoteKind[] = ["summary", "recap"];
 
 /**
  * Spec §6: "min 10 minutes between generations per session". The same window
@@ -42,9 +56,8 @@ export const NOTE_WINDOW_MS = 600_000;
  * The slice of `ConversationsStore` the scheduler needs.
  *
  * `getSnapshot` is satisfied structurally by `ConversationsStore.getSnapshot`
- * as it exists today. `writeGeneratedNote` is **not** on the store yet — U10
- * must not modify store.ts, so this is the write action the integration wires
- * up (a one-line adapter that merges the note into
+ * as it exists today. `writeGeneratedNote` is the write action the integration
+ * wires up (a one-line adapter that merges the note into
  * `ConversationsV1.generated[key]` and lets the store's existing debounced save
  * persist it).
  */
@@ -68,38 +81,26 @@ export interface NoteSchedulerSettings {
 }
 
 export interface NoteSchedulerDeps {
-  /** Injected `generate_session_note`; `null` = generation failed (§9). */
-  generate(filePath: string, kind: NoteKind): Promise<string | null>;
+  /** Injected `generate_session_bundle`; `null` = generation failed (§9). */
+  generateBundle(filePath: string): Promise<BundleNote | null>;
   store: NoteSchedulerStore;
   settings: NoteSchedulerSettings;
   now(): number;
 }
 
 interface QueueItem {
-  /** Session key + kind — the throttle and dedupe unit. */
-  readonly id: string;
+  /** The session key — the throttle, dedupe and ordering unit. */
   readonly key: SessionKey;
-  readonly kind: NoteKind;
   /** Ordering snapshot taken at enqueue time. */
   readonly updatedAtMs: number;
 }
 
-function itemId(key: SessionKey, kind: NoteKind): string {
-  return `${key}\u0000${kind}`;
-}
-
-/** Which kinds `summaryContent` asks for (§6); `none` asks for nothing. */
-function kindsFor(content: SummaryContent): readonly NoteKind[] {
-  switch (content) {
-    case "summary":
-      return ["summary"];
-    case "recap":
-      return ["recap"];
-    case "both":
-      return ["summary", "recap"];
-    case "none":
-      return [];
-  }
+/**
+ * Whether `summaryContent` wants notes at all (§6). Anything but `none` asks
+ * for the same single bundle; `none` asks for nothing.
+ */
+function wantsNotes(content: SummaryContent): boolean {
+  return content !== "none";
 }
 
 /**
@@ -119,51 +120,56 @@ function isStale(
 }
 
 /**
- * Per-kind eligibility (§6).
+ * Per-session eligibility (§6) — the same engine gate as before, asked once
+ * for the whole bundle instead of once per kind.
  *
  * - `disk-only` never reaches here.
- * - `disk-first`: the LLM fills gaps only — the kind must be missing on disk
- *   *and* absent from the generated cache.
- * - `llm`: the LLM owns both kinds regardless of what disk harvested, so the
- *   disk value is ignored; generate when never generated, or when stale. This
- *   is a strict superset of the `disk-first` set, which is what makes
- *   `ConversationsStore.noteFor`'s `llm` branch (a fresh generated note beats
- *   disk per kind) meaningful.
+ * - `disk-first`: the LLM fills gaps only — some kind must be missing on disk
+ *   *and* absent from the generated cache. One gap is enough, because the one
+ *   call that fills it also produces the rest.
+ * - `llm`: the LLM owns the notes regardless of what disk harvested, so the
+ *   disk value is ignored; generate when never generated, when a kind is
+ *   missing from the cache, or when stale. This is a strict superset of the
+ *   `disk-first` set, which is what makes `ConversationsStore.noteFor`'s `llm`
+ *   branch (a fresh generated note beats disk per kind) meaningful.
  */
 function isEligible(
   record: LlmSessionRecord,
   generated: GeneratedNote | undefined,
-  kind: NoteKind,
   engine: SummaryEngine,
   now: number,
 ): boolean {
-  const cached = generated ? generated[kind] : null;
   if (engine === "llm") {
-    if (generated === undefined || cached === null) {
+    if (generated === undefined) {
+      return true;
+    }
+    if (NOTE_KINDS.some((kind) => generated[kind] === null)) {
       return true;
     }
     return isStale(generated, record, now);
   }
-  return record[kind] === null && cached === null;
+  return NOTE_KINDS.some(
+    (kind) => record[kind] === null && (generated?.[kind] ?? null) === null,
+  );
 }
 
 export class NoteScheduler {
-  private readonly generate: NoteSchedulerDeps["generate"];
+  private readonly generateBundle: NoteSchedulerDeps["generateBundle"];
   private readonly store: NoteSchedulerStore;
   private readonly settings: NoteSchedulerSettings;
   private readonly now: () => number;
   /** Pending work, head first; re-sorted most-recently-updated first. */
   private readonly queue: QueueItem[] = [];
-  /** Item ids that are queued or in flight — the dedupe guard. */
-  private readonly claimed = new Set<string>();
-  /** Item id → clock reading when its last attempt STARTED (§9 backoff). */
-  private readonly attempts = new Map<string, number>();
+  /** Session keys that are queued or in flight — the dedupe guard. */
+  private readonly claimed = new Set<SessionKey>();
+  /** Session key → clock reading when its last attempt STARTED (§9 backoff). */
+  private readonly attempts = new Map<SessionKey, number>();
   private visible = new Set<SessionKey>();
   private running = false;
   private disposed = false;
 
   constructor(deps: NoteSchedulerDeps) {
-    this.generate = deps.generate;
+    this.generateBundle = deps.generateBundle;
     this.store = deps.store;
     this.settings = deps.settings;
     this.now = deps.now;
@@ -193,8 +199,7 @@ export class NoteScheduler {
 
   private enqueueEligible(): void {
     const { summaryEngine, summaryContent } = this.settings.getSnapshot();
-    const kinds = kindsFor(summaryContent);
-    if (summaryEngine === "disk-only" || kinds.length === 0) {
+    if (summaryEngine === "disk-only" || !wantsNotes(summaryContent)) {
       return;
     }
     const snapshot = this.store.getSnapshot();
@@ -206,26 +211,22 @@ export class NoteScheduler {
       if (!this.visible.has(key) || !hasTranscript(record)) {
         continue;
       }
-      const generated = snapshot.data.generated[key];
-      for (const kind of kinds) {
-        const id = itemId(key, kind);
-        if (this.claimed.has(id)) {
-          continue;
-        }
-        const lastAttempt = this.attempts.get(id);
-        if (lastAttempt !== undefined && now - lastAttempt < NOTE_WINDOW_MS) {
-          continue;
-        }
-        if (!isEligible(record, generated, kind, summaryEngine, now)) {
-          continue;
-        }
-        this.queue.push({ id, key, kind, updatedAtMs: record.updatedAtMs });
-        this.claimed.add(id);
-        added = true;
+      if (this.claimed.has(key)) {
+        continue;
       }
+      const lastAttempt = this.attempts.get(key);
+      if (lastAttempt !== undefined && now - lastAttempt < NOTE_WINDOW_MS) {
+        continue;
+      }
+      if (!isEligible(record, snapshot.data.generated[key], summaryEngine, now)) {
+        continue;
+      }
+      this.queue.push({ key, updatedAtMs: record.updatedAtMs });
+      this.claimed.add(key);
+      added = true;
     }
     if (added) {
-      // Stable sort: ties keep insertion order (summary before recap).
+      // Stable sort: ties keep insertion order (record order from the store).
       this.queue.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
     }
   }
@@ -239,7 +240,7 @@ export class NoteScheduler {
       const item = this.queue.shift() as QueueItem;
       const record = this.liveRecord(item.key);
       if (record === null) {
-        this.claimed.delete(item.id);
+        this.claimed.delete(item.key);
         continue;
       }
       this.start(item, record);
@@ -266,11 +267,11 @@ export class NoteScheduler {
     // Captured at generation START: a transcript that grows while the model is
     // thinking must leave the note stale, not falsely current.
     const sourceMtimeMs = record.updatedAtMs;
-    this.attempts.set(item.id, this.now());
+    this.attempts.set(item.key, this.now());
     this.running = true;
-    void this.generate(record.filePath, item.kind).then(
-      (text) => {
-        this.settle(item, sourceMtimeMs, text);
+    void this.generateBundle(record.filePath).then(
+      (bundle) => {
+        this.settle(item, sourceMtimeMs, bundle);
       },
       (error: unknown) => {
         // §9: generation failures are silent in the UI; console only.
@@ -283,18 +284,20 @@ export class NoteScheduler {
   private settle(
     item: QueueItem,
     sourceMtimeMs: number,
-    text: string | null,
+    bundle: BundleNote | null,
   ): void {
     if (this.disposed) {
       return;
     }
     this.running = false;
-    this.claimed.delete(item.id);
-    if (text !== null) {
-      const previous = this.store.getSnapshot().data.generated[item.key];
+    this.claimed.delete(item.key);
+    if (bundle !== null) {
+      // The bundle is authoritative for all three fields: they were produced
+      // in one pass and must stay mutually consistent.
       this.store.writeGeneratedNote(item.key, {
-        summary: item.kind === "summary" ? text : (previous?.summary ?? null),
-        recap: item.kind === "recap" ? text : (previous?.recap ?? null),
+        title: bundle.title,
+        summary: bundle.summary,
+        recap: bundle.recap,
         generatedAtMs: this.now(),
         sourceMtimeMs,
       });
