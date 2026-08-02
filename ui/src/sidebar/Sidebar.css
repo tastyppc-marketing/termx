@@ -44,6 +44,30 @@
   letter-spacing: 0;
 }
 
+/* Full-screen Conversations control (polish P5) — only rendered while the
+   rail is on screen and the App wired the surface. */
+.sidebar__expand {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  place-items: center;
+  padding: 0;
+  color: var(--sidebar-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.sidebar__expand:hover {
+  color: var(--sidebar-text);
+  background: rgb(255 255 255 / 6%);
+  border-color: rgb(122 162 247 / 20%);
+}
+
 .sidebar__saving {
   margin-left: auto;
   color: var(--sidebar-muted);
@@ -416,6 +440,39 @@
 .sidebar-dialog__actions .sidebar-dialog__danger {
   background: #7e3544;
   border-color: #a4485b;
+}
+
+/* Width drag handle (polish P5): a 6px hit strip inside the right border (the
+   sidebar clips its overflow), invisible until hovered/focused/dragged so the
+   sidebar reads exactly as it did. */
+.sidebar__resize {
+  position: absolute;
+  z-index: 50;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar__resize::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 2px;
+  height: 100%;
+  background: var(--sidebar-accent);
+  content: "";
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.sidebar__resize:hover::after,
+.sidebar__resize:focus-visible::after,
+.sidebar__resize:active::after {
+  opacity: 0.85;
 }
 
 .sidebar :focus-visible {

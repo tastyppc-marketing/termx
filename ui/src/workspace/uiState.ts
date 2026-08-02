@@ -25,7 +25,18 @@ export interface UiStateV1 {
   readonly trayChips?: Partial<Record<TrayId, readonly string[]>>;
   /** Native viewer placement and visibility. Absent means the viewer defaults. */
   readonly viewerGeometry?: ViewerGeometry;
+  /**
+   * Sidebar width in px (polish P5). Absent — or unusable — means
+   * `DEFAULT_SIDEBAR_WIDTH`; stored values are clamped to
+   * [`MIN_SIDEBAR_WIDTH`, `MAX_SIDEBAR_WIDTH`] on parse AND on write, so a
+   * hand-edited file can never wedge the sidebar off screen.
+   */
+  readonly sidebarWidth?: number;
 }
+
+export const MIN_SIDEBAR_WIDTH = 200;
+export const MAX_SIDEBAR_WIDTH = 480;
+export const DEFAULT_SIDEBAR_WIDTH = 260;
 
 export const DEFAULT_UI_STATE: UiStateV1 = {
   scopePaths: EMPTY_SCOPE_PATHS,
@@ -95,6 +106,26 @@ function parseViewerGeometry(value: unknown): ViewerGeometry | undefined {
   return { dock, sizePx, state };
 }
 
+/** Round and pin a width into the resizable range. */
+export function clampSidebarWidth(width: number): number {
+  return Math.min(
+    Math.max(Math.round(width), MIN_SIDEBAR_WIDTH),
+    MAX_SIDEBAR_WIDTH,
+  );
+}
+
+/**
+ * Width is optional: anything that is not a finite number degrades to
+ * `undefined` (= the default width), and an out-of-range number is clamped
+ * rather than dropped — the user did resize, the file is just stale or edited.
+ */
+function parseSidebarWidth(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return clampSidebarWidth(value);
+}
+
 /** Parse ui-state text (null = missing file). Never throws. */
 export function parseUiState(text: string | null): UiStateV1 {
   if (text === null) {
@@ -121,6 +152,7 @@ export function parseUiState(text: string | null): UiStateV1 {
     : [];
   const trayChips = parseTrayChips(record.trayChips);
   const viewerGeometry = parseViewerGeometry(record.viewerGeometry);
+  const sidebarWidth = parseSidebarWidth(record.sidebarWidth);
   return {
     scopePaths: {
       seeds: parsePathRecord(scopePathsRaw.seeds),
@@ -129,6 +161,7 @@ export function parseUiState(text: string | null): UiStateV1 {
     recentFolders: recents,
     ...(trayChips ? { trayChips } : {}),
     ...(viewerGeometry ? { viewerGeometry } : {}),
+    ...(sidebarWidth !== undefined ? { sidebarWidth } : {}),
   };
 }
 
@@ -229,6 +262,38 @@ export function setViewerGeometry(
     return state;
   }
   return { ...state, viewerGeometry: geometry };
+}
+
+/**
+ * Store the sidebar width (polish P5). `null` is the reset sentinel — the
+ * double-click on the drag handle — and deletes the field so the sidebar falls
+ * back on `DEFAULT_SIDEBAR_WIDTH`; a number is clamped before it is stored, so
+ * the store never holds a width the sidebar would not honour. Same-ref return
+ * when nothing changes: a drag reports on every pointer move and an unchanged
+ * report must not schedule a disk write. Junk (NaN/Infinity) is ignored rather
+ * than treated as a reset — it must never destroy a stored width.
+ */
+export function setSidebarWidth(
+  state: UiStateV1,
+  width: number | null,
+): UiStateV1 {
+  if (width === null) {
+    if (state.sidebarWidth === undefined) {
+      return state;
+    }
+    // Spread-then-delete keeps any unrelated fields this state may carry.
+    const next: { -readonly [K in keyof UiStateV1]: UiStateV1[K] } = { ...state };
+    delete next.sidebarWidth;
+    return next;
+  }
+  if (!Number.isFinite(width)) {
+    return state;
+  }
+  const clamped = clampSidebarWidth(width);
+  if (state.sidebarWidth === clamped) {
+    return state;
+  }
+  return { ...state, sidebarWidth: clamped };
 }
 
 export interface UiStateStoreOptions {

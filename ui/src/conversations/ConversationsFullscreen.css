@@ -1,0 +1,80 @@
+/*
+ * Full-screen Conversations overlay (polish P5). Covers the whole window and
+ * sits above the workspace (SplitLayout tops out at 100) but BELOW every
+ * dialog/menu/palette layer (100–200) — a settings dialog or close guard
+ * opened from here must still paint on top.
+ */
+.conversations-fullscreen {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
+  color: #e6e6e6;
+  background: #0f1115;
+  font: 13px/1.35 Inter, "Segoe UI", sans-serif;
+}
+
+.conversations-fullscreen__header {
+  display: flex;
+  min-height: 40px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgb(255 255 255 / 6%);
+}
+
+.conversations-fullscreen__title {
+  margin: 0;
+  color: #f2f3f5;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.conversations-fullscreen__hint {
+  margin-left: auto;
+  padding: 2px 6px;
+  color: #8b93a7;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 5px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.conversations-fullscreen__restore {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  color: #8b93a7;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.conversations-fullscreen__restore:hover {
+  color: #e6e6e6;
+  background: rgb(255 255 255 / 6%);
+  border-color: rgb(122 162 247 / 20%);
+}
+
+.conversations-fullscreen :focus-visible {
+  outline: 2px solid #7aa2f7;
+  outline-offset: 1px;
+}
+
+/* The body owns the remaining height; the expanded rail lays itself out. */
+.conversations-fullscreen__body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}

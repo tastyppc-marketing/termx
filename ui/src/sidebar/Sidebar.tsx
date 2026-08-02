@@ -13,6 +13,7 @@ import type { ConversationsStore } from "../conversations/store";
 import type { LlmSessionRecord } from "../conversations/types";
 import type { TermxSettings } from "../settings/settings";
 import { PALETTE_HEX, PALETTE_IDS, type PaletteId } from "../state/layout";
+import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH } from "../workspace/uiState";
 import type {
   SidebarGroupModel,
   SidebarTabModel,
@@ -73,6 +74,24 @@ export interface SidebarProps {
   /** Opens the folder-search palette targeting the given group. */
   onOpenFolderSearch?: (groupId: string | null) => void;
   conversations?: SidebarConversations;
+  /**
+   * Persisted sidebar width in px (polish P5), already clamped by
+   * `uiState.setSidebarWidth`. Absent = the stylesheet's own width, so a
+   * caller that does not persist a width gets the sidebar exactly as it was.
+   */
+  width?: number;
+  /**
+   * Reports a new width from the right-edge drag handle; `null` is the
+   * double-click reset sentinel (back to `DEFAULT_SIDEBAR_WIDTH`). Absent
+   * hides the handle — an unpersisted width is not resizable.
+   */
+  onResize?(width: number | null): void;
+  /**
+   * Opens the full-screen Conversations surface (polish P5). The ⛶ control
+   * renders only when this is wired AND the rail is on screen — the App owns
+   * the surface, the sidebar only asks for it.
+   */
+  onExpandConversations?(): void;
   /** Sessions currently asleep (spec §13) — tabs holding one show a zZ badge. */
   sleeping?: ReadonlySet<number>;
   /**
@@ -101,6 +120,17 @@ type SidebarMenu =
 
 type MenuPanel = "root" | "color" | "move";
 
+/** Right-edge width drag (polish P5) — same pointer-capture shape as the
+ *  SplitLayout divider, but reporting px instead of a fraction. */
+interface ResizeDragState {
+  pointerId: number;
+  startX: number;
+  startWidth: number;
+}
+
+/** Arrow-key step for the resize handle, matching the divider's nudge idiom. */
+const SIDEBAR_RESIZE_STEP = 16;
+
 interface PointerDragState {
   pointerId: number;
   source: DragSource;
@@ -118,6 +148,9 @@ export function Sidebar({
   onOpenSettings,
   onOpenFolderSearch,
   conversations,
+  width,
+  onResize,
+  onExpandConversations,
   sleeping,
   footerTray,
 }: SidebarProps) {
@@ -143,6 +176,8 @@ export function Sidebar({
   const dialogOpenerRef = useRef<HTMLElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const dialogCancelRef = useRef<HTMLButtonElement | null>(null);
+  const asideRef = useRef<HTMLElement | null>(null);
+  const resizeRef = useRef<ResizeDragState | null>(null);
 
   const visibleTabs = useMemo(() => [
     ...snapshot.ungroupedTabs,
@@ -285,6 +320,63 @@ export function Sidebar({
       actions.moveTab(command.tabId, command.groupId, command.index);
     } else if (command?.kind === "reorder_group") {
       actions.reorderGroup(command.groupId, command.index);
+    }
+  };
+
+  /**
+   * The width a drag starts from: the persisted value when there is one, else
+   * the rendered width, else the default (a layout that has not been measured
+   * — jsdom, or a display:none sidebar — reports 0 and must not collapse the
+   * handle to the minimum on the first pointer move).
+   */
+  const currentWidth = (): number => {
+    if (width !== undefined) {
+      return width;
+    }
+    const measured = asideRef.current?.getBoundingClientRect().width ?? 0;
+    return measured > 0 ? measured : DEFAULT_SIDEBAR_WIDTH;
+  };
+
+  const beginResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!onResize || event.button !== 0 || !event.isPrimary) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Environments without pointer capture still get move/up on the element.
+    }
+    resizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: currentWidth(),
+    };
+  };
+
+  const moveResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = resizeRef.current;
+    if (!current || current.pointerId !== event.pointerId) {
+      return;
+    }
+    event.stopPropagation();
+    // Reported live (the ui-state store debounces its own disk writes), so the
+    // sidebar tracks the pointer instead of jumping on release.
+    onResize?.(clampSidebarWidth(current.startWidth + (event.clientX - current.startX)));
+  };
+
+  const endResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = resizeRef.current;
+    if (!current || current.pointerId !== event.pointerId) {
+      return;
+    }
+    event.stopPropagation();
+    resizeRef.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Capture may already be gone.
     }
   };
 
@@ -759,8 +851,12 @@ export function Sidebar({
 
   return (
     <aside
+      ref={asideRef}
       className="sidebar"
       aria-label="Terminal sessions"
+      {...(width !== undefined
+        ? { style: { flexBasis: `${width}px`, width: `${width}px` } }
+        : {})}
       onPointerMove={handlePointerMove}
       onPointerUp={finishDrag}
       onPointerCancel={cancelDrag}
@@ -776,6 +872,17 @@ export function Sidebar({
         <span className="sidebar__mark" aria-hidden="true">T</span>
         <span>Sessions</span>
         {snapshot.persistence.saving ? <span className="sidebar__saving">Saving…</span> : null}
+        {showConversations && onExpandConversations ? (
+          <button
+            type="button"
+            className="sidebar__expand"
+            aria-label="Conversations full screen"
+            title="Conversations full screen"
+            onClick={onExpandConversations}
+          >
+            ⛶
+          </button>
+        ) : null}
       </header>
       {railEnabled ? (
         <div className="sidebar__modes" role="tablist" aria-label="Sidebar mode">
@@ -1009,6 +1116,34 @@ export function Sidebar({
             </div>
           </div>
         </div>
+      ) : null}
+      {onResize ? (
+        <div
+          className="sidebar__resize"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          title="Drag to resize — double-click to reset"
+          tabIndex={0}
+          data-testid="sidebar-resize"
+          onPointerDown={beginResize}
+          onPointerMove={moveResize}
+          onPointerUp={endResize}
+          onPointerCancel={endResize}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onResize(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+              return;
+            }
+            event.preventDefault();
+            const step = event.key === "ArrowRight" ? SIDEBAR_RESIZE_STEP : -SIDEBAR_RESIZE_STEP;
+            onResize(clampSidebarWidth(currentWidth() + step));
+          }}
+        />
       ) : null}
     </aside>
   );
