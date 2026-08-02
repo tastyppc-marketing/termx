@@ -74,8 +74,20 @@ describe("parseConversations", () => {
       }),
     );
     expect(parsed.generated).toEqual({
-      "claude:a": { summary: "one", recap: null, generatedAtMs: 5, sourceMtimeMs: 9 },
-      "claude:b": { summary: null, recap: null, generatedAtMs: 0, sourceMtimeMs: 0 },
+      "claude:a": {
+        title: null,
+        summary: "one",
+        recap: null,
+        generatedAtMs: 5,
+        sourceMtimeMs: 9,
+      },
+      "claude:b": {
+        title: null,
+        summary: null,
+        recap: null,
+        generatedAtMs: 0,
+        sourceMtimeMs: 0,
+      },
     });
   });
 
@@ -114,7 +126,13 @@ describe("parseConversations", () => {
       folders: [{ id: "f1", name: "Work" }],
       assignments: { "codex:x": "f1" },
       generated: {
-        "codex:x": { summary: "s", recap: "r", generatedAtMs: 1, sourceMtimeMs: 2 },
+        "codex:x": {
+          title: null,
+          summary: "s",
+          recap: "r",
+          generatedAtMs: 1,
+          sourceMtimeMs: 2,
+        },
       },
       artifacts: {
         "codex:x": {
@@ -166,6 +184,7 @@ describe("parseSessionRecords", () => {
         updatedAtMs: 10,
         summary: "did things",
         recap: null,
+        titleSource: "named",
       },
       {
         provider: "codex",
@@ -176,6 +195,7 @@ describe("parseSessionRecords", () => {
         updatedAtMs: 0,
         summary: null,
         recap: null,
+        titleSource: "named",
       },
     ]);
   });
