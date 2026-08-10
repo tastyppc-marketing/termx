@@ -754,3 +754,29 @@ C:\Dev\TermX\dist-portable\TermX\ (running exes: rename aside first —
 
 Michael is live-testing the adoption batch; his bug reports take priority
 when they arrive.
+
+## 2026-08-10 delta — settings lane MERGED (a456393); chat lane still running
+
+lane-settings completed and merged onto main as a456393 (squashed 3 lane
+commits). Contents: agentPaneDefaultView + chatDefaultDensity fields (both
+in SettingsStore equality check, plus a generic every-field update/notify
+loop test); SETTINGS_SECTIONS data + completeness test; SettingsSurface
+fullscreen (ConversationsFullscreen pattern, z-index 95 — deliberately above
+conversations' 90) replaces SettingsDialog (deleted, tests migrated).
+Gates verified on main AFTER merge: tsc clean; vitest 929/929 (77 files;
+new baseline 929); e2e 6/6. Worktree + branch removed, node_modules intact.
+NOTE: a dot-reporter vitest run overlapping another run showed 62 files/670
+tests + 15 errors — interference artifact; clean solo run was 929 green.
+Cargo gates skipped for this merge: diff contained zero Rust files.
+
+Lane deviations (accepted): scoped-focus instead of Tab trap; z-index 95;
+SettingsSurface takes `store` prop; no roving tabindex on section tabs.
+Michael should eyeball the surface visually after next restage.
+
+STILL WAITING: lane-chat (agent a0a489c0eae6f2103, worktree
+.claude/worktrees/agent-a0a489c0eae6f2103). On its notification: same merge
+protocol (junction probe, review, cherry-pick -n, gates — vitest baseline
+now 929, cargo termx-ui from ui/src-tauri since chat lane HAS Rust changes),
+then cross-lane integration commit (wire settings into
+ui/src/chat/chatDefaults.ts at // SETTINGS-INTEGRATION markers — fields now
+exist on main), then release rebuild + restage per RELEASE.md.
