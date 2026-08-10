@@ -4,7 +4,7 @@
  * "Reset layout" which restores `DEFAULT_TRAYS` everywhere. Removal lives on
  * the chip itself (right-click a tray chip).
  *
- * Focus trap mirrors `SettingsDialog` — Escape closes, Tab wraps inside.
+ * Focus trap is the app's modal pattern — Escape closes, Tab wraps inside.
  */
 
 import { useEffect, useRef } from "react";

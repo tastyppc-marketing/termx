@@ -11,8 +11,20 @@ import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
 const terminalRender = vi.hoisted(() => vi.fn());
 
 vi.mock("../sidebar/Sidebar", () => ({
-  Sidebar: ({ snapshot }: { snapshot: WorkspaceSnapshot }) => (
-    <div data-active-tab={snapshot.activeTabId ?? ""} data-testid="workspace-sidebar" />
+  Sidebar: ({
+    snapshot,
+    onOpenSettings,
+  }: {
+    snapshot: WorkspaceSnapshot;
+    onOpenSettings?: () => void;
+  }) => (
+    <div data-active-tab={snapshot.activeTabId ?? ""} data-testid="workspace-sidebar">
+      <button
+        type="button"
+        data-testid="sidebar-open-settings"
+        onClick={onOpenSettings}
+      />
+    </div>
   ),
 }));
 vi.mock("../terminal/TerminalPane", () => ({
@@ -290,6 +302,40 @@ describe("App workspace lifecycle", () => {
     await act(async () => root.unmount());
 
     expect(harness.order).toEqual(["controller.dispose", "client.close"]);
+  });
+});
+
+describe("App settings surface", () => {
+  it("opens the full-screen settings surface from the sidebar and closes on Esc", async () => {
+    const harness = controllerHarness();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<App bootstrap={async () => harness.workspace} />));
+
+    expect(container.querySelector(".settings-surface")).toBeNull();
+    // The old modal is gone — no backdrop, ever.
+    expect(container.querySelector(".settings-dialog-backdrop")).toBeNull();
+
+    const gear = container.querySelector<HTMLButtonElement>(
+      "[data-testid='sidebar-open-settings']",
+    )!;
+    await act(async () => gear.click());
+
+    const surface = container.querySelector<HTMLElement>(".settings-surface");
+    expect(surface).not.toBeNull();
+    expect(surface!.getAttribute("aria-label")).toBe("TermX settings");
+    // Terminals underneath stay mounted — the surface is a layer, not a route.
+    expect(container.querySelector("[data-testid='workspace-terminal']")).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(container.querySelector(".settings-surface")).toBeNull();
+
+    await act(async () => root.unmount());
   });
 });
 

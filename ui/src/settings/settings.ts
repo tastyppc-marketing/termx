@@ -48,6 +48,14 @@ export const MAX_GROUP_DEPTH_OPTIONS = [1, 2, 3, 4, 5] as const;
 
 export type MaxGroupDepthOption = (typeof MAX_GROUP_DEPTH_OPTIONS)[number];
 
+export const AGENT_PANE_VIEWS = ["terminal", "chat"] as const;
+
+export type AgentPaneView = (typeof AGENT_PANE_VIEWS)[number];
+
+export const CHAT_DENSITIES = ["chips", "smart", "full"] as const;
+
+export type ChatDensity = (typeof CHAT_DENSITIES)[number];
+
 export interface TermxSettings {
   /** Where a plain "new tab" opens. Default: follow the group's CDs. */
   readonly newTabPolicy: NewTabPolicy;
@@ -73,6 +81,10 @@ export interface TermxSettings {
   readonly maxGroupDepth: MaxGroupDepthOption;
   /** Colour theme. Applies live — no restart, no confirmation. */
   readonly theme: ThemeId;
+  /** Which view an agent pane opens in: the raw terminal or the chat view. */
+  readonly agentPaneDefaultView: AgentPaneView;
+  /** How much of each chat message the chat view shows by default. */
+  readonly chatDefaultDensity: ChatDensity;
 }
 
 export const DEFAULT_SETTINGS: TermxSettings = {
@@ -88,6 +100,8 @@ export const DEFAULT_SETTINGS: TermxSettings = {
   onWindowClose: "ask",
   maxGroupDepth: 3,
   theme: DEFAULT_THEME_ID,
+  agentPaneDefaultView: "terminal",
+  chatDefaultDensity: "smart",
 };
 
 function isNewTabPolicy(value: unknown): value is NewTabPolicy {
@@ -120,6 +134,14 @@ function isCloseBehavior(value: unknown): value is CloseBehavior {
 
 function isMaxGroupDepth(value: unknown): value is MaxGroupDepthOption {
   return (MAX_GROUP_DEPTH_OPTIONS as readonly unknown[]).includes(value);
+}
+
+function isAgentPaneView(value: unknown): value is AgentPaneView {
+  return (AGENT_PANE_VIEWS as readonly unknown[]).includes(value);
+}
+
+function isChatDensity(value: unknown): value is ChatDensity {
+  return (CHAT_DENSITIES as readonly unknown[]).includes(value);
 }
 
 /** Parse settings text (null = missing file). Never throws. */
@@ -175,6 +197,12 @@ export function parseSettings(text: string | null): TermxSettings {
       ? record.maxGroupDepth
       : DEFAULT_SETTINGS.maxGroupDepth,
     theme: isThemeId(record.theme) ? record.theme : DEFAULT_SETTINGS.theme,
+    agentPaneDefaultView: isAgentPaneView(record.agentPaneDefaultView)
+      ? record.agentPaneDefaultView
+      : DEFAULT_SETTINGS.agentPaneDefaultView,
+    chatDefaultDensity: isChatDensity(record.chatDefaultDensity)
+      ? record.chatDefaultDensity
+      : DEFAULT_SETTINGS.chatDefaultDensity,
   };
 }
 

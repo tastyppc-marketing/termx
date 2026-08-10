@@ -13,7 +13,7 @@ export interface CloseGuardProps {
  * The spec §15 "window close" dialog: shown when `onWindowClose` is "ask"
  * and at least one session is alive. Makes it unmissable that closing the
  * window does not stop anything running in the background daemon. Clones
- * the focus-trap pattern from SettingsDialog.
+ * the app's modal focus-trap pattern (see `FeaturesDock`).
  */
 export function CloseGuard({ open, onDecide }: CloseGuardProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);

@@ -60,7 +60,9 @@ export class SettingsStore {
       next.sleepHiddenTerminals === this.current.sleepHiddenTerminals &&
       next.onWindowClose === this.current.onWindowClose &&
       next.maxGroupDepth === this.current.maxGroupDepth &&
-      next.theme === this.current.theme
+      next.theme === this.current.theme &&
+      next.agentPaneDefaultView === this.current.agentPaneDefaultView &&
+      next.chatDefaultDensity === this.current.chatDefaultDensity
     ) {
       return;
     }

@@ -3,8 +3,31 @@ import {
   DEFAULT_SETTINGS,
   parseSettings,
   serializeSettings,
+  type TermxSettings,
 } from "../settings";
 import { SettingsStore, loadSettingsStore } from "../SettingsStore";
+
+/**
+ * One legal value per field that differs from its default. Used by the
+ * equality-check regression suite below: every field must survive a
+ * change-of-one-field update (the maxGroupDepth-swallow bug class).
+ */
+const ALTERNATE_SETTINGS: TermxSettings = {
+  newTabPolicy: "ask-native",
+  shellIntegration: false,
+  defaultProfile: "cmd",
+  conversationsRail: false,
+  conversationsPalette: false,
+  summaryEngine: "llm",
+  summaryContent: "none",
+  summaryDisplay: "under-title",
+  sleepHiddenTerminals: "60",
+  onWindowClose: "stop-all",
+  maxGroupDepth: 5,
+  theme: "paper-light",
+  agentPaneDefaultView: "chat",
+  chatDefaultDensity: "full",
+};
 
 describe("parseSettings", () => {
   it("returns defaults for a missing file", () => {
@@ -31,6 +54,8 @@ describe("parseSettings", () => {
       onWindowClose: "stop-all",
       maxGroupDepth: 5,
       theme: "paper-light",
+      agentPaneDefaultView: "chat",
+      chatDefaultDensity: "chips",
     } as const;
     expect(parseSettings(serializeSettings(settings))).toEqual(settings);
   });
@@ -50,6 +75,8 @@ describe("parseSettings", () => {
         onWindowClose: "explode",
         maxGroupDepth: 7,
         theme: "neon",
+        agentPaneDefaultView: "bubble",
+        chatDefaultDensity: 7,
       }),
     );
     expect(parsed).toEqual({
@@ -65,6 +92,8 @@ describe("parseSettings", () => {
       onWindowClose: DEFAULT_SETTINGS.onWindowClose,
       maxGroupDepth: DEFAULT_SETTINGS.maxGroupDepth,
       theme: DEFAULT_SETTINGS.theme,
+      agentPaneDefaultView: DEFAULT_SETTINGS.agentPaneDefaultView,
+      chatDefaultDensity: DEFAULT_SETTINGS.chatDefaultDensity,
     });
   });
 
@@ -88,6 +117,44 @@ describe("parseSettings", () => {
     }
     expect(parseSettings(JSON.stringify({ maxGroupDepth: 1 })).maxGroupDepth).toBe(1);
     expect(parseSettings(JSON.stringify({ maxGroupDepth: 5 })).maxGroupDepth).toBe(5);
+  });
+
+  it("agentPaneDefaultView: defaults to terminal and rejects unknown views", () => {
+    expect(DEFAULT_SETTINGS.agentPaneDefaultView).toBe("terminal");
+    expect(parseSettings(JSON.stringify({}))).toMatchObject({
+      agentPaneDefaultView: "terminal",
+    });
+    for (const bad of ["bubble", "", 7, null, true, {}]) {
+      expect(
+        parseSettings(
+          JSON.stringify({ agentPaneDefaultView: bad, defaultProfile: "cmd" }),
+        ),
+      ).toMatchObject({ agentPaneDefaultView: "terminal", defaultProfile: "cmd" });
+    }
+    expect(
+      parseSettings(JSON.stringify({ agentPaneDefaultView: "chat" }))
+        .agentPaneDefaultView,
+    ).toBe("chat");
+  });
+
+  it("chatDefaultDensity: defaults to smart and rejects unknown densities", () => {
+    expect(DEFAULT_SETTINGS.chatDefaultDensity).toBe("smart");
+    expect(parseSettings(JSON.stringify({}))).toMatchObject({
+      chatDefaultDensity: "smart",
+    });
+    for (const bad of ["bubble", "dense", "", 7, null, true, {}]) {
+      expect(
+        parseSettings(
+          JSON.stringify({ chatDefaultDensity: bad, defaultProfile: "cmd" }),
+        ),
+      ).toMatchObject({ chatDefaultDensity: "smart", defaultProfile: "cmd" });
+    }
+    for (const good of ["chips", "smart", "full"] as const) {
+      expect(
+        parseSettings(JSON.stringify({ chatDefaultDensity: good }))
+          .chatDefaultDensity,
+      ).toBe(good);
+    }
   });
 
   it("ignores unknown fields", () => {
@@ -248,6 +315,62 @@ describe("SettingsStore", () => {
     expect(store.getSnapshot().maxGroupDepth).toBe(5);
     expect(listener).toHaveBeenCalledTimes(1);
     expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies and saves for an agentPaneDefaultView-only change", async () => {
+    const save = vi.fn(() => Promise.resolve());
+    const store = new SettingsStore({ save });
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.update({ agentPaneDefaultView: "chat" });
+    await store.flush();
+
+    expect(store.getSnapshot().agentPaneDefaultView).toBe("chat");
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies and saves for a chatDefaultDensity-only change", async () => {
+    const save = vi.fn(() => Promise.resolve());
+    const store = new SettingsStore({ save });
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.update({ chatDefaultDensity: "full" });
+    await store.flush();
+
+    expect(store.getSnapshot().chatDefaultDensity).toBe("full");
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  // The generic guard: a field added to TermxSettings but forgotten in the
+  // store's equality check is silently unsaveable (bug class fixed in e5f0e5b).
+  // This loop fails for ANY such field, including ones added in future batches.
+  it("notifies and saves for a one-field change to EVERY settings field", async () => {
+    const keys = Object.keys(DEFAULT_SETTINGS) as (keyof TermxSettings)[];
+    expect(keys.length).toBeGreaterThan(0);
+
+    for (const key of keys) {
+      expect(ALTERNATE_SETTINGS[key], `alternate for ${key}`).not.toEqual(
+        DEFAULT_SETTINGS[key],
+      );
+
+      const save = vi.fn(() => Promise.resolve());
+      const store = new SettingsStore({ save });
+      const listener = vi.fn();
+      store.subscribe(listener);
+
+      store.update({ [key]: ALTERNATE_SETTINGS[key] } as Partial<TermxSettings>);
+      await store.flush();
+
+      expect(store.getSnapshot()[key], `snapshot for ${key}`).toEqual(
+        ALTERNATE_SETTINGS[key],
+      );
+      expect(listener, `listener for ${key}`).toHaveBeenCalledTimes(1);
+      expect(save, `save for ${key}`).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("serializes saves in update order", async () => {

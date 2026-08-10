@@ -1,4 +1,5 @@
-/* Panel chrome matches SettingsDialog; buttons match the sidebar footer. */
+/* Panel chrome matches the app's overlay dialogs; buttons match the sidebar
+   footer. */
 
 .features-dock-backdrop {
   position: fixed;

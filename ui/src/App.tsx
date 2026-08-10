@@ -35,7 +35,7 @@ import {
 } from "./native/sessionData";
 import { OutputPane, type LiveOutputRow } from "./outputs/OutputPane";
 import { OutputsStore } from "./outputs/outputsStore";
-import { SettingsDialog } from "./settings/SettingsDialog";
+import { SettingsSurface } from "./settings/SettingsSurface";
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
 import { ThemeProvider } from "./theme/ThemeProvider";
@@ -664,9 +664,8 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           </div>
         ) : null}
         {settingsOpen ? (
-          <SettingsDialog
-            settings={settings}
-            onChange={settingsStore.update}
+          <SettingsSurface
+            store={settingsStore}
             onClose={() => setSettingsOpen(false)}
           />
         ) : null}
