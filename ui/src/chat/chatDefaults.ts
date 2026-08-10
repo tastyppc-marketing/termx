@@ -1,11 +1,8 @@
 /**
- * Chat view defaults.
- *
- * SETTINGS-INTEGRATION. The companion settings spec adds two user settings —
- * the default view for agent panes and the default density. They land in a
- * parallel lane, so every default is read through this module and nowhere
- * else: wiring the settings means changing these two functions to consult the
- * settings snapshot, and nothing else in `ui/src/chat/` moves.
+ * Chat view defaults. Every default is read through this module and nowhere
+ * else: callers pass the settings snapshot and the user's
+ * `agentPaneDefaultView` / `chatDefaultDensity` choices win, with the
+ * constants below as the fallback when no settings are supplied.
  */
 
 import type { ChatDensity, ChatViewMode } from "./types";
@@ -21,14 +18,22 @@ export const DEFAULT_CHAT_DENSITY: ChatDensity = "smart";
 
 export const CHAT_DENSITIES: readonly ChatDensity[] = ["chips", "smart", "full"];
 
-/** SETTINGS-INTEGRATION: replace the body with the settings lookup. */
-export function defaultChatViewMode(): ChatViewMode {
-  return DEFAULT_CHAT_VIEW_MODE;
+/**
+ * The user's `agentPaneDefaultView` setting when given one, else the built-in
+ * default. Structural parameter — `TermxSettings` satisfies it without this
+ * module importing the settings layer.
+ */
+export function defaultChatViewMode(settings?: {
+  readonly agentPaneDefaultView: ChatViewMode;
+}): ChatViewMode {
+  return settings?.agentPaneDefaultView ?? DEFAULT_CHAT_VIEW_MODE;
 }
 
-/** SETTINGS-INTEGRATION: replace the body with the settings lookup. */
-export function defaultChatDensity(): ChatDensity {
-  return DEFAULT_CHAT_DENSITY;
+/** The user's `chatDefaultDensity` setting when given one, else the default. */
+export function defaultChatDensity(settings?: {
+  readonly chatDefaultDensity: ChatDensity;
+}): ChatDensity {
+  return settings?.chatDefaultDensity ?? DEFAULT_CHAT_DENSITY;
 }
 
 /** Tolerant parse for a persisted value; anything unknown falls back. */

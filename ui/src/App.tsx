@@ -585,11 +585,10 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       return null;
     }
     const key = String(sessionId);
-    // SETTINGS-INTEGRATION: the stored pane state wins; the defaults below are
-    // where the settings lane's "default view"/"default density" land.
+    // The stored pane state wins; otherwise the user's settings decide.
     const stored = uiSnapshot.chatPanes?.[key];
-    const mode = stored?.mode ?? defaultChatViewMode();
-    const density = stored?.density ?? defaultChatDensity();
+    const mode = stored?.mode ?? defaultChatViewMode(settings);
+    const density = stored?.density ?? defaultChatDensity(settings);
     const write = (next: { mode: ChatViewMode; density: typeof density }) =>
       uiStateStore.update((current) => setChatPaneState(current, key, next));
     return {
