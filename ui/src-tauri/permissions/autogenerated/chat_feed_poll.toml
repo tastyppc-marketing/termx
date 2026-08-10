@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-chat-feed-poll"
+description = "Enables the chat_feed_poll command without any pre-configured scope."
+commands.allow = ["chat_feed_poll"]
+
+[[permission]]
+identifier = "deny-chat-feed-poll"
+description = "Denies the chat_feed_poll command without any pre-configured scope."
+commands.deny = ["chat_feed_poll"]

@@ -213,6 +213,24 @@ export class TerminalSessionBinding {
   }
 
   /**
+   * Write bytes to the session as if they had been typed (the chat view's
+   * input box, its prompt cards, its Esc/Ctrl+C buttons). It uses the same
+   * gate as real typing — a session that is not accepting input silently
+   * ignores it — and it touches nothing on the output path, so the terminal
+   * underneath is unaffected.
+   */
+  sendInput(data: string): void {
+    if (!this.acceptingInput || this.disposed) {
+      return;
+    }
+    try {
+      this.attachment?.sendInput(data);
+    } catch (error) {
+      this.reportRuntimeError("input", error);
+    }
+  }
+
+  /**
    * Declare that the host has delivered every replay byte — a resolved attach
    * means exactly that. The first live frame normally closes replay first;
    * this keeps a session that produced no output after attach from stranding

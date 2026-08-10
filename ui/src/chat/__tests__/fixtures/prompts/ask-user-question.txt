@@ -1,0 +1,7 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Which approach should I take for the sidebar?                                │
+│                                                                              │
+│ ❯ Refactor the existing tree in place                                        │
+│   Rewrite it around nested groups                                            │
+│   Leave it alone for now                                                     │
+╰──────────────────────────────────────────────────────────────────────────────╯

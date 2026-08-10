@@ -1,5 +1,6 @@
 mod artifacts;
 mod bootstrap;
+mod chat_feed;
 mod file_view;
 mod folders;
 mod llm_sessions;
@@ -39,6 +40,9 @@ pub fn run() {
             file_view::read_text_file,
             transcript::read_transcript_window,
             transcript::search_transcript,
+            chat_feed::chat_feed_open,
+            chat_feed::chat_feed_poll,
+            chat_feed::chat_feed_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running TermX");

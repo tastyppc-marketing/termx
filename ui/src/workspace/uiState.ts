@@ -10,10 +10,27 @@
  */
 
 import { DEFAULT_TRAYS, type TrayId } from "../actions/registry";
+import {
+  DEFAULT_CHAT_DENSITY,
+  DEFAULT_CHAT_VIEW_MODE,
+  parseChatDensity,
+  parseChatViewMode,
+} from "../chat/chatDefaults";
+import type { ChatDensity, ChatViewMode } from "../chat/types";
 import type { ViewerGeometry } from "../viewer/viewerState";
 import { EMPTY_SCOPE_PATHS, type ScopePathsState } from "./scopePaths";
 
 export const RECENT_FOLDERS_CAP = 50;
+
+/**
+ * A pane's chat view state (chat-view spec §1), keyed by host session id.
+ * Machine-written like the rest of this file, and deliberately NOT part of
+ * `layout_v2` — flipping a pane into chat is not a layout change.
+ */
+export interface ChatPaneState {
+  mode: ChatViewMode;
+  density: ChatDensity;
+}
 
 export interface UiStateV1 {
   readonly scopePaths: ScopePathsState;
@@ -32,6 +49,11 @@ export interface UiStateV1 {
    * hand-edited file can never wedge the sidebar off screen.
    */
   readonly sidebarWidth?: number;
+  /**
+   * Per-pane chat view state, keyed by session id. Absent — or unparseable —
+   * means every pane starts on the defaults from `chatDefaults.ts`.
+   */
+  readonly chatPanes?: Readonly<Record<string, ChatPaneState>>;
 }
 
 export const MIN_SIDEBAR_WIDTH = 200;
@@ -126,6 +148,72 @@ function parseSidebarWidth(value: unknown): number | undefined {
   return clampSidebarWidth(value);
 }
 
+/**
+ * Chat state is optional per pane and per field: a record whose mode or
+ * density is junk keeps whichever half parsed, and a pane with neither
+ * disappears entirely rather than persisting an empty object.
+ */
+function parseChatPanes(
+  value: unknown,
+): Readonly<Record<string, ChatPaneState>> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const result: Record<string, ChatPaneState> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "object" || entry === null) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const mode = parseChatViewMode(record.mode);
+    const density = parseChatDensity(record.density);
+    if (mode === undefined && density === undefined) {
+      continue;
+    }
+    result[key] = {
+      mode: mode ?? DEFAULT_CHAT_VIEW_MODE,
+      density: density ?? DEFAULT_CHAT_DENSITY,
+    };
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Store one pane's chat state. `null` is the reset sentinel — it drops the
+ * pane's key so it falls back on the defaults, and the whole field disappears
+ * once no pane is configured. Same-ref return when nothing changed: the pane
+ * writes on every flip and an unchanged write must not schedule a save.
+ */
+export function setChatPaneState(
+  state: UiStateV1,
+  sessionId: string,
+  chat: ChatPaneState | null,
+): UiStateV1 {
+  const current = state.chatPanes?.[sessionId];
+  if (chat === null) {
+    if (current === undefined) {
+      return state;
+    }
+    const rest: Record<string, ChatPaneState> = {};
+    for (const [key, value] of Object.entries(state.chatPanes ?? {})) {
+      if (key !== sessionId) {
+        rest[key] = value;
+      }
+    }
+    if (Object.keys(rest).length > 0) {
+      return { ...state, chatPanes: rest };
+    }
+    // Spread-then-delete keeps any unrelated fields this state may carry.
+    const next: { -readonly [K in keyof UiStateV1]: UiStateV1[K] } = { ...state };
+    delete next.chatPanes;
+    return next;
+  }
+  if (current?.mode === chat.mode && current.density === chat.density) {
+    return state;
+  }
+  return { ...state, chatPanes: { ...state.chatPanes, [sessionId]: chat } };
+}
+
 /** Parse ui-state text (null = missing file). Never throws. */
 export function parseUiState(text: string | null): UiStateV1 {
   if (text === null) {
@@ -153,6 +241,7 @@ export function parseUiState(text: string | null): UiStateV1 {
   const trayChips = parseTrayChips(record.trayChips);
   const viewerGeometry = parseViewerGeometry(record.viewerGeometry);
   const sidebarWidth = parseSidebarWidth(record.sidebarWidth);
+  const chatPanes = parseChatPanes(record.chatPanes);
   return {
     scopePaths: {
       seeds: parsePathRecord(scopePathsRaw.seeds),
@@ -162,6 +251,7 @@ export function parseUiState(text: string | null): UiStateV1 {
     ...(trayChips ? { trayChips } : {}),
     ...(viewerGeometry ? { viewerGeometry } : {}),
     ...(sidebarWidth !== undefined ? { sidebarWidth } : {}),
+    ...(chatPanes ? { chatPanes } : {}),
   };
 }
 

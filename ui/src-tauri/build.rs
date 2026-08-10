@@ -17,6 +17,9 @@ fn main() {
                 "read_text_file",
                 "read_transcript_window",
                 "search_transcript",
+                "chat_feed_open",
+                "chat_feed_poll",
+                "chat_feed_close",
             ]),
         ),
     )

@@ -750,6 +750,24 @@ export class WorkspaceController {
   /// hub's live resize record wins (the dims the pty actually ran at), the
   /// host's creation-time SessionInfo is the fallback for sessions no
   /// terminal has resized yet this run.
+  /// A session's current directory, as the host reported it (OSC 9;9 keeps it
+  /// live). The chat view matches this against the recorded cwd of discovered
+  /// transcripts to work out which conversation a pane is running.
+  sessionCwd = (sessionId: number): string | null =>
+    this.sessions.get(sessionId)?.cwd ?? null;
+
+  /// The session key a resume tied to this pane's tab, when the session was
+  /// started or resumed through TermX. This is the strongest chat linkage
+  /// there is — no directory guessing involved.
+  resumedSessionKeyForTab = (tabId: string): SessionKey | null => {
+    for (const [key, boundTabId] of this.resumedTabs) {
+      if (boundTabId === tabId) {
+        return key;
+      }
+    }
+    return null;
+  };
+
   sessionDims = (
     sessionIds: readonly number[],
   ): Readonly<Record<number, { cols: number; rows: number }>> => {

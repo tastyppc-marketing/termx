@@ -13,6 +13,9 @@ import {
 } from "./actions/registry";
 import { FeaturesDock } from "./actions/FeaturesDock";
 import { Tray } from "./actions/Tray";
+import { defaultChatDensity, defaultChatViewMode } from "./chat/chatDefaults";
+import { resolveLinkage } from "./chat/linkage";
+import type { ChatViewMode } from "./chat/types";
 import { CloseGuard } from "./close/CloseGuard";
 import { decideOnClose, type CloseDecision } from "./close/closeBehavior";
 import { ConnectionBanner } from "./connection/ConnectionBanner";
@@ -65,6 +68,7 @@ import {
   DEFAULT_SIDEBAR_WIDTH,
   UiStateStore,
   applyTrayConfigure,
+  setChatPaneState,
   setSidebarWidth,
   setViewerGeometry,
 } from "./workspace/uiState";
@@ -564,6 +568,74 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationsStore, settings, controller, activeGroupId, noteScheduler]);
 
+  // Chat view (chat-view spec §1/§2). A pane is offered the switch only when
+  // it can be tied to a transcript: the session key a resume recorded, else
+  // the pane's own directory, else nothing at all.
+  const chatForSession = (sessionId: number, tabId: string) => {
+    const records = conversationsStore?.getSnapshot().records ?? [];
+    if (records.length === 0) {
+      return null;
+    }
+    const link = resolveLinkage({
+      explicitKey: controller.resumedSessionKeyForTab(tabId),
+      paneCwd: controller.sessionCwd(sessionId),
+      candidates: records,
+    });
+    if (!link) {
+      return null;
+    }
+    const key = String(sessionId);
+    // SETTINGS-INTEGRATION: the stored pane state wins; the defaults below are
+    // where the settings lane's "default view"/"default density" land.
+    const stored = uiSnapshot.chatPanes?.[key];
+    const mode = stored?.mode ?? defaultChatViewMode();
+    const density = stored?.density ?? defaultChatDensity();
+    const write = (next: { mode: ChatViewMode; density: typeof density }) =>
+      uiStateStore.update((current) => setChatPaneState(current, key, next));
+    return {
+      filePath: link.record.filePath,
+      title: link.record.title,
+      mode,
+      density,
+      onModeChange: (nextMode: ChatViewMode) => write({ mode: nextMode, density }),
+      onDensityChange: (nextDensity: typeof density) =>
+        write({ mode, density: nextDensity }),
+    };
+  };
+
+  // Ctrl+Shift+C flips the focused pane between the terminal and the chat.
+  // Verified free in this keymap (Ctrl+Shift+O and Ctrl+Shift+R are the only
+  // app chords) before it was claimed.
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
+        return;
+      }
+      if (event.key.toLowerCase() !== "c") {
+        return;
+      }
+      if (isEditableElement(document.activeElement)) {
+        return;
+      }
+      const sessionId = focusedSessionId;
+      const tabId = activeTabId;
+      if (sessionId === null || tabId === null) {
+        return;
+      }
+      const chat = chatForSession(sessionId, tabId);
+      if (!chat) {
+        return; // an unlinked pane has no chat to flip to
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      chat.onModeChange(chat.mode === "chat" ? "terminal" : "chat");
+    };
+    window.addEventListener("keydown", handleKey, true);
+    return () => window.removeEventListener("keydown", handleKey, true);
+    // chatForSession closes over the current stores and ui snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedSessionId, activeTabId, uiSnapshot, conversationsStore, controller]);
+
   return (
     <>
       <ConnectionBanner
@@ -640,6 +712,8 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     sleep={sleepController}
                     sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
                     {...(openHistory ? { onLoadEarlier: openHistory } : {})}
+                    chatForSession={(sessionId) =>
+                      chatForSession(sessionId, tab.id)}
                   />
                 </div>
               ))

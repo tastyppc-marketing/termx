@@ -1,0 +1,4 @@
+   Compiling termx-ui v0.1.0 (C:\Dev\TermX\ui\src-tauri)
+   Compiling tauri v2.11.5
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 41.02s
+     Running unittests src\lib.rs (target\debug\deps\termx_ui_lib.exe)

@@ -1,0 +1,5 @@
+● The adapter now normalizes queue-operation prompts and pairs tool results
+  by id. Next: the feed commands.
+
+  Files changed:
+   - ui/src-tauri/src/chat_feed.rs

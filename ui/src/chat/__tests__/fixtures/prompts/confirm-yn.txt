@@ -1,0 +1,2 @@
+Removing 3 stale worktrees.
+Continue? (y/N)

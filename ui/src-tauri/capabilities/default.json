@@ -18,6 +18,9 @@
     "allow-read-text-file",
     "allow-read-transcript-window",
     "allow-search-transcript",
+    "allow-chat-feed-open",
+    "allow-chat-feed-poll",
+    "allow-chat-feed-close",
     "dialog:allow-open"
   ]
 }

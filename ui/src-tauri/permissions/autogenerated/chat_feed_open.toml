@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-chat-feed-open"
+description = "Enables the chat_feed_open command without any pre-configured scope."
+commands.allow = ["chat_feed_open"]
+
+[[permission]]
+identifier = "deny-chat-feed-open"
+description = "Denies the chat_feed_open command without any pre-configured scope."
+commands.deny = ["chat_feed_open"]

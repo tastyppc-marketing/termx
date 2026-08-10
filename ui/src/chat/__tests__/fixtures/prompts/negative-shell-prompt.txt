@@ -1,0 +1,4 @@
+PS C:\Dev\TermX> git status
+On branch main
+nothing to commit, working tree clean
+PS C:\Dev\TermX>

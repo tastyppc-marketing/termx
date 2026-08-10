@@ -4,6 +4,9 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
+import { ChatOverlay } from "../chat/ChatOverlay";
+import type { openChatFeed } from "../chat/feed";
+import type { ChatDensity, ChatViewMode } from "../chat/types";
 import { HostClient } from "../host/client";
 import {
   xtermSearchDecorations,
@@ -62,11 +65,38 @@ export interface TerminalPresentation {
   /** Top buffer line of the current viewport. */
   viewportY(): number;
   /**
+   * The rows currently on screen, as text. This is what the chat view's prompt
+   * detector reads: a TUI prompt is never written to the transcript, but it IS
+   * on the screen. Optional so existing presentations and fakes stay valid; a
+   * presentation without it simply offers no prompt cards.
+   */
+  visibleLines?(): string[];
+  /**
    * Reports whether the viewport is at the very top of the scrollback, on every
    * scroll. Optional: a presentation without it simply never offers the
    * earlier-output bar, which is the right default for one that cannot say.
    */
   onScroll?(listener: (atTop: boolean) => void): () => void;
+}
+
+/**
+ * The chat view's binding to this pane (chat-view spec §1/§2). Present ONLY
+ * when the pane is linked to a recognized agent session — an unlinked pane is
+ * offered no switch at all, because a switch that opens the wrong
+ * conversation is worse than no switch.
+ */
+export interface PaneChatProps {
+  /** Absolute path of the linked transcript. */
+  filePath: string;
+  title: string;
+  model?: string;
+  mode: ChatViewMode;
+  density: ChatDensity;
+  onModeChange(mode: ChatViewMode): void;
+  onDensityChange(density: ChatDensity): void;
+  onOpenLinkPicker?: () => void;
+  /** Injected feed opener (tests). */
+  openFeed?: typeof openChatFeed;
 }
 
 export interface TerminalPaneDependencies {
@@ -84,6 +114,7 @@ type TerminalPaneProps =
       onCwd?: (path: string, live: boolean) => void;
       onOutput?: (path: string) => void;
       recordedDims?: TerminalDimensions | null;
+      chat?: PaneChatProps;
       suspended?: undefined;
       attachGeneration?: undefined;
       historyBefore?: undefined;
@@ -123,6 +154,8 @@ type TerminalPaneProps =
       historyBefore?: bigint | null;
       /** Open the spilled scrollback below `historyBefore`. */
       onLoadEarlier?: (beforeOffset: bigint) => void;
+      /** Chat view binding; absent means this pane offers no chat (spec §2). */
+      chat?: PaneChatProps;
     };
 
 type PaneState =
@@ -143,6 +176,9 @@ const defaultDependencies: TerminalPaneDependencies = {
 export function TerminalPane(props: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const presentationRef = useRef<TerminalPresentation | null>(null);
+  // The chat view writes through this; the terminal underneath never changes
+  // hands, which is what "the terminal stays mounted" actually means.
+  const bindingRef = useRef<TerminalSessionBinding | null>(null);
   const [paneState, setPaneState] = useState<PaneState>({ type: "loading" });
   const [lostScrollback, setLostScrollback] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -319,6 +355,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         stopJumpListener = () =>
           window.removeEventListener("termx:jump-last-input", onJumpToLastInput);
         const activeBinding = binding;
+        bindingRef.current = activeBinding;
         stopObserving = dependencies.observeResize(element, () => {
           if (sizedToRecord && !replayFinished) {
             // Never retarget the grid mid-replay; the post-replay fit reads
@@ -364,6 +401,9 @@ export function TerminalPane(props: TerminalPaneProps) {
       attemptCleanup("resize_observer", stopObserving);
       attemptCleanup("host_error_subscription", stopHostErrors);
       attemptCleanup("terminal_attachment", () => binding?.dispose());
+      if (bindingRef.current === binding) {
+        bindingRef.current = null;
+      }
       attemptCleanup("host_client", () => ownedClient?.close());
       attemptCleanup("terminal_presentation", () => presentation.dispose());
       if (presentationRef.current === presentation) {
@@ -418,6 +458,40 @@ export function TerminalPane(props: TerminalPaneProps) {
       }}
     >
       <div className="terminal-pane__surface" ref={containerRef} />
+
+      {/* The chat renders OVER the terminal — the surface above stays mounted
+          and attached, which is what keeps the session running and gives the
+          prompt detector something to read. */}
+      {props.chat && props.chat.mode === "chat" ? (
+        <ChatOverlay
+          filePath={props.chat.filePath}
+          density={props.chat.density}
+          onDensityChange={props.chat.onDensityChange}
+          sendKeys={(data) => bindingRef.current?.sendInput(data)}
+          terminalSnapshot={() => presentationRef.current?.visibleLines?.() ?? []}
+          header={{
+            title: props.chat.title,
+            onFlipToTerminal: () => props.chat?.onModeChange("terminal"),
+            ...(props.chat.model ? { model: props.chat.model } : {}),
+            ...(props.chat.onOpenLinkPicker
+              ? { onOpenLinkPicker: props.chat.onOpenLinkPicker }
+              : {}),
+          }}
+          {...(props.chat.openFeed ? { openFeed: props.chat.openFeed } : {})}
+        />
+      ) : null}
+
+      {props.chat && props.chat.mode === "terminal" ? (
+        <button
+          type="button"
+          className="terminal-pane__chat-switch"
+          data-testid="chat-switch"
+          title="Show this session as a chat (Ctrl+Shift+C)"
+          onClick={() => props.chat?.onModeChange("chat")}
+        >
+          Chat
+        </button>
+      ) : null}
 
       {/* Only at the top of the scrollback, and only when the ring has actually
           evicted something: an always-visible bar in every pane would be noise
@@ -611,6 +685,16 @@ function createPresentation(
     },
     scrollToLine: (line) => terminal.scrollToLine(line),
     viewportY: () => terminal.buffer.active.viewportY,
+    visibleLines: () => {
+      const buffer = terminal.buffer.active;
+      const rows: string[] = [];
+      for (let row = 0; row < terminal.rows; row += 1) {
+        // `true` trims the right padding, which is what makes a drawn dialog
+        // read as the lines someone would see rather than a grid of spaces.
+        rows.push(buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "");
+      }
+      return rows;
+    },
     onScroll: (listener) => {
       const subscription = terminal.onScroll(() => {
         // baseY 0 means nothing has scrolled off yet — being "at the top" of a

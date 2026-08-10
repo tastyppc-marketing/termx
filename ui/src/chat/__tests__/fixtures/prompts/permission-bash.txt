@@ -1,0 +1,13 @@
+● I'll confirm the suite is green before touching anything else.
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Bash command                                                                 │
+│                                                                              │
+│   npm run build                                                              │
+│   Build the renderer bundle                                                  │
+│                                                                              │
+│ Do you want to proceed?                                                      │
+│ ❯ 1. Yes                                                                     │
+│   2. Yes, and don't ask again for npm commands in C:\Dev\TermX               │
+│   3. No, and tell Claude what to do differently (esc)                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
