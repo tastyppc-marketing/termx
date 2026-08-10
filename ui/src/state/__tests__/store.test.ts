@@ -1,27 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { validateInvariants } from "../layout";
-import type { LayoutV1, PaletteId, SplitNode } from "../layout";
+import { groupDepth, MAX_GROUP_DEPTH, validateInvariants } from "../layout";
+import type { FillStrength, LayoutV2, PaletteId, SplitNode } from "../layout";
 import { createLayoutStore } from "../store";
-import { baseLayout } from "./helpers";
+import { baseLayout, groupItem, tabItem } from "./helpers";
 
-function store(initial: LayoutV1 = baseLayout()) {
+function store(initial: LayoutV2 = baseLayout()) {
   return createLayoutStore(initial);
 }
 
-function rootSplit(state: LayoutV1, tabId: string): SplitNode {
+function rootSplit(state: LayoutV2, tabId: string): SplitNode {
   return state.tabs[tabId].split;
+}
+
+/// Ids of a container's items in order, tabs and subgroups alike.
+function itemIds(state: LayoutV2, groupId: string | null): string[] {
+  const items = groupId === null ? state.rootItems : state.groups[groupId]!.items;
+  return items.map((item) => item.id);
 }
 
 describe("createTab", () => {
   it("appends ungrouped by default and focuses the new tab", () => {
     const s = store();
     const next = s.createTab({ id: "t9", sessionId: 9 });
-    expect(next.ungroupedTabIds).toEqual(["t1", "t2", "t9"]);
+    expect(next.rootItems).toEqual([
+      tabItem("t1"),
+      tabItem("t2"),
+      groupItem("g1"),
+      tabItem("t9"),
+    ]);
     expect(next.activeTabId).toBe("t9");
     expect(next.tabs.t9).toEqual({
       id: "t9",
       title: null,
       color: "slate",
+      fill: "off",
       split: { kind: "pane", sessionId: 9 },
     });
   });
@@ -29,7 +41,7 @@ describe("createTab", () => {
   it("inserts into a group at a clamped index", () => {
     const s = store();
     const next = s.createTab({ id: "t9", sessionId: 9, groupId: "g1", index: 99 });
-    expect(next.groups[0].tabIds).toEqual(["t3", "t9"]);
+    expect(itemIds(next, "g1")).toEqual(["t3", "t9"]);
   });
 
   it("trims a provided title", () => {
@@ -58,7 +70,7 @@ describe("closeTab", () => {
   it("activates the next tab in render order", () => {
     const s = store();
     const next = s.closeTab("t1");
-    expect(next.ungroupedTabIds).toEqual(["t2"]);
+    expect(itemIds(next, null)).toEqual(["t2", "g1"]);
     expect(next.activeTabId).toBe("t2");
     expect(next.tabs).not.toHaveProperty("t1");
   });
@@ -141,22 +153,22 @@ describe("moveTab / reorderWithinContainer", () => {
   it("moves ungrouped → group at an index", () => {
     const s = store();
     const next = s.moveTab("t1", { groupId: "g1" }, 0);
-    expect(next.ungroupedTabIds).toEqual(["t2"]);
-    expect(next.groups[0].tabIds).toEqual(["t1", "t3"]);
+    expect(itemIds(next, null)).toEqual(["t2", "g1"]);
+    expect(itemIds(next, "g1")).toEqual(["t1", "t3"]);
     expect(validateInvariants(next)).toEqual([]);
   });
 
   it("moves group → ungrouped", () => {
     const s = store();
     const next = s.moveTab("t3", { groupId: null }, 1);
-    expect(next.ungroupedTabIds).toEqual(["t1", "t3", "t2"]);
-    expect(next.groups[0].tabIds).toEqual([]);
+    expect(itemIds(next, null)).toEqual(["t1", "t3", "t2", "g1"]);
+    expect(itemIds(next, "g1")).toEqual([]);
   });
 
   it("repositions within the same container (index after removal)", () => {
     const s = store();
-    expect(s.moveTab("t1", { groupId: null }, 1).ungroupedTabIds)
-      .toEqual(["t2", "t1"]);
+    expect(itemIds(s.moveTab("t1", { groupId: null }, 1), null))
+      .toEqual(["t2", "t1", "g1"]);
   });
 
   it("is identity for a drop on the same position", () => {
@@ -169,14 +181,14 @@ describe("moveTab / reorderWithinContainer", () => {
     const before = s.getState();
     expect(s.moveTab("ghost", { groupId: null }, 0)).toBe(before);
     expect(s.moveTab("t1", { groupId: "nope" }, 0)).toBe(before);
-    expect(s.moveTab("t1", { groupId: "g1" }, 99).groups[0].tabIds)
+    expect(itemIds(s.moveTab("t1", { groupId: "g1" }, 99), "g1"))
       .toEqual(["t3", "t1"]);
   });
 
   it("reorders inside ungrouped and inside a group", () => {
     const s = store();
-    expect(s.reorderWithinContainer(null, 0, 1).ungroupedTabIds)
-      .toEqual(["t2", "t1"]);
+    expect(itemIds(s.reorderWithinContainer(null, 0, 1), null))
+      .toEqual(["t2", "t1", "g1"]);
     const before = s.getState();
     expect(s.reorderWithinContainer(null, 5, 0)).toBe(before);
     expect(s.reorderWithinContainer("nope", 0, 0)).toBe(before);
@@ -189,14 +201,15 @@ describe("groups", () => {
   it("creates, renames, collapses, deletes", () => {
     const s = store();
     s.createGroup({ id: "g2", name: "  Builds " });
-    expect(s.getState().groups.map((g) => g.name)).toEqual(["Servers", "Builds"]);
+    expect(s.getState().groups.g2.name).toBe("Builds");
+    expect(itemIds(s.getState(), null)).toEqual(["t1", "t2", "g1", "g2"]);
 
     s.createGroup({ id: "g3", name: "Top", index: 0 });
-    expect(s.getState().groups.map((g) => g.id)).toEqual(["g3", "g1", "g2"]);
+    expect(itemIds(s.getState(), null)).toEqual(["g3", "t1", "t2", "g1", "g2"]);
 
-    expect(s.renameGroup("g2", " CI ").groups[2].name).toBe("CI");
-    expect(s.toggleGroupCollapsed("g1").groups[1].collapsed).toBe(true);
-    expect(s.toggleGroupCollapsed("g1").groups[1].collapsed).toBe(false);
+    expect(s.renameGroup("g2", " CI ").groups.g2.name).toBe("CI");
+    expect(s.toggleGroupCollapsed("g1").groups.g1.collapsed).toBe(true);
+    expect(s.toggleGroupCollapsed("g1").groups.g1.collapsed).toBe(false);
   });
 
   it("rejects bad names and duplicate ids", () => {
@@ -211,13 +224,66 @@ describe("groups", () => {
     expect(s.deleteGroup("ghost")).toBe(before);
   });
 
-  it("deleteGroup drops tabs to the ungrouped tail in order", () => {
+  it("deleteGroup splices its items into its own container in order", () => {
     const s = store();
     s.createTab({ id: "t9", sessionId: 9, groupId: "g1", index: 0 });
     const next = s.deleteGroup("g1");
-    expect(next.groups).toEqual([]);
-    expect(next.ungroupedTabIds).toEqual(["t1", "t2", "t9", "t3"]);
+    expect(next.groups).toEqual({});
+    expect(itemIds(next, null)).toEqual(["t1", "t2", "t9", "t3"]);
     expect(validateInvariants(next)).toEqual([]);
+  });
+
+  it("creates a subgroup inside a parent and refuses an unknown parent", () => {
+    const s = store();
+    const next = s.createGroup({ id: "g2", name: "Nested", parentGroupId: "g1" });
+    expect(itemIds(next, "g1")).toEqual(["t3", "g2"]);
+    expect(validateInvariants(next)).toEqual([]);
+    expect(s.createGroup({ id: "g3", name: "Nope", parentGroupId: "ghost" }))
+      .toBe(s.getState());
+  });
+
+  it("refuses a subgroup past the hard depth cap", () => {
+    const s = store();
+    let parent: string | null = null;
+    for (let level = 1; level <= MAX_GROUP_DEPTH; level++) {
+      s.createGroup({ id: `d${level}`, name: `level ${level}`, parentGroupId: parent });
+      parent = `d${level}`;
+    }
+    const atCap = s.getState();
+    expect(groupDepth(atCap, `d${MAX_GROUP_DEPTH}`)).toBe(MAX_GROUP_DEPTH);
+    expect(s.createGroup({ id: "over", name: "Over", parentGroupId: parent })).toBe(atCap);
+  });
+
+  it("recolors a group and rejects unknown colors", () => {
+    const s = store();
+    expect(s.recolorGroup("g1", "magenta").groups.g1.color).toBe("magenta");
+    const before = s.getState();
+    expect(s.recolorGroup("g1", "purple" as PaletteId)).toBe(before);
+    expect(s.recolorGroup("g1", "magenta")).toBe(before);
+    expect(s.recolorGroup("ghost", null)).toBe(before);
+    expect(s.recolorGroup("g1", null).groups.g1.color).toBeNull();
+  });
+
+  it("moveItem nests a group and refuses its own subtree", () => {
+    const s = store();
+    s.createGroup({ id: "g2", name: "Builds" });
+    const next = s.moveItem({ kind: "group", id: "g2" }, "g1", 0);
+    expect(itemIds(next, "g1")).toEqual(["g2", "t3"]);
+    expect(itemIds(next, null)).toEqual(["t1", "t2", "g1"]);
+    expect(validateInvariants(next)).toEqual([]);
+    expect(s.moveItem({ kind: "group", id: "g1" }, "g2", 0)).toBe(next);
+    expect(s.moveItem({ kind: "group", id: "ghost" }, null, 0)).toBe(next);
+  });
+});
+
+describe("setTabFill", () => {
+  it("applies known strengths only", () => {
+    const s = store();
+    expect(s.setTabFill("t1", "strong").tabs.t1.fill).toBe("strong");
+    const before = s.getState();
+    expect(s.setTabFill("t1", "loud" as FillStrength)).toBe(before);
+    expect(s.setTabFill("t1", "strong")).toBe(before);
+    expect(s.setTabFill("ghost", "off")).toBe(before);
   });
 });
 
@@ -291,6 +357,10 @@ describe("splitPane / closePane / resizePane", () => {
       .toEqual([0.1, 0.9]);
     expect((rootSplit(s.resizePane("t1", [], [1, 3]), "t1") as { sizes: [number, number] }).sizes)
       .toEqual([0.25, 0.75]);
+    // 1 - 0.9 lands just below the minimum in floating point: both sides are
+    // clamped, so the extreme drag still parses back.
+    expect((rootSplit(s.resizePane("t1", [], [0.99, 0.01]), "t1") as { sizes: [number, number] }).sizes)
+      .toEqual([0.9, 0.1]);
     expect(validateInvariants(s.getState())).toEqual([]);
   });
 
@@ -311,7 +381,7 @@ describe("splitPane / closePane / resizePane", () => {
 describe("store mechanics", () => {
   it("notifies once per real change and never on no-ops", () => {
     const s = store();
-    const seen: LayoutV1[] = [];
+    const seen: LayoutV2[] = [];
     const unsubscribe = s.subscribe((state) => seen.push(state));
 
     s.renameTab("t1", "deploy");

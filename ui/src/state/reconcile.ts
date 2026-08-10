@@ -1,5 +1,5 @@
 import { sessionIdsInLayout } from "./layout";
-import type { LayoutV1, Tab } from "./layout";
+import type { Item, LayoutV2, Tab } from "./layout";
 
 /// Boot-time reconciliation of the persisted layout against the host's actual
 /// session list (spec "Restore reconciliation", rules 1–3).
@@ -8,7 +8,7 @@ import type { LayoutV1, Tab } from "./layout";
 /// sessions stay in the tree (they must render "session ended — Dismiss"
 /// until the user dismisses them) and their session ids are reported in
 /// `deadSessionIds`. No flag is added to the layout itself — the serialized
-/// blob may only contain fields from the layout_v1 spec.
+/// blob may only contain fields from the layout_v2 spec.
 ///
 /// Structurally compatible with protocol SessionInfo.
 export interface SessionLike {
@@ -17,13 +17,13 @@ export interface SessionLike {
 }
 
 export interface ReconcileResult {
-  layout: LayoutV1;
+  layout: LayoutV2;
   /// Session ids referenced by panes but not alive (absent host-side, or
   /// present with alive=false). Their panes render dead placeholders;
   /// Dismiss prunes the pane and CloseSessions ids still known to the host.
   deadSessionIds: number[];
   /// Live session ids that no tab referenced — each was adopted into a new
-  /// one-pane ungrouped slate tab at tail position (rule 2). With a
+  /// one-pane root-level slate tab at tail position (rule 2). With a
   /// malformed/absent layout (rule 3) every live session lands here.
   orphanAdoptedIds: number[];
   /// Dead host-side sessions referenced by NO pane: invisible, but their
@@ -46,6 +46,7 @@ function adoptionTab(id: string, sessionId: number): Tab {
     id,
     title: null,
     color: "slate",
+    fill: "off",
     split: { kind: "pane", sessionId },
   };
 }
@@ -66,7 +67,7 @@ function freshTabId(
 /// never a silent migration). A valid layout with nothing to adopt is
 /// returned unchanged by identity.
 export function reconcile(
-  layout: LayoutV1 | null,
+  layout: LayoutV2 | null,
   hostSessions: readonly SessionLike[],
   opts?: ReconcileOptions,
 ): ReconcileResult {
@@ -75,7 +76,7 @@ export function reconcile(
   if (layout === null) {
     const taken = new Set<string>();
     const tabs: Record<string, Tab> = {};
-    const ungroupedTabIds: string[] = [];
+    const rootItems: Item[] = [];
     const orphanAdoptedIds: number[] = [];
     for (const session of hostSessions) {
       if (!session.alive) {
@@ -84,16 +85,16 @@ export function reconcile(
       const id = freshTabId(generateId, taken);
       taken.add(id);
       tabs[id] = adoptionTab(id, session.id);
-      ungroupedTabIds.push(id);
+      rootItems.push({ kind: "tab", id });
       orphanAdoptedIds.push(session.id);
     }
     return {
       layout: {
-        version: 1,
-        groups: [],
-        ungroupedTabIds,
+        version: 2,
+        groups: {},
+        rootItems,
         tabs,
-        activeTabId: ungroupedTabIds[0] ?? null,
+        activeTabId: rootItems[0]?.id ?? null,
       },
       deadSessionIds: [],
       orphanAdoptedIds,
@@ -125,18 +126,18 @@ export function reconcile(
 
   const taken = new Set(Object.keys(layout.tabs));
   const tabs = { ...layout.tabs };
-  const ungroupedTabIds = [...layout.ungroupedTabIds];
+  const rootItems = [...layout.rootItems];
   const orphanAdoptedIds: number[] = [];
   for (const session of orphans) {
     const id = freshTabId(generateId, taken);
     taken.add(id);
     tabs[id] = adoptionTab(id, session.id);
-    ungroupedTabIds.push(id);
+    rootItems.push({ kind: "tab", id });
     orphanAdoptedIds.push(session.id);
   }
 
   return {
-    layout: { ...layout, tabs, ungroupedTabIds },
+    layout: { ...layout, tabs, rootItems },
     deadSessionIds,
     orphanAdoptedIds,
     unreferencedDeadSessionIds,

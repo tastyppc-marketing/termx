@@ -86,13 +86,13 @@
   scrollbar-width: thin;
 }
 
-.sidebar__ungrouped {
+.sidebar__root {
   display: grid;
   gap: 2px;
   margin-bottom: 8px;
 }
 
-.sidebar__ungrouped[data-empty="true"] {
+.sidebar__root[data-empty="true"] {
   min-height: 20px;
 }
 
@@ -188,6 +188,18 @@
   display: grid;
   gap: 2px;
   margin-top: 2px;
+}
+
+/* Nesting (layout_v2): one indent step per level, with a hairline guide down
+   the level it belongs to. --border comes from the theme spec once it lands. */
+.sidebar-group .sidebar-group__tabs {
+  margin-left: var(--sidebar-indent, 12px);
+  padding-left: calc(var(--sidebar-indent, 12px) / 2);
+  border-left: 1px solid var(--border, #2a3040);
+}
+
+.sidebar-group .sidebar-group {
+  margin: 2px 0 4px;
 }
 
 .sidebar-tab {

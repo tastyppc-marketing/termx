@@ -1,13 +1,25 @@
 import {
+  canMoveItem,
   emptyLayout,
+  isFillStrength,
   isPaletteId,
+  MAX_GROUP_DEPTH,
   MAX_NAME_LENGTH,
   MAX_SPLIT_DEPTH,
   MIN_PANE_FRACTION,
   sessionIdsInLayout,
   validateInvariants,
 } from "./layout";
-import type { Group, LayoutV1, PaletteId, SplitDir, SplitNode, Tab } from "./layout";
+import type {
+  FillStrength,
+  Group,
+  Item,
+  LayoutV2,
+  PaletteId,
+  SplitDir,
+  SplitNode,
+  Tab,
+} from "./layout";
 
 /// Framework-free layout store. React binds via useSyncExternalStore later;
 /// nothing in here may import react.
@@ -19,46 +31,52 @@ import type { Group, LayoutV1, PaletteId, SplitDir, SplitNode, Tab } from "./lay
 /// sharing. Ids for new tabs/groups are caller-supplied uuids (the spec says
 /// ids are UI-generated), which keeps the store deterministic under test.
 export interface LayoutStore {
-  getState(): LayoutV1;
-  subscribe(listener: (state: LayoutV1) => void): () => void;
+  getState(): LayoutV2;
+  subscribe(listener: (state: LayoutV2) => void): () => void;
   /// Wholesale adoption (e.g. the reconciled boot layout). Rejected if the
   /// candidate violates any spec invariant.
-  replaceState(layout: LayoutV1): LayoutV1;
+  replaceState(layout: LayoutV2): LayoutV2;
 
-  createTab(opts: CreateTabOptions): LayoutV1;
-  closeTab(tabId: string): LayoutV1;
-  renameTab(tabId: string, title: string | null): LayoutV1;
-  recolorTab(tabId: string, color: PaletteId): LayoutV1;
-  setActiveTab(tabId: string | null): LayoutV1;
+  createTab(opts: CreateTabOptions): LayoutV2;
+  closeTab(tabId: string): LayoutV2;
+  renameTab(tabId: string, title: string | null): LayoutV2;
+  recolorTab(tabId: string, color: PaletteId): LayoutV2;
+  setActiveTab(tabId: string | null): LayoutV2;
 
   /// Drag-drop commit: remove from the current container, then insert at
   /// `index` in the target (index applies AFTER removal; clamped).
-  moveTab(tabId: string, target: ContainerRef, index: number): LayoutV1;
+  moveTab(tabId: string, target: ContainerRef, index: number): LayoutV2;
+  /// moveTab for any item, subgroups included. Refused when the move would
+  /// break an invariant (a group into its own subtree, past the depth cap).
+  moveItem(item: Item, targetGroupId: string | null, index: number): LayoutV2;
   reorderWithinContainer(
     groupId: string | null,
     fromIndex: number,
     toIndex: number,
-  ): LayoutV1;
+  ): LayoutV2;
 
-  createGroup(opts: CreateGroupOptions): LayoutV1;
-  renameGroup(groupId: string, name: string): LayoutV1;
-  toggleGroupCollapsed(groupId: string): LayoutV1;
-  /// Tabs fall back to the ungrouped list (which renders above all groups),
-  /// appended at its tail in their existing order.
-  deleteGroup(groupId: string): LayoutV1;
+  createGroup(opts: CreateGroupOptions): LayoutV2;
+  renameGroup(groupId: string, name: string): LayoutV2;
+  recolorGroup(groupId: string, color: PaletteId | null): LayoutV2;
+  toggleGroupCollapsed(groupId: string): LayoutV2;
+  /// Keep-children delete: the group's items take its place in its own
+  /// container, in order. Closing the tabs first is the caller's business.
+  deleteGroup(groupId: string): LayoutV2;
+
+  setTabFill(tabId: string, fill: FillStrength): LayoutV2;
 
   splitPane(
     tabId: string,
     paneSessionId: number,
     dir: SplitDir,
     newSessionId: number,
-  ): LayoutV1;
+  ): LayoutV2;
   /// Prunes the pane and collapses its parent split into the sibling. Closing
   /// a tab's last pane closes the tab.
-  closePane(tabId: string, sessionId: number): LayoutV1;
+  closePane(tabId: string, sessionId: number): LayoutV2;
   /// `path` walks child indices (0|1) from the tab's root to a split node.
   /// Sizes are normalized to sum 1 with each side clamped to ≥ 0.1.
-  resizePane(tabId: string, path: number[], sizes: [number, number]): LayoutV1;
+  resizePane(tabId: string, path: number[], sizes: [number, number]): LayoutV2;
 }
 
 export interface ContainerRef {
@@ -70,6 +88,7 @@ export interface CreateTabOptions {
   sessionId: number;
   title?: string | null;
   color?: PaletteId;
+  fill?: FillStrength;
   groupId?: string | null;
   index?: number;
 }
@@ -77,6 +96,9 @@ export interface CreateTabOptions {
 export interface CreateGroupOptions {
   id: string;
   name: string;
+  color?: PaletteId | null;
+  /// Container the new group lands in; null (the default) = the root.
+  parentGroupId?: string | null;
   index?: number;
 }
 
@@ -101,8 +123,9 @@ function clampIndex(index: number, length: number): number {
   return Math.min(Math.max(index, 0), length);
 }
 
-function sameOrder(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((id, i) => id === b[i]);
+function sameItems(a: readonly Item[], b: readonly Item[]): boolean {
+  return a.length === b.length &&
+    a.every((item, i) => item.kind === b[i]!.kind && item.id === b[i]!.id);
 }
 
 function insertAt<T>(list: readonly T[], index: number, item: T): T[] {
@@ -111,39 +134,80 @@ function insertAt<T>(list: readonly T[], index: number, item: T): T[] {
   return next;
 }
 
-function findGroup(layout: LayoutV1, groupId: string): Group | undefined {
-  return layout.groups.find((g) => g.id === groupId);
+function findGroup(layout: LayoutV2, groupId: string): Group | undefined {
+  return layout.groups[groupId];
 }
 
-/// The container currently holding `tabId`: null groupId = ungrouped.
-function containerOf(
-  layout: LayoutV1,
-  tabId: string,
-): { groupId: string | null; list: readonly string[] } | undefined {
-  if (layout.ungroupedTabIds.includes(tabId)) {
-    return { groupId: null, list: layout.ungroupedTabIds };
-  }
-  const group = layout.groups.find((g) => g.tabIds.includes(tabId));
-  return group ? { groupId: group.id, list: group.tabIds } : undefined;
+function isItem(item: Item, kind: Item["kind"], id: string): boolean {
+  return item.kind === kind && item.id === id;
 }
 
-function withContainerList(
-  layout: LayoutV1,
+/// Ordered children of a container: null groupId = the sidebar root. Undefined
+/// means the group does not exist.
+function itemsOf(
+  layout: LayoutV2,
   groupId: string | null,
-  list: string[],
-): LayoutV1 {
+): readonly Item[] | undefined {
+  return groupId === null ? layout.rootItems : findGroup(layout, groupId)?.items;
+}
+
+/// The container currently holding `item`: null groupId = the root.
+function containerOf(
+  layout: LayoutV2,
+  item: Item,
+): { groupId: string | null; list: readonly Item[] } | undefined {
+  if (layout.rootItems.some((candidate) => isItem(candidate, item.kind, item.id))) {
+    return { groupId: null, list: layout.rootItems };
+  }
+  for (const group of Object.values(layout.groups)) {
+    if (group.items.some((candidate) => isItem(candidate, item.kind, item.id))) {
+      return { groupId: group.id, list: group.items };
+    }
+  }
+  return undefined;
+}
+
+function withContainerItems(
+  layout: LayoutV2,
+  groupId: string | null,
+  items: Item[],
+): LayoutV2 {
   if (groupId === null) {
-    return { ...layout, ungroupedTabIds: list };
+    return { ...layout, rootItems: items };
+  }
+  const group = layout.groups[groupId];
+  if (!group) {
+    return layout;
   }
   return {
     ...layout,
-    groups: layout.groups.map((g) => (g.id === groupId ? { ...g, tabIds: list } : g)),
+    groups: { ...layout.groups, [groupId]: { ...group, items } },
   };
 }
 
-/// Sidebar render order: ungrouped tabs first, then each group's tabs.
-function flattenedTabOrder(layout: LayoutV1): string[] {
-  return [...layout.ungroupedTabIds, ...layout.groups.flatMap((g) => g.tabIds)];
+/// Sidebar render order: every container's items in order, subgroups walked
+/// where they sit.
+function flattenedTabOrder(layout: LayoutV2): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const walk = (items: readonly Item[]): void => {
+    for (const item of items) {
+      if (item.kind === "tab") {
+        out.push(item.id);
+        continue;
+      }
+      if (seen.has(item.id)) {
+        continue;
+      }
+      seen.add(item.id);
+      const group = layout.groups[item.id];
+      if (group) {
+        walk(group.items);
+      }
+    }
+  };
+  walk(layout.rootItems);
+  return out;
 }
 
 function nodeAtPath(
@@ -222,11 +286,11 @@ function prunePane(
   return "not-found";
 }
 
-export function createLayoutStore(initial?: LayoutV1): LayoutStore {
-  let state: LayoutV1 = initial ?? emptyLayout();
-  const listeners = new Set<(state: LayoutV1) => void>();
+export function createLayoutStore(initial?: LayoutV2): LayoutStore {
+  let state: LayoutV2 = initial ?? emptyLayout();
+  const listeners = new Set<(state: LayoutV2) => void>();
 
-  function commit(next: LayoutV1): LayoutV1 {
+  function commit(next: LayoutV2): LayoutV2 {
     if (next === state) {
       return state;
     }
@@ -237,8 +301,8 @@ export function createLayoutStore(initial?: LayoutV1): LayoutStore {
     return state;
   }
 
-  function closeTabImpl(tabId: string): LayoutV1 {
-    const container = containerOf(state, tabId);
+  function closeTabImpl(tabId: string): LayoutV2 {
+    const container = containerOf(state, { kind: "tab", id: tabId });
     if (container === undefined || !(tabId in state.tabs)) {
       return state;
     }
@@ -252,12 +316,50 @@ export function createLayoutStore(initial?: LayoutV1): LayoutStore {
 
     const tabs = { ...state.tabs };
     delete tabs[tabId];
-    const next = withContainerList(
+    const next = withContainerItems(
       state,
       container.groupId,
-      container.list.filter((id) => id !== tabId),
+      container.list.filter((item) => !isItem(item, "tab", tabId)),
     );
     return commit({ ...next, tabs, activeTabId });
+  }
+
+  /// Shared move engine: pull the item out of its container, drop it back in
+  /// at `index` of the target (clamped, applied AFTER the removal).
+  function moveItemImpl(
+    item: Item,
+    targetGroupId: string | null,
+    index: number,
+  ): LayoutV2 {
+    const source = containerOf(state, item);
+    if (source === undefined || itemsOf(state, targetGroupId) === undefined) {
+      return state;
+    }
+    // The hard cap guards the blob; the user setting gates the UI upstream.
+    if (!canMoveItem(state, item, targetGroupId, MAX_GROUP_DEPTH)) {
+      return state;
+    }
+
+    const removed = withContainerItems(
+      state,
+      source.groupId,
+      source.list.filter((candidate) => !isItem(candidate, item.kind, item.id)),
+    );
+    const listAfterRemoval = itemsOf(removed, targetGroupId)!;
+    const at = clampIndex(index, listAfterRemoval.length);
+    const next = withContainerItems(
+      removed,
+      targetGroupId,
+      insertAt(listAfterRemoval, at, item),
+    );
+
+    if (
+      source.groupId === targetGroupId &&
+      sameItems(source.list, itemsOf(next, targetGroupId)!)
+    ) {
+      return state;
+    }
+    return commit(next);
   }
 
   return {
@@ -297,17 +399,23 @@ export function createLayoutStore(initial?: LayoutV1): LayoutStore {
         }
         title = normalized;
       }
+      const fill = opts.fill ?? "off";
+      if (!isFillStrength(fill)) {
+        return state;
+      }
       const groupId = opts.groupId ?? null;
-      const targetList = groupId === null
-        ? state.ungroupedTabIds
-        : findGroup(state, groupId)?.tabIds;
+      const targetList = itemsOf(state, groupId);
       if (targetList === undefined) {
         return state;
       }
 
-      const tab: Tab = { id, title, color, split: { kind: "pane", sessionId } };
+      const tab: Tab = { id, title, color, fill, split: { kind: "pane", sessionId } };
       const index = clampIndex(opts.index ?? targetList.length, targetList.length);
-      const next = withContainerList(state, groupId, insertAt(targetList, index, id));
+      const next = withContainerItems(
+        state,
+        groupId,
+        insertAt(targetList, index, { kind: "tab", id }),
+      );
       return commit({
         ...next,
         tabs: { ...next.tabs, [id]: tab },
@@ -361,47 +469,16 @@ export function createLayoutStore(initial?: LayoutV1): LayoutStore {
     },
 
     moveTab(tabId, target, index) {
-      const source = containerOf(state, tabId);
-      if (source === undefined) {
+      if (!(tabId in state.tabs)) {
         return state;
       }
-      const targetList = target.groupId === null
-        ? state.ungroupedTabIds
-        : findGroup(state, target.groupId)?.tabIds;
-      if (targetList === undefined) {
-        return state;
-      }
-
-      const removed = withContainerList(
-        state,
-        source.groupId,
-        source.list.filter((id) => id !== tabId),
-      );
-      const listAfterRemoval = target.groupId === null
-        ? removed.ungroupedTabIds
-        : findGroup(removed, target.groupId)!.tabIds;
-      const at = clampIndex(index, listAfterRemoval.length);
-      const next = withContainerList(
-        removed,
-        target.groupId,
-        insertAt(listAfterRemoval, at, tabId),
-      );
-
-      if (
-        source.groupId === target.groupId &&
-        sameOrder(source.list, target.groupId === null
-          ? next.ungroupedTabIds
-          : findGroup(next, target.groupId)!.tabIds)
-      ) {
-        return state;
-      }
-      return commit(next);
+      return moveItemImpl({ kind: "tab", id: tabId }, target.groupId, index);
     },
 
+    moveItem: moveItemImpl,
+
     reorderWithinContainer(groupId, fromIndex, toIndex) {
-      const list = groupId === null
-        ? state.ungroupedTabIds
-        : findGroup(state, groupId)?.tabIds;
+      const list = itemsOf(state, groupId);
       if (list === undefined) {
         return state;
       }
@@ -410,11 +487,11 @@ export function createLayoutStore(initial?: LayoutV1): LayoutStore {
       }
       const next = [...list];
       const [moved] = next.splice(fromIndex, 1);
-      next.splice(clampIndex(toIndex, next.length), 0, moved);
-      if (sameOrder(list, next)) {
+      next.splice(clampIndex(toIndex, next.length), 0, moved!);
+      if (sameItems(list, next)) {
         return state;
       }
-      return commit(withContainerList(state, groupId, next));
+      return commit(withContainerItems(state, groupId, next));
     },
 
     createGroup(opts) {
@@ -422,9 +499,24 @@ export function createLayoutStore(initial?: LayoutV1): LayoutStore {
       if (name === null || opts.id.length === 0 || findGroup(state, opts.id)) {
         return state;
       }
-      const group: Group = { id: opts.id, name, collapsed: false, tabIds: [] };
-      const index = clampIndex(opts.index ?? state.groups.length, state.groups.length);
-      return commit({ ...state, groups: insertAt(state.groups, index, group) });
+      const color = opts.color ?? null;
+      if (color !== null && !isPaletteId(color)) {
+        return state;
+      }
+      const parentGroupId = opts.parentGroupId ?? null;
+      const targetList = itemsOf(state, parentGroupId);
+      if (targetList === undefined) {
+        return state;
+      }
+      const group: Group = { id: opts.id, name, collapsed: false, color, items: [] };
+      const index = clampIndex(opts.index ?? targetList.length, targetList.length);
+      const next = withContainerItems(
+        { ...state, groups: { ...state.groups, [opts.id]: group } },
+        parentGroupId,
+        insertAt(targetList, index, { kind: "group", id: opts.id }),
+      );
+      // A new group is empty, so only the depth cap can refuse it.
+      return validateInvariants(next).length === 0 ? commit(next) : state;
     },
 
     renameGroup(groupId, name) {
@@ -435,33 +527,60 @@ export function createLayoutStore(initial?: LayoutV1): LayoutStore {
       }
       return commit({
         ...state,
-        groups: state.groups.map((g) =>
-          g.id === groupId ? { ...g, name: normalized } : g
-        ),
+        groups: { ...state.groups, [groupId]: { ...group, name: normalized } },
       });
     },
 
-    toggleGroupCollapsed(groupId) {
-      if (findGroup(state, groupId) === undefined) {
+    recolorGroup(groupId, color) {
+      const group = findGroup(state, groupId);
+      if (group === undefined || (color !== null && !isPaletteId(color))) {
+        return state;
+      }
+      if (group.color === color) {
         return state;
       }
       return commit({
         ...state,
-        groups: state.groups.map((g) =>
-          g.id === groupId ? { ...g, collapsed: !g.collapsed } : g
-        ),
+        groups: { ...state.groups, [groupId]: { ...group, color } },
       });
     },
 
-    deleteGroup(groupId) {
+    toggleGroupCollapsed(groupId) {
       const group = findGroup(state, groupId);
       if (group === undefined) {
         return state;
       }
       return commit({
         ...state,
-        groups: state.groups.filter((g) => g.id !== groupId),
-        ungroupedTabIds: [...state.ungroupedTabIds, ...group.tabIds],
+        groups: {
+          ...state.groups,
+          [groupId]: { ...group, collapsed: !group.collapsed },
+        },
+      });
+    },
+
+    deleteGroup(groupId) {
+      const group = findGroup(state, groupId);
+      const container = containerOf(state, { kind: "group", id: groupId });
+      if (group === undefined || container === undefined) {
+        return state;
+      }
+      const at = container.list.findIndex((item) => isItem(item, "group", groupId));
+      const items = [...container.list];
+      items.splice(at, 1, ...group.items);
+      const groups = { ...state.groups };
+      delete groups[groupId];
+      return commit(withContainerItems({ ...state, groups }, container.groupId, items));
+    },
+
+    setTabFill(tabId, fill) {
+      const tab = state.tabs[tabId] as Tab | undefined;
+      if (tab === undefined || !isFillStrength(fill) || tab.fill === fill) {
+        return state;
+      }
+      return commit({
+        ...state,
+        tabs: { ...state.tabs, [tabId]: { ...tab, fill } },
       });
     },
 
@@ -527,15 +646,22 @@ export function createLayoutStore(initial?: LayoutV1): LayoutStore {
         Math.max(a / (a + b), MIN_PANE_FRACTION),
         1 - MIN_PANE_FRACTION,
       );
+      // `1 - first` at the clamp is 0.09999999999999998 in binary floating
+      // point — just under the minimum the invariants enforce — so the second
+      // side is clamped in its own right rather than trusted to the subtraction.
+      const second = Math.min(
+        Math.max(1 - first, MIN_PANE_FRACTION),
+        1 - MIN_PANE_FRACTION,
+      );
       const target = nodeAtPath(tab.split, path);
       if (target === undefined || target.kind !== "split") {
         return state;
       }
-      if (target.sizes[0] === first && target.sizes[1] === 1 - first) {
+      if (target.sizes[0] === first && target.sizes[1] === second) {
         return state;
       }
       const split = replaceAtPath(tab.split, path, (node) =>
-        node.kind === "split" ? { ...node, sizes: [first, 1 - first] } : null
+        node.kind === "split" ? { ...node, sizes: [first, second] } : null
       );
       if (split === null) {
         return state;

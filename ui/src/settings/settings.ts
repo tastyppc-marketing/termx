@@ -41,6 +41,11 @@ export const CLOSE_BEHAVIORS = ["ask", "keep-running", "stop-all"] as const;
 
 export type CloseBehavior = (typeof CLOSE_BEHAVIORS)[number];
 
+/** 1 = flat (the pre-nesting behavior). The parse cap is 8 regardless. */
+export const MAX_GROUP_DEPTH_OPTIONS = [1, 2, 3, 4, 5] as const;
+
+export type MaxGroupDepthOption = (typeof MAX_GROUP_DEPTH_OPTIONS)[number];
+
 export interface TermxSettings {
   /** Where a plain "new tab" opens. Default: follow the group's CDs. */
   readonly newTabPolicy: NewTabPolicy;
@@ -62,6 +67,8 @@ export interface TermxSettings {
   readonly sleepHiddenTerminals: SleepOption;
   /** What happens to running sessions when the TermX window closes. */
   readonly onWindowClose: CloseBehavior;
+  /** How deep sidebar groups may be nested by creation or drag. */
+  readonly maxGroupDepth: MaxGroupDepthOption;
 }
 
 export const DEFAULT_SETTINGS: TermxSettings = {
@@ -75,6 +82,7 @@ export const DEFAULT_SETTINGS: TermxSettings = {
   summaryDisplay: "hover",
   sleepHiddenTerminals: "15",
   onWindowClose: "ask",
+  maxGroupDepth: 3,
 };
 
 function isNewTabPolicy(value: unknown): value is NewTabPolicy {
@@ -103,6 +111,10 @@ function isSleepOption(value: unknown): value is SleepOption {
 
 function isCloseBehavior(value: unknown): value is CloseBehavior {
   return (CLOSE_BEHAVIORS as readonly unknown[]).includes(value);
+}
+
+function isMaxGroupDepth(value: unknown): value is MaxGroupDepthOption {
+  return (MAX_GROUP_DEPTH_OPTIONS as readonly unknown[]).includes(value);
 }
 
 /** Parse settings text (null = missing file). Never throws. */
@@ -154,6 +166,9 @@ export function parseSettings(text: string | null): TermxSettings {
     onWindowClose: isCloseBehavior(record.onWindowClose)
       ? record.onWindowClose
       : DEFAULT_SETTINGS.onWindowClose,
+    maxGroupDepth: isMaxGroupDepth(record.maxGroupDepth)
+      ? record.maxGroupDepth
+      : DEFAULT_SETTINGS.maxGroupDepth,
   };
 }
 

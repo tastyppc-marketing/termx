@@ -4,7 +4,6 @@ import {
   commitDrop,
   crossedDragThreshold,
   type DragSource,
-  type DropTarget,
 } from "../pointerDrag";
 
 describe("crossedDragThreshold", () => {
@@ -19,64 +18,72 @@ describe("crossedDragThreshold", () => {
 });
 
 describe("commitDrop", () => {
-  const tab: DragSource = { kind: "tab", tabId: "tab", groupId: "a", index: 1 };
+  const tab: DragSource = {
+    item: { kind: "tab", id: "tab" },
+    containerId: "a",
+    index: 1,
+  };
 
   it("converts same-container positions to post-removal indices", () => {
-    expect(commitDrop(tab, { kind: "tab", groupId: "a", index: 4 })).toEqual({
-      kind: "move_tab",
-      tabId: "tab",
+    expect(commitDrop(tab, { containerId: "a", index: 4 })).toEqual({
+      kind: "move_item",
+      item: { kind: "tab", id: "tab" },
       groupId: "a",
       index: 3,
     });
-    expect(commitDrop(tab, { kind: "tab", groupId: "a", index: 0 })).toEqual({
-      kind: "move_tab",
-      tabId: "tab",
+    expect(commitDrop(tab, { containerId: "a", index: 0 })).toEqual({
+      kind: "move_item",
+      item: { kind: "tab", id: "tab" },
       groupId: "a",
       index: 0,
     });
   });
 
-  it("returns null for before/after slots that leave a tab unchanged", () => {
-    expect(commitDrop(tab, { kind: "tab", groupId: "a", index: 1 })).toBeNull();
-    expect(commitDrop(tab, { kind: "tab", groupId: "a", index: 2 })).toBeNull();
+  it("returns null for before/after slots that leave an item unchanged", () => {
+    expect(commitDrop(tab, { containerId: "a", index: 1 })).toBeNull();
+    expect(commitDrop(tab, { containerId: "a", index: 2 })).toBeNull();
   });
 
-  it("moves tabs across groups and the ungrouped root without index adjustment", () => {
-    expect(commitDrop(tab, { kind: "tab", groupId: "b", index: 2 })).toEqual({
-      kind: "move_tab",
-      tabId: "tab",
+  it("moves items across containers without index adjustment", () => {
+    expect(commitDrop(tab, { containerId: "b", index: 2 })).toEqual({
+      kind: "move_item",
+      item: { kind: "tab", id: "tab" },
       groupId: "b",
       index: 2,
     });
-    expect(commitDrop(tab, { kind: "tab", groupId: null, index: 0 })).toEqual({
-      kind: "move_tab",
-      tabId: "tab",
+    expect(commitDrop(tab, { containerId: null, index: 0 })).toEqual({
+      kind: "move_item",
+      item: { kind: "tab", id: "tab" },
       groupId: null,
       index: 0,
     });
   });
 
-  it("reorders groups with post-removal indices and rejects no-op slots", () => {
-    const group: DragSource = { kind: "group", groupId: "group", index: 0 };
-    expect(commitDrop(group, { kind: "group", index: 3 })).toEqual({
-      kind: "reorder_group",
-      groupId: "group",
+  it("carries groups through the same container arithmetic", () => {
+    const group: DragSource = {
+      item: { kind: "group", id: "group" },
+      containerId: null,
+      index: 0,
+    };
+    expect(commitDrop(group, { containerId: null, index: 3 })).toEqual({
+      kind: "move_item",
+      item: { kind: "group", id: "group" },
+      groupId: null,
       index: 2,
     });
-    expect(commitDrop(group, { kind: "group", index: 1 })).toBeNull();
-  });
-
-  it("rejects mismatched source and target kinds", () => {
-    const groupTarget: DropTarget = { kind: "group", index: 0 };
-    const tabTarget: DropTarget = { kind: "tab", groupId: null, index: 0 };
-    expect(commitDrop(tab, groupTarget)).toBeNull();
-    expect(commitDrop({ kind: "group", groupId: "g", index: 0 }, tabTarget)).toBeNull();
+    expect(commitDrop(group, { containerId: null, index: 1 })).toBeNull();
+    expect(commitDrop(group, { containerId: "nest", index: 0 })).toEqual({
+      kind: "move_item",
+      item: { kind: "group", id: "group" },
+      groupId: "nest",
+      index: 0,
+    });
   });
 
   it("clamps negative, fractional, and non-finite edge positions", () => {
-    expect(commitDrop(tab, { kind: "tab", groupId: "b", index: -100 })).toMatchObject({ index: 0 });
-    expect(commitDrop(tab, { kind: "tab", groupId: "b", index: 2.9 })).toMatchObject({ index: 2 });
-    expect(commitDrop(tab, { kind: "tab", groupId: "b", index: Number.POSITIVE_INFINITY }))
+    expect(commitDrop(tab, { containerId: "b", index: -100 })).toMatchObject({ index: 0 });
+    expect(commitDrop(tab, { containerId: "b", index: 2.9 })).toMatchObject({ index: 2 });
+    expect(commitDrop(tab, { containerId: "b", index: Number.POSITIVE_INFINITY }))
       .toMatchObject({ index: 0 });
   });
 });

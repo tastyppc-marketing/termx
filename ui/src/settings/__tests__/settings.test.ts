@@ -29,6 +29,7 @@ describe("parseSettings", () => {
       summaryDisplay: "under-title",
       sleepHiddenTerminals: "60",
       onWindowClose: "stop-all",
+      maxGroupDepth: 5,
     } as const;
     expect(parseSettings(serializeSettings(settings))).toEqual(settings);
   });
@@ -46,6 +47,7 @@ describe("parseSettings", () => {
         summaryDisplay: "sidebar",
         sleepHiddenTerminals: "30",
         onWindowClose: "explode",
+        maxGroupDepth: 7,
       }),
     );
     expect(parsed).toEqual({
@@ -59,7 +61,19 @@ describe("parseSettings", () => {
       summaryDisplay: DEFAULT_SETTINGS.summaryDisplay,
       sleepHiddenTerminals: DEFAULT_SETTINGS.sleepHiddenTerminals,
       onWindowClose: DEFAULT_SETTINGS.onWindowClose,
+      maxGroupDepth: DEFAULT_SETTINGS.maxGroupDepth,
     });
+  });
+
+  it("maxGroupDepth: defaults to 3 and rejects anything off the ladder", () => {
+    expect(DEFAULT_SETTINGS.maxGroupDepth).toBe(3);
+    expect(parseSettings(JSON.stringify({}))).toMatchObject({ maxGroupDepth: 3 });
+    for (const bad of [7, 0, -1, 2.5, "deep", null, true]) {
+      expect(parseSettings(JSON.stringify({ maxGroupDepth: bad, defaultProfile: "cmd" })))
+        .toMatchObject({ maxGroupDepth: 3, defaultProfile: "cmd" });
+    }
+    expect(parseSettings(JSON.stringify({ maxGroupDepth: 1 })).maxGroupDepth).toBe(1);
+    expect(parseSettings(JSON.stringify({ maxGroupDepth: 5 })).maxGroupDepth).toBe(5);
   });
 
   it("ignores unknown fields", () => {

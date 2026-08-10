@@ -166,6 +166,38 @@ describe("SettingsDialog", () => {
     expect(onChange).toHaveBeenCalledWith({ onWindowClose: "stop-all" });
   });
 
+  it("renders the group-nesting depth ladder and patches just that field", async () => {
+    const onChange = vi.fn();
+    await render(
+      <SettingsDialog
+        settings={DEFAULT_SETTINGS}
+        onChange={onChange}
+        onClose={() => undefined}
+      />,
+    );
+
+    const depth3 = container.querySelector<HTMLInputElement>(
+      "input[name='maxGroupDepth'][value='3']",
+    );
+    expect(depth3?.checked).toBe(true);
+
+    const depth1 = container.querySelector<HTMLInputElement>(
+      "input[name='maxGroupDepth'][value='1']",
+    );
+    await act(async () => {
+      depth1?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ maxGroupDepth: 1 });
+
+    const depth5 = container.querySelector<HTMLInputElement>(
+      "input[name='maxGroupDepth'][value='5']",
+    );
+    await act(async () => {
+      depth5?.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ maxGroupDepth: 5 });
+  });
+
   it("closes on Escape and via the Done button", async () => {
     const onClose = vi.fn();
     await render(

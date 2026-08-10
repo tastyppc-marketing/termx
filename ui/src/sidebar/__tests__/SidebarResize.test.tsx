@@ -10,7 +10,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationsStore } from "../../conversations/store";
 import type { LlmSessionRecord } from "../../conversations/types";
 import { DEFAULT_SETTINGS } from "../../settings/settings";
-import type { WorkspaceSnapshot } from "../../workspace/WorkspaceController";
+import type {
+  SidebarTabModel,
+  WorkspaceSnapshot,
+} from "../../workspace/WorkspaceController";
 import { Sidebar, type SidebarActions, type SidebarProps } from "../Sidebar";
 
 let container: HTMLDivElement;
@@ -37,36 +40,41 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
+function rootTab(): SidebarTabModel {
+  return {
+    id: "tab-1",
+    groupId: null,
+    title: "powershell · one",
+    color: "blue",
+    fill: "off",
+    primarySessionId: 1,
+    sessionIds: [1],
+    status: "live",
+    activity: "idle",
+    profile: "powershell",
+    cwd: "C:\\one",
+  };
+}
+
 function snapshot(): WorkspaceSnapshot {
   return {
     layout: {
-      version: 1,
-      groups: [],
-      ungroupedTabIds: ["tab-1"],
+      version: 2,
+      groups: {},
+      rootItems: [{ kind: "tab", id: "tab-1" }],
       tabs: {
         "tab-1": {
           id: "tab-1",
           title: null,
           color: "blue",
+          fill: "off",
           split: { kind: "pane", sessionId: 1 },
         },
       },
       activeTabId: "tab-1",
     },
-    ungroupedTabs: [
-      {
-        id: "tab-1",
-        groupId: null,
-        title: "powershell · one",
-        color: "blue",
-        primarySessionId: 1,
-        sessionIds: [1],
-        status: "live",
-        activity: "idle",
-        profile: "powershell",
-        cwd: "C:\\one",
-      },
-    ],
+    rootItems: [{ kind: "tab", tab: rootTab() }],
+    ungroupedTabs: [rootTab()],
     groups: [],
     paneStates: { 1: { status: "live", exitCode: null } },
     activeTabId: "tab-1",
@@ -81,9 +89,8 @@ function actions(): SidebarActions {
     activateTab: vi.fn(),
     renameTab: vi.fn(),
     recolorTab: vi.fn(),
-    moveTab: vi.fn(),
-    reorderGroup: vi.fn(),
-    createGroup: vi.fn(),
+    moveItem: vi.fn(() => true),
+    createGroup: vi.fn(() => 'new-group'),
     renameGroup: vi.fn(),
     toggleGroup: vi.fn(),
     createTab: vi.fn(async () => undefined),
@@ -91,7 +98,7 @@ function actions(): SidebarActions {
     duplicateTab: vi.fn(async () => undefined),
     openFolderHere: vi.fn(async () => undefined),
     closeLiveTab: vi.fn(async () => undefined),
-    closeGroup: vi.fn(async () => undefined),
+    deleteGroup: vi.fn(async () => undefined),
     dismissDeadTab: vi.fn(async () => undefined),
   };
 }

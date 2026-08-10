@@ -11,11 +11,18 @@ import {
 } from "../conversations/ConversationsRail";
 import type { ConversationsStore } from "../conversations/store";
 import type { LlmSessionRecord } from "../conversations/types";
-import type { TermxSettings } from "../settings/settings";
-import { PALETTE_HEX, PALETTE_IDS, type PaletteId } from "../state/layout";
+import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
+import {
+  canMoveItem,
+  PALETTE_HEX,
+  PALETTE_IDS,
+  type Item,
+  type PaletteId,
+} from "../state/layout";
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH } from "../workspace/uiState";
 import type {
   SidebarGroupModel,
+  SidebarItemModel,
   SidebarTabModel,
   WorkspaceSnapshot,
 } from "../workspace/WorkspaceController";
@@ -33,9 +40,10 @@ export interface SidebarActions {
   activateTab(tabId: string): void;
   renameTab(tabId: string, title: string | null): void;
   recolorTab(tabId: string, color: PaletteId): void;
-  moveTab(tabId: string, groupId: string | null, index: number): void;
-  reorderGroup(groupId: string, targetIndex: number): void;
-  createGroup(name: string): void;
+  /** Tabs and subgroups alike (layout_v2); false = the move was refused. */
+  moveItem(item: Item, targetGroupId: string | null, index: number): boolean;
+  /** `parentGroupId` null = a root group; null back = the depth cap refused it. */
+  createGroup(parentGroupId: string | null, name?: string): string | null;
   renameGroup(groupId: string, name: string): void;
   toggleGroup(groupId: string): void;
   createTab(options: { groupId: string | null; profile: string | null }): Promise<void>;
@@ -44,7 +52,8 @@ export interface SidebarActions {
   duplicateTab(tabId: string): Promise<void>;
   openFolderHere(tabId: string): Promise<void>;
   closeLiveTab(tabId: string): Promise<void>;
-  closeGroup(groupId: string): Promise<void>;
+  /** Keep-children lifts the group's items into its own container. */
+  deleteGroup(groupId: string, mode: "keep-children" | "close-tabs"): Promise<void>;
   dismissDeadTab(tabId: string): Promise<void>;
 }
 
@@ -76,6 +85,12 @@ export interface SidebarProps {
   onOpenSettings?: () => void;
   /** Opens the folder-search palette targeting the given group. */
   onOpenFolderSearch?: (groupId: string | null) => void;
+  /**
+   * `settings.maxGroupDepth` (nesting spec §3) — it gates creation and
+   * movement only, never rendering, so an unwired caller just gets the
+   * default.
+   */
+  maxGroupDepth?: number;
   conversations?: SidebarConversations;
   /**
    * Persisted sidebar width in px (polish P5), already clamped by
@@ -143,6 +158,11 @@ interface PointerDragState {
   target: DropTarget | null;
   label: string;
   indicator: { left: number; top: number; width: number } | null;
+  /**
+   * Containers this item may land in, resolved once at drag start (nesting
+   * spec §5): an illegal drop never renders a target in the first place.
+   */
+  eligible: ReadonlySet<string | null>;
 }
 
 export function Sidebar({
@@ -150,6 +170,7 @@ export function Sidebar({
   actions,
   onOpenSettings,
   onOpenFolderSearch,
+  maxGroupDepth = DEFAULT_SETTINGS.maxGroupDepth,
   conversations,
   width,
   onResize,
@@ -165,7 +186,11 @@ export function Sidebar({
   const [dismissingTabIds, setDismissingTabIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  const [creatingGroup, setCreatingGroup] = useState(false);
+  /// Non-null while the inline name editor is open; it carries the parent the
+  /// new group belongs to (null = a root group).
+  const [creatingGroup, setCreatingGroup] = useState<
+    { parentGroupId: string | null } | null
+  >(null);
   const [menu, setMenu] = useState<SidebarMenu | null>(null);
   const [menuPanel, setMenuPanel] = useState<MenuPanel>("root");
   const [focusedTabId, setFocusedTabId] = useState<string | null>(snapshot.activeTabId);
@@ -182,10 +207,22 @@ export function Sidebar({
   const asideRef = useRef<HTMLElement | null>(null);
   const resizeRef = useRef<ResizeDragState | null>(null);
 
-  const visibleTabs = useMemo(() => [
-    ...snapshot.ungroupedTabs,
-    ...snapshot.groups.flatMap((group) => group.collapsed ? [] : group.tabs),
-  ], [snapshot.groups, snapshot.ungroupedTabs]);
+  /// Rendered top-to-bottom order of the rows a user can actually reach:
+  /// a collapsed group hides its whole subtree, not just its own tabs.
+  const visibleTabs = useMemo(() => {
+    const out: SidebarTabModel[] = [];
+    const walk = (items: readonly SidebarItemModel[]): void => {
+      for (const item of items) {
+        if (item.kind === "tab") {
+          out.push(item.tab);
+        } else if (!item.group.collapsed) {
+          walk(item.group.items);
+        }
+      }
+    };
+    walk(snapshot.rootItems);
+    return out;
+  }, [snapshot.rootItems]);
   const visibleTabIds = useMemo(() => visibleTabs.map((tab) => tab.id), [visibleTabs]);
 
   useLayoutEffect(() => {
@@ -259,6 +296,21 @@ export function Sidebar({
     return () => window.removeEventListener("keydown", handleEscape);
   }, []);
 
+  /// Every container `item` is allowed into, the root included — the depth
+  /// setting and the no-cycle rule both live in `canMoveItem`.
+  const eligibleContainers = (item: Item): ReadonlySet<string | null> => {
+    const out = new Set<string | null>();
+    if (canMoveItem(snapshot.layout, item, null, maxGroupDepth)) {
+      out.add(null);
+    }
+    for (const group of snapshot.groups) {
+      if (canMoveItem(snapshot.layout, item, group.id, maxGroupDepth)) {
+        out.add(group.id);
+      }
+    }
+    return out;
+  };
+
   const startDrag = (
     event: ReactPointerEvent<HTMLElement>,
     source: DragSource,
@@ -282,6 +334,7 @@ export function Sidebar({
       target: null,
       label,
       indicator: null,
+      eligible: eligibleContainers(source.item),
     });
   };
 
@@ -298,7 +351,7 @@ export function Sidebar({
       }
       return;
     }
-    const resolved = resolveDropTarget(current.source, point);
+    const resolved = resolveDropTarget(point, current.eligible);
     installDrag({
       ...current,
       current: point,
@@ -319,10 +372,8 @@ export function Sidebar({
       : null;
     suppressClickRef.current = current.active;
     installDrag(null);
-    if (command?.kind === "move_tab") {
-      actions.moveTab(command.tabId, command.groupId, command.index);
-    } else if (command?.kind === "reorder_group") {
-      actions.reorderGroup(command.groupId, command.index);
+    if (command) {
+      actions.moveItem(command.item, command.groupId, command.index);
     }
   };
 
@@ -403,6 +454,18 @@ export function Sidebar({
     setConfirmClose(null);
   };
 
+  /// Every confirmation button runs the same way: the dialog stays up, busy,
+  /// until the workspace call settles.
+  const runConfirmation = async (run: () => Promise<void>) => {
+    setBusy(true);
+    try {
+      await run();
+      closeConfirmation();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const openMenu = (next: SidebarMenu) => {
     setMenuPanel("root");
     setMenu(next);
@@ -474,13 +537,17 @@ export function Sidebar({
     }
   };
 
-  const renderTab = (tab: SidebarTabModel, index: number) => {
+  /// `index` is the row's position among its container's ITEMS (tabs and
+  /// subgroups alike) — the index every move/drop command speaks in — and
+  /// `depth` is its nesting level, 1 at the root.
+  const renderTab = (tab: SidebarTabModel, index: number, depth: number) => {
     const active = tab.id === snapshot.activeTabId;
     const ended = tab.status === "dead" || tab.status === "missing";
     const renaming = renameTarget?.kind === "tab" && renameTarget.id === tab.id;
     return (
       <div
         key={tab.id}
+        aria-level={depth}
         ref={(node) => {
           if (node) tabRefs.current.set(tab.id, node);
           else tabRefs.current.delete(tab.id);
@@ -499,9 +566,8 @@ export function Sidebar({
         data-drop-kind="tab"
         data-drop-index={index}
         onPointerDown={(event) => startDrag(event, {
-          kind: "tab",
-          tabId: tab.id,
-          groupId: tab.groupId,
+          item: { kind: "tab", id: tab.id },
+          containerId: tab.groupId,
           index,
         }, tab.title)}
         onContextMenu={(event) => {
@@ -586,18 +652,37 @@ export function Sidebar({
     );
   };
 
-  const renderGroup = (group: SidebarGroupModel, groupIndex: number) => {
+  const renderItems = (items: readonly SidebarItemModel[], depth: number) =>
+    items.map((item, index) =>
+      item.kind === "tab"
+        ? renderTab(item.tab, index, depth)
+        : renderGroup(item.group, index, depth)
+    );
+
+  const renderGroup = (
+    group: SidebarGroupModel,
+    groupIndex: number,
+    depth: number,
+  ) => {
     const renaming = renameTarget?.kind === "group" && renameTarget.id === group.id;
     return (
-      <section className="sidebar-group" data-group-id={group.id} key={group.id}>
+      <section
+        className="sidebar-group"
+        data-group-id={group.id}
+        data-group-depth={depth}
+        key={group.id}
+      >
         <div
           className="sidebar-group__header"
+          aria-level={depth}
           data-drop-kind="group"
+          data-drop-group-id={group.id}
+          data-drop-parent-id={group.parentGroupId ?? ""}
           data-drop-index={groupIndex}
-          data-drop-tab-count={group.tabs.length}
+          data-drop-tab-count={group.items.length}
           onPointerDown={(event) => startDrag(event, {
-            kind: "group",
-            groupId: group.id,
+            item: { kind: "group", id: group.id },
+            containerId: group.parentGroupId,
             index: groupIndex,
           }, group.name)}
           onContextMenu={(event) => {
@@ -619,7 +704,11 @@ export function Sidebar({
           >
             <span className="sidebar-group__chevron" aria-hidden="true">›</span>
           </button>
-          <span className="sidebar-group__color" data-color="slate" aria-hidden="true" />
+          <span
+            className="sidebar-group__color"
+            data-color={group.color ?? "slate"}
+            aria-hidden="true"
+          />
           <span
             ref={(node) => {
               if (node) groupRefs.current.set(group.id, node);
@@ -648,7 +737,7 @@ export function Sidebar({
               />
             ) : group.name}
           </span>
-          <span className="sidebar-group__count">{group.tabs.length}</span>
+          <span className="sidebar-group__count">{group.items.length}</span>
         </div>
         {!group.collapsed ? (
           <div
@@ -657,14 +746,67 @@ export function Sidebar({
             aria-label={`${group.name} terminals`}
             data-drop-kind="tab-container"
             data-drop-group-id={group.id}
-            data-drop-index={group.tabs.length}
+            data-drop-index={group.items.length}
           >
-            {group.tabs.map(renderTab)}
+            {renderItems(group.items, depth + 1)}
           </div>
         ) : null}
       </section>
     );
   };
+
+  /// Containers the item may move into, minus the one it already sits in —
+  /// the menu twin of the drag eligibility set, each with the append index for
+  /// that container.
+  const moveTargets = (
+    item: Item,
+    containerId: string | null,
+  ): { id: string | null; name: string; index: number }[] => {
+    const targets: { id: string | null; name: string; index: number }[] = [];
+    if (
+      containerId !== null &&
+      canMoveItem(snapshot.layout, item, null, maxGroupDepth)
+    ) {
+      targets.push({
+        id: null,
+        name: item.kind === "tab" ? "Ungrouped" : "Top level",
+        index: snapshot.rootItems.length,
+      });
+    }
+    for (const group of snapshot.groups) {
+      if (
+        group.id === containerId ||
+        !canMoveItem(snapshot.layout, item, group.id, maxGroupDepth)
+      ) {
+        continue;
+      }
+      targets.push({ id: group.id, name: group.name, index: group.items.length });
+    }
+    return targets;
+  };
+
+  const renderMovePanel = (
+    label: string,
+    item: Item,
+    containerId: string | null,
+  ) => (
+    <ContextMenu label={label} point={menu!.point} onClose={closeMenu}>
+      <button type="button" role="menuitem" onClick={() => setMenuPanel("root")}>← Back</button>
+      {moveTargets(item, containerId).map((target) => (
+        <button
+          type="button"
+          role="menuitem"
+          key={target.id ?? "root"}
+          onClick={() => {
+            actions.moveItem(item, target.id, target.index);
+            closeMenu();
+          }}
+        >
+          {target.name}
+        </button>
+      ))}
+    </ContextMenu>
+  );
 
   const renderedMenu = (() => {
     if (!menu) {
@@ -701,29 +843,10 @@ export function Sidebar({
         );
       }
       if (menuPanel === "move") {
-        const targets = [
-          ...(tab.groupId === null ? [] : [{ id: null, name: "Ungrouped", count: snapshot.ungroupedTabs.length }]),
-          ...snapshot.groups
-            .filter((group) => group.id !== tab.groupId)
-            .map((group) => ({ id: group.id, name: group.name, count: group.tabs.length })),
-        ];
-        return (
-          <ContextMenu label={`Move ${tab.title}`} point={menu.point} onClose={closeMenu}>
-            <button type="button" role="menuitem" onClick={() => setMenuPanel("root")}>← Back</button>
-            {targets.map((target) => (
-              <button
-                type="button"
-                role="menuitem"
-                key={target.id ?? "ungrouped"}
-                onClick={() => {
-                  actions.moveTab(tab.id, target.id, target.count);
-                  closeMenu();
-                }}
-              >
-                {target.name}
-              </button>
-            ))}
-          </ContextMenu>
+        return renderMovePanel(
+          `Move ${tab.title}`,
+          { kind: "tab", id: tab.id },
+          tab.groupId,
         );
       }
       const ended = tab.status === "dead" || tab.status === "missing";
@@ -742,7 +865,7 @@ export function Sidebar({
             void actions.openFolderHere(tab.id);
           }}>Open folder here</button>
           <button type="button" role="menuitem" onClick={() => setMenuPanel("color")}>Color</button>
-          <button type="button" role="menuitem" onClick={() => setMenuPanel("move")}>Move to group</button>
+          <button type="button" role="menuitem" onClick={() => setMenuPanel("move")}>Move to…</button>
           <button
             type="button"
             role="menuitem"
@@ -770,12 +893,32 @@ export function Sidebar({
       if (!group) {
         return null;
       }
+      if (menuPanel === "move") {
+        return renderMovePanel(
+          `Move ${group.name}`,
+          { kind: "group", id: group.id },
+          group.parentGroupId,
+        );
+      }
+      const nestingBlocked = group.depth + 1 > maxGroupDepth;
       return (
         <ContextMenu label={`Actions for ${group.name}`} point={menu.point} onClose={closeMenu}>
           <button type="button" role="menuitem" onClick={() => {
             closeMenu();
             setRenameTarget({ kind: "group", id: group.id });
           }}>Rename</button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={nestingBlocked}
+            {...(nestingBlocked
+              ? { title: `Max group depth is ${maxGroupDepth} — change it in Settings` }
+              : {})}
+            onClick={() => {
+              closeMenu();
+              setCreatingGroup({ parentGroupId: group.id });
+            }}
+          >New subgroup</button>
           <button type="button" role="menuitem" onClick={() => {
             closeMenu();
             void createTab(group.id, null);
@@ -786,6 +929,7 @@ export function Sidebar({
               onOpenFolderSearch(group.id);
             }}>New tab in folder…</button>
           ) : null}
+          <button type="button" role="menuitem" onClick={() => setMenuPanel("move")}>Move to…</button>
           <button type="button" role="menuitem" onClick={() => {
             actions.toggleGroup(group.id);
             closeMenu();
@@ -796,7 +940,7 @@ export function Sidebar({
               { kind: "group", id: group.id, title: group.name },
               groupRefs.current.get(group.id),
             );
-          }}>Close group</button>
+          }}>Delete group</button>
         </ContextMenu>
       );
     }
@@ -816,7 +960,7 @@ export function Sidebar({
           ) : null}
           <button type="button" role="menuitem" onClick={() => {
             closeMenu();
-            setCreatingGroup(true);
+            setCreatingGroup({ parentGroupId: null });
           }}>New group</button>
         </ContextMenu>
       );
@@ -938,17 +1082,16 @@ export function Sidebar({
       <>
       <div className="sidebar__scroll">
         <div
-          className="sidebar__ungrouped"
+          className="sidebar__root"
           role="tablist"
-          aria-label="Ungrouped terminals"
+          aria-label="Terminals"
           data-drop-kind="tab-container"
           data-drop-group-id=""
-          data-drop-index={snapshot.ungroupedTabs.length}
-          data-empty={snapshot.ungroupedTabs.length === 0 ? "true" : undefined}
+          data-drop-index={snapshot.rootItems.length}
+          data-empty={snapshot.rootItems.length === 0 ? "true" : undefined}
         >
-          {snapshot.ungroupedTabs.map(renderTab)}
+          {renderItems(snapshot.rootItems, 1)}
         </div>
-        {snapshot.groups.map(renderGroup)}
       </div>
       {creatingGroup ? (
         <div className="sidebar-new-group">
@@ -956,10 +1099,10 @@ export function Sidebar({
             value="New group"
             ariaLabel="Name new group"
             onCommit={(name) => {
-              actions.createGroup(name);
-              setCreatingGroup(false);
+              actions.createGroup(creatingGroup.parentGroupId, name);
+              setCreatingGroup(null);
             }}
-            onCancel={() => setCreatingGroup(false)}
+            onCancel={() => setCreatingGroup(null)}
           />
         </div>
       ) : null}
@@ -1054,7 +1197,7 @@ export function Sidebar({
             role="dialog"
             aria-modal="true"
             aria-busy={busy}
-            aria-label={confirmClose.kind === "tab" ? "Close terminal" : "Close group"}
+            aria-label={confirmClose.kind === "tab" ? "Close terminal" : "Delete group"}
             tabIndex={-1}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
@@ -1087,11 +1230,11 @@ export function Sidebar({
               }
             }}
           >
-            <h2>{confirmClose.kind === "tab" ? "Close terminal?" : "Close group?"}</h2>
+            <h2>{confirmClose.kind === "tab" ? "Close terminal?" : "Delete group?"}</h2>
             <p>
               {confirmClose.kind === "tab"
                 ? `Close “${confirmClose.title}” and end its running shell?`
-                : `Close every terminal in “${confirmClose.title}”?`}
+                : `Delete “${confirmClose.title}”? Its terminals move up a level, or close with it.`}
             </p>
             <div className="sidebar-dialog__actions">
               <button
@@ -1100,27 +1243,27 @@ export function Sidebar({
                 disabled={busy}
                 onClick={closeConfirmation}
               >Cancel</button>
+              {confirmClose.kind === "group" ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void runConfirmation(
+                    () => actions.deleteGroup(confirmClose.id, "keep-children"),
+                  )}
+                >Keep terminals</button>
+              ) : null}
               <button
                 type="button"
                 className="sidebar-dialog__danger"
                 disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    if (confirmClose.kind === "tab") {
-                      await actions.closeLiveTab(confirmClose.id);
-                    } else {
-                      await actions.closeGroup(confirmClose.id);
-                    }
-                    closeConfirmation();
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
+                onClick={() => void runConfirmation(() =>
+                  confirmClose.kind === "tab"
+                    ? actions.closeLiveTab(confirmClose.id)
+                    : actions.deleteGroup(confirmClose.id, "close-tabs"))}
               >
                 {busy
                   ? "Closing…"
-                  : (confirmClose.kind === "tab" ? "Close terminal" : "Close group")}
+                  : (confirmClose.kind === "tab" ? "Close terminal" : "Close terminals")}
               </button>
             </div>
           </div>
@@ -1164,9 +1307,15 @@ function activityLabel(activity: SidebarTabModel["activity"]): string {
   return "No recent output";
 }
 
+/**
+ * The slot under the pointer, or null when there is no legal one. Rows and
+ * containers speak positions in their own container's ITEMS; a group header
+ * means "nest into me" through its middle band and "before/after me" at its
+ * edges, so a group can be both a destination and a neighbour.
+ */
 function resolveDropTarget(
-  source: DragSource,
   point: { x: number; y: number },
+  eligible: ReadonlySet<string | null>,
 ): {
   target: DropTarget;
   indicator: { left: number; top: number; width: number };
@@ -1182,31 +1331,15 @@ function resolveDropTarget(
   const kind = candidate.dataset.dropKind;
   const rect = candidate.getBoundingClientRect();
 
-  if (source.kind === "group") {
-    if (kind !== "group") {
+  if (kind === "tab") {
+    const containerId = nullableGroupId(candidate.dataset.groupId);
+    if (!eligible.has(containerId)) {
       return null;
     }
     const baseIndex = numberAttribute(candidate.dataset.dropIndex);
     const after = point.y >= rect.top + rect.height / 2;
     return {
-      target: { kind: "group", index: baseIndex + (after ? 1 : 0) },
-      indicator: {
-        left: rect.left,
-        top: after ? rect.bottom : rect.top,
-        width: rect.width,
-      },
-    };
-  }
-
-  if (kind === "tab") {
-    const baseIndex = numberAttribute(candidate.dataset.dropIndex);
-    const after = point.y >= rect.top + rect.height / 2;
-    return {
-      target: {
-        kind: "tab",
-        groupId: nullableGroupId(candidate.dataset.groupId),
-        index: baseIndex + (after ? 1 : 0),
-      },
+      target: { containerId, index: baseIndex + (after ? 1 : 0) },
       indicator: {
         left: rect.left + 8,
         top: after ? rect.bottom : rect.top,
@@ -1216,10 +1349,13 @@ function resolveDropTarget(
   }
 
   if (kind === "tab-container") {
+    const containerId = nullableGroupId(candidate.dataset.dropGroupId);
+    if (!eligible.has(containerId)) {
+      return null;
+    }
     return {
       target: {
-        kind: "tab",
-        groupId: nullableGroupId(candidate.dataset.dropGroupId),
+        containerId,
         index: numberAttribute(candidate.dataset.dropIndex),
       },
       indicator: {
@@ -1231,20 +1367,38 @@ function resolveDropTarget(
   }
 
   if (kind === "group") {
-    const group = candidate.closest<HTMLElement>("[data-group-id]");
-    if (!group) {
+    const offset = (point.y - rect.top) / (rect.height || 1);
+    if (offset > 0.25 && offset < 0.75) {
+      const containerId = nullableGroupId(candidate.dataset.dropGroupId);
+      if (containerId === null || !eligible.has(containerId)) {
+        return null;
+      }
+      return {
+        target: {
+          containerId,
+          index: numberAttribute(candidate.dataset.dropTabCount),
+        },
+        indicator: {
+          left: rect.left + 8,
+          top: rect.bottom,
+          width: Math.max(0, rect.width - 16),
+        },
+      };
+    }
+    const containerId = nullableGroupId(candidate.dataset.dropParentId);
+    if (!eligible.has(containerId)) {
       return null;
     }
+    const after = offset >= 0.75;
     return {
       target: {
-        kind: "tab",
-        groupId: nullableGroupId(group.dataset.groupId),
-        index: numberAttribute(candidate.dataset.dropTabCount),
+        containerId,
+        index: numberAttribute(candidate.dataset.dropIndex) + (after ? 1 : 0),
       },
       indicator: {
-        left: rect.left + 8,
-        top: rect.bottom,
-        width: Math.max(0, rect.width - 16),
+        left: rect.left,
+        top: after ? rect.bottom : rect.top,
+        width: rect.width,
       },
     };
   }
@@ -1265,9 +1419,9 @@ function releaseDragCapture(
   tabRefs: ReadonlyMap<string, HTMLDivElement>,
   groupRefs: ReadonlyMap<string, HTMLElement>,
 ): void {
-  const element = drag.source.kind === "tab"
-    ? tabRefs.get(drag.source.tabId)
-    : groupRefs.get(drag.source.groupId)?.closest<HTMLElement>(".sidebar-group__header");
+  const element = drag.source.item.kind === "tab"
+    ? tabRefs.get(drag.source.item.id)
+    : groupRefs.get(drag.source.item.id)?.closest<HTMLElement>(".sidebar-group__header");
   try {
     element?.releasePointerCapture(drag.pointerId);
   } catch {

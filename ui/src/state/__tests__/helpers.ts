@@ -1,4 +1,4 @@
-import type { Group, LayoutV1, SplitNode, Tab } from "../layout";
+import type { Group, Item, LayoutV2, SplitNode, Tab } from "../layout";
 
 export function pane(sessionId: number): SplitNode {
   return { kind: "pane", sessionId };
@@ -16,33 +16,49 @@ export function split(
 export function tab(
   id: string,
   splitOrSession: SplitNode | number,
-  overrides?: Partial<Pick<Tab, "title" | "color">>,
+  overrides?: Partial<Pick<Tab, "title" | "color" | "fill">>,
 ): Tab {
   return {
     id,
     title: overrides?.title ?? null,
     color: overrides?.color ?? "blue",
+    fill: overrides?.fill ?? "off",
     split: typeof splitOrSession === "number"
       ? pane(splitOrSession)
       : splitOrSession,
   };
 }
 
+/// Group holding tabs only; nested fixtures build `items` by hand.
 export function group(
   id: string,
   name: string,
   tabIds: string[],
   collapsed = false,
 ): Group {
-  return { id, name, collapsed, tabIds };
+  return {
+    id,
+    name,
+    collapsed,
+    color: null,
+    items: tabIds.map((tabId): Item => ({ kind: "tab", id: tabId })),
+  };
 }
 
-/// t1(session 1), t2(session 2) ungrouped; g1 "Servers" holds t3(session 3).
-export function baseLayout(): LayoutV1 {
+export function tabItem(id: string): Item {
+  return { kind: "tab", id };
+}
+
+export function groupItem(id: string): Item {
+  return { kind: "group", id };
+}
+
+/// t1(session 1), t2(session 2) at the root; g1 "Servers" holds t3(session 3).
+export function baseLayout(): LayoutV2 {
   return {
-    version: 1,
-    groups: [group("g1", "Servers", ["t3"])],
-    ungroupedTabIds: ["t1", "t2"],
+    version: 2,
+    groups: { g1: group("g1", "Servers", ["t3"]) },
+    rootItems: [tabItem("t1"), tabItem("t2"), groupItem("g1")],
     tabs: {
       t1: tab("t1", 1),
       t2: tab("t2", 2, { color: "green" }),

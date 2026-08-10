@@ -30,8 +30,14 @@ import {
 } from "./scopePaths";
 import { UiStateStore, touchRecentFolder, updateScopePaths } from "./uiState";
 import {
+  canMoveItem,
+  collectSubtreeTabIds,
+  findContainer,
+  groupDepth,
   sessionIdsInLayout,
-  type LayoutV1,
+  type FillStrength,
+  type Item,
+  type LayoutV2,
   type PaletteId,
   type SplitDir,
 } from "../state/layout";
@@ -96,16 +102,18 @@ export interface WorkspaceAttachmentHub {
 export interface WorkspacePersistence {
   getSnapshot(): LayoutPersistenceSnapshot;
   subscribe(listener: () => void): () => void;
-  record(layout: LayoutV1, kind: LayoutChangeKind): void;
+  record(layout: LayoutV2, kind: LayoutChangeKind): void;
   flush(): Promise<void>;
   dispose(): void;
 }
 
 export interface SidebarTabModel {
   id: string;
+  /** Immediate parent group, null at the root. */
   groupId: string | null;
   title: string;
   color: PaletteId;
+  fill: FillStrength;
   primarySessionId: number;
   sessionIds: readonly number[];
   status: "live" | "dead" | "missing" | "attach_error";
@@ -116,11 +124,23 @@ export interface SidebarTabModel {
 
 export interface SidebarGroupModel {
   id: string;
+  /** Immediate parent group, null at the root. */
+  parentGroupId: string | null;
   name: string;
   collapsed: boolean;
-  color: "slate";
+  color: PaletteId | null;
+  /** Nesting level, 1 for a root group — mirrors `groupDepth`. */
+  depth: number;
+  /** Ordered children as rendered: tabs and subgroups interleaved. */
+  items: readonly SidebarItemModel[];
+  /** This group's own tabs (NOT its subgroups'), in order. */
   tabs: readonly SidebarTabModel[];
 }
+
+/// One rendered sidebar row and, for a group, everything under it.
+export type SidebarItemModel =
+  | { kind: "tab"; tab: SidebarTabModel }
+  | { kind: "group"; group: SidebarGroupModel };
 
 /// Per-pane projection for the split renderer. "dead" = the host still knows
 /// the session (scrollback ring intact, exit code may be known); "missing" =
@@ -131,8 +151,12 @@ export interface PaneSessionState {
 }
 
 export interface WorkspaceSnapshot {
-  layout: LayoutV1;
+  layout: LayoutV2;
+  /** Top level of the sidebar, in order — the recursive render's entry point. */
+  rootItems: readonly SidebarItemModel[];
+  /** Root-level tabs only, in order. */
   ungroupedTabs: readonly SidebarTabModel[];
+  /** EVERY group, depth-first in render order (menus and lookups). */
   groups: readonly SidebarGroupModel[];
   paneStates: Readonly<Record<number, PaneSessionState>>;
   activeTabId: string | null;
@@ -215,7 +239,7 @@ export class WorkspaceController {
   private readonly listeners = new Set<() => void>();
   private readonly cleanups: Array<() => void> = [];
   private cachedSnapshot: WorkspaceSnapshot | null = null;
-  private cachedLayout: LayoutV1 | null = null;
+  private cachedLayout: LayoutV2 | null = null;
   private cachedAttachments: AttachmentHubSnapshot | null = null;
   private cachedPersistence: LayoutPersistenceSnapshot | null = null;
   private sessionsRevision = 0;
@@ -267,14 +291,21 @@ export class WorkspaceController {
           const primary = this.sessions.get(firstSessionId(tab.split));
           next = seedScope(next, key, primary?.cwd ?? null);
         };
-        for (const tabId of layout.ungroupedTabIds) {
-          seedFromTab(tabId, scopeKeyFor(null));
-        }
-        for (const group of layout.groups) {
-          for (const tabId of group.tabIds) {
-            seedFromTab(tabId, group.id);
+        // A tab's scope is its IMMEDIATE parent group (spec §6), so every
+        // container seeds only the tabs it holds directly.
+        const seedContainer = (items: readonly Item[], key: ScopeKey) => {
+          for (const item of items) {
+            if (item.kind === "tab") {
+              seedFromTab(item.id, key);
+            } else {
+              const group = layout.groups[item.id];
+              if (group) {
+                seedContainer(group.items, group.id);
+              }
+            }
           }
-        }
+        };
+        seedContainer(layout.rootItems, scopeKeyFor(null));
         return next;
       }),
     );
@@ -345,6 +376,7 @@ export class WorkspaceController {
         groupId,
         title: tab.title ?? derivedTitle(primary),
         color: tab.color,
+        fill: tab.fill,
         primarySessionId,
         sessionIds,
         status: live
@@ -356,14 +388,57 @@ export class WorkspaceController {
       };
     };
 
-    const ungroupedTabs = layout.ungroupedTabIds.map((tabId) => projectTab(tabId, null));
-    const groups = layout.groups.map((group): SidebarGroupModel => ({
-      id: group.id,
-      name: group.name,
-      collapsed: group.collapsed,
-      color: "slate",
-      tabs: group.tabIds.map((tabId) => projectTab(tabId, group.id)),
-    }));
+    // One recursive pass builds the render tree; a group met twice (impossible
+    // in a valid layout) is skipped so a bad blob can never spin this walk.
+    const seenGroups = new Set<string>();
+    const projectItems = (
+      items: readonly Item[],
+      parentGroupId: string | null,
+      depth: number,
+    ): SidebarItemModel[] => {
+      const projected: SidebarItemModel[] = [];
+      for (const item of items) {
+        if (item.kind === "tab") {
+          if (layout.tabs[item.id]) {
+            projected.push({ kind: "tab", tab: projectTab(item.id, parentGroupId) });
+          }
+          continue;
+        }
+        const group = layout.groups[item.id];
+        if (!group || seenGroups.has(group.id)) {
+          continue;
+        }
+        seenGroups.add(group.id);
+        const children = projectItems(group.items, group.id, depth + 1);
+        const model: SidebarGroupModel = {
+          id: group.id,
+          parentGroupId,
+          name: group.name,
+          collapsed: group.collapsed,
+          color: group.color,
+          depth,
+          items: children,
+          tabs: children.flatMap((child) => child.kind === "tab" ? [child.tab] : []),
+        };
+        projected.push({ kind: "group", group: model });
+      }
+      return projected;
+    };
+    const rootItems = projectItems(layout.rootItems, null, 1);
+    const ungroupedTabs = rootItems.flatMap((item) =>
+      item.kind === "tab" ? [item.tab] : []
+    );
+    // Flat, depth-first in render order: the menus' "Move to…" list.
+    const groups: SidebarGroupModel[] = [];
+    const collectGroups = (items: readonly SidebarItemModel[]): void => {
+      for (const item of items) {
+        if (item.kind === "group") {
+          groups.push(item.group);
+          collectGroups(item.group.items);
+        }
+      }
+    };
+    collectGroups(rootItems);
     const paneStates: Record<number, PaneSessionState> = {};
     for (const sessionId of sessionIdsInLayout(layout)) {
       const info = this.sessions.get(sessionId);
@@ -381,6 +456,7 @@ export class WorkspaceController {
     const activeTab = layout.activeTabId ? layout.tabs[layout.activeTabId] : undefined;
     const snapshot: WorkspaceSnapshot = {
       layout,
+      rootItems,
       ungroupedTabs,
       groups,
       paneStates,
@@ -416,7 +492,19 @@ export class WorkspaceController {
   };
 
   moveTab = (tabId: string, groupId: string | null, index: number): void => {
-    this.mutate("structural", () => this.store.moveTab(tabId, { groupId }, index));
+    this.moveItem({ kind: "tab", id: tabId }, groupId, index);
+  };
+
+  /// Drag/menu move for tabs AND subgroups. Returns false when the move is
+  /// refused — the depth setting, a group into its own subtree, an unknown
+  /// item or target — in which case nothing is written.
+  moveItem = (item: Item, targetGroupId: string | null, index: number): boolean => {
+    const layout = this.store.getState();
+    if (!canMoveItem(layout, item, targetGroupId, this.maxGroupDepth())) {
+      return false;
+    }
+    this.mutate("structural", () => this.store.moveItem(item, targetGroupId, index));
+    return true;
   };
 
   reorderGroup = (groupId: string, targetIndex: number): void => {
@@ -425,12 +513,36 @@ export class WorkspaceController {
     );
   };
 
-  createGroup = (name: string): void => {
-    this.mutate("structural", () => this.store.createGroup({ id: this.generateId(), name }));
+  /// New group inside `parentGroupId` (null = the root). Returns the new
+  /// group's id, or null when the depth setting refuses it.
+  createGroup = (parentGroupId: string | null, name?: string): string | null => {
+    const layout = this.store.getState();
+    const depth = parentGroupId === null ? 0 : groupDepth(layout, parentGroupId);
+    if (parentGroupId !== null && depth === 0) {
+      return null;
+    }
+    if (depth + 1 > this.maxGroupDepth()) {
+      return null;
+    }
+    const id = this.generateId();
+    this.mutate("structural", () => this.store.createGroup({
+      id,
+      name: name ?? "New group",
+      parentGroupId,
+    }));
+    return this.store.getState().groups[id] ? id : null;
   };
 
   renameGroup = (groupId: string, name: string): void => {
     this.mutate("structural", () => this.store.renameGroup(groupId, name));
+  };
+
+  recolorGroup = (groupId: string, color: PaletteId | null): void => {
+    this.mutate("structural", () => this.store.recolorGroup(groupId, color));
+  };
+
+  setTabFill = (tabId: string, fill: FillStrength): void => {
+    this.mutate("structural", () => this.store.setTabFill(tabId, fill));
   };
 
   toggleGroup = (groupId: string): void => {
@@ -711,16 +823,31 @@ export class WorkspaceController {
     }
   };
 
-  closeGroup = async (groupId: string): Promise<void> => {
+  /// Delete a group, either keeping its children (they take its place in its
+  /// own container, subgroups included) or closing every session in its whole
+  /// subtree first. Unknown groups are a silent no-op.
+  deleteGroup = async (
+    groupId: string,
+    mode: "keep-children" | "close-tabs",
+  ): Promise<void> => {
     const layout = this.store.getState();
-    const group = layout.groups.find((candidate) => candidate.id === groupId);
+    const group = layout.groups[groupId];
     if (!group) {
       return;
     }
-    const sessionIds = group.tabIds.flatMap((tabId) => {
+    if (mode === "keep-children") {
+      this.mutate("structural", () => this.store.deleteGroup(groupId));
+      this.uiState.update((state) =>
+        updateScopePaths(state, (paths) => dropScope(paths, groupId)),
+      );
+      return;
+    }
+
+    const sessionIds = collectSubtreeTabIds(layout, groupId).flatMap((tabId) => {
       const tab = layout.tabs[tabId];
       return tab ? sessionIdsInTab(tab) : [];
     });
+    const droppedScopes = [groupId, ...subtreeGroupIdsOf(layout, groupId)];
     const { successful, failed } = await this.closeSessions(sessionIds);
     this.mutate("structural", () => {
       const pruned = pruneSessionIds(this.store.getState(), successful);
@@ -731,10 +858,16 @@ export class WorkspaceController {
       this.setNotice("Some terminal sessions could not be closed.");
     } else {
       this.uiState.update((state) =>
-        updateScopePaths(state, (paths) => dropScope(paths, groupId)),
+        updateScopePaths(state, (paths) =>
+          droppedScopes.reduce((next, id) => dropScope(next, id), paths),
+        ),
       );
     }
   };
+
+  /// The sidebar's existing "Close group" affordance.
+  closeGroup = (groupId: string): Promise<void> =>
+    this.deleteGroup(groupId, "close-tabs");
 
   dismissDeadTab = async (tabId: string): Promise<void> => {
     const tab = this.store.getState().tabs[tabId];
@@ -986,9 +1119,7 @@ export class WorkspaceController {
     this.sessionsRevision += 1;
     await this.attachments.attachSession(session.id);
     const layout = this.store.getState();
-    const targetGroupId = groupId !== null && layout.groups.some((group) => group.id === groupId)
-      ? groupId
-      : null;
+    const targetGroupId = groupId !== null && layout.groups[groupId] ? groupId : null;
     const tabId = this.generateId();
     this.mutate("structural", () => this.store.createTab({
       id: tabId,
@@ -1009,6 +1140,12 @@ export class WorkspaceController {
     }
     this.publish();
     return tabId;
+  }
+
+  /// The user's nesting ceiling for CREATION and MOVEMENT (spec §3). Parsing
+  /// is never gated by it — a deeper layout built earlier still works.
+  private maxGroupDepth(): number {
+    return this.settings.getSnapshot().maxGroupDepth;
   }
 
   /// The injected probe is renderer code that can throw; a resume must never
@@ -1064,12 +1201,9 @@ export class WorkspaceController {
     if (!activeTabId) {
       return null;
     }
-    const inScope =
-      key === scopeKeyFor(null)
-        ? layout.ungroupedTabIds.includes(activeTabId)
-        : layout.groups.some(
-            (group) => group.id === key && group.tabIds.includes(activeTabId),
-          );
+    // Spec §6: a tab's scope is its IMMEDIATE parent group.
+    const parentGroupId = findContainer(layout, { kind: "tab", id: activeTabId });
+    const inScope = key === scopeKeyFor(parentGroupId);
     if (!inScope) {
       return null;
     }
@@ -1082,16 +1216,9 @@ export class WorkspaceController {
 
   private scopeKeyOfSession(sessionId: number): ScopeKey | null {
     const layout = this.store.getState();
-    const tabHasSession = (tabId: string): boolean => {
-      const tab = layout.tabs[tabId];
-      return tab !== undefined && sessionIdsInTab(tab).includes(sessionId);
-    };
-    if (layout.ungroupedTabIds.some(tabHasSession)) {
-      return scopeKeyFor(null);
-    }
-    for (const group of layout.groups) {
-      if (group.tabIds.some(tabHasSession)) {
-        return group.id;
+    for (const [tabId, tab] of Object.entries(layout.tabs)) {
+      if (sessionIdsInTab(tab).includes(sessionId)) {
+        return scopeKeyFor(findContainer(layout, { kind: "tab", id: tabId }));
       }
     }
     return null;
@@ -1128,9 +1255,8 @@ export class WorkspaceController {
     if (!session) {
       return null;
     }
-    const group = layout.groups.find((candidate) => candidate.tabIds.includes(tabId));
     return {
-      groupId: group?.id ?? null,
+      groupId: findContainer(layout, { kind: "tab", id: tabId }),
       template: { profile: session.profile, cwd: session.cwd },
     };
   }
@@ -1171,7 +1297,7 @@ export class WorkspaceController {
     this.publish();
   }
 
-  private mutate(kind: LayoutChangeKind, mutation: () => LayoutV1): void {
+  private mutate(kind: LayoutChangeKind, mutation: () => LayoutV2): void {
     const before = this.store.getState();
     const after = mutation();
     if (after !== before) {
@@ -1185,7 +1311,7 @@ export class WorkspaceController {
   }
 
   /// Drops any resume-dedupe entry whose tab id no longer exists in `layout`.
-  private purgeResumedTabsNotIn(layout: LayoutV1): void {
+  private purgeResumedTabsNotIn(layout: LayoutV2): void {
     if (this.resumedTabs.size === 0) {
       return;
     }
@@ -1245,6 +1371,21 @@ export class WorkspaceController {
       }
     }
   }
+}
+
+/// Every group id strictly under `groupId` (its scope entries die with it).
+function subtreeGroupIdsOf(layout: LayoutV2, groupId: string): string[] {
+  const out: string[] = [];
+  const walk = (id: string): void => {
+    for (const item of layout.groups[id]?.items ?? []) {
+      if (item.kind === "group" && !out.includes(item.id)) {
+        out.push(item.id);
+        walk(item.id);
+      }
+    }
+  };
+  walk(groupId);
+  return out;
 }
 
 function derivedTitle(session: SessionInfo | undefined): string {

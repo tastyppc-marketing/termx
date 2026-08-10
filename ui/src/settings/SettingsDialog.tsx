@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import {
+  MAX_GROUP_DEPTH_OPTIONS,
   type CloseBehavior,
+  type MaxGroupDepthOption,
   type NewTabPolicy,
   type SleepOption,
   type SummaryContent,
@@ -120,6 +122,18 @@ const SLEEP_OPTIONS_LIST: ReadonlyArray<{
     hint: "Hidden terminals sleep after 60 minutes of being out of view.",
   },
 ];
+
+const GROUP_DEPTH_OPTIONS: ReadonlyArray<{
+  value: MaxGroupDepthOption;
+  label: string;
+  hint: string;
+}> = MAX_GROUP_DEPTH_OPTIONS.map((value) => ({
+  value,
+  label: value === 1 ? "No subgroups" : `${value} levels`,
+  hint: value === 1
+    ? "Groups stay flat, as they were before nesting."
+    : `Groups may be nested ${value} levels deep. Deeper layouts built elsewhere still open.`,
+}));
 
 const CLOSE_BEHAVIOR_OPTIONS: ReadonlyArray<{
   value: CloseBehavior;
@@ -349,6 +363,25 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
                   checked={settings.sleepHiddenTerminals === option.value}
                   onChange={() =>
                     onChange({ sleepHiddenTerminals: option.value })}
+                />
+                <span className="settings-radio__text">
+                  <span className="settings-radio__label">{option.label}</span>
+                  <span className="settings-radio__hint">{option.hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <div className="settings-subsection">
+            <div className="settings-subsection__title">Group nesting depth</div>
+            {GROUP_DEPTH_OPTIONS.map((option) => (
+              <label className="settings-radio" key={option.value}>
+                <input
+                  type="radio"
+                  name="maxGroupDepth"
+                  value={option.value}
+                  checked={settings.maxGroupDepth === option.value}
+                  onChange={() => onChange({ maxGroupDepth: option.value })}
                 />
                 <span className="settings-radio__text">
                   <span className="settings-radio__label">{option.label}</span>

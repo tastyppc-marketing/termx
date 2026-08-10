@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   PALETTE_IDS,
   validateInvariants,
-  type LayoutV1,
+  type Item,
+  type LayoutV2,
   type SplitNode,
 } from "../../state/layout";
 import {
@@ -20,21 +21,42 @@ import {
   sessionIdsInTab,
 } from "../layoutOperations";
 
-function layout(): LayoutV1 {
+function tabItem(id: string): Item {
+  return { kind: "tab", id };
+}
+
+function groupItem(id: string): Item {
+  return { kind: "group", id };
+}
+
+/// Ids of a container's items in order (null = the root).
+function itemIds(state: LayoutV2, groupId: string | null): string[] {
+  const items = groupId === null ? state.rootItems : state.groups[groupId]!.items;
+  return items.map((item) => item.id);
+}
+
+function layout(): LayoutV2 {
   return {
-    version: 1,
-    groups: [
-      { id: "g1", name: "One", collapsed: false, tabIds: ["t2"] },
-      { id: "g2", name: "Two", collapsed: false, tabIds: ["t3"] },
-      { id: "g3", name: "Three", collapsed: false, tabIds: [] },
-    ],
-    ungroupedTabIds: ["t1"],
+    version: 2,
+    groups: {
+      g1: { id: "g1", name: "One", collapsed: false, color: null, items: [tabItem("t2")] },
+      g2: { id: "g2", name: "Two", collapsed: false, color: null, items: [tabItem("t3")] },
+      g3: { id: "g3", name: "Three", collapsed: false, color: null, items: [] },
+    },
+    rootItems: [tabItem("t1"), groupItem("g1"), groupItem("g2"), groupItem("g3")],
     tabs: {
-      t1: { id: "t1", title: null, color: "blue", split: { kind: "pane", sessionId: 1 } },
+      t1: {
+        id: "t1",
+        title: null,
+        color: "blue",
+        fill: "off",
+        split: { kind: "pane", sessionId: 1 },
+      },
       t2: {
         id: "t2",
         title: "Split",
         color: "cyan",
+        fill: "off",
         split: {
           kind: "split",
           dir: "row",
@@ -53,7 +75,13 @@ function layout(): LayoutV1 {
           ],
         },
       },
-      t3: { id: "t3", title: null, color: "slate", split: { kind: "pane", sessionId: 5 } },
+      t3: {
+        id: "t3",
+        title: null,
+        color: "slate",
+        fill: "off",
+        split: { kind: "pane", sessionId: 5 },
+      },
     },
     activeTabId: "t2",
   };
@@ -70,20 +98,33 @@ describe("layoutOperations", () => {
   it("rotates the palette after the final rendered tab and defaults to blue", () => {
     expect(nextTabColor(layout())).toBe("blue");
     const empty = layout();
-    empty.groups = [];
-    empty.ungroupedTabIds = [];
+    empty.groups = {};
+    empty.rootItems = [];
     empty.tabs = {};
     empty.activeTabId = null;
     expect(nextTabColor(empty)).toBe(PALETTE_IDS[0]);
   });
 
-  it("reorders groups with post-removal clamped indices", () => {
+  it("reorders groups with post-removal clamped item indices", () => {
     const state = layout();
     const moved = reorderGroup(state, "g1", 2);
-    expect(moved.groups.map((group) => group.id)).toEqual(["g2", "g3", "g1"]);
+    expect(itemIds(moved, null)).toEqual(["t1", "g2", "g1", "g3"]);
     expect(validateInvariants(moved)).toEqual([]);
     expect(reorderGroup(moved, "missing", 0)).toBe(moved);
-    expect(reorderGroup(moved, "g1", 99)).toBe(moved);
+    expect(reorderGroup(moved, "g1", 2)).toBe(moved);
+    expect(itemIds(reorderGroup(moved, "g1", 99), null))
+      .toEqual(["t1", "g2", "g3", "g1"]);
+  });
+
+  it("reorders a subgroup inside its own parent, not at the root", () => {
+    const state = layout();
+    state.groups.g1!.items = [tabItem("t2"), groupItem("g3")];
+    state.rootItems = [tabItem("t1"), groupItem("g1"), groupItem("g2")];
+
+    const moved = reorderGroup(state, "g3", 0);
+    expect(itemIds(moved, "g1")).toEqual(["g3", "t2"]);
+    expect(itemIds(moved, null)).toEqual(["t1", "g1", "g2"]);
+    expect(validateInvariants(moved)).toEqual([]);
   });
 
   it("prunes panes recursively, collapses splits, and removes empty tabs", () => {
@@ -92,7 +133,7 @@ describe("layoutOperations", () => {
 
     expect(pruned.tabs.t2?.split).toEqual({ kind: "pane", sessionId: 3 });
     expect(pruned.tabs.t3).toBeUndefined();
-    expect(pruned.groups.find((group) => group.id === "g2")?.tabIds).toEqual([]);
+    expect(itemIds(pruned, "g2")).toEqual([]);
     expect(pruned.activeTabId).toBe("t2");
     expect(validateInvariants(pruned)).toEqual([]);
   });
@@ -108,10 +149,24 @@ describe("layoutOperations", () => {
   it("removes a group and all its tabs rather than ungrouping them", () => {
     const state = layout();
     const removed = removeGroupAndTabs(state, "g1");
-    expect(removed.groups.map((group) => group.id)).toEqual(["g2", "g3"]);
+    expect(Object.keys(removed.groups)).toEqual(["g2", "g3"]);
     expect(removed.tabs.t2).toBeUndefined();
-    expect(removed.ungroupedTabIds).toEqual(["t1"]);
+    expect(itemIds(removed, null)).toEqual(["t1", "g2", "g3"]);
     expect(removed.activeTabId).toBe("t3");
+    expect(validateInvariants(removed)).toEqual([]);
+  });
+
+  it("removes a whole nested subtree, subgroups and their tabs included", () => {
+    const state = layout();
+    state.groups.g1!.items = [tabItem("t2"), groupItem("g2")];
+    state.rootItems = [tabItem("t1"), groupItem("g1"), groupItem("g3")];
+
+    const removed = removeGroupAndTabs(state, "g1");
+    expect(Object.keys(removed.groups)).toEqual(["g3"]);
+    expect(removed.tabs.t2).toBeUndefined();
+    expect(removed.tabs.t3).toBeUndefined();
+    expect(itemIds(removed, null)).toEqual(["t1", "g3"]);
+    expect(removed.activeTabId).toBe("t1");
     expect(validateInvariants(removed)).toEqual([]);
   });
 });
@@ -119,7 +174,7 @@ describe("layoutOperations", () => {
 /// Depth fixtures for the §16 cap: "deep" is exactly MAX_SPLIT_DEPTH (4), so
 /// grafting anything beside it would make 5; "three" is 3, so a pane grafted
 /// beside it lands exactly ON the cap.
-function depthLayout(): LayoutV1 {
+function depthLayout(): LayoutV2 {
   const depth4: SplitNode = {
     kind: "split",
     dir: "row",
@@ -179,16 +234,17 @@ function depthLayout(): LayoutV1 {
     ],
   };
   return {
-    version: 1,
-    groups: [],
-    ungroupedTabIds: ["deep", "three", "simple"],
+    version: 2,
+    groups: {},
+    rootItems: [tabItem("deep"), tabItem("three"), tabItem("simple")],
     tabs: {
-      deep: { id: "deep", title: null, color: "blue", split: depth4 },
-      three: { id: "three", title: null, color: "cyan", split: depth3 },
+      deep: { id: "deep", title: null, color: "blue", fill: "off", split: depth4 },
+      three: { id: "three", title: null, color: "cyan", fill: "off", split: depth3 },
       simple: {
         id: "simple",
         title: null,
         color: "green",
+        fill: "off",
         split: { kind: "pane", sessionId: 15 },
       },
     },
@@ -257,13 +313,13 @@ describe("combine tabs side-by-side (spec §16)", () => {
 
   it("removes the source tab from whichever container held it", () => {
     const fromGroup = mergeTabIntoTab(layout(), "t2", "t1")!;
-    expect(fromGroup.groups.find((group) => group.id === "g1")?.tabIds).toEqual([]);
-    expect(fromGroup.ungroupedTabIds).toEqual(["t1"]);
+    expect(itemIds(fromGroup, "g1")).toEqual([]);
+    expect(itemIds(fromGroup, null)).toEqual(["t1", "g1", "g2", "g3"]);
 
-    const fromUngrouped = mergeTabIntoTab(layout(), "t1", "t3")!;
-    expect(fromUngrouped.ungroupedTabIds).toEqual([]);
-    expect(fromUngrouped.groups.find((group) => group.id === "g2")?.tabIds).toEqual(["t3"]);
-    expect(validateInvariants(fromUngrouped)).toEqual([]);
+    const fromRoot = mergeTabIntoTab(layout(), "t1", "t3")!;
+    expect(itemIds(fromRoot, null)).toEqual(["g1", "g2", "g3"]);
+    expect(itemIds(fromRoot, "g2")).toEqual(["t3"]);
+    expect(validateInvariants(fromRoot)).toEqual([]);
   });
 
   it("refuses a merge past the split-depth cap but allows landing exactly on it", () => {
@@ -290,7 +346,7 @@ describe("combine tabs side-by-side (spec §16)", () => {
     expect(restored.tabs.t1?.split).toEqual(state.tabs.t1!.split);
     expect(restored.tabs.t4?.split).toEqual({ kind: "pane", sessionId: 5 });
     expect(restored.tabs.t4?.title).toBeNull();
-    expect(restored.ungroupedTabIds).toEqual(["t1", "t4"]);
+    expect(itemIds(restored, null)).toEqual(["t1", "t4", "g1", "g2", "g3"]);
     expect(validateInvariants(restored)).toEqual([]);
   });
 
@@ -307,7 +363,7 @@ describe("combine tabs side-by-side (spec §16)", () => {
         { kind: "pane", sessionId: 4 },
       ],
     });
-    expect(extracted.groups.find((group) => group.id === "g1")?.tabIds).toEqual(["t2", "t4"]);
+    expect(itemIds(extracted, "g1")).toEqual(["t2", "t4"]);
     // New tabs continue the palette rotation, like every other created tab.
     expect(extracted.tabs.t4?.color).toBe(nextTabColor(state));
     expect(validateInvariants(extracted)).toEqual([]);

@@ -37,7 +37,12 @@ import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
 import { Sidebar, type SidebarConversations } from "./sidebar/Sidebar";
 import { SplitLayout, type SplitLayoutActions } from "./split/SplitLayout";
-import { sessionIdsInSplit, type SplitNode, type Tab } from "./state/layout";
+import {
+  findContainer,
+  sessionIdsInSplit,
+  type SplitNode,
+  type Tab,
+} from "./state/layout";
 import { SleepController } from "./terminal/sleep";
 import {
   DEFAULT_VIEWER_GEOMETRY,
@@ -197,11 +202,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const viewerRef = useRef<ViewerApi | null>(null);
 
   const activeTabId = snapshot.activeTabId;
+  // Spec §6: the active tab's IMMEDIATE parent group is the new-tab scope.
   const activeGroupId = useMemo(
     () =>
       activeTabId
-        ? snapshot.layout.groups.find((group) => group.tabIds.includes(activeTabId))
-            ?.id ?? null
+        ? findContainer(snapshot.layout, { kind: "tab", id: activeTabId })
         : null,
     [snapshot.layout, activeTabId],
   );
@@ -514,6 +519,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenFolderSearch={(groupId) =>
           setFolderSearch({ groupId, profile: null })}
+        maxGroupDepth={settings.maxGroupDepth}
         {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
         width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
         onResize={(width) =>

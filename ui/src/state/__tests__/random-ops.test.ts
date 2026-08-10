@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  FILL_STRENGTHS,
   PALETTE_IDS,
   parseLayout,
   serializeLayout,
   sessionIdsInLayout,
   validateInvariants,
 } from "../layout";
-import type { LayoutV1, SplitNode } from "../layout";
+import type { LayoutV2, SplitNode } from "../layout";
 import { createLayoutStore } from "../store";
 import { baseLayout, mulberry32 } from "./helpers";
 
@@ -15,7 +16,7 @@ interface PaneRef {
   sessionId: number;
 }
 
-function panes(layout: LayoutV1): PaneRef[] {
+function panes(layout: LayoutV2): PaneRef[] {
   const out: PaneRef[] = [];
   for (const tab of Object.values(layout.tabs)) {
     const walk = (node: SplitNode): void => {
@@ -57,14 +58,16 @@ describe("random op sequences keep every invariant", () => {
       let nextSession = 100;
       let nextId = 0;
 
+      const groupList = (): string[] => Object.keys(store.getState().groups);
+
       const ops: Array<() => void> = [
         () => {
-          const groups = store.getState().groups;
+          const groups = groupList();
           const grouped = rand() < 0.3 && groups.length > 0;
           store.createTab({
             id: rand() < 0.9 ? `T${nextId++}` : "",
             sessionId: rand() < 0.9 ? nextSession++ : -1,
-            groupId: grouped ? pick(groups)?.id : null,
+            groupId: grouped ? pick(groups) : null,
             index: rint(6) - 1,
             color: pick(PALETTE_IDS),
             title: rand() < 0.3 ? `tab ${rint(1000)}` : undefined,
@@ -88,30 +91,49 @@ describe("random op sequences keep every invariant", () => {
         () => {
           const state = store.getState();
           const tabId = pick(Object.keys(state.tabs)) ?? "ghost";
-          const groupId = rand() < 0.5 ? pick(state.groups)?.id ?? null : null;
+          const groupId = rand() < 0.5 ? pick(groupList()) ?? null : null;
           store.moveTab(tabId, { groupId }, rint(8) - 2);
         },
         () => {
-          const state = store.getState();
-          const groupId = rand() < 0.5 ? pick(state.groups)?.id ?? null : null;
+          const groupId = rand() < 0.5 ? pick(groupList()) ?? null : null;
           store.reorderWithinContainer(groupId, rint(6), rint(6));
         },
         () => {
           store.createGroup({
             id: `G${nextId++}`,
             name: `group ${rint(100)}`,
+            ...(rand() < 0.5 ? { parentGroupId: pick(groupList()) ?? null } : {}),
             index: rint(4),
           });
         },
         () => {
-          const id = pick(store.getState().groups)?.id ?? "ghost";
+          // Nesting churn: any group into any container, cycles included —
+          // the store must refuse the illegal ones, never corrupt.
+          const groupId = pick(groupList()) ?? "ghost";
+          const target = rand() < 0.8 ? pick(groupList()) ?? null : null;
+          store.moveItem({ kind: "group", id: groupId }, target, rint(6) - 1);
+        },
+        () => {
+          const id = pick(groupList()) ?? "ghost";
           store.renameGroup(id, rand() < 0.1 ? "" : `renamed ${rint(100)}`);
         },
         () => {
-          store.toggleGroupCollapsed(pick(store.getState().groups)?.id ?? "ghost");
+          store.recolorGroup(
+            pick(groupList()) ?? "ghost",
+            rand() < 0.3 ? null : pick(PALETTE_IDS)!,
+          );
         },
         () => {
-          store.deleteGroup(pick(store.getState().groups)?.id ?? "ghost");
+          store.setTabFill(
+            pick(Object.keys(store.getState().tabs)) ?? "ghost",
+            pick(FILL_STRENGTHS)!,
+          );
+        },
+        () => {
+          store.toggleGroupCollapsed(pick(groupList()) ?? "ghost");
+        },
+        () => {
+          store.deleteGroup(pick(groupList()) ?? "ghost");
         },
         () => {
           const target = pick(panes(store.getState()));

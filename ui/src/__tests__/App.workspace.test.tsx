@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LayoutV1 } from "../state/layout";
+import type { LayoutV2 } from "../state/layout";
 import type {
   SidebarTabModel,
   WorkspaceSnapshot,
@@ -47,6 +47,7 @@ function tab(overrides: Partial<SidebarTabModel> = {}): SidebarTabModel {
     groupId: null,
     title: "PowerShell · project",
     color: "blue",
+    fill: "off",
     primarySessionId: 1,
     sessionIds: [1],
     status: "live",
@@ -64,14 +65,15 @@ function snapshot(activeTab: SidebarTabModel | null = tab()): WorkspaceSnapshot 
           id: activeTab.id,
           title: activeTab.title,
           color: activeTab.color,
+          fill: activeTab.fill,
           split: { kind: "pane" as const, sessionId: activeTab.primarySessionId },
         },
       }
     : {};
-  const layout: LayoutV1 = {
-    version: 1,
-    groups: [],
-    ungroupedTabIds: activeTab ? [activeTab.id] : [],
+  const layout: LayoutV2 = {
+    version: 2,
+    groups: {},
+    rootItems: activeTab ? [{ kind: "tab", id: activeTab.id }] : [],
     tabs,
     activeTabId: activeTab?.id ?? null,
   };
@@ -82,6 +84,7 @@ function snapshot(activeTab: SidebarTabModel | null = tab()): WorkspaceSnapshot 
       : ("missing" as const);
   return {
     layout,
+    rootItems: activeTab ? [{ kind: "tab", tab: activeTab }] : [],
     ungroupedTabs: activeTab ? [activeTab] : [],
     groups: [],
     paneStates: activeTab
@@ -293,18 +296,31 @@ describe("App workspace lifecycle", () => {
 function twoTabSnapshot(activeTabId: "tab-a" | "tab-b"): WorkspaceSnapshot {
   const tabA = tab({ id: "tab-a", primarySessionId: 1, sessionIds: [1] });
   const tabB = tab({ id: "tab-b", primarySessionId: 2, sessionIds: [2] });
-  const layout: LayoutV1 = {
-    version: 1,
-    groups: [],
-    ungroupedTabIds: ["tab-a", "tab-b"],
+  const layout: LayoutV2 = {
+    version: 2,
+    groups: {},
+    rootItems: [{ kind: "tab", id: "tab-a" }, { kind: "tab", id: "tab-b" }],
     tabs: {
-      "tab-a": { id: "tab-a", title: tabA.title, color: tabA.color, split: { kind: "pane", sessionId: 1 } },
-      "tab-b": { id: "tab-b", title: tabB.title, color: tabB.color, split: { kind: "pane", sessionId: 2 } },
+      "tab-a": {
+        id: "tab-a",
+        title: tabA.title,
+        color: tabA.color,
+        fill: "off",
+        split: { kind: "pane", sessionId: 1 },
+      },
+      "tab-b": {
+        id: "tab-b",
+        title: tabB.title,
+        color: tabB.color,
+        fill: "off",
+        split: { kind: "pane", sessionId: 2 },
+      },
     },
     activeTabId,
   };
   return {
     layout,
+    rootItems: [{ kind: "tab", tab: tabA }, { kind: "tab", tab: tabB }],
     ungroupedTabs: [tabA, tabB],
     groups: [],
     paneStates: {

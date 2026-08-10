@@ -1,14 +1,80 @@
 import {
+  collectSubtreeTabIds,
   MAX_SPLIT_DEPTH,
   PALETTE_IDS,
   sessionIdsInSplit,
   splitDepth,
   validateInvariants,
-  type LayoutV1,
+  type Group,
+  type Item,
+  type LayoutV2,
   type PaletteId,
   type SplitNode,
   type Tab,
 } from "../state/layout";
+
+/// The container holding `item` (null groupId = the sidebar root) and its
+/// ordered contents. Undefined when nothing references the item.
+function containerOf(
+  layout: LayoutV2,
+  item: Item,
+): { groupId: string | null; items: readonly Item[] } | undefined {
+  if (layout.rootItems.some((candidate) => sameItem(candidate, item))) {
+    return { groupId: null, items: layout.rootItems };
+  }
+  for (const group of Object.values(layout.groups)) {
+    if (group.items.some((candidate) => sameItem(candidate, item))) {
+      return { groupId: group.id, items: group.items };
+    }
+  }
+  return undefined;
+}
+
+function sameItem(a: Item, b: Item): boolean {
+  return a.kind === b.kind && a.id === b.id;
+}
+
+function withContainerItems(
+  layout: LayoutV2,
+  groupId: string | null,
+  items: Item[],
+): LayoutV2 {
+  if (groupId === null) {
+    return { ...layout, rootItems: items };
+  }
+  const group = layout.groups[groupId];
+  if (!group) {
+    return layout;
+  }
+  return { ...layout, groups: { ...layout.groups, [groupId]: { ...group, items } } };
+}
+
+/// Drops every listed tab id from every container, leaving groups in place.
+function withoutTabItems(layout: LayoutV2, removed: ReadonlySet<string>): LayoutV2 {
+  const keep = (items: readonly Item[]): Item[] =>
+    items.filter((item) => !(item.kind === "tab" && removed.has(item.id)));
+  const groups: Record<string, Group> = {};
+  for (const [id, group] of Object.entries(layout.groups)) {
+    const items = keep(group.items);
+    groups[id] = items.length === group.items.length ? group : { ...group, items };
+  }
+  return { ...layout, groups, rootItems: keep(layout.rootItems) };
+}
+
+/// Every group id at or under `groupId`, itself included.
+function subtreeGroupIds(layout: LayoutV2, groupId: string): Set<string> {
+  const ids = new Set<string>([groupId]);
+  const walk = (id: string): void => {
+    for (const item of layout.groups[id]?.items ?? []) {
+      if (item.kind === "group" && !ids.has(item.id)) {
+        ids.add(item.id);
+        walk(item.id);
+      }
+    }
+  };
+  walk(groupId);
+  return ids;
+}
 
 export function firstSessionId(node: SplitNode): number {
   return node.kind === "pane" ? node.sessionId : firstSessionId(node.children[0]);
@@ -42,11 +108,26 @@ export function sessionIdsInTab(tab: Tab): number[] {
   return sessionIdsInSplit(tab.split);
 }
 
-export function flattenTabIds(layout: LayoutV1): string[] {
-  return [...layout.ungroupedTabIds, ...layout.groups.flatMap((group) => group.tabIds)];
+/// Every tab id in sidebar order: each container's items in order, subgroups
+/// walked where they sit.
+export function flattenTabIds(layout: LayoutV2): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const walk = (items: readonly Item[]): void => {
+    for (const item of items) {
+      if (item.kind === "tab") {
+        out.push(item.id);
+      } else if (!seen.has(item.id)) {
+        seen.add(item.id);
+        walk(layout.groups[item.id]?.items ?? []);
+      }
+    }
+  };
+  walk(layout.rootItems);
+  return out;
 }
 
-export function nextTabColor(layout: LayoutV1): PaletteId {
+export function nextTabColor(layout: LayoutV2): PaletteId {
   const order = flattenTabIds(layout);
   const last = order.length === 0 ? undefined : layout.tabs[order[order.length - 1]!];
   if (!last) {
@@ -56,29 +137,33 @@ export function nextTabColor(layout: LayoutV1): PaletteId {
   return PALETTE_IDS[(index + 1) % PALETTE_IDS.length];
 }
 
+/// Reposition a group inside the container it already sits in. Nesting is
+/// `moveItem`'s job; this is the sibling-order drag.
 export function reorderGroup(
-  layout: LayoutV1,
+  layout: LayoutV2,
   groupId: string,
   targetIndex: number,
-): LayoutV1 {
-  const fromIndex = layout.groups.findIndex((group) => group.id === groupId);
-  if (fromIndex < 0 || !Number.isInteger(targetIndex)) {
+): LayoutV2 {
+  const item: Item = { kind: "group", id: groupId };
+  const container = containerOf(layout, item);
+  if (container === undefined || !Number.isInteger(targetIndex)) {
     return layout;
   }
-  const groups = [...layout.groups];
-  const [group] = groups.splice(fromIndex, 1);
-  const at = Math.min(Math.max(targetIndex, 0), groups.length);
-  groups.splice(at, 0, group!);
-  if (groups.every((candidate, index) => candidate === layout.groups[index])) {
+  const items = [...container.items];
+  const fromIndex = items.findIndex((candidate) => sameItem(candidate, item));
+  const [moved] = items.splice(fromIndex, 1);
+  const at = Math.min(Math.max(targetIndex, 0), items.length);
+  items.splice(at, 0, moved!);
+  if (items.every((candidate, index) => candidate === container.items[index])) {
     return layout;
   }
-  return admit(layout, { ...layout, groups });
+  return admit(layout, withContainerItems(layout, container.groupId, items));
 }
 
 export function pruneSessionIds(
-  layout: LayoutV1,
+  layout: LayoutV2,
   sessionIds: ReadonlySet<number>,
-): LayoutV1 {
+): LayoutV2 {
   if (sessionIds.size === 0) {
     return layout;
   }
@@ -104,36 +189,44 @@ export function pruneSessionIds(
     return layout;
   }
 
-  const ungroupedTabIds = layout.ungroupedTabIds.filter((id) => !removedTabs.has(id));
-  const groups = layout.groups.map((group) => {
-    const tabIds = group.tabIds.filter((id) => !removedTabs.has(id));
-    return tabIds.length === group.tabIds.length ? group : { ...group, tabIds };
-  });
   const activeTabId = layout.activeTabId && removedTabs.has(layout.activeTabId)
     ? nextActiveTab(layout, removedTabs)
     : layout.activeTabId;
-  return admit(layout, { ...layout, tabs, ungroupedTabIds, groups, activeTabId });
+  return admit(
+    layout,
+    withoutTabItems({ ...layout, tabs, activeTabId }, removedTabs),
+  );
 }
 
-export function removeGroupAndTabs(layout: LayoutV1, groupId: string): LayoutV1 {
-  const group = layout.groups.find((candidate) => candidate.id === groupId);
-  if (!group) {
+/// Close-tabs group delete: the group, every subgroup under it, and every tab
+/// in that subtree leave the layout together.
+export function removeGroupAndTabs(layout: LayoutV2, groupId: string): LayoutV2 {
+  const item: Item = { kind: "group", id: groupId };
+  const container = containerOf(layout, item);
+  if (!layout.groups[groupId] || container === undefined) {
     return layout;
   }
-  const removedTabs = new Set(group.tabIds);
+  const removedGroups = subtreeGroupIds(layout, groupId);
+  const removedTabs = new Set(collectSubtreeTabIds(layout, groupId));
   const tabs = { ...layout.tabs };
   for (const tabId of removedTabs) {
     delete tabs[tabId];
   }
+  const groups = { ...layout.groups };
+  for (const id of removedGroups) {
+    delete groups[id];
+  }
   const activeTabId = layout.activeTabId && removedTabs.has(layout.activeTabId)
     ? nextActiveTab(layout, removedTabs)
     : layout.activeTabId;
-  return admit(layout, {
-    ...layout,
-    groups: layout.groups.filter((candidate) => candidate.id !== groupId),
-    tabs,
-    activeTabId,
-  });
+  return admit(
+    layout,
+    withContainerItems(
+      { ...layout, groups, tabs, activeTabId },
+      container.groupId,
+      container.items.filter((candidate) => !sameItem(candidate, item)),
+    ),
+  );
 }
 
 /// Spec §16 merge ("Side-by-side with active tab"): the SOURCE tab's entire
@@ -146,10 +239,10 @@ export function removeGroupAndTabs(layout: LayoutV1, groupId: string): LayoutV1 
 /// unknown, both ids are the same tab, or the grafted tree would exceed the
 /// MAX_SPLIT_DEPTH cap this module already mirrors for splits.
 export function mergeTabIntoTab(
-  layout: LayoutV1,
+  layout: LayoutV2,
   sourceTabId: string,
   targetTabId: string,
-): LayoutV1 | null {
+): LayoutV2 | null {
   const source = layout.tabs[sourceTabId];
   const target = layout.tabs[targetTabId];
   if (!source || !target || sourceTabId === targetTabId) {
@@ -168,19 +261,16 @@ export function mergeTabIntoTab(
 
   const tabs: Record<string, Tab> = { ...layout.tabs, [targetTabId]: { ...target, split } };
   delete tabs[sourceTabId];
-  return admitOrNull({
-    ...layout,
-    tabs,
-    ungroupedTabIds: layout.ungroupedTabIds.filter((id) => id !== sourceTabId),
-    groups: layout.groups.map((group) =>
-      group.tabIds.includes(sourceTabId)
-        ? { ...group, tabIds: group.tabIds.filter((id) => id !== sourceTabId) }
-        : group
-    ),
-    // The merge happens INTO the active tab, and it stays active afterwards
-    // (the source tab is gone, so an active source would dangle).
-    activeTabId: targetTabId,
-  });
+  return admitOrNull(withoutTabItems(
+    {
+      ...layout,
+      tabs,
+      // The merge happens INTO the active tab, and it stays active afterwards
+      // (the source tab is gone, so an active source would dangle).
+      activeTabId: targetTabId,
+    },
+    new Set([sourceTabId]),
+  ));
 }
 
 /// Spec §16 extract ("Pop out to own tab"), the undo of a merge: one session's
@@ -191,11 +281,11 @@ export function mergeTabIntoTab(
 /// Returns null when the tab is unknown, `newTabId` is unusable, the session is
 /// not in this tab, or it is the tab's ONLY pane (already its own tab).
 export function extractSessionToTab(
-  layout: LayoutV1,
+  layout: LayoutV2,
   tabId: string,
   sessionId: number,
   newTabId: string,
-): LayoutV1 | null {
+): LayoutV2 | null {
   const tab = layout.tabs[tabId];
   if (!tab || newTabId.length === 0 || newTabId in layout.tabs) {
     return null;
@@ -207,47 +297,35 @@ export function extractSessionToTab(
   if (remaining === null) {
     return null;
   }
-
-  let ungroupedTabIds = layout.ungroupedTabIds;
-  let groups = layout.groups;
-  const ungroupedAt = layout.ungroupedTabIds.indexOf(tabId);
-  if (ungroupedAt >= 0) {
-    ungroupedTabIds = insertAfter(layout.ungroupedTabIds, ungroupedAt, newTabId);
-  } else {
-    const group = layout.groups.find((candidate) => candidate.tabIds.includes(tabId));
-    if (!group) {
-      return null;
-    }
-    groups = layout.groups.map((candidate) =>
-      candidate === group
-        ? {
-          ...candidate,
-          tabIds: insertAfter(
-            candidate.tabIds,
-            candidate.tabIds.indexOf(tabId),
-            newTabId,
-          ),
-        }
-        : candidate
-    );
+  const source: Item = { kind: "tab", id: tabId };
+  const container = containerOf(layout, source);
+  if (container === undefined) {
+    return null;
   }
 
   const extracted: Tab = {
     id: newTabId,
     title: null,
     color: nextTabColor(layout),
+    fill: tab.fill,
     split: { kind: "pane", sessionId },
   };
-  return admitOrNull({
-    ...layout,
-    ungroupedTabIds,
-    groups,
-    tabs: {
-      ...layout.tabs,
-      [tabId]: { ...tab, split: remaining },
-      [newTabId]: extracted,
+  return admitOrNull(withContainerItems(
+    {
+      ...layout,
+      tabs: {
+        ...layout.tabs,
+        [tabId]: { ...tab, split: remaining },
+        [newTabId]: extracted,
+      },
     },
-  });
+    container.groupId,
+    insertAfter(
+      container.items,
+      container.items.findIndex((candidate) => sameItem(candidate, source)),
+      { kind: "tab", id: newTabId },
+    ),
+  ));
 }
 
 /// Dead-pane relaunch: swap one pane's session id in place, leaving the tab's
@@ -258,11 +336,11 @@ export function extractSessionToTab(
 /// old session is not one of its panes, or the swap would violate an invariant
 /// (e.g. the new session id already lives in another pane).
 export function replaceSessionInTab(
-  layout: LayoutV1,
+  layout: LayoutV2,
   tabId: string,
   oldSessionId: number,
   newSessionId: number,
-): LayoutV1 | null {
+): LayoutV2 | null {
   const tab = layout.tabs[tabId];
   if (!tab || oldSessionId === newSessionId) {
     return null;
@@ -298,9 +376,9 @@ function replaceInNode(
   return null;
 }
 
-function insertAfter(list: readonly string[], index: number, id: string): string[] {
+function insertAfter(list: readonly Item[], index: number, item: Item): Item[] {
   const next = [...list];
-  next.splice(index + 1, 0, id);
+  next.splice(index + 1, 0, item);
   return next;
 }
 
@@ -322,7 +400,7 @@ function pruneNode(node: SplitNode, sessionIds: ReadonlySet<number>): SplitNode 
   return { ...node, children: [first, second] };
 }
 
-function nextActiveTab(layout: LayoutV1, removedTabs: ReadonlySet<string>): string | null {
+function nextActiveTab(layout: LayoutV2, removedTabs: ReadonlySet<string>): string | null {
   if (!layout.activeTabId) {
     return null;
   }
@@ -341,12 +419,12 @@ function nextActiveTab(layout: LayoutV1, removedTabs: ReadonlySet<string>): stri
   return null;
 }
 
-function admit(previous: LayoutV1, candidate: LayoutV1): LayoutV1 {
+function admit(previous: LayoutV2, candidate: LayoutV2): LayoutV2 {
   return validateInvariants(candidate).length === 0 ? candidate : previous;
 }
 
 /// admit() for operations whose refusal the caller must SEE (spec §16): an
 /// invariant violation is a refusal, never a silently unchanged layout.
-function admitOrNull(candidate: LayoutV1): LayoutV1 | null {
+function admitOrNull(candidate: LayoutV2): LayoutV2 | null {
   return validateInvariants(candidate).length === 0 ? candidate : null;
 }

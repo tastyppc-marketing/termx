@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SessionAttachment, SessionAttachmentCallbacks } from "../../host/client";
 import type { SessionInfo } from "../../host/protocol";
 import { createLayoutStore } from "../../state/store";
-import type { LayoutV1 } from "../../state/layout";
+import type { Item, LayoutV2 } from "../../state/layout";
 import {
   WorkspaceController,
   type WorkspaceAttachmentHub,
@@ -25,22 +25,32 @@ function session(id: number, overrides: Partial<SessionInfo> = {}): SessionInfo 
   };
 }
 
-function layout(): LayoutV1 {
+function layout(): LayoutV2 {
   return {
-    version: 1,
-    groups: [{ id: "group", name: "Work", collapsed: false, tabIds: ["tab-2"] }],
-    ungroupedTabIds: ["tab-1"],
+    version: 2,
+    groups: {
+      group: {
+        id: "group",
+        name: "Work",
+        collapsed: false,
+        color: null,
+        items: [{ kind: "tab", id: "tab-2" }],
+      },
+    },
+    rootItems: [{ kind: "tab", id: "tab-1" }, { kind: "group", id: "group" }],
     tabs: {
       "tab-1": {
         id: "tab-1",
         title: null,
         color: "blue",
+        fill: "off",
         split: { kind: "pane", sessionId: 1 },
       },
       "tab-2": {
         id: "tab-2",
         title: "Split",
         color: "cyan",
+        fill: "off",
         split: {
           kind: "split",
           dir: "row",
@@ -58,7 +68,7 @@ function layout(): LayoutV1 {
 
 function harness(options: {
   sessions?: SessionInfo[];
-  initial?: LayoutV1;
+  initial?: LayoutV2;
   closeSession?: (sessionId: number) => Promise<void>;
   pickFolder?: () => Promise<string | null>;
   settings?: Partial<TermxSettings>;
@@ -104,7 +114,7 @@ function harness(options: {
       return () => errorListeners.delete(listener);
     },
   };
-  const persistenceCalls: Array<{ layout: LayoutV1; kind: "structural" | "active_tab" }> = [];
+  const persistenceCalls: Array<{ layout: LayoutV2; kind: "structural" | "active_tab" }> = [];
   const persistence: WorkspacePersistence = {
     getSnapshot: () => ({ saving: false, error: null }),
     subscribe: () => () => undefined,
@@ -161,7 +171,7 @@ function harness(options: {
 }
 
 describe("WorkspaceController projection", () => {
-  it("derives titles and projects fixed slate groups without serializing color", () => {
+  it("derives titles and projects neutral root groups with their nesting depth", () => {
     const { controller } = harness();
     const snapshot = controller.getSnapshot();
 
@@ -170,8 +180,14 @@ describe("WorkspaceController projection", () => {
       status: "live",
       primarySessionId: 1,
     });
-    expect(snapshot.groups[0]).toMatchObject({ color: "slate", name: "Work" });
-    expect("color" in snapshot.layout.groups[0]!).toBe(false);
+    expect(snapshot.groups[0]).toMatchObject({
+      color: null,
+      name: "Work",
+      depth: 1,
+      parentGroupId: null,
+    });
+    expect(snapshot.layout.groups.group!.color).toBeNull();
+    expect(snapshot.rootItems.map((item) => item.kind)).toEqual(["tab", "group"]);
     expect(snapshot.activeSessionId).toBe(1);
   });
 
@@ -220,7 +236,9 @@ describe("WorkspaceController mutations", () => {
     controller.renameTab("tab-2", "Renamed");
     controller.recolorTab("tab-2", "green");
     controller.toggleGroup("group");
-    controller.reorderGroup("group", 0);
+    // Item indices, not group indices: the group already sits at 1 (after
+    // tab-1), so this reorder is a no-op and writes nothing.
+    controller.reorderGroup("group", 1);
 
     expect(persistenceCalls.map((call) => call.kind)).toEqual([
       "active_tab",
@@ -367,6 +385,134 @@ describe("WorkspaceController mutations", () => {
   });
 });
 
+describe("WorkspaceController nested groups", () => {
+  /// The fixture's group, plus a subgroup holding one more tab.
+  function nested(settings?: Partial<TermxSettings>) {
+    const base = layout();
+    base.groups.sub = {
+      id: "sub",
+      name: "Clients",
+      collapsed: false,
+      color: null,
+      items: [{ kind: "tab", id: "tab-3" }],
+    };
+    base.groups.group!.items.push({ kind: "group", id: "sub" });
+    base.tabs["tab-3"] = {
+      id: "tab-3",
+      title: "Deep",
+      color: "red",
+      fill: "off",
+      split: { kind: "pane", sessionId: 4 },
+    };
+    return harness({
+      initial: base,
+      sessions: [session(1), session(2), session(3), session(4)],
+      ...(settings ? { settings } : {}),
+    });
+  }
+
+  it("creates a subgroup under a parent and reports its id", () => {
+    const { controller, persistenceCalls } = harness();
+
+    const id = controller.createGroup("group", "Clients");
+
+    expect(id).toBe("new-tab");
+    expect(controller.getSnapshot().layout.groups[id!]).toMatchObject({
+      name: "Clients",
+      color: null,
+      items: [],
+    });
+    expect(controller.getSnapshot().groups.map((group) => group.depth)).toEqual([1, 2]);
+    expect(persistenceCalls.at(-1)?.kind).toBe("structural");
+  });
+
+  it("refuses a subgroup past maxGroupDepth without writing anything", () => {
+    const { controller, persistenceCalls } = nested({ maxGroupDepth: 2 });
+
+    expect(controller.createGroup("sub")).toBeNull();
+    expect(controller.createGroup("ghost")).toBeNull();
+    expect(persistenceCalls).toEqual([]);
+    expect(controller.createGroup(null, "Root level")).not.toBeNull();
+  });
+
+  it("moves a tab into a subgroup and a group into another group", () => {
+    const { controller } = nested();
+
+    expect(controller.moveItem({ kind: "tab", id: "tab-1" }, "sub", 0)).toBe(true);
+    expect(controller.getSnapshot().layout.groups.sub!.items).toEqual([
+      { kind: "tab", id: "tab-1" },
+      { kind: "tab", id: "tab-3" },
+    ]);
+
+    controller.createGroup(null, "Standalone");
+    expect(controller.moveItem({ kind: "group", id: "new-tab" }, "group", 0)).toBe(true);
+    expect(controller.getSnapshot().layout.groups.group!.items[0])
+      .toEqual({ kind: "group", id: "new-tab" });
+  });
+
+  it("refuses a cyclic move and a move past the depth setting", () => {
+    const { controller, persistenceCalls } = nested({ maxGroupDepth: 2 });
+    const before = controller.getSnapshot().layout;
+
+    const cycle: Item = { kind: "group", id: "group" };
+    expect(controller.moveItem(cycle, "sub", 0)).toBe(false);
+    // group > sub is already 2 levels tall, so it cannot go under another group.
+    controller.createGroup(null, "Elsewhere");
+    expect(controller.moveItem(cycle, "new-tab", 0)).toBe(false);
+    expect(controller.getSnapshot().layout.groups.group).toBe(before.groups.group);
+    expect(persistenceCalls.filter((call) => call.kind === "structural")).toHaveLength(1);
+  });
+
+  it("keep-children delete splices the subtree into the parent in place", async () => {
+    const { controller, closeSession } = nested();
+
+    await controller.deleteGroup("group", "keep-children");
+
+    expect(closeSession).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().layout.rootItems).toEqual([
+      { kind: "tab", id: "tab-1" },
+      { kind: "tab", id: "tab-2" },
+      { kind: "group", id: "sub" },
+    ]);
+    expect(controller.getSnapshot().layout.groups.group).toBeUndefined();
+    expect(controller.getSnapshot().layout.tabs["tab-3"]).toBeDefined();
+  });
+
+  it("close-tabs delete closes every session in the subtree, then removes it", async () => {
+    const closed: number[] = [];
+    const { controller } = nested();
+    const nestedWithSpy = harness({
+      initial: controller.getSnapshot().layout,
+      sessions: [session(1), session(2), session(3), session(4)],
+      closeSession: async (sessionId) => {
+        closed.push(sessionId);
+      },
+    });
+
+    await nestedWithSpy.controller.deleteGroup("group", "close-tabs");
+
+    expect(closed).toEqual([2, 3, 4]);
+    const layoutAfter = nestedWithSpy.controller.getSnapshot().layout;
+    expect(layoutAfter.groups).toEqual({});
+    expect(layoutAfter.tabs["tab-2"]).toBeUndefined();
+    expect(layoutAfter.tabs["tab-3"]).toBeUndefined();
+    expect(layoutAfter.rootItems).toEqual([{ kind: "tab", id: "tab-1" }]);
+  });
+
+  it("recolors a group and sets a tab fill through the persisted blob", () => {
+    const { controller, persistenceCalls } = harness();
+
+    controller.recolorGroup("group", "magenta");
+    controller.setTabFill("tab-1", "strong");
+
+    const persisted = persistenceCalls.at(-1)!.layout;
+    expect(persisted.groups.group!.color).toBe("magenta");
+    expect(persisted.tabs["tab-1"]!.fill).toBe("strong");
+    expect(controller.getSnapshot().groups[0]?.color).toBe("magenta");
+    expect(controller.getSnapshot().ungroupedTabs[0]?.fill).toBe("strong");
+  });
+});
+
 describe("WorkspaceController pane states", () => {
   it("projects live, dead-with-exit-code, and missing sessions per pane", () => {
     const dead = session(2, { alive: false, pid: null });
@@ -441,15 +587,16 @@ describe("WorkspaceController split actions", () => {
   });
 
   it("refuses a depth-capped split before creating any session", async () => {
-    const initial: LayoutV1 = {
-      version: 1,
-      groups: [],
-      ungroupedTabIds: ["deep"],
+    const initial: LayoutV2 = {
+      version: 2,
+      groups: {},
+      rootItems: [{ kind: "tab", id: "deep" }],
       tabs: {
         deep: {
           id: "deep",
           title: null,
           color: "blue",
+          fill: "off",
           split: {
             kind: "split",
             dir: "row",
@@ -576,7 +723,9 @@ describe("WorkspaceController split actions", () => {
     await controller.closePane("tab-1", 1);
 
     expect(controller.getSnapshot().layout.tabs["tab-1"]).toBeUndefined();
-    expect(controller.getSnapshot().layout.ungroupedTabIds).toEqual([]);
+    expect(controller.getSnapshot().layout.rootItems).toEqual([
+      { kind: "group", id: "group" },
+    ]);
   });
 
   it("records a structural write for a real resize and nothing for a no-op", () => {
@@ -726,7 +875,7 @@ describe("WorkspaceController combine tabs (spec §16)", () => {
       children: [{ kind: "pane", sessionId: 1 }, layout().tabs["tab-2"]!.split],
     });
     expect(after.tabs["tab-2"]).toBeUndefined();
-    expect(after.groups[0]?.tabIds).toEqual([]);
+    expect(after.groups.group?.items).toEqual([]);
     expect(persistenceCalls.at(-1)?.kind).toBe("structural");
     expect(createSession).not.toHaveBeenCalled();
     expect(closeSession).not.toHaveBeenCalled();
@@ -773,7 +922,10 @@ describe("WorkspaceController combine tabs (spec §16)", () => {
     expect(snapshot.layout.tabs["tab-2"]?.split).toEqual({ kind: "pane", sessionId: 2 });
     // "new-tab" is the harness's first generateId() value.
     expect(snapshot.layout.tabs["new-tab"]?.split).toEqual({ kind: "pane", sessionId: 3 });
-    expect(snapshot.layout.groups[0]?.tabIds).toEqual(["tab-2", "new-tab"]);
+    expect(snapshot.layout.groups.group?.items).toEqual([
+      { kind: "tab", id: "tab-2" },
+      { kind: "tab", id: "new-tab" },
+    ]);
     expect(snapshot.activeTabId).toBe("new-tab");
     expect(snapshot.activeSessionId).toBe(3);
     expect(snapshot.groups[0]?.tabs.at(-1)).toMatchObject({
@@ -970,6 +1122,106 @@ describe("WorkspaceController new-tab cwd policy (F1)", () => {
 
     expect(uiState.getSnapshot().scopePaths.active["group"]).toBeUndefined();
     expect(uiState.getSnapshot().scopePaths.seeds["group"]).toBeUndefined();
+  });
+});
+
+/// Marketing > Clients with the active tab two levels down, and a root tab
+/// beside it — the shape spec §6 is about.
+function nestedLayout(): LayoutV2 {
+  return {
+    version: 2,
+    groups: {
+      marketing: {
+        id: "marketing",
+        name: "Marketing",
+        collapsed: false,
+        color: null,
+        items: [{ kind: "group", id: "clients" }],
+      },
+      clients: {
+        id: "clients",
+        name: "Clients",
+        collapsed: false,
+        color: null,
+        items: [{ kind: "tab", id: "tab-2" }],
+      },
+    },
+    rootItems: [{ kind: "tab", id: "tab-1" }, { kind: "group", id: "marketing" }],
+    tabs: {
+      "tab-1": {
+        id: "tab-1",
+        title: null,
+        color: "blue",
+        fill: "off",
+        split: { kind: "pane", sessionId: 1 },
+      },
+      "tab-2": {
+        id: "tab-2",
+        title: null,
+        color: "cyan",
+        fill: "off",
+        split: { kind: "pane", sessionId: 2 },
+      },
+    },
+    activeTabId: "tab-2",
+  };
+}
+
+describe("WorkspaceController new-tab policy with nesting (spec §6)", () => {
+  it("scopes a nested tab to its immediate parent, never an ancestor", async () => {
+    const { controller, createSession, uiState } = harness({ initial: nestedLayout() });
+
+    controller.reportSessionCwd(2, "D:\\clients-cd", true);
+    expect(uiState.getSnapshot().scopePaths.active["clients"]).toBe("D:\\clients-cd");
+    expect(uiState.getSnapshot().scopePaths.active["marketing"]).toBeUndefined();
+
+    await controller.createTab({ groupId: "clients", profile: null });
+    expect(createSession)
+      .toHaveBeenLastCalledWith(expect.objectContaining({ cwd: "D:\\clients-cd" }));
+
+    // Marketing holds no tabs of its own, so it inherits nothing from below.
+    await controller.createTab({ groupId: "marketing", profile: null });
+    expect(createSession).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: null }));
+  });
+
+  it("active-tab policy reaches a nested active tab only inside its own scope", async () => {
+    const { controller, createSession } = harness({
+      initial: nestedLayout(),
+      settings: { newTabPolicy: "active-tab" },
+    });
+
+    controller.reportSessionCwd(2, "D:\\deep", true);
+    await controller.createTab({ groupId: "clients", profile: null });
+    expect(createSession).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: "D:\\deep" }));
+
+    await controller.createTab({ groupId: null, profile: null });
+    expect(createSession)
+      .toHaveBeenLastCalledWith(expect.objectContaining({ cwd: "C:\\work\\project-1" }));
+  });
+
+  it("lands a group row's new tab in that group and a root one at the root", async () => {
+    // Two creations in one test need two distinct sessions; the default fake
+    // hands out 50 every time, which the store would reject as a duplicate.
+    let nextSessionId = 50;
+    const { controller } = harness({
+      initial: nestedLayout(),
+      createSession: async (createOptions) =>
+        session(nextSessionId++, {
+          profile: createOptions.profile ?? "powershell",
+          cwd: createOptions.cwd,
+        }),
+    });
+
+    // Ids come from the harness's generic pool, in creation order.
+    await controller.createTab({ groupId: "clients", profile: null });
+    await controller.createTab({ groupId: null, profile: null });
+
+    const state = controller.getSnapshot().layout;
+    expect(state.groups.clients!.items).toEqual([
+      { kind: "tab", id: "tab-2" },
+      { kind: "tab", id: "new-tab" },
+    ]);
+    expect(state.rootItems.at(-1)).toEqual({ kind: "tab", id: "new-group" });
   });
 });
 

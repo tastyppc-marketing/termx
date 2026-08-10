@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { validateInvariants } from "../layout";
 import { reconcile } from "../reconcile";
 import type { SessionLike } from "../reconcile";
-import { baseLayout } from "./helpers";
+import { baseLayout, groupItem, tabItem } from "./helpers";
 
 function ids(prefix: string): () => string {
   let n = 0;
@@ -35,11 +35,17 @@ describe("reconcile rule 2 — live sessions never orphaned", () => {
     );
 
     expect(result.orphanAdoptedIds).toEqual([7]);
-    expect(result.layout.ungroupedTabIds).toEqual(["t1", "t2", "new0"]);
+    expect(result.layout.rootItems).toEqual([
+      tabItem("t1"),
+      tabItem("t2"),
+      groupItem("g1"),
+      tabItem("new0"),
+    ]);
     expect(result.layout.tabs.new0).toEqual({
       id: "new0",
       title: null,
       color: "slate",
+      fill: "off",
       split: { kind: "pane", sessionId: 7 },
     });
     expect(result.layout.activeTabId).toBe("t1");
@@ -69,8 +75,8 @@ describe("reconcile rule 3 — malformed or absent layout", () => {
       { generateId: ids("f") },
     );
 
-    expect(result.layout.groups).toEqual([]);
-    expect(result.layout.ungroupedTabIds).toEqual(["f0", "f1"]);
+    expect(result.layout.groups).toEqual({});
+    expect(result.layout.rootItems).toEqual([tabItem("f0"), tabItem("f1")]);
     expect(result.layout.tabs.f0.split).toEqual({ kind: "pane", sessionId: 1 });
     expect(result.layout.tabs.f1.split).toEqual({ kind: "pane", sessionId: 3 });
     expect(result.layout.tabs.f0.color).toBe("slate");
@@ -103,7 +109,12 @@ describe("reconcile — mixed case", () => {
     expect(result.deadSessionIds.sort()).toEqual([2, 3]);
     expect(result.orphanAdoptedIds).toEqual([7]);
     expect(result.unreferencedDeadSessionIds).toEqual([9]);
-    expect(result.layout.ungroupedTabIds).toEqual(["t1", "t2", "m0"]);
+    expect(result.layout.rootItems).toEqual([
+      tabItem("t1"),
+      tabItem("t2"),
+      groupItem("g1"),
+      tabItem("m0"),
+    ]);
     expect(result.layout.groups).toEqual(layout.groups);
     expect(validateInvariants(result.layout)).toEqual([]);
   });

@@ -1,9 +1,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LayoutV1 } from "../../state/layout";
-import type { WorkspaceSnapshot } from "../../workspace/WorkspaceController";
-import { Sidebar, type SidebarActions } from "../Sidebar";
+import type { LayoutV2 } from "../../state/layout";
+import type {
+  SidebarGroupModel,
+  SidebarItemModel,
+  SidebarTabModel,
+  WorkspaceSnapshot,
+} from "../../workspace/WorkspaceController";
+import { Sidebar, type SidebarActions, type SidebarProps } from "../Sidebar";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -29,98 +34,160 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
+function tabModel(
+  id: string,
+  groupId: string | null,
+  overrides: Partial<SidebarTabModel> = {},
+): SidebarTabModel {
+  return {
+    id,
+    groupId,
+    title: id,
+    color: "blue",
+    fill: "off",
+    primarySessionId: 1,
+    sessionIds: [1],
+    status: "live",
+    activity: "idle",
+    profile: "powershell",
+    cwd: "C:\\one",
+    ...overrides,
+  };
+}
+
+function groupModel(
+  id: string,
+  name: string,
+  items: readonly SidebarItemModel[],
+  overrides: Partial<SidebarGroupModel> = {},
+): SidebarGroupModel {
+  return {
+    id,
+    parentGroupId: null,
+    name,
+    collapsed: false,
+    color: null,
+    depth: 1,
+    items,
+    tabs: items.flatMap((item) => item.kind === "tab" ? [item.tab] : []),
+    ...overrides,
+  };
+}
+
+/// Every group model reachable from `rootItems`, depth-first — the flat list
+/// the controller publishes alongside the tree.
+function flatGroups(items: readonly SidebarItemModel[]): SidebarGroupModel[] {
+  return items.flatMap((item) =>
+    item.kind === "group" ? [item.group, ...flatGroups(item.group.items)] : []
+  );
+}
+
+function fromRoot(rootItems: readonly SidebarItemModel[], layout: LayoutV2): WorkspaceSnapshot {
+  return {
+    layout,
+    rootItems,
+    ungroupedTabs: rootItems.flatMap((item) => item.kind === "tab" ? [item.tab] : []),
+    groups: flatGroups(rootItems),
+    paneStates: {
+      1: { status: "live", exitCode: null },
+      2: { status: "dead", exitCode: 0 },
+      3: { status: "live", exitCode: null },
+    },
+    activeTabId: layout.activeTabId,
+    activeSessionId: 1,
+    persistence: { saving: false, error: null },
+    notice: null,
+  };
+}
+
 function workspace(): WorkspaceSnapshot {
-  const layout: LayoutV1 = {
-    version: 1,
-    groups: [
-      { id: "group-1", name: "Work", collapsed: false, tabIds: ["tab-2"] },
-      { id: "group-2", name: "Hidden", collapsed: true, tabIds: ["tab-3"] },
+  const layout: LayoutV2 = {
+    version: 2,
+    groups: {
+      "group-1": {
+        id: "group-1",
+        name: "Work",
+        collapsed: false,
+        color: null,
+        items: [{ kind: "tab", id: "tab-2" }],
+      },
+      "group-2": {
+        id: "group-2",
+        name: "Hidden",
+        collapsed: true,
+        color: null,
+        items: [{ kind: "tab", id: "tab-3" }],
+      },
+    },
+    rootItems: [
+      { kind: "tab", id: "tab-1" },
+      { kind: "group", id: "group-1" },
+      { kind: "group", id: "group-2" },
     ],
-    ungroupedTabIds: ["tab-1"],
     tabs: {
       "tab-1": {
         id: "tab-1",
         title: null,
         color: "blue",
+        fill: "off",
         split: { kind: "pane", sessionId: 1 },
       },
       "tab-2": {
         id: "tab-2",
         title: "Exited shell",
         color: "red",
+        fill: "off",
         split: { kind: "pane", sessionId: 2 },
       },
       "tab-3": {
         id: "tab-3",
         title: "Collapsed shell",
         color: "green",
+        fill: "off",
         split: { kind: "pane", sessionId: 3 },
       },
     },
     activeTabId: "tab-1",
   };
-  return {
-    layout,
-    ungroupedTabs: [{
-      id: "tab-1",
-      groupId: null,
-      title: "powershell · one",
-      color: "blue",
-      primarySessionId: 1,
-      sessionIds: [1],
-      status: "live",
-      activity: "unread",
-      profile: "powershell",
-      cwd: "C:\\one",
-    }],
-    groups: [
-      {
-        id: "group-1",
-        name: "Work",
-        collapsed: false,
-        color: "slate",
-        tabs: [{
-          id: "tab-2",
-          groupId: "group-1",
+  const rootItems: SidebarItemModel[] = [
+    {
+      kind: "tab",
+      tab: tabModel("tab-1", null, {
+        title: "powershell · one",
+        activity: "unread",
+      }),
+    },
+    {
+      kind: "group",
+      group: groupModel("group-1", "Work", [{
+        kind: "tab",
+        tab: tabModel("tab-2", "group-1", {
           title: "Exited shell",
           color: "red",
           primarySessionId: 2,
           sessionIds: [2],
           status: "dead",
-          activity: "idle",
-          profile: "powershell",
           cwd: "C:\\two",
-        }],
-      },
-      {
-        id: "group-2",
-        name: "Hidden",
-        collapsed: true,
-        color: "slate",
-        tabs: [{
-          id: "tab-3",
-          groupId: "group-2",
+        }),
+      }]),
+    },
+    {
+      kind: "group",
+      group: groupModel("group-2", "Hidden", [{
+        kind: "tab",
+        tab: tabModel("tab-3", "group-2", {
           title: "Collapsed shell",
           color: "green",
           primarySessionId: 3,
           sessionIds: [3],
-          status: "live",
           activity: "active",
           profile: "cmd",
           cwd: "C:\\three",
-        }],
-      },
-    ],
-    paneStates: {
-      1: { status: "live", exitCode: null },
-      2: { status: "dead", exitCode: 0 },
-      3: { status: "live", exitCode: null },
+        }),
+      }], { collapsed: true }),
     },
-    activeTabId: "tab-1",
-    activeSessionId: 1,
-    persistence: { saving: false, error: null },
-    notice: null,
-  };
+  ];
+  return fromRoot(rootItems, layout);
 }
 
 function actions(): SidebarActions {
@@ -128,9 +195,8 @@ function actions(): SidebarActions {
     activateTab: vi.fn(),
     renameTab: vi.fn(),
     recolorTab: vi.fn(),
-    moveTab: vi.fn(),
-    reorderGroup: vi.fn(),
-    createGroup: vi.fn(),
+    moveItem: vi.fn(() => true),
+    createGroup: vi.fn(() => "new-group"),
     renameGroup: vi.fn(),
     toggleGroup: vi.fn(),
     createTab: vi.fn(async () => undefined),
@@ -138,14 +204,45 @@ function actions(): SidebarActions {
     duplicateTab: vi.fn(async () => undefined),
     openFolderHere: vi.fn(async () => undefined),
     closeLiveTab: vi.fn(async () => undefined),
-    closeGroup: vi.fn(async () => undefined),
+    deleteGroup: vi.fn(async () => undefined),
     dismissDeadTab: vi.fn(async () => undefined),
   };
 }
 
-async function renderSidebar(snapshot = workspace(), sidebarActions = actions()) {
-  await act(async () => root.render(<Sidebar snapshot={snapshot} actions={sidebarActions} />));
+async function renderSidebar(
+  snapshot = workspace(),
+  sidebarActions = actions(),
+  props: Partial<SidebarProps> = {},
+) {
+  await act(async () =>
+    root.render(<Sidebar snapshot={snapshot} actions={sidebarActions} {...props} />)
+  );
   return sidebarActions;
+}
+
+function menuItems(): HTMLButtonElement[] {
+  return [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")];
+}
+
+function menuItem(label: string): HTMLButtonElement {
+  const found = menuItems().find((button) => button.textContent === label);
+  if (!found) {
+    throw new Error(`no menu item ${label}`);
+  }
+  return found;
+}
+
+async function openMenuOn(element: Element): Promise<void> {
+  await act(async () => element.dispatchEvent(new MouseEvent("contextmenu", {
+    bubbles: true,
+    cancelable: true,
+  })));
+}
+
+function groupHeader(groupId: string): HTMLElement {
+  return container.querySelector<HTMLElement>(
+    `[data-group-id='${groupId}'] .sidebar-group__header`,
+  )!;
 }
 
 function key(element: Element, value: string): void {
@@ -200,6 +297,161 @@ describe("Sidebar structure", () => {
     expect(dead.classList.contains("sidebar-tab--ended")).toBe(true);
     expect(dead.textContent).toContain("Exited");
     expect(group.querySelector("[data-color='slate']")).not.toBeNull();
+  });
+});
+
+/// Marketing > Clients > Acme, one tab at each level plus a root tab.
+function nestedWorkspace(): WorkspaceSnapshot {
+  const layout: LayoutV2 = {
+    version: 2,
+    groups: {
+      marketing: {
+        id: "marketing",
+        name: "Marketing",
+        collapsed: false,
+        color: "blue",
+        items: [{ kind: "tab", id: "tab-2" }, { kind: "group", id: "clients" }],
+      },
+      clients: {
+        id: "clients",
+        name: "Clients",
+        collapsed: false,
+        color: null,
+        items: [{ kind: "group", id: "acme" }],
+      },
+      acme: {
+        id: "acme",
+        name: "Acme",
+        collapsed: false,
+        color: null,
+        items: [{ kind: "tab", id: "tab-3" }],
+      },
+    },
+    rootItems: [{ kind: "tab", id: "tab-1" }, { kind: "group", id: "marketing" }],
+    tabs: {
+      "tab-1": {
+        id: "tab-1",
+        title: null,
+        color: "blue",
+        fill: "off",
+        split: { kind: "pane", sessionId: 1 },
+      },
+      "tab-2": {
+        id: "tab-2",
+        title: "Campaign",
+        color: "red",
+        fill: "off",
+        split: { kind: "pane", sessionId: 2 },
+      },
+      "tab-3": {
+        id: "tab-3",
+        title: "Acme shell",
+        color: "green",
+        fill: "off",
+        split: { kind: "pane", sessionId: 3 },
+      },
+    },
+    activeTabId: "tab-1",
+  };
+  const acme = groupModel("acme", "Acme", [{
+    kind: "tab",
+    tab: tabModel("tab-3", "acme", { title: "Acme shell", primarySessionId: 3, sessionIds: [3] }),
+  }], { parentGroupId: "clients", depth: 3 });
+  const clients = groupModel("clients", "Clients", [{ kind: "group", group: acme }], {
+    parentGroupId: "marketing",
+    depth: 2,
+  });
+  const marketing = groupModel(
+    "marketing",
+    "Marketing",
+    [
+      {
+        kind: "tab",
+        tab: tabModel("tab-2", "marketing", {
+          title: "Campaign",
+          primarySessionId: 2,
+          sessionIds: [2],
+        }),
+      },
+      { kind: "group", group: clients },
+    ],
+    { color: "blue" },
+  );
+  return fromRoot(
+    [
+      { kind: "tab", tab: tabModel("tab-1", null, { title: "powershell · one" }) },
+      { kind: "group", group: marketing },
+    ],
+    layout,
+  );
+}
+
+describe("Sidebar nested groups", () => {
+  it("renders a three-level tree with per-level aria-levels and group colors", async () => {
+    await renderSidebar(nestedWorkspace());
+
+    expect([...container.querySelectorAll("section[data-group-id]")]
+      .map((node) => node.getAttribute("data-group-depth")))
+      .toEqual(["1", "2", "3"]);
+    expect(
+      container.querySelector("[data-group-id='acme'] .sidebar-group__header")
+        ?.getAttribute("aria-level"),
+    ).toBe("3");
+    expect(container.querySelector<HTMLElement>("[data-tab-id='tab-3']")
+      ?.getAttribute("aria-level")).toBe("4");
+    expect(container.querySelector<HTMLElement>("[data-tab-id='tab-1']")
+      ?.getAttribute("aria-level")).toBe("1");
+    // Subgroups nest inside their parent's container, not beside it.
+    expect(container.querySelector(
+      "[data-group-id='marketing'] [data-group-id='clients'] [data-group-id='acme']",
+    )).not.toBeNull();
+    expect(container.querySelector("[data-group-id='marketing'] [data-color='blue']"))
+      .not.toBeNull();
+  });
+
+  it("collapsing a middle group hides only its own subtree", async () => {
+    const base = nestedWorkspace();
+    const marketing = base.rootItems[1]!;
+    if (marketing.kind !== "group") {
+      throw new Error("fixture");
+    }
+    const clients = marketing.group.items[1]!;
+    if (clients.kind !== "group") {
+      throw new Error("fixture");
+    }
+    const collapsed = fromRoot(
+      [
+        base.rootItems[0]!,
+        {
+          kind: "group",
+          group: {
+            ...marketing.group,
+            items: [
+              marketing.group.items[0]!,
+              { kind: "group", group: { ...clients.group, collapsed: true } },
+            ],
+          },
+        },
+      ],
+      base.layout,
+    );
+
+    await renderSidebar(collapsed);
+
+    expect([...container.querySelectorAll("[data-tab-id]")]
+      .map((node) => node.getAttribute("data-tab-id")))
+      .toEqual(["tab-1", "tab-2"]);
+    expect(container.querySelector("[data-group-id='acme']")).toBeNull();
+    expect(container.querySelector("[data-group-id='clients']")).not.toBeNull();
+  });
+
+  it("activates a deeply nested tab on click", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    const deep = container.querySelector<HTMLElement>("[data-tab-id='tab-3']")!;
+
+    await act(async () => deep.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+    expect(sidebarActions.activateTab).toHaveBeenCalledWith("tab-3");
   });
 });
 
@@ -284,16 +536,21 @@ describe("Sidebar rename and keyboard", () => {
     await act(async () => grouped.focus());
     expect(grouped.tabIndex).toBe(0);
 
-    const collapsed = workspace();
-    collapsed.groups = collapsed.groups.map((group) =>
-      group.id === "group-1" ? { ...group, collapsed: true } : group
-    );
-    collapsed.layout = {
-      ...collapsed.layout,
-      groups: collapsed.layout.groups.map((group) =>
-        group.id === "group-1" ? { ...group, collapsed: true } : group
+    const base = workspace();
+    const collapsed = fromRoot(
+      base.rootItems.map((item) =>
+        item.kind === "group" && item.group.id === "group-1"
+          ? { kind: "group", group: { ...item.group, collapsed: true } }
+          : item
       ),
-    };
+      {
+        ...base.layout,
+        groups: {
+          ...base.layout.groups,
+          "group-1": { ...base.layout.groups["group-1"]!, collapsed: true },
+        },
+      },
+    );
     await renderSidebar(collapsed, sidebarActions);
 
     const replacement = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
@@ -371,29 +628,30 @@ describe("Sidebar pointer drag", () => {
     await act(async () => title.dispatchEvent(pointer("pointerdown", { x: 10, y: 10 })));
     await act(async () => row.dispatchEvent(pointer("pointermove", { x: 12, y: 10 })));
     expect(container.querySelector(".sidebar-drag-ghost")).toBeNull();
-    expect(sidebarActions.moveTab).not.toHaveBeenCalled();
+    expect(sidebarActions.moveItem).not.toHaveBeenCalled();
 
     await act(async () => row.dispatchEvent(pointer("pointermove", { x: 20, y: 25 })));
     expect(container.querySelector(".sidebar-drag-ghost")?.textContent).toContain("powershell · one");
     expect(container.querySelector(".sidebar-drag-indicator")).not.toBeNull();
-    expect(sidebarActions.moveTab).not.toHaveBeenCalled();
+    expect(sidebarActions.moveItem).not.toHaveBeenCalled();
 
     await act(async () => row.dispatchEvent(pointer("pointerup", { x: 20, y: 25 })));
-    expect(sidebarActions.moveTab).toHaveBeenCalledTimes(1);
-    expect(sidebarActions.moveTab).toHaveBeenCalledWith("tab-1", "group-1", 0);
+    expect(sidebarActions.moveItem).toHaveBeenCalledTimes(1);
+    expect(sidebarActions.moveItem)
+      .toHaveBeenCalledWith({ kind: "tab", id: "tab-1" }, "group-1", 0);
     expect(container.querySelector(".sidebar-drag-ghost")).toBeNull();
   });
 
-  it("moves a grouped tab to the ungrouped root when the root is empty", async () => {
-    const emptyRoot = workspace();
-    emptyRoot.layout = {
-      ...emptyRoot.layout,
-      ungroupedTabIds: [],
-      activeTabId: "tab-2",
-    };
-    emptyRoot.ungroupedTabs = [];
-    emptyRoot.activeTabId = "tab-2";
-    emptyRoot.activeSessionId = 2;
+  it("moves a grouped tab to the root when the root holds no tabs", async () => {
+    const base = workspace();
+    const emptyRoot = fromRoot(
+      base.rootItems.filter((item) => item.kind === "group"),
+      {
+        ...base.layout,
+        rootItems: base.layout.rootItems.filter((item) => item.kind === "group"),
+        activeTabId: "tab-2",
+      },
+    );
     const sidebarActions = await renderSidebar(emptyRoot);
     const rootTarget = container.querySelector<HTMLElement>(
       "[data-drop-kind='tab-container'][data-drop-group-id='']",
@@ -414,7 +672,9 @@ describe("Sidebar pointer drag", () => {
     await act(async () => row.dispatchEvent(pointer("pointermove", { x: 10, y: 5 })));
     await act(async () => row.dispatchEvent(pointer("pointerup", { x: 10, y: 5 })));
 
-    expect(sidebarActions.moveTab).toHaveBeenCalledWith("tab-2", null, 0);
+    // The root container appends at its tail — past the two group rows.
+    expect(sidebarActions.moveItem)
+      .toHaveBeenCalledWith({ kind: "tab", id: "tab-2" }, null, 2);
   });
 
   it("does not dispatch unchanged, canceled, or pointer-canceled drops", async () => {
@@ -433,7 +693,7 @@ describe("Sidebar pointer drag", () => {
     await act(async () => title.dispatchEvent(pointer("pointerdown")));
     await act(async () => row.dispatchEvent(pointer("pointermove", { x: 10, y: 1 })));
     await act(async () => row.dispatchEvent(pointer("pointerup", { x: 10, y: 1 })));
-    expect(sidebarActions.moveTab).not.toHaveBeenCalled();
+    expect(sidebarActions.moveItem).not.toHaveBeenCalled();
 
     await act(async () => title.dispatchEvent(pointer("pointerdown")));
     await act(async () => row.dispatchEvent(pointer("pointermove", { x: 10 })));
@@ -443,7 +703,187 @@ describe("Sidebar pointer drag", () => {
     await act(async () => title.dispatchEvent(pointer("pointerdown")));
     await act(async () => row.dispatchEvent(pointer("pointermove", { x: 10 })));
     await act(async () => row.dispatchEvent(pointer("pointercancel", { x: 10 })));
-    expect(sidebarActions.moveTab).not.toHaveBeenCalled();
+    expect(sidebarActions.moveItem).not.toHaveBeenCalled();
+  });
+});
+
+/// Rects the nested fixture's rows would have on screen: 40 px tall, stacked in
+/// render order. jsdom lays nothing out, so drops need them stubbed.
+function stubRow(selector: string, top: number): HTMLElement {
+  const element = container.querySelector<HTMLElement>(selector)!;
+  vi.spyOn(element, "getBoundingClientRect").mockReturnValue({
+    x: 0, y: top, width: 200, height: 40, top, right: 200, bottom: top + 40, left: 0,
+    toJSON: () => ({}),
+  });
+  return element;
+}
+
+function dropOn(target: HTMLElement): void {
+  Object.defineProperty(document, "elementFromPoint", {
+    configurable: true,
+    value: vi.fn(() => target),
+  });
+}
+
+describe("Sidebar nested drag and drop", () => {
+  it("nests a tab into a group dropped on the middle of its header", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    const row = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+    const title = row.querySelector<HTMLElement>(".sidebar-tab__title")!;
+    dropOn(stubRow("[data-group-id='marketing'] > .sidebar-group__header", 40));
+
+    await act(async () => title.dispatchEvent(pointer("pointerdown", { x: 10, y: 10 })));
+    await act(async () => row.dispatchEvent(pointer("pointermove", { x: 10, y: 60 })));
+    expect(container.querySelector(".sidebar-drag-indicator")).not.toBeNull();
+    await act(async () => row.dispatchEvent(pointer("pointerup", { x: 10, y: 60 })));
+
+    // Marketing already holds a tab and a subgroup, so nesting appends at 2.
+    expect(sidebarActions.moveItem)
+      .toHaveBeenCalledWith({ kind: "tab", id: "tab-1" }, "marketing", 2);
+  });
+
+  it("inserts between rows into the row's own container", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    const row = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+    const title = row.querySelector<HTMLElement>(".sidebar-tab__title")!;
+    dropOn(stubRow("[data-tab-id='tab-3']", 120));
+
+    await act(async () => title.dispatchEvent(pointer("pointerdown", { x: 10, y: 10 })));
+    // Below the midpoint of Acme's only tab: the slot after it.
+    await act(async () => row.dispatchEvent(pointer("pointermove", { x: 10, y: 150 })));
+    await act(async () => row.dispatchEvent(pointer("pointerup", { x: 10, y: 150 })));
+
+    expect(sidebarActions.moveItem)
+      .toHaveBeenCalledWith({ kind: "tab", id: "tab-1" }, "acme", 1);
+  });
+
+  it("shows no indicator and moves nothing when a group is dropped in its own subtree", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    const header = container.querySelector<HTMLElement>(
+      "[data-group-id='clients'] > .sidebar-group__header",
+    )!;
+    const name = container.querySelector<HTMLElement>("[data-group-name='clients']")!;
+    dropOn(stubRow("[data-group-id='acme'] > .sidebar-group__header", 120));
+
+    await act(async () => name.dispatchEvent(pointer("pointerdown", { x: 10, y: 90 })));
+    await act(async () => header.dispatchEvent(pointer("pointermove", { x: 10, y: 140 })));
+    expect(container.querySelector(".sidebar-drag-ghost")).not.toBeNull();
+    expect(container.querySelector(".sidebar-drag-indicator")).toBeNull();
+
+    await act(async () => header.dispatchEvent(pointer("pointerup", { x: 10, y: 140 })));
+    expect(sidebarActions.moveItem).not.toHaveBeenCalled();
+  });
+
+  it("reorders a group inside its own container from a header edge", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    const header = container.querySelector<HTMLElement>(
+      "[data-group-id='marketing'] > .sidebar-group__header",
+    )!;
+    const name = container.querySelector<HTMLElement>("[data-group-name='marketing']")!;
+    dropOn(stubRow("[data-tab-id='tab-1']", 0));
+
+    await act(async () => name.dispatchEvent(pointer("pointerdown", { x: 10, y: 50 })));
+    // Above the midpoint of the root tab: the slot before it.
+    await act(async () => header.dispatchEvent(pointer("pointermove", { x: 10, y: 10 })));
+    await act(async () => header.dispatchEvent(pointer("pointerup", { x: 10, y: 10 })));
+
+    expect(sidebarActions.moveItem)
+      .toHaveBeenCalledWith({ kind: "group", id: "marketing" }, null, 0);
+  });
+});
+
+describe("Sidebar nesting menus", () => {
+  it("gates New subgroup on the depth setting with a settings tooltip", async () => {
+    await renderSidebar(nestedWorkspace());
+
+    await openMenuOn(groupHeader("clients"));
+    expect(menuItem("New subgroup").disabled).toBe(false);
+
+    await openMenuOn(groupHeader("acme"));
+    const blocked = menuItem("New subgroup");
+    expect(blocked.disabled).toBe(true);
+    expect(blocked.title).toBe("Max group depth is 3 — change it in Settings");
+  });
+
+  it("honors a raised depth setting", async () => {
+    await renderSidebar(nestedWorkspace(), actions(), { maxGroupDepth: 4 });
+
+    await openMenuOn(groupHeader("acme"));
+    expect(menuItem("New subgroup").disabled).toBe(false);
+  });
+
+  it("creates a subgroup under the group its menu came from", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    await openMenuOn(groupHeader("clients"));
+
+    await act(async () => menuItem("New subgroup").click());
+    const input = container.querySelector<HTMLInputElement>("input[aria-label='Name new group']")!;
+    await act(async () => {
+      input.value = "Globex";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      key(input, "Enter");
+    });
+
+    expect(sidebarActions.createGroup).toHaveBeenCalledWith("clients", "Globex");
+  });
+
+  it("offers a group only the move targets outside its own subtree", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    await openMenuOn(groupHeader("clients"));
+
+    await act(async () => menuItem("Move to…").click());
+    // Marketing is Clients' own container; Clients and Acme are its subtree.
+    expect(menuItems().map((button) => button.textContent))
+      .toEqual(["← Back", "Top level"]);
+
+    await act(async () => menuItem("Top level").click());
+    expect(sidebarActions.moveItem)
+      .toHaveBeenCalledWith({ kind: "group", id: "clients" }, null, 2);
+  });
+
+  it("offers a tab every group but its own", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    await openMenuOn(container.querySelector("[data-tab-id='tab-3']")!);
+
+    await act(async () => menuItem("Move to…").click());
+    expect(menuItems().map((button) => button.textContent))
+      .toEqual(["← Back", "Ungrouped", "Marketing", "Clients"]);
+
+    await act(async () => menuItem("Clients").click());
+    expect(sidebarActions.moveItem)
+      .toHaveBeenCalledWith({ kind: "tab", id: "tab-3" }, "clients", 1);
+  });
+
+  it("creates a new tab inside the nested group its menu came from", async () => {
+    const sidebarActions = await renderSidebar(nestedWorkspace());
+    await openMenuOn(groupHeader("acme"));
+
+    await act(async () => menuItem("New tab in group").click());
+
+    expect(sidebarActions.createTab).toHaveBeenCalledWith({
+      groupId: "acme",
+      profile: null,
+    });
+  });
+
+  it("deletes a group keeping or closing its terminals", async () => {
+    const sidebarActions = await renderSidebar();
+
+    await openMenuOn(groupHeader("group-1"));
+    await act(async () => menuItem("Delete group").click());
+    const dialog = container.querySelector<HTMLElement>("[role='dialog']")!;
+    expect(dialog.textContent).toContain("Delete group?");
+    const keep = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Keep terminals")!;
+    await act(async () => keep.click());
+    expect(sidebarActions.deleteGroup).toHaveBeenCalledWith("group-1", "keep-children");
+
+    await openMenuOn(groupHeader("group-1"));
+    await act(async () => menuItem("Delete group").click());
+    const close = [...container.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")]
+      .find((button) => button.textContent === "Close terminals")!;
+    await act(async () => close.click());
+    expect(sidebarActions.deleteGroup).toHaveBeenLastCalledWith("group-1", "close-tabs");
   });
 });
 
@@ -464,7 +904,7 @@ describe("Sidebar context menus and creation", () => {
     expect(container.querySelector("[role='menu']")?.textContent).toContain("Duplicate tab");
     expect(container.querySelector("[role='menu']")?.textContent).toContain("Open folder here");
     expect(container.querySelector("[role='menu']")?.textContent).toContain("Color");
-    expect(container.querySelector("[role='menu']")?.textContent).toContain("Move to group");
+    expect(container.querySelector("[role='menu']")?.textContent).toContain("Move to…");
     expect(container.querySelector("[role='menu']")?.textContent).toContain("Close");
 
     const duplicate = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
@@ -483,13 +923,14 @@ describe("Sidebar context menus and creation", () => {
 
     await act(async () => tab.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })));
     const move = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
-      .find((button) => button.textContent === "Move to group")!;
+      .find((button) => button.textContent === "Move to…")!;
     await act(async () => move.click());
     expect(container.querySelector("[role='menu']")?.textContent).toContain("Work");
     const work = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
       .find((button) => button.textContent === "Work")!;
     await act(async () => work.click());
-    expect(sidebarActions.moveTab).toHaveBeenCalledWith("tab-1", "group-1", 1);
+    expect(sidebarActions.moveItem)
+      .toHaveBeenCalledWith({ kind: "tab", id: "tab-1" }, "group-1", 1);
   });
 
   it("refocuses submenu content and restores the opener after an action", async () => {
@@ -560,8 +1001,10 @@ describe("Sidebar context menus and creation", () => {
     const text = container.querySelector("[role='menu']")?.textContent ?? "";
     expect(text).toContain("Rename");
     expect(text).toContain("New tab in group");
+    expect(text).toContain("New subgroup");
+    expect(text).toContain("Move to…");
     expect(text).toContain("Collapse");
-    expect(text).toContain("Close group");
+    expect(text).toContain("Delete group");
     expect(text).not.toContain("Color");
     const collapse = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
       .find((button) => button.textContent === "Collapse")!;
@@ -590,7 +1033,7 @@ describe("Sidebar context menus and creation", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
       key(input, "Enter");
     });
-    expect(sidebarActions.createGroup).toHaveBeenCalledWith("Infrastructure");
+    expect(sidebarActions.createGroup).toHaveBeenCalledWith(null, "Infrastructure");
   });
 
   it("offers the exact default and profile-specific creation actions", async () => {
@@ -614,10 +1057,10 @@ describe("Sidebar context menus and creation", () => {
     expect(sidebarActions.createTab).toHaveBeenLastCalledWith({ groupId: null, profile: "cmd" });
   });
 
-  it("confirms group close and enters a pending state before dispatch completes", async () => {
+  it("confirms group deletion and enters a pending state before dispatch completes", async () => {
     let resolve!: () => void;
     const sidebarActions = actions();
-    sidebarActions.closeGroup = vi.fn(() => new Promise<void>((done) => { resolve = done; }));
+    sidebarActions.deleteGroup = vi.fn(() => new Promise<void>((done) => { resolve = done; }));
     await renderSidebar(workspace(), sidebarActions);
     const header = container.querySelector<HTMLElement>("[data-group-id='group-1'] .sidebar-group__header")!;
     const groupName = container.querySelector<HTMLElement>("[data-group-name='group-1']")!;
@@ -627,18 +1070,18 @@ describe("Sidebar context menus and creation", () => {
       cancelable: true,
     })));
     const close = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
-      .find((button) => button.textContent === "Close group")!;
+      .find((button) => button.textContent === "Delete group")!;
     await act(async () => close.click());
     const dialog = container.querySelector<HTMLElement>("[role='dialog']")!;
-    expect(dialog.textContent).toContain("Close group?");
+    expect(dialog.textContent).toContain("Delete group?");
     const cancel = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Cancel")!;
     const confirm = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Close group")!;
+      .find((button) => button.textContent === "Close terminals")!;
     expect(document.activeElement).toBe(cancel);
 
     await act(async () => { confirm.click(); });
-    expect(sidebarActions.closeGroup).toHaveBeenCalledWith("group-1");
+    expect(sidebarActions.deleteGroup).toHaveBeenCalledWith("group-1", "close-tabs");
     expect(confirm.disabled).toBe(true);
     expect(container.textContent).toContain("Closing…");
     expect(document.activeElement).toBe(dialog);

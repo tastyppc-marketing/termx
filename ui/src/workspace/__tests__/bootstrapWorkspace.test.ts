@@ -102,15 +102,17 @@ describe("bootstrapWorkspace", () => {
       id: "first",
       title: null,
       color: "blue",
+      fill: "off",
       split: { kind: "pane", sessionId: 1 },
     };
     state.tabs.second = {
       id: "second",
       title: null,
       color: "cyan",
+      fill: "off",
       split: { kind: "pane", sessionId: 2 },
     };
-    state.ungroupedTabIds = ["first", "second"];
+    state.rootItems = [{ kind: "tab", id: "first" }, { kind: "tab", id: "second" }];
     state.activeTabId = "second";
     const fake = fakeClient({ layout: serializeLayout(state), sessions: [session(1), session(2)] });
     const invokeBootstrap = vi.fn(async () => ({ port: 3210, token: "token-value" }));
@@ -131,15 +133,17 @@ describe("bootstrapWorkspace", () => {
       id: "first",
       title: null,
       color: "blue",
+      fill: "off",
       split: { kind: "pane", sessionId: 1 },
     };
     state.tabs.second = {
       id: "second",
       title: null,
       color: "cyan",
+      fill: "off",
       split: { kind: "pane", sessionId: 2 },
     };
-    state.ungroupedTabIds = ["first", "second"];
+    state.rootItems = [{ kind: "tab", id: "first" }, { kind: "tab", id: "second" }];
     state.activeTabId = "second";
     const fake = fakeClient({ layout: serializeLayout(state), sessions: [session(1), session(2)] });
     vi.mocked(fake.client.attach).mockImplementation(async (sessionId) => {
@@ -178,7 +182,8 @@ describe("bootstrapWorkspace", () => {
       generateId: () => "adopted",
     });
 
-    expect(workspace.controller.getSnapshot().layout.ungroupedTabIds).toEqual(["adopted"]);
+    expect(workspace.controller.getSnapshot().layout.rootItems)
+      .toEqual([{ kind: "tab", id: "adopted" }]);
     expect(fake.setLayout).not.toHaveBeenCalled();
   });
 
@@ -196,8 +201,8 @@ describe("bootstrapWorkspace", () => {
 
     expect(fake.setLayout).toHaveBeenCalledTimes(1);
     expect(fake.setLayout.mock.calls[0]?.[0]).toMatchObject({
-      version: 1,
-      ungroupedTabIds: ["orphan"],
+      version: 2,
+      rootItems: [{ kind: "tab", id: "orphan" }],
     });
   });
 
