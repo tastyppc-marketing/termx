@@ -39,6 +39,13 @@ pub enum ClientMsg {
     Attach {
         session_id: SessionId,
         replay: bool,
+        /// Resume cursor: replay only bytes at or after this absolute stream
+        /// offset. Omitted means "replay the whole ring" — the pre-reconnect
+        /// behavior, so an older client stays wire-compatible. A cursor older
+        /// than the ring start is clamped to it and the client's existing
+        /// lost-scrollback path reports the gap.
+        #[serde(default)]
+        since_offset: Option<u64>,
     },
     Detach {
         session_id: SessionId,
@@ -50,6 +57,13 @@ pub enum ClientMsg {
     },
     CloseSession {
         session_id: SessionId,
+    },
+    /// Page backward through a session's disk-spilled scrollback: return up to
+    /// `max_bytes` (clamped host-side) ending just before `before_offset`.
+    ReadHistory {
+        session_id: SessionId,
+        before_offset: u64,
+        max_bytes: u32,
     },
     ListSessions,
     SetLayout {
@@ -83,6 +97,15 @@ pub enum HostMsg {
     },
     SessionClosed {
         session_id: SessionId,
+    },
+    /// Reply to ReadHistory. An absent session or spill file is NOT an error —
+    /// it comes back as an empty slice with `at_start`, because "this session
+    /// has no history" is the normal case, not a failure.
+    History {
+        session_id: SessionId,
+        start_offset: u64,
+        data_b64: String,
+        at_start: bool,
     },
     Sessions {
         sessions: Vec<SessionInfo>,
@@ -238,6 +261,25 @@ mod tests {
             ClientMsg::CreateSession {
                 shell_integration, ..
             } => assert!(!shell_integration),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// Reconnect resync rides an optional cursor on Attach. An old client omits
+    /// it and must keep getting the whole ring.
+    #[test]
+    fn attach_since_offset_is_optional_on_the_wire() {
+        let legacy = r#"{"type":"attach","session_id":3,"replay":true}"#;
+        match serde_json::from_str::<ClientMsg>(legacy).unwrap() {
+            ClientMsg::Attach { since_offset, .. } => {
+                assert_eq!(since_offset, None, "omitted cursor means replay-all");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let resync = r#"{"type":"attach","session_id":3,"replay":true,"since_offset":4096}"#;
+        match serde_json::from_str::<ClientMsg>(resync).unwrap() {
+            ClientMsg::Attach { since_offset, .. } => assert_eq!(since_offset, Some(4096)),
             other => panic!("wrong variant: {other:?}"),
         }
     }

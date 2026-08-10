@@ -21,14 +21,27 @@ impl RingBuffer {
     }
 
     pub fn push(&mut self, data: &[u8]) {
+        self.push_evicting(data, None);
+    }
+
+    /// `push`, but handing the bytes that fall out of the window to `evicted`
+    /// in stream order — the disk-spill path (`crate::history`) needs them, and
+    /// only the ring knows exactly which bytes left the window.
+    ///
+    /// Both eviction sources are reported: the front of the buffer, and (for a
+    /// push larger than the whole ring) the prefix of `data` that never fits.
+    /// The buffer is strictly older than that prefix, so appending in this
+    /// order keeps the spill file in stream order.
+    pub fn push_evicting(&mut self, data: &[u8], evicted: Option<&mut Vec<u8>>) {
         self.total_written += data.len() as u64;
         // Only the last `cap` bytes of `data` can survive; skip the rest cheaply.
-        let keep = if data.len() > self.cap {
-            &data[data.len() - self.cap..]
-        } else {
-            data
-        };
+        let skipped = data.len().saturating_sub(self.cap);
+        let keep = &data[skipped..];
         let overflow = (self.buf.len() + keep.len()).saturating_sub(self.cap);
+        if let Some(sink) = evicted {
+            sink.extend(self.buf.iter().take(overflow).copied());
+            sink.extend_from_slice(&data[..skipped]);
+        }
         self.buf.drain(..overflow);
         self.buf.extend(keep);
     }
@@ -95,6 +108,38 @@ mod tests {
         assert_eq!(start, 7);
         assert_eq!(bytes, b"789");
         assert_eq!(r.end_offset(), 10);
+    }
+
+    /// The spill file is built from these bytes, so what leaves the window must
+    /// come out contiguous, in order, and exactly once.
+    #[test]
+    fn evicted_bytes_are_handed_out_in_stream_order() {
+        let mut r = RingBuffer::new(4);
+        let mut evicted = Vec::new();
+        r.push_evicting(b"abc", Some(&mut evicted));
+        assert!(evicted.is_empty(), "nothing has left the window yet");
+        r.push_evicting(b"def", Some(&mut evicted));
+        assert_eq!(evicted, b"ab", "the oldest two bytes fell out");
+        let (start, kept) = r.snapshot();
+        assert_eq!((start, kept), (2, b"cdef".to_vec()));
+    }
+
+    /// A push bigger than the whole ring evicts the entire buffer AND the part
+    /// of the push that never fit — both belong in history, in that order.
+    #[test]
+    fn a_push_larger_than_the_ring_evicts_buffer_then_unfitting_prefix() {
+        let mut r = RingBuffer::new(3);
+        let mut evicted = Vec::new();
+        r.push_evicting(b"AB", Some(&mut evicted));
+        r.push_evicting(b"0123456789", Some(&mut evicted));
+        assert_eq!(evicted, b"AB0123456");
+        let (start, kept) = r.snapshot();
+        assert_eq!((start, kept.as_slice()), (9, b"789".as_slice()));
+        assert_eq!(
+            evicted.len() as u64 + kept.len() as u64,
+            r.end_offset(),
+            "every byte ever written is either retained or evicted, never both"
+        );
     }
 
     #[test]

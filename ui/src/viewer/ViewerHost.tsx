@@ -19,6 +19,7 @@ import {
   useState,
   type ComponentType,
 } from "react";
+import { HistoryView, type HistoryReader } from "./HistoryView";
 import { fileName, FileView, Viewer, type FileReadResult } from "./Viewer";
 import {
   transitionViewerGeometry,
@@ -85,7 +86,20 @@ function discoverTranscriptLoader(): TranscriptLoader | null {
 export interface ViewerApi {
   openFile(path: string): void;
   openTranscript(record: LlmSessionRecord): void;
+  /**
+   * Scrollback the terminal's ring no longer holds, paged out of the host's
+   * spill file. `beforeOffset` is where paging starts — the oldest offset the
+   * pane itself still has.
+   */
+  openHistory(session: HistorySession): void;
   close(): void;
+}
+
+export interface HistorySession {
+  sessionId: number;
+  title: string;
+  beforeOffset: bigint;
+  read: HistoryReader;
 }
 
 export interface ViewerHostProps {
@@ -101,7 +115,8 @@ type ViewerContent =
       kind: "transcript";
       record: LlmSessionRecord;
       view: ComponentType<TranscriptViewProps> | null;
-    };
+    }
+  | { kind: "history"; session: HistorySession };
 
 export const ViewerHost = forwardRef<ViewerApi, ViewerHostProps>(
   function ViewerHost(
@@ -193,6 +208,13 @@ export const ViewerHost = forwardRef<ViewerApi, ViewerHostProps>(
               // Module absent or broken: the stub is already showing.
             });
         },
+        openHistory(session: HistorySession) {
+          // No request id to guard: the view owns its own paging, and there is
+          // nothing in flight here to arrive late.
+          requestId.current += 1;
+          setContent({ kind: "history", session });
+          applyGeometry({ type: "show" });
+        },
         close: closeViewer,
       }),
       [applyGeometry, closeViewer, readFile, registerTranscript],
@@ -202,10 +224,16 @@ export const ViewerHost = forwardRef<ViewerApi, ViewerHostProps>(
       return null;
     }
 
-    const label =
-      content.kind === "file" ? fileName(content.path) : content.record.title;
-    const detail =
-      content.kind === "file" ? content.path : content.record.filePath;
+    const label = content.kind === "file"
+      ? fileName(content.path)
+      : content.kind === "history"
+        ? content.session.title
+        : content.record.title;
+    const detail = content.kind === "file"
+      ? content.path
+      : content.kind === "history"
+        ? "Earlier output"
+        : content.record.filePath;
     const TranscriptBody = content.kind === "transcript" ? content.view : null;
 
     return (
@@ -222,6 +250,12 @@ export const ViewerHost = forwardRef<ViewerApi, ViewerHostProps>(
       >
         {content.kind === "file" ? (
           <FileView path={content.path} result={content.result} />
+        ) : content.kind === "history" ? (
+          <HistoryView
+            sessionId={content.session.sessionId}
+            beforeOffset={content.session.beforeOffset}
+            read={content.session.read}
+          />
         ) : TranscriptBody ? (
           <TranscriptBody record={content.record} />
         ) : (

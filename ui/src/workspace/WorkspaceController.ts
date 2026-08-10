@@ -148,6 +148,24 @@ export type SidebarItemModel =
 export interface PaneSessionState {
   status: "live" | "dead" | "missing";
   exitCode: number | null;
+  /**
+   * The host connection is gone but the session is presumed still running: the
+   * pane shows a reconnecting chip and stays live. Optional so the many
+   * hand-written pane fixtures keep type-checking; the controller always sets
+   * it, and absent reads as "not suspended".
+   */
+  suspended?: boolean;
+  /**
+   * From `HubSessionSnapshot.attachGeneration`. The pane remounts its terminal
+   * binding whenever this moves — the only way a pane recovers from a
+   * reconnect, since a binding cannot be revived once it is disconnected.
+   */
+  attachGeneration?: number;
+  /**
+   * From `HubSessionSnapshot.oldestOffset`: where the earlier-output bar starts
+   * paging backward. Zero means nothing has been evicted.
+   */
+  historyBefore?: bigint;
 }
 
 export interface WorkspaceSnapshot {
@@ -442,12 +460,19 @@ export class WorkspaceController {
     const paneStates: Record<number, PaneSessionState> = {};
     for (const sessionId of sessionIdsInLayout(layout)) {
       const info = this.sessions.get(sessionId);
+      const attachment = attachments.sessions[sessionId];
       if (info?.alive === true) {
-        paneStates[sessionId] = { status: "live", exitCode: null };
+        paneStates[sessionId] = {
+          status: "live",
+          exitCode: null,
+          suspended: attachment?.suspended ?? false,
+          attachGeneration: attachment?.attachGeneration ?? 0,
+          historyBefore: attachment?.oldestOffset ?? 0n,
+        };
       } else if (info !== undefined) {
         paneStates[sessionId] = {
           status: "dead",
-          exitCode: attachments.sessions[sessionId]?.exitCode ?? null,
+          exitCode: attachment?.exitCode ?? null,
         };
       } else {
         paneStates[sessionId] = { status: "missing", exitCode: null };

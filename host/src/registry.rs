@@ -2,6 +2,7 @@
 //! Session objects — client connections borrow Arc clones and may die freely.
 
 use crate::config::Config;
+use crate::history::{self, HistoryWriter};
 use crate::profiles;
 use crate::protocol::{SessionId, SessionInfo};
 use crate::session::Session;
@@ -147,12 +148,26 @@ impl Registry {
         // birth, independent of shell_integration (spec §7).
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         stamp_termx_env(&mut prof.env, id);
-        let session = Arc::new(Session::spawn(
+        // history_bytes: 0 means no writer at all, so the eviction path keeps
+        // its pre-history cost. A spill file we cannot create costs history,
+        // never the session.
+        let history = match self.config.history_bytes {
+            0 => None,
+            cap => match HistoryWriter::open(&self.data_dir, id, cap) {
+                Ok(writer) => Some(writer),
+                Err(error) => {
+                    tracing::warn!("scrollback history unavailable for session {id}: {error:#}");
+                    None
+                }
+            },
+        };
+        let session = Arc::new(Session::spawn_with_history(
             &prof,
             cwd.as_deref(),
             cols,
             rows,
             self.config.scrollback_bytes,
+            history,
         )?);
         let info = SessionInfo {
             id,
@@ -206,6 +221,10 @@ impl Registry {
             entry
         };
         entry.session.kill();
+        // Rust opens files with FILE_SHARE_DELETE, so this succeeds even while
+        // the dying session's reader thread still holds the writer handle:
+        // Windows unlinks the name now and reclaims the blocks at last close.
+        history::delete(&self.data_dir, id);
         self.persist_logged();
         true
     }
@@ -226,6 +245,25 @@ impl Registry {
         entry.info.cols = cols;
         entry.info.rows = rows;
         Ok(())
+    }
+
+    /// Page backward through a session's spilled scrollback. Absence and
+    /// corruption both degrade to `None` — the caller answers "no history",
+    /// which is exactly what a client can act on. Deliberately does not require
+    /// a live session: a just-exited tab's history is still readable.
+    pub fn read_history(
+        &self,
+        id: SessionId,
+        before_offset: u64,
+        max_bytes: u32,
+    ) -> Option<history::HistorySlice> {
+        match history::read_history(&self.data_dir, id, before_offset, max_bytes) {
+            Ok(slice) => slice,
+            Err(error) => {
+                tracing::warn!("history unreadable for session {id}: {error:#}");
+                None
+            }
+        }
     }
 
     pub fn list(&self) -> Vec<SessionInfo> {
@@ -384,6 +422,33 @@ mod tests {
         assert!(reg.list().is_empty());
         assert!(!reg.close_session(999), "unknown id -> false");
         assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    /// Long-uptime hygiene: closing the same session twice must be a no-op the
+    /// second time — no second kill, no second graveyard entry keeping a dead
+    /// session's ring alive, and no complaint about history that is already
+    /// gone. A UI that double-fires a close (double-click, retry after a
+    /// reconnect) must not leak a session's worth of memory per attempt.
+    #[test]
+    fn closing_a_session_twice_is_a_no_op_the_second_time() {
+        let (tmp, reg) = test_registry();
+        let (info, session) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
+        assert!(reg.close_session(info.id), "first close does the work");
+        let after_first = reg.graveyard.lock().unwrap().len();
+
+        assert!(
+            !reg.close_session(info.id),
+            "a session already closed cannot be closed again"
+        );
+
+        assert!(
+            reg.graveyard.lock().unwrap().len() <= after_first,
+            "a repeated close must not re-register the session for teardown"
+        );
+        assert!(!history::session_file(tmp.path(), info.id).exists());
+        assert!(session.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
     #[test]
@@ -712,6 +777,80 @@ mod tests {
         let (_, bytes) = session.snapshot();
         assert!(bytes.len() <= 2048, "ring exceeded configured cap");
         session.kill();
+        assert!(session.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    /// The whole point of the spill file: what the ring forgets, disk keeps —
+    /// at the SAME absolute offsets, so the two windows meet without a gap.
+    #[test]
+    fn ring_eviction_spills_to_the_history_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(
+            tmp.path().to_path_buf(),
+            Config {
+                scrollback_bytes: 2048,
+                ..Config::default()
+            },
+        );
+        let (info, session) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
+        session
+            .write_input(b"for /L %i in (1,1,400) do @echo history_line_%i\r\n")
+            .unwrap();
+
+        // The ring is updated before the spill append, so a snapshot taken
+        // between the two can briefly show the file lagging. Poll until the
+        // shell falls quiet and the two windows meet exactly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let (ring_start, page) = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ring never evicted into history"
+            );
+            let (ring_start, _) = session.snapshot();
+            let page = history::read_history(tmp.path(), info.id, ring_start, 512 * 1024)
+                .unwrap()
+                .expect("history file must exist once a session is created");
+            if ring_start > 0 && page.start_offset + page.data.len() as u64 == ring_start {
+                break (ring_start, page);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        assert_eq!(page.start_offset, 0, "nothing was truncated at this size");
+        assert!(page.at_start);
+        assert_eq!(page.data.len() as u64, ring_start);
+        assert!(
+            String::from_utf8_lossy(&page.data).contains("history_line_"),
+            "the spill must hold the real evicted stream"
+        );
+
+        reg.close_session(info.id);
+        assert!(
+            !history::session_file(tmp.path(), info.id).exists(),
+            "closing a session forgets its history"
+        );
+        assert!(session.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn zero_history_bytes_creates_no_spill_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::new(
+            tmp.path().to_path_buf(),
+            Config {
+                history_bytes: 0,
+                ..Config::default()
+            },
+        );
+        let (info, session) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
+        assert!(
+            !history::session_file(tmp.path(), info.id).exists(),
+            "history off must cost nothing, not an empty file"
+        );
+        reg.close_session(info.id);
         assert!(session.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 

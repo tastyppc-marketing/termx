@@ -20,6 +20,22 @@ export interface HubSessionSnapshot {
   exitCode: number | null;
   lostScrollback: boolean;
   attachError: string | null;
+  /** The host connection is gone but this session is presumed ALIVE: the pane
+   * shows a reconnecting chip and must never become a dead pane. */
+  suspended: boolean;
+  /**
+   * Incremented every time this session is re-attached to a NEW socket. A
+   * terminal binding is one-shot — its `onDisconnect` ends input for good — so
+   * a bound pane has to build a fresh binding after a reconnect. This is the
+   * signal it watches; it never moves while a connection holds.
+   */
+  attachGeneration: number;
+  /**
+   * The oldest offset this session's retained replay still covers. Greater than
+   * zero means output has fallen out of what the pane holds and lives only in
+   * the host's spill file — the cursor the history viewer pages backward from.
+   */
+  oldestOffset: bigint;
 }
 
 export interface AttachmentHubSnapshot {
@@ -29,7 +45,11 @@ export interface AttachmentHubSnapshot {
 export type AttachmentHostClient = Pick<
   HostClient,
   "attach" | "onError" | "onSessionClosed"
->;
+> &
+  // Optional so existing fixtures keep type-checking. Without it a resync
+  // cannot tell a session that died while we were offline from one that is
+  // still running, and re-attaches everything hopefully.
+  Partial<Pick<HostClient, "getState">>;
 
 interface ReplayChunk {
   offset: bigint;
@@ -55,6 +75,8 @@ interface SessionRecord {
   exitCode: number | null;
   lostRange: LostRange | null;
   attachError: string | null;
+  suspended: boolean;
+  attachGeneration: number;
   activityTimer: ReturnType<typeof setTimeout> | null;
   /** Last dimensions a terminal successfully pushed to the host — the dims a
    * sleeping pane's scrollback was produced at, so the dims a wake must
@@ -66,12 +88,22 @@ export class AttachmentHub implements AttachmentClient {
   private readonly records = new Map<number, SessionRecord>();
   private readonly listeners = new Set<() => void>();
   private readonly errorListeners = new Set<(error: Error) => void>();
-  private readonly stopHostError: () => void;
-  private readonly stopHostClosed: () => void;
+  private stopHostError: () => void = () => undefined;
+  private stopHostClosed: () => void = () => undefined;
   private snapshot: AttachmentHubSnapshot = { sessions: {} };
   private closed = false;
+  /** Bumped by every suspend, so an in-flight resync can tell that the world
+   * moved on and stop issuing attaches into a dead socket. */
+  private connectionEpoch = 0;
 
-  constructor(private readonly client: AttachmentHostClient) {
+  constructor(private client: AttachmentHostClient) {
+    this.bindClient(client);
+  }
+
+  private bindClient(client: AttachmentHostClient): void {
+    invokeCleanup(this.stopHostError);
+    invokeCleanup(this.stopHostClosed);
+    this.client = client;
     this.stopHostError = client.onError((error) => {
       for (const listener of [...this.errorListeners]) {
         invokeConsumer(listener, error);
@@ -236,6 +268,101 @@ export class AttachmentHub implements AttachmentClient {
     return this.records.get(sessionId)?.lastDims ?? null;
   }
 
+  /// The host connection died. Records are KEPT, marked suspended, with their
+  /// `nextOffset` cursors intact — the sessions are still running inside the
+  /// daemon, only our socket is gone. Tearing them down here is what used to
+  /// make every pane unusable until a restart.
+  suspendAll(): void {
+    if (this.closed) {
+      return;
+    }
+    this.connectionEpoch += 1;
+    let changed = false;
+    for (const record of this.records.values()) {
+      if (record.exited) {
+        continue;
+      }
+      if (!record.suspended || record.physical !== null) {
+        changed = true;
+      }
+      record.suspended = true;
+      record.physical = null;
+      record.attaching = null;
+    }
+    if (changed) {
+      this.publish();
+    }
+  }
+
+  /// A new connection is up: re-attach every suspended session from the cursor
+  /// it left off at, SEQUENTIALLY (client.ts requires it — a failure among
+  /// concurrent attaches is ambiguous and kills the connection), then re-apply
+  /// the dims its scrollback was produced at. Sessions the daemon no longer has
+  /// go down the ordinary exit path and become dead panes.
+  async resync(client: AttachmentHostClient): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    this.bindClient(client);
+    const epoch = this.connectionEpoch;
+    const alive = await this.liveSessionIds(client);
+    for (const record of [...this.records.values()]) {
+      if (this.closed || this.connectionEpoch !== epoch) {
+        return; // the replacement died too; suspendAll already reset the state
+      }
+      if (record.exited || this.records.get(record.sessionId) !== record) {
+        continue;
+      }
+      if (alive && !alive.has(record.sessionId)) {
+        record.suspended = false;
+        this.markExited(record.sessionId, null);
+        continue;
+      }
+      await this.reattach(record);
+    }
+    if (!this.closed && this.connectionEpoch === epoch) {
+      this.publish();
+    }
+  }
+
+  /// The sessions the daemon admits to having, or null when this client cannot
+  /// say (older fixtures) — in which case every record is re-attached and a
+  /// vanished session surfaces as an attach error instead.
+  private async liveSessionIds(
+    client: AttachmentHostClient,
+  ): Promise<Set<number> | null> {
+    if (!client.getState) {
+      return null;
+    }
+    try {
+      const state = await client.getState();
+      return new Set(state.sessions.filter((s) => s.alive).map((s) => s.id));
+    } catch {
+      // A resync that cannot ask must not delete anything it is unsure about.
+      return null;
+    }
+  }
+
+  private async reattach(record: SessionRecord): Promise<void> {
+    const epoch = this.connectionEpoch;
+    const cursor = record.nextOffset;
+    await this.attachPhysical(record, cursor ?? undefined);
+    if (this.closed || this.connectionEpoch !== epoch || !record.physical) {
+      return;
+    }
+    record.suspended = false;
+    // Only now, with a proven attachment: this is what makes a bound pane throw
+    // away its dead binding and build a new one, so a failed attach must not
+    // move it or the pane rebinds into nothing.
+    record.attachGeneration += 1;
+    const dims = record.lastDims;
+    if (dims) {
+      // The pty must be back at the size its scrollback was rendered for before
+      // the replayed bytes land, or the reflow is wrong.
+      invokeCleanup(() => record.physical?.resize(dims.cols, dims.rows));
+    }
+  }
+
   onError(listener: (error: Error) => void): () => void {
     this.errorListeners.add(listener);
     return () => this.errorListeners.delete(listener);
@@ -261,7 +388,10 @@ export class AttachmentHub implements AttachmentClient {
     this.snapshot = { sessions: {} };
   }
 
-  private async attachPhysical(record: SessionRecord): Promise<void> {
+  private async attachPhysical(
+    record: SessionRecord,
+    sinceOffset?: bigint,
+  ): Promise<void> {
     try {
       let dead = false;
       const physical = await this.client.attach(
@@ -289,6 +419,7 @@ export class AttachmentHub implements AttachmentClient {
           },
         },
         true,
+        sinceOffset,
       );
       if (this.closed || this.records.get(record.sessionId) !== record) {
         invokeCleanup(() => physical.detach());
@@ -408,6 +539,8 @@ export class AttachmentHub implements AttachmentClient {
       exitCode: null,
       lostRange: null,
       attachError: null,
+      suspended: false,
+      attachGeneration: 0,
       activityTimer: null,
       lastDims: null,
     };
@@ -445,6 +578,9 @@ export class AttachmentHub implements AttachmentClient {
         exitCode: record.exitCode,
         lostScrollback: record.lostRange !== null,
         attachError: record.attachError,
+        suspended: record.suspended,
+        attachGeneration: record.attachGeneration,
+        oldestOffset: record.chunks[0]?.offset ?? 0n,
       };
     }
     this.snapshot = { sessions };

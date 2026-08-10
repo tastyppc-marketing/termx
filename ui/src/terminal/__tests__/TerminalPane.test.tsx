@@ -377,3 +377,195 @@ describe("TerminalPane", () => {
     expect(fixture.client.close).not.toHaveBeenCalled();
   });
 });
+
+describe("TerminalPane earlier output", () => {
+  function historyFixture() {
+    const fixture = paneFixture();
+    let scrollListener: ((atTop: boolean) => void) | undefined;
+    const dependencies: TerminalPaneDependencies = {
+      ...fixture.dependencies,
+      createPresentation: (element, onLink) => ({
+        ...fixture.dependencies.createPresentation(element, onLink),
+        onScroll: (listener: (atTop: boolean) => void) => {
+          scrollListener = listener;
+          return () => {
+            scrollListener = undefined;
+          };
+        },
+      }),
+    };
+    // Deliberately NOT spread: `fixture.callbacks` is a throwing getter until
+    // the pane attaches, and spreading would evaluate it here.
+    return {
+      client: fixture.client,
+      dependencies,
+      scrollTo(atTop: boolean) {
+        if (!scrollListener) {
+          throw new Error("scroll listener is not installed");
+        }
+        scrollListener(atTop);
+      },
+    };
+  }
+
+  it("offers earlier output only at the top of a scrollback that has some", async () => {
+    const fixture = historyFixture();
+    const onLoadEarlier = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          client={fixture.client}
+          sessionId={7}
+          historyBefore={4_096n}
+          onLoadEarlier={onLoadEarlier}
+          dependencies={fixture.dependencies}
+        />,
+      );
+      await flushPromises();
+    });
+
+    // Not while the user is reading the live tail.
+    expect(container.querySelector("[data-testid='load-earlier-output']")).toBeNull();
+
+    await act(async () => fixture.scrollTo(true));
+    const bar = container.querySelector<HTMLButtonElement>(
+      "[data-testid='load-earlier-output']",
+    );
+    expect(bar).not.toBeNull();
+    await act(async () => bar!.click());
+    expect(onLoadEarlier).toHaveBeenCalledWith(4_096n);
+
+    await act(async () => fixture.scrollTo(false));
+    expect(container.querySelector("[data-testid='load-earlier-output']")).toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
+  it("stays quiet when the session has never lost a byte to disk", async () => {
+    const fixture = historyFixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          client={fixture.client}
+          sessionId={7}
+          historyBefore={0n}
+          onLoadEarlier={vi.fn()}
+          dependencies={fixture.dependencies}
+        />,
+      );
+      await flushPromises();
+    });
+    await act(async () => fixture.scrollTo(true));
+
+    expect(container.querySelector("[data-testid='load-earlier-output']")).toBeNull();
+
+    await act(async () => root.unmount());
+  });
+});
+
+describe("TerminalPane reconnect", () => {
+  it("rebinds to the host when the hub reports a new attach generation", async () => {
+    const fixture = paneFixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          client={fixture.client}
+          sessionId={7}
+          attachGeneration={0}
+          dependencies={fixture.dependencies}
+        />,
+      );
+      await flushPromises();
+    });
+    expect(fixture.client.attach).toHaveBeenCalledTimes(1);
+
+    // The binding is one-shot: onDisconnect ends it for good, so a reconnect
+    // has to build a new one or the pane stays dead until a restart.
+    await act(async () => {
+      fixture.callbacks.onDisconnect?.();
+      await flushPromises();
+    });
+    expect(container.textContent).toContain("Host connection lost");
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          client={fixture.client}
+          sessionId={7}
+          attachGeneration={1}
+          dependencies={fixture.dependencies}
+        />,
+      );
+      await flushPromises();
+    });
+
+    expect(fixture.client.attach).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain("Host connection lost");
+
+    await act(async () => root.unmount());
+  });
+
+  it("shows a reconnecting chip instead of pretending the session died", async () => {
+    const fixture = paneFixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          client={fixture.client}
+          sessionId={7}
+          suspended
+          dependencies={fixture.dependencies}
+        />,
+      );
+      await flushPromises();
+    });
+
+    const chip = container.querySelector("[data-testid='pane-reconnecting-chip']");
+    expect(chip?.textContent).toContain("Reconnecting");
+    expect(container.querySelector("[data-testid='dead-pane']")).toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
+  it("does not repeat the outage in the status line while the chip is up", async () => {
+    const fixture = paneFixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          client={fixture.client}
+          sessionId={7}
+          suspended
+          dependencies={fixture.dependencies}
+        />,
+      );
+      await flushPromises();
+    });
+    await act(async () => {
+      fixture.callbacks.onDisconnect?.();
+      await flushPromises();
+    });
+
+    expect(container.querySelector(".terminal-pane__status--disconnected")).toBeNull();
+
+    await act(async () => root.unmount());
+  });
+});

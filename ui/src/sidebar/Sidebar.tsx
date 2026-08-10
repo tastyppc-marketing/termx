@@ -113,12 +113,22 @@ export interface SidebarProps {
   /** Sessions currently asleep (spec §13) — tabs holding one show a zZ badge. */
   sleeping?: ReadonlySet<number>;
   /**
+   * False while the host connection is down. Creating a terminal needs a live
+   * socket, and a request issued without one fails fast by design — better to
+   * say "not yet" on the button than to hand the user an error. Defaults to
+   * true so callers that do not track a connection are unaffected.
+   */
+  hostConnected?: boolean;
+  /**
    * Action tray for the footer (spec §14). When provided it REPLACES the
    * hardcoded folder-search/settings chrome buttons; the New-terminal button
    * and its options menu stay native (they carry busy state a chip cannot).
    */
   footerTray?: ReactNode;
 }
+
+/** Tooltip on the creation controls while the host connection is down. */
+const WAITING_FOR_HOST = "Waiting for host…";
 
 type SidebarMode = "terminals" | "conversations";
 
@@ -177,6 +187,7 @@ export function Sidebar({
   onExpandConversations,
   sleeping,
   footerTray,
+  hostConnected = true,
 }: SidebarProps) {
   const [mode, setMode] = useState<SidebarMode>("terminals");
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
@@ -1111,7 +1122,8 @@ export function Sidebar({
           type="button"
           className="sidebar-create__primary"
           aria-label="New terminal"
-          disabled={creating}
+          disabled={creating || !hostConnected}
+          {...(hostConnected ? {} : { title: WAITING_FOR_HOST })}
           onClick={() => void createTab(null, null)}
         >
           <span aria-hidden="true">＋</span>
@@ -1121,7 +1133,8 @@ export function Sidebar({
           type="button"
           className="sidebar-create__options"
           aria-label="New terminal options"
-          disabled={creating}
+          disabled={creating || !hostConnected}
+          {...(hostConnected ? {} : { title: WAITING_FOR_HOST })}
           onClick={(event) => {
             const rect = event.currentTarget.getBoundingClientRect();
             openMenu({

@@ -756,3 +756,193 @@ describe("HostClient review regressions", () => {
     await expect(next).resolves.toMatchObject({ sessionId: 8 });
   });
 });
+
+describe("HostClient attach resume cursor", () => {
+  it("omits since_offset on a first attach and sends it on a resync", async () => {
+    const { client, socket } = await connect();
+
+    void client.attach(7);
+    await flushPromises();
+    expect(sentJson(socket).at(-1)).toEqual({
+      type: "attach",
+      session_id: 7,
+      replay: true,
+    });
+
+    socket.receiveJson({ type: "replay", session_id: 7, start_offset: 0, data_b64: "" });
+    void client.attach(8, {}, true, 4_096n);
+    await flushPromises();
+    expect(sentJson(socket).at(-1)).toEqual({
+      type: "attach",
+      session_id: 8,
+      replay: true,
+      since_offset: 4096,
+    });
+  });
+
+  it("treats the cursor as already seen, so a resync replay is not a gap", async () => {
+    const { client, socket } = await connect();
+    const output: Array<{ offset: bigint; text: string }> = [];
+    const gaps: Array<{ expectedOffset: bigint; receivedOffset: bigint }> = [];
+    const attaching = client.attach(
+      7,
+      {
+        onOutput: (event) =>
+          output.push({ offset: event.offset, text: new TextDecoder().decode(event.data) }),
+        onLostScrollback: (event) => gaps.push(event),
+      },
+      true,
+      100n,
+    );
+    await flushPromises();
+
+    socket.receiveJson({
+      type: "replay",
+      session_id: 7,
+      start_offset: 100,
+      data_b64: base64("abcd"),
+    });
+    const handle = await attaching;
+
+    expect(gaps).toEqual([]);
+    expect(output).toEqual([{ offset: 100n, text: "abcd" }]);
+    expect(handle.nextOffset).toBe(104n);
+  });
+
+  it("reports a gap when the host had already evicted past the cursor", async () => {
+    const { client, socket } = await connect();
+    const gaps: Array<{ expectedOffset: bigint; receivedOffset: bigint }> = [];
+    const attaching = client.attach(
+      7,
+      { onLostScrollback: (event) => gaps.push(event) },
+      true,
+      100n,
+    );
+    await flushPromises();
+
+    socket.receiveJson({
+      type: "replay",
+      session_id: 7,
+      start_offset: 500,
+      data_b64: base64("late"),
+    });
+    await attaching;
+
+    expect(gaps).toEqual([{ expectedOffset: 100n, receivedOffset: 500n }]);
+  });
+
+  it("trims a replay the host clamped back to an older ring start", async () => {
+    const { client, socket } = await connect();
+    const output: Array<{ offset: bigint; text: string }> = [];
+    const attaching = client.attach(
+      7,
+      {
+        onOutput: (event) =>
+          output.push({ offset: event.offset, text: new TextDecoder().decode(event.data) }),
+      },
+      true,
+      102n,
+    );
+    await flushPromises();
+
+    socket.receiveJson({
+      type: "replay",
+      session_id: 7,
+      start_offset: 100,
+      data_b64: base64("abcdef"),
+    });
+    await attaching;
+
+    expect(output).toEqual([{ offset: 102n, text: "cdef" }]);
+  });
+
+  it("refuses a cursor no JSON number can carry", async () => {
+    const { client } = await connect();
+
+    await expect(client.attach(7, {}, true, BigInt(Number.MAX_SAFE_INTEGER) + 1n))
+      .rejects.toThrow(/safe integer/i);
+    await expect(client.attach(7, {}, true, -1n)).rejects.toThrow(/safe integer/i);
+  });
+});
+
+describe("HostClient scrollback history", () => {
+  it("pages backward and decodes the slice the host answers with", async () => {
+    const { client, socket } = await connect();
+
+    const reading = client.readHistory(7, 4_096n, 65_536);
+    await flushPromises();
+    expect(sentJson(socket).at(-1)).toEqual({
+      type: "read_history",
+      session_id: 7,
+      before_offset: 4096,
+      max_bytes: 65536,
+    });
+
+    socket.receiveJson({
+      type: "history",
+      session_id: 7,
+      start_offset: 4090,
+      data_b64: base64("abcdef"),
+      at_start: false,
+    });
+
+    const page = await reading;
+    expect(page.startOffset).toBe(4090n);
+    expect(new TextDecoder().decode(page.data)).toBe("abcdef");
+    expect(page.atStart).toBe(false);
+  });
+
+  it("reports the start of history as an ordinary empty answer", async () => {
+    const { client, socket } = await connect();
+
+    const reading = client.readHistory(7, 0n, 65_536);
+    await flushPromises();
+    socket.receiveJson({
+      type: "history",
+      session_id: 7,
+      start_offset: 0,
+      data_b64: "",
+      at_start: true,
+    });
+
+    await expect(reading).resolves.toEqual({
+      startOffset: 0n,
+      data: new Uint8Array(0),
+      atStart: true,
+    });
+  });
+
+  it("refuses a cursor no JSON number can carry", async () => {
+    const { client } = await connect();
+
+    await expect(client.readHistory(7, BigInt(Number.MAX_SAFE_INTEGER) + 1n, 1_024))
+      .rejects.toThrow(/safe integer/i);
+    await expect(client.readHistory(7, -1n, 1_024)).rejects.toThrow(/safe integer/i);
+  });
+
+  it("stays ordered behind another reply-bearing request", async () => {
+    const { client, socket } = await connect();
+
+    const sessions = client.listSessions();
+    const reading = client.readHistory(7, 64n, 64);
+    await flushPromises();
+    expect(sentJson(socket).map((message) => message.type)).toEqual([
+      "auth",
+      "list_sessions",
+    ]);
+
+    socket.receiveJson({ type: "sessions", sessions: [SESSION] });
+    await expect(sessions).resolves.toEqual([SESSION]);
+    await flushPromises();
+    expect(sentJson(socket).at(-1)?.type).toBe("read_history");
+
+    socket.receiveJson({
+      type: "history",
+      session_id: 7,
+      start_offset: 0,
+      data_b64: base64("gh"),
+      at_start: true,
+    });
+    await expect(reading).resolves.toMatchObject({ startOffset: 0n, atStart: true });
+  });
+});

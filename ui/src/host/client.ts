@@ -14,10 +14,20 @@ const REQUEST_CONTEXTS = new Set([
   "list_sessions",
   "set_layout",
   "get_state",
+  "read_history",
 ]);
 
+/** One backward page of spilled scrollback. */
+export const HISTORY_PAGE_BYTES = 64 * 1024;
+
 type WebSocketFactory = (url: string) => WebSocket;
-type ReplyType = "session_created" | "session_closed" | "sessions" | "layout_saved" | "state";
+type ReplyType =
+  | "session_created"
+  | "session_closed"
+  | "sessions"
+  | "layout_saved"
+  | "state"
+  | "history";
 
 export interface HostClientConnectOptions {
   port: number;
@@ -44,6 +54,16 @@ export interface SessionOutputEvent {
   offset: bigint;
   data: Uint8Array;
   source: "replay" | "live";
+}
+
+/**
+ * One page of scrollback the ring has already evicted, read back from the
+ * host's spill file. `atStart` means there is nothing older to ask for.
+ */
+export interface HistoryPage {
+  startOffset: bigint;
+  data: Uint8Array;
+  atStart: boolean;
 }
 
 export interface LostScrollbackEvent {
@@ -80,6 +100,8 @@ interface AttachmentState {
   callbacks: SessionAttachmentCallbacks;
   nextOffset: bigint | null;
   replay: boolean;
+  /** Resume cursor for a reconnect resync; absent on a first attach. */
+  sinceOffset?: bigint;
   awaitingReplay: boolean;
   detaching: boolean;
   detached: boolean;
@@ -278,6 +300,44 @@ export class HostClient {
     );
   }
 
+  /**
+   * The newest `maxBytes` of spilled scrollback ending before `beforeOffset`.
+   * Absent, disabled, or unreadable history is NOT an error: the host answers
+   * an empty slice with `atStart`, and the caller simply stops paging.
+   */
+  readHistory(
+    sessionId: number,
+    beforeOffset: bigint,
+    maxBytes: number,
+  ): Promise<HistoryPage> {
+    assertSessionId(sessionId);
+    if (!isSafeOffset(beforeOffset)) {
+      return Promise.reject(
+        new RangeError("readHistory beforeOffset must be a non-negative safe integer offset"),
+      );
+    }
+    return this.request(
+      {
+        type: "read_history",
+        session_id: sessionId,
+        before_offset: Number(beforeOffset),
+        max_bytes: Math.trunc(maxBytes),
+      },
+      "read_history",
+      "history",
+      (message) => {
+        if (message.type !== "history") {
+          throw new Error("unreachable reply type");
+        }
+        return {
+          startOffset: BigInt(message.start_offset),
+          data: decodeBase64(message.data_b64),
+          atStart: message.at_start,
+        };
+      },
+    );
+  }
+
   closeSession(sessionId: number): Promise<void> {
     assertSessionId(sessionId);
     return this.request(
@@ -293,12 +353,21 @@ export class HostClient {
   /// id — so a failure among concurrent pending attaches is ambiguous and
   /// tears down the connection as a protocol violation. Boot-time attach-all
   /// loops must `await` one attach at a time.
+  /// `sinceOffset` resumes an attachment a dropped connection interrupted: the
+  /// host replays only from there, and the cursor seeds `nextOffset` so the
+  /// resync replay lands as continuation rather than as a scrollback gap.
   attach(
     sessionId: number,
     callbacks: SessionAttachmentCallbacks = {},
     replay = true,
+    sinceOffset?: bigint,
   ): Promise<SessionAttachment> {
     assertSessionId(sessionId);
+    if (sinceOffset !== undefined && !isSafeOffset(sinceOffset)) {
+      return Promise.reject(
+        new RangeError("attach sinceOffset must be a non-negative safe integer offset"),
+      );
+    }
     if (this.closed) {
       return Promise.reject(new Error("Host connection is closed"));
     }
@@ -320,8 +389,9 @@ export class HostClient {
       Object.assign(state, {
         sessionId,
         callbacks,
-        nextOffset: replay ? 0n : null,
+        nextOffset: replay ? sinceOffset ?? 0n : null,
         replay,
+        ...(sinceOffset === undefined ? {} : { sinceOffset }),
         awaitingReplay: replay,
         detaching: false,
         detached: false,
@@ -413,6 +483,9 @@ export class HostClient {
         type: "attach",
         session_id: next.sessionId,
         replay: next.replay,
+        ...(next.sinceOffset === undefined
+          ? {}
+          : { since_offset: Number(next.sinceOffset) }),
       });
     } catch {
       this.activeAttach = null;
@@ -558,6 +631,7 @@ export class HostClient {
       case "sessions":
       case "layout_saved":
       case "state":
+      case "history":
         this.receiveReply(message);
         return;
       case "session_closed":
@@ -846,6 +920,14 @@ function parseHostMessage(text: string): HostMsg {
       return { type: value.type };
     case "state":
       return { type: value.type, layout: jsonField(value, "layout"), sessions: sessionsField(value) };
+    case "history":
+      return {
+        type: value.type,
+        session_id: u32Field(value, "session_id"),
+        start_offset: safeUnsignedField(value, "start_offset"),
+        data_b64: stringField(value, "data_b64"),
+        at_start: booleanField(value, "at_start"),
+      };
     case "error":
       return {
         type: value.type,
@@ -960,6 +1042,12 @@ function assertDimensions(cols: number, rows: number) {
   if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1 || cols > 0xffff || rows > 0xffff) {
     throw new RangeError("terminal dimensions must fit positive unsigned 16-bit integers");
   }
+}
+
+/** Offsets ride the wire as JSON numbers, so anything past 2^53-1 would be
+ * silently rounded into a wrong resume point. */
+function isSafeOffset(offset: bigint): boolean {
+  return offset >= 0n && offset <= BigInt(Number.MAX_SAFE_INTEGER);
 }
 
 function asError(error: unknown): Error {

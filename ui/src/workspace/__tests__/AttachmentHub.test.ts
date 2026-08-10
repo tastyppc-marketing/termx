@@ -28,8 +28,12 @@ interface PhysicalRecord {
 
 interface FakeHost extends AttachmentHostClient {
   attachCalls: number[];
+  /** Every attach with the resume cursor it carried, for resync assertions. */
+  attachArgs: Array<{ sessionId: number; sinceOffset: bigint | undefined }>;
   pending: Map<number, Deferred<SessionAttachment>>;
   physical: Map<number, PhysicalRecord>;
+  /** Sessions the daemon admits to having, for getState during a resync. */
+  liveSessions: Set<number>;
   emitError(error: Error): void;
   emitClosed(sessionId: number): void;
 }
@@ -54,15 +58,35 @@ function createFakeHost(): FakeHost {
   const errorListeners = new Set<(error: Error) => void>();
   const closeListeners = new Set<(event: { sessionId: number }) => void>();
   const attachCalls: number[] = [];
+  const attachArgs: Array<{ sessionId: number; sinceOffset: bigint | undefined }> = [];
   const pending = new Map<number, Deferred<SessionAttachment>>();
   const physical = new Map<number, PhysicalRecord>();
+  const liveSessions = new Set<number>();
 
   return {
     attachCalls,
+    attachArgs,
     pending,
     physical,
-    attach(sessionId, callbacks = {}) {
+    liveSessions,
+    getState() {
+      return Promise.resolve({
+        layout: null,
+        sessions: [...liveSessions].map((id) => ({
+          id,
+          profile: "cmd",
+          cwd: null,
+          cols: 80,
+          rows: 25,
+          alive: true,
+          pid: null,
+        })),
+      });
+    },
+    attach(sessionId, callbacks = {}, _replay = true, sinceOffset?: bigint) {
       attachCalls.push(sessionId);
+      attachArgs.push({ sessionId, sinceOffset });
+      liveSessions.add(sessionId);
       const next = deferred<SessionAttachment>();
       const detach = vi.fn();
       const sendInput = vi.fn();
@@ -328,6 +352,24 @@ describe("AttachmentHub replay bounds", () => {
     expect(replayEvents).toHaveLength(ATTACHMENT_REPLAY_MAX_CHUNKS);
     expect(replayEvents[0]?.offset).toBe(1n);
     expect(onLostScrollback).toHaveBeenCalled();
+    // Everything below this offset is only on disk now — the cursor the
+    // earlier-output bar pages backward from.
+    expect(hub.getSnapshot().sessions[30]!.oldestOffset).toBe(1n);
+  });
+
+  it("reports no earlier output for a session that has lost nothing", async () => {
+    const host = createFakeHost();
+    const hub = new AttachmentHub(host);
+    const attaching = hub.attachAll([32]);
+    emitOutput(host, 32, {
+      offset: 0n,
+      data: new Uint8Array([1, 2, 3]),
+      source: "replay",
+    });
+    resolvePhysical(host, 32);
+    await attaching;
+
+    expect(hub.getSnapshot().sessions[32]!.oldestOffset).toBe(0n);
   });
 
   it("evicts an oversized byte history down to the approved cap", async () => {
@@ -411,5 +453,164 @@ describe("AttachmentHub disconnect and recorded dims", () => {
     // Sleep detaches the terminal; the recorded dims survive for the wake.
     handle.detach();
     expect(hub.lastDims(5)).toEqual({ cols: 140, rows: 42 });
+  });
+});
+
+describe("AttachmentHub reconnect resync", () => {
+  async function hubWithSessions(sessionIds: readonly number[]) {
+    const host = createFakeHost();
+    const hub = new AttachmentHub(host);
+    const attaching = hub.attachAll(sessionIds);
+    for (const sessionId of sessionIds) {
+      resolvePhysical(host, sessionId);
+      await flushMicrotasks();
+    }
+    await attaching;
+    return { host, hub };
+  }
+
+  it("suspends every live record instead of forgetting it", async () => {
+    const { host, hub } = await hubWithSessions([5, 6]);
+    emitOutput(host, 5, { offset: 0n, data: new Uint8Array([1, 2, 3]), source: "live" });
+    const notified = vi.fn();
+    hub.subscribe(notified);
+
+    hub.suspendAll();
+
+    const snapshot = hub.getSnapshot();
+    expect(snapshot.sessions[5]).toMatchObject({ suspended: true, hostAttached: false });
+    expect(snapshot.sessions[6]).toMatchObject({ suspended: true, hostAttached: false });
+    expect(notified).toHaveBeenCalled();
+  });
+
+  it("re-attaches sequentially from each session's own cursor and restores dims", async () => {
+    const { host, hub } = await hubWithSessions([5, 6]);
+    emitOutput(host, 5, { offset: 0n, data: new Uint8Array(64), source: "live" });
+    emitOutput(host, 6, { offset: 0n, data: new Uint8Array(10), source: "live" });
+    const handle = await hub.attach(6);
+    handle.resize(120, 40);
+    host.attachCalls.length = 0;
+    host.attachArgs.length = 0;
+
+    hub.suspendAll();
+    const resyncing = hub.resync(host);
+    await flushMicrotasks();
+
+    // Sequential: the second attach must not be issued until the first lands.
+    expect(host.attachCalls).toEqual([5]);
+    resolvePhysical(host, 5);
+    await flushMicrotasks();
+    expect(host.attachCalls).toEqual([5, 6]);
+    resolvePhysical(host, 6);
+    await resyncing;
+
+    expect(host.attachArgs).toEqual([
+      { sessionId: 5, sinceOffset: 64n },
+      { sessionId: 6, sinceOffset: 10n },
+    ]);
+    expect(host.physical.get(6)!.resize).toHaveBeenCalledWith(120, 40);
+    expect(host.physical.get(5)!.resize).not.toHaveBeenCalled();
+    expect(hub.getSnapshot().sessions[5]).toMatchObject({
+      suspended: false,
+      hostAttached: true,
+    });
+  });
+
+  it("turns a session the daemon no longer has into a dead pane", async () => {
+    const { host, hub } = await hubWithSessions([5, 6]);
+    const exits: Array<number | null> = [];
+    const handle = await hub.attach(5, { onExit: (code) => exits.push(code) });
+    expect(handle.sessionId).toBe(5);
+    host.liveSessions.delete(5);
+    host.attachCalls.length = 0;
+
+    hub.suspendAll();
+    const resyncing = hub.resync(host);
+    await flushMicrotasks();
+    resolvePhysical(host, 6);
+    await resyncing;
+
+    expect(host.attachCalls).toEqual([6]);
+    expect(exits).toEqual([null]);
+    expect(hub.getSnapshot().sessions[5]).toMatchObject({
+      exited: true,
+      suspended: false,
+    });
+  });
+
+  it("leaves a consistent suspended state when the socket dies mid-resync", async () => {
+    const { host, hub } = await hubWithSessions([5, 6]);
+    host.attachCalls.length = 0;
+
+    hub.suspendAll();
+    const resyncing = hub.resync(host);
+    await flushMicrotasks();
+    expect(host.attachCalls).toEqual([5]);
+
+    // The replacement connection dies while session 5's attach is in flight.
+    host.pending.get(5)!.reject(new Error("Host connection closed"));
+    hub.suspendAll();
+    await resyncing;
+
+    // No attach may be issued into a socket that has already died.
+    expect(host.attachCalls).toEqual([5]);
+    const snapshot = hub.getSnapshot();
+    expect(snapshot.sessions[5]).toMatchObject({ suspended: true, hostAttached: false });
+    expect(snapshot.sessions[6]).toMatchObject({ suspended: true, hostAttached: false });
+  });
+
+  it("routes errors and closes through the replacement connection", async () => {
+    const { hub } = await hubWithSessions([5]);
+    const replacement = createFakeHost();
+    replacement.liveSessions.add(5); // the daemon still has it; only our socket changed
+    const errors: Error[] = [];
+    hub.onError((error) => errors.push(error));
+
+    hub.suspendAll();
+    const resyncing = hub.resync(replacement);
+    await flushMicrotasks();
+    resolvePhysical(replacement, 5);
+    await resyncing;
+
+    replacement.emitError(new Error("from the new socket"));
+    expect(errors.map((error) => error.message)).toEqual(["from the new socket"]);
+
+    replacement.emitClosed(5);
+    expect(hub.getSnapshot().sessions[5]).toBeUndefined();
+  });
+
+  it("does nothing on a closed hub", async () => {
+    const { host, hub } = await hubWithSessions([5]);
+    hub.close();
+
+    hub.suspendAll();
+    await hub.resync(host);
+
+    expect(hub.getSnapshot().sessions).toEqual({});
+  });
+
+  it("bumps the attach generation so bound terminals know to rebind", async () => {
+    const { host, hub } = await hubWithSessions([5]);
+    expect(hub.getSnapshot().sessions[5]!.attachGeneration).toBe(0);
+
+    hub.suspendAll();
+    const resyncing = hub.resync(host);
+    await flushMicrotasks();
+    resolvePhysical(host, 5);
+    await resyncing;
+
+    expect(hub.getSnapshot().sessions[5]!.attachGeneration).toBe(1);
+  });
+
+  it("does not bump the generation for a resync that never re-attached", async () => {
+    const { host, hub } = await hubWithSessions([5]);
+
+    hub.suspendAll();
+    const resyncing = hub.resync(host);
+    await flushMicrotasks();
+    host.pending.get(5)!.reject(new Error("Host connection closed"));
+    await resyncing;
+
+    expect(hub.getSnapshot().sessions[5]!.attachGeneration).toBe(0);
   });
 });

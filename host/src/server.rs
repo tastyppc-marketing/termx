@@ -174,14 +174,18 @@ async fn send_ctl(out_tx: &tokio::sync::mpsc::Sender<Outbound>, msg: &HostMsg) {
 
 /// Reserve the connection's Replay slot before taking a ring snapshot or
 /// base64-encoding it. The permit remains attached through socket send.
+///
+/// `since_offset` is a reconnecting client's resume cursor (see
+/// `ClientMsg::Attach`); `None` replays the whole ring.
 async fn send_replay(
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     budget: Arc<tokio::sync::Semaphore>,
     session_id: SessionId,
     session: &Session,
+    since_offset: Option<u64>,
 ) -> Option<u64> {
     let permit = reserve_replay_budget(budget).await.ok()?;
-    let (msg, end) = replay_msg(session_id, session);
+    let (msg, end) = replay_msg(session_id, session, since_offset);
     let text = serde_json::to_string(&msg).ok()?;
     out_tx
         .send(Outbound {
@@ -193,8 +197,28 @@ async fn send_replay(
     Some(end)
 }
 
-fn replay_msg(session_id: SessionId, session: &Session) -> (HostMsg, u64) {
-    let (start_offset, bytes) = session.snapshot();
+/// Drop the prefix a client already has. A cursor the ring evicted past is
+/// clamped to the ring start (the client's gap logic reports the loss), and a
+/// cursor at or past the ring end yields an empty replay pinned at that end.
+fn trim_replay(start_offset: u64, bytes: Vec<u8>, since_offset: Option<u64>) -> (u64, Vec<u8>) {
+    let end = start_offset + bytes.len() as u64;
+    let Some(since) = since_offset.filter(|since| *since > start_offset) else {
+        return (start_offset, bytes);
+    };
+    if since >= end {
+        return (end, Vec::new());
+    }
+    let skip = (since - start_offset) as usize;
+    (since, bytes[skip..].to_vec())
+}
+
+fn replay_msg(
+    session_id: SessionId,
+    session: &Session,
+    since_offset: Option<u64>,
+) -> (HostMsg, u64) {
+    let (snapshot_start, snapshot) = session.snapshot();
+    let (start_offset, bytes) = trim_replay(snapshot_start, snapshot, since_offset);
     let end = start_offset + bytes.len() as u64;
     (
         HostMsg::Replay {
@@ -262,6 +286,7 @@ async fn forward_session(
                         Arc::clone(&replay_budget),
                         session_id,
                         &session,
+                        None,
                     )
                     .await
                     else {
@@ -291,8 +316,14 @@ async fn forward_session(
             Err(_) => break, // quiet for 300ms — tail is flushed
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                let Some(end) =
-                    send_replay(&out_tx, Arc::clone(&replay_budget), session_id, &session).await
+                let Some(end) = send_replay(
+                    &out_tx,
+                    Arc::clone(&replay_budget),
+                    session_id,
+                    &session,
+                    None,
+                )
+                .await
                 else {
                     return;
                 };
@@ -488,7 +519,11 @@ async fn handle_conn(
                         };
                         send_ctl(&out_tx, &reply).await;
                     }
-                    ClientMsg::Attach { session_id, replay } => {
+                    ClientMsg::Attach {
+                        session_id,
+                        replay,
+                        since_offset,
+                    } => {
                         // Abort the previous forwarder AND await it, so a
                         // stale frame it was mid-sending can't land after the
                         // fresh replay below. (Await after abort returns as
@@ -525,6 +560,7 @@ async fn handle_conn(
                                 Arc::clone(&replay_budget),
                                 session_id,
                                 &session,
+                                since_offset,
                             )
                             .await
                             else {
@@ -592,6 +628,32 @@ async fn handle_conn(
                             )
                             .await;
                         }
+                    }
+                    ClientMsg::ReadHistory {
+                        session_id,
+                        before_offset,
+                        max_bytes,
+                    } => {
+                        // No file, unknown session, or an unreadable one all
+                        // answer the same way: an empty slice that says there
+                        // is nothing older. History absence is normal.
+                        let slice = registry.read_history(session_id, before_offset, max_bytes);
+                        let reply = match slice {
+                            Some(slice) => HostMsg::History {
+                                session_id,
+                                start_offset: slice.start_offset,
+                                data_b64: base64::engine::general_purpose::STANDARD
+                                    .encode(&slice.data),
+                                at_start: slice.at_start,
+                            },
+                            None => HostMsg::History {
+                                session_id,
+                                start_offset: before_offset,
+                                data_b64: String::new(),
+                                at_start: true,
+                            },
+                        };
+                        send_ctl(&out_tx, &reply).await;
                     }
                     ClientMsg::ListSessions => {
                         send_ctl(
@@ -874,6 +936,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: true,
+                since_offset: None,
             },
         )
         .await;
@@ -901,6 +964,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: false,
+                since_offset: None,
             },
         )
         .await;
@@ -935,6 +999,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: false,
+                since_offset: None,
             },
         )
         .await;
@@ -980,6 +1045,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: false,
+                since_offset: None,
             },
         )
         .await;
@@ -1023,6 +1089,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: false,
+                since_offset: None,
             },
         )
         .await;
@@ -1034,6 +1101,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: false,
+                since_offset: None,
             },
         )
         .await;
@@ -1206,6 +1274,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: true,
+                since_offset: None,
             },
         )
         .await;
@@ -1287,6 +1356,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: true,
+                since_offset: None,
             },
         )
         .await;
@@ -1334,6 +1404,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: true,
+                since_offset: None,
             },
         )
         .await;
@@ -1408,6 +1479,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: true,
+                since_offset: None,
             },
         )
         .await;
@@ -1418,6 +1490,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: true,
+                since_offset: None,
             },
         )
         .await;
@@ -1625,6 +1698,7 @@ mod tests {
             &ClientMsg::Attach {
                 session_id: id,
                 replay: false,
+                since_offset: None,
             },
         )
         .await;
@@ -1717,6 +1791,7 @@ mod tests {
                 &ClientMsg::Attach {
                     session_id: id,
                     replay: false,
+                    since_offset: None,
                 },
             )
             .await;
@@ -1809,6 +1884,255 @@ mod tests {
         .await
         .expect("budget released")
         .expect("second max replay fits after release");
+    }
+
+    /// Reconnect resync: the ring snapshot is trimmed to the client's cursor
+    /// BEFORE base64, so a resync after a dropped socket costs the unseen tail
+    /// rather than the whole ring.
+    #[test]
+    fn trim_replay_slices_the_snapshot_at_the_clients_cursor() {
+        let bytes = b"abcdefgh".to_vec();
+        assert_eq!(
+            trim_replay(100, bytes.clone(), None),
+            (100, bytes.clone()),
+            "no cursor keeps today's replay-everything behavior"
+        );
+        assert_eq!(
+            trim_replay(100, bytes.clone(), Some(103)),
+            (103, b"defgh".to_vec()),
+            "a mid-ring cursor replays exactly the tail"
+        );
+        assert_eq!(
+            trim_replay(100, bytes.clone(), Some(100)),
+            (100, bytes.clone()),
+            "a cursor at the ring start is the whole ring"
+        );
+    }
+
+    /// A cursor the ring has already evicted past cannot be honored; the client
+    /// gets what still exists and its own gap logic reports the loss.
+    #[test]
+    fn trim_replay_clamps_a_cursor_the_ring_evicted_past() {
+        let bytes = b"abcdefgh".to_vec();
+        assert_eq!(trim_replay(100, bytes.clone(), Some(7)), (100, bytes));
+    }
+
+    /// A client that saw everything gets an empty replay pinned at the ring
+    /// end — not an error, and never a re-send of bytes it already rendered.
+    #[test]
+    fn trim_replay_at_or_beyond_the_ring_end_is_empty() {
+        let bytes = b"abcdefgh".to_vec();
+        assert_eq!(
+            trim_replay(100, bytes.clone(), Some(108)),
+            (108, Vec::new())
+        );
+        assert_eq!(
+            trim_replay(100, bytes, Some(u64::MAX)),
+            (108, Vec::new()),
+            "an absurd cursor must not panic or wrap"
+        );
+    }
+
+    /// Wire-level proof through the real dispatcher: re-attaching with the
+    /// cursor from a previous replay yields a Replay that starts exactly there.
+    #[tokio::test]
+    async fn attach_with_since_offset_replays_only_the_unseen_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        let id = create_cmd(&mut ws).await;
+        // Output only reaches an ATTACHED client, so attach before driving the
+        // shell; replay:false keeps the ring out of this first exchange.
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: false,
+                since_offset: None,
+            },
+        )
+        .await;
+        ws.send(input_frame(id, b"echo since_offset_marker\r\n"))
+            .await
+            .unwrap();
+        let seen = pump_output_until(&mut ws, id, "since_offset_marker", 20).await;
+        assert!(seen.contains("since_offset_marker"), "saw: {seen:?}");
+
+        async fn next_replay(ws: &mut Ws, id: SessionId) -> (u64, Vec<u8>) {
+            loop {
+                if let HostMsg::Replay {
+                    session_id,
+                    start_offset,
+                    data_b64,
+                } = next_json(ws).await
+                {
+                    assert_eq!(session_id, id);
+                    return (
+                        start_offset,
+                        base64::engine::general_purpose::STANDARD
+                            .decode(data_b64)
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+
+        // Full replay first: establishes the ring window this client has seen.
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+                since_offset: None,
+            },
+        )
+        .await;
+        let (start, full) = next_replay(&mut ws, id).await;
+        assert!(full.len() > 8, "need a ring worth slicing: {}", full.len());
+        let mid = start + (full.len() as u64) / 2;
+
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+                since_offset: Some(mid),
+            },
+        )
+        .await;
+        let (resync_start, resync) = next_replay(&mut ws, id).await;
+        assert_eq!(
+            resync_start, mid,
+            "resync must begin at the client's cursor"
+        );
+        let expected_tail = &full[(mid - start) as usize..];
+        assert!(
+            resync.starts_with(expected_tail),
+            "resync payload must be the unseen tail of the ring"
+        );
+
+        // A cursor past everything the host holds: an empty replay at the end.
+        send_json(
+            &mut ws,
+            &ClientMsg::Attach {
+                session_id: id,
+                replay: true,
+                since_offset: Some(u64::MAX),
+            },
+        )
+        .await;
+        let (end_start, end_data) = next_replay(&mut ws, id).await;
+        assert!(end_data.is_empty(), "nothing unseen means nothing to send");
+        assert!(end_start >= start + full.len() as u64);
+
+        send_json(&mut ws, &ClientMsg::CloseSession { session_id: id }).await;
+        shutdown_and_drain(&mut ws).await;
+    }
+
+    /// Backward paging over the wire: each reply ends where the previous one
+    /// began, and reaching the oldest stored byte sets `at_start`.
+    #[tokio::test]
+    async fn read_history_pages_backward_and_reports_the_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        {
+            let mut writer = crate::history::HistoryWriter::open(tmp.path(), 5, 1024).unwrap();
+            writer.append(b"0123456789").unwrap();
+        }
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+
+        async fn page(
+            ws: &mut Ws,
+            session_id: SessionId,
+            before: u64,
+            max: u32,
+        ) -> (u64, Vec<u8>, bool) {
+            send_json(
+                ws,
+                &ClientMsg::ReadHistory {
+                    session_id,
+                    before_offset: before,
+                    max_bytes: max,
+                },
+            )
+            .await;
+            loop {
+                if let HostMsg::History {
+                    session_id: id,
+                    start_offset,
+                    data_b64,
+                    at_start,
+                } = next_json(ws).await
+                {
+                    assert_eq!(id, session_id);
+                    return (
+                        start_offset,
+                        base64::engine::general_purpose::STANDARD
+                            .decode(data_b64)
+                            .unwrap(),
+                        at_start,
+                    );
+                }
+            }
+        }
+
+        let newest = page(&mut ws, 5, 10, 4).await;
+        assert_eq!(
+            (newest.0, newest.1.as_slice(), newest.2),
+            (6, b"6789".as_slice(), false)
+        );
+        let older = page(&mut ws, 5, newest.0, 4).await;
+        assert_eq!(
+            (older.0, older.1.as_slice(), older.2),
+            (2, b"2345".as_slice(), false)
+        );
+        let oldest = page(&mut ws, 5, older.0, 64).await;
+        assert_eq!(
+            (oldest.0, oldest.1.as_slice(), oldest.2),
+            (0, b"01".as_slice(), true)
+        );
+
+        // An absurd request size is clamped, never trusted.
+        let all = page(&mut ws, 5, 10, u32::MAX).await;
+        assert_eq!(all.1.len(), 10);
+        assert!(all.2);
+
+        // A session the host has never heard of is not an error.
+        let unknown = page(&mut ws, 4242, 999, 64).await;
+        assert!(unknown.1.is_empty(), "no history is not a failure");
+        assert!(unknown.2);
+    }
+
+    /// Corruption degrades to "nothing older" instead of tearing the
+    /// connection down over scrollback the user can live without.
+    #[tokio::test]
+    async fn read_history_degrades_on_a_corrupt_spill_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        std::fs::create_dir_all(crate::history::history_dir(tmp.path())).unwrap();
+        std::fs::write(crate::history::session_file(tmp.path(), 3), b"xx").unwrap();
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        send_json(
+            &mut ws,
+            &ClientMsg::ReadHistory {
+                session_id: 3,
+                before_offset: 100,
+                max_bytes: 64,
+            },
+        )
+        .await;
+        match next_json(&mut ws).await {
+            HostMsg::History {
+                data_b64, at_start, ..
+            } => {
+                assert!(data_b64.is_empty());
+                assert!(at_start);
+            }
+            other => panic!("expected History, got {other:?}"),
+        }
     }
 
     #[test]

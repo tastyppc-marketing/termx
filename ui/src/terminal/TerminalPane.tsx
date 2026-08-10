@@ -48,6 +48,12 @@ export interface TerminalPresentation {
   scrollToLine(line: number): void;
   /** Top buffer line of the current viewport. */
   viewportY(): number;
+  /**
+   * Reports whether the viewport is at the very top of the scrollback, on every
+   * scroll. Optional: a presentation without it simply never offers the
+   * earlier-output bar, which is the right default for one that cannot say.
+   */
+  onScroll?(listener: (atTop: boolean) => void): () => void;
 }
 
 export interface TerminalPaneDependencies {
@@ -65,6 +71,10 @@ type TerminalPaneProps =
       onCwd?: (path: string, live: boolean) => void;
       onOutput?: (path: string) => void;
       recordedDims?: TerminalDimensions | null;
+      suspended?: undefined;
+      attachGeneration?: undefined;
+      historyBefore?: undefined;
+      onLoadEarlier?: undefined;
     }
   | {
       client: PaneHostClient;
@@ -79,6 +89,27 @@ type TerminalPaneProps =
        * afterwards — the malformed-scrollback defense (spec §13).
        */
       recordedDims?: TerminalDimensions | null;
+      /**
+       * The host connection is down and this session is presumed still running.
+       * The pane shows a reconnecting chip and keeps its scrollback — it must
+       * never turn into a dead pane over a lost socket.
+       */
+      suspended?: boolean;
+      /**
+       * `HubSessionSnapshot.attachGeneration`. A binding cannot be revived once
+       * it has been disconnected, so a change here rebuilds the whole terminal
+       * against the new socket — that is what brings the pane back after a
+       * reconnect.
+       */
+      attachGeneration?: number;
+      /**
+       * The oldest offset this pane still holds. Anything greater than zero
+       * means the ring has evicted output that is only on disk now, so there is
+       * something to offer. Zero or absent: nothing was ever lost.
+       */
+      historyBefore?: bigint | null;
+      /** Open the spilled scrollback below `historyBefore`. */
+      onLoadEarlier?: (beforeOffset: bigint) => void;
     };
 
 type PaneState =
@@ -104,6 +135,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [linkNotice, setLinkNotice] = useState<string | null>(null);
+  const [atTopOfScrollback, setAtTopOfScrollback] = useState(false);
   const dependencies = props.dependencies ?? defaultDependencies;
   // Ref-isolated so a new callback identity never re-runs the bootstrap
   // effect (which would tear down and remount the whole terminal).
@@ -130,9 +162,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     let presentation: TerminalPresentation;
     let linkActivationId = 0;
     const inputMarks = new InputMarks();
+    let stopScrollListener: () => void = () => undefined;
     setPaneState({ type: "loading" });
     setLostScrollback(false);
     setLinkNotice(null);
+    setAtTopOfScrollback(false);
 
     const onLink = (link: string) => {
       const activationId = ++linkActivationId;
@@ -158,6 +192,11 @@ export function TerminalPane(props: TerminalPaneProps) {
       return;
     }
     presentationRef.current = presentation;
+    stopScrollListener = presentation.onScroll?.((atTop) => {
+      if (!cancelled) {
+        setAtTopOfScrollback(atTop);
+      }
+    }) ?? (() => undefined);
 
     const reportStatus = (status: TerminalSessionStatus) => {
       if (cancelled) {
@@ -306,6 +345,7 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     return () => {
       cancelled = true;
+      attemptCleanup("scroll_listener", stopScrollListener);
       attemptCleanup("jump_listener", stopJumpListener);
       attemptCleanup("input_marks", () => inputMarks.dispose());
       attemptCleanup("resize_observer", stopObserving);
@@ -317,7 +357,12 @@ export function TerminalPane(props: TerminalPaneProps) {
         presentationRef.current = null;
       }
     };
-  }, [dependencies, props.client, props.sessionId]);
+    // `attachGeneration` belongs here on purpose: a reconnect gives the hub a
+    // NEW host attachment, and the old binding is unrecoverable (its
+    // `onDisconnect` already ended input). Rebuilding the terminal is what
+    // makes the pane usable again — the alternative is a live session the user
+    // can only stare at until they restart the app.
+  }, [dependencies, props.client, props.sessionId, props.attachGeneration]);
 
   const runSearch = (direction: "next" | "previous") => {
     if (searchQuery.length === 0) {
@@ -350,6 +395,20 @@ export function TerminalPane(props: TerminalPaneProps) {
       }}
     >
       <div className="terminal-pane__surface" ref={containerRef} />
+
+      {/* Only at the top of the scrollback, and only when the ring has actually
+          evicted something: an always-visible bar in every pane would be noise
+          for the many sessions that never outgrow their ring. */}
+      {atTopOfScrollback && (props.historyBefore ?? 0n) > 0n && props.onLoadEarlier ? (
+        <button
+          type="button"
+          className="terminal-pane__load-earlier"
+          data-testid="load-earlier-output"
+          onClick={() => props.onLoadEarlier?.(props.historyBefore ?? 0n)}
+        >
+          Load earlier output
+        </button>
+      ) : null}
 
       {searchOpen ? (
         <div className="terminal-search" role="search">
@@ -391,7 +450,20 @@ export function TerminalPane(props: TerminalPaneProps) {
           Earlier output is no longer available.
         </div>
       ) : null}
-      {paneState.type !== "ready" && paneState.type !== "loading" ? (
+      {props.suspended ? (
+        <div
+          className="terminal-pane__chip terminal-pane__chip--reconnecting"
+          data-testid="pane-reconnecting-chip"
+          role="status"
+        >
+          Reconnecting…
+        </div>
+      ) : null}
+      {/* While the chip is up the outage is already stated; the status line
+          would only say the same thing twice, in gloomier words. */}
+      {paneState.type !== "ready"
+      && paneState.type !== "loading"
+      && !(props.suspended && paneState.type === "disconnected") ? (
         <div className={`terminal-pane__status terminal-pane__status--${paneState.type}`} role="status">
           {statusText(paneState)}
         </div>
@@ -521,6 +593,15 @@ function createPresentation(
     },
     scrollToLine: (line) => terminal.scrollToLine(line),
     viewportY: () => terminal.buffer.active.viewportY,
+    onScroll: (listener) => {
+      const subscription = terminal.onScroll(() => {
+        // baseY 0 means nothing has scrolled off yet — being "at the top" of a
+        // scrollback that does not exist is not an invitation to load more.
+        const buffer = terminal.buffer.active;
+        listener(buffer.baseY > 0 && buffer.viewportY === 0);
+      });
+      return () => subscription.dispose();
+    },
   };
 }
 

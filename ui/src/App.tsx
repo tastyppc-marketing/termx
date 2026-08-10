@@ -5,6 +5,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   registerAction,
   type ActionContext,
@@ -14,6 +15,8 @@ import { FeaturesDock } from "./actions/FeaturesDock";
 import { Tray } from "./actions/Tray";
 import { CloseGuard } from "./close/CloseGuard";
 import { decideOnClose, type CloseDecision } from "./close/closeBehavior";
+import { ConnectionBanner } from "./connection/ConnectionBanner";
+import { listenForPowerEvents } from "./connection/powerEvents";
 import { AlreadyOpenDialog } from "./conversations/AlreadyOpenDialog";
 import { ConversationsFullscreen } from "./conversations/ConversationsFullscreen";
 import { ConversationsRail } from "./conversations/ConversationsRail";
@@ -56,6 +59,7 @@ import {
 } from "./workspace/bootstrapWorkspace";
 import type { FolderSearchTarget } from "./workspace/WorkspaceController";
 import { firstSessionId } from "./workspace/layoutOperations";
+import type { ConnectionState } from "./host/reconnect";
 import {
   DEFAULT_SIDEBAR_WIDTH,
   UiStateStore,
@@ -167,9 +171,38 @@ export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
   );
 }
 
+type WorkspaceConnection = NonNullable<BootstrappedWorkspace["connection"]>;
+
+/** Legacy fixtures carry no reconnect machine; they are simply always up. */
+const ALWAYS_CONNECTED: ConnectionState = { phase: "connected" };
+
+function useConnectionState(connection: WorkspaceConnection | null): ConnectionState {
+  const subscribe = useMemo(
+    () => (onChange: () => void) =>
+      connection ? connection.onStateChange(onChange) : () => undefined,
+    [connection],
+  );
+  const getSnapshot = useMemo(
+    () => () => connection?.state ?? ALWAYS_CONNECTED,
+    [connection],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
 function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const controller = workspace.controller;
   const snapshot = useWorkspace(controller);
+  const connection = workspace.connection ?? null;
+  const connectionState = useConnectionState(connection);
+  // A socket that dies while the CPU is asleep is never noticed by a read
+  // loop; the shell's power broadcasts are what turn a wake into an immediate
+  // reconnect instead of a terminal that looks alive and answers nothing.
+  useEffect(() => {
+    if (!connection) {
+      return;
+    }
+    return listenForPowerEvents(connection, listen);
+  }, [connection]);
   // Legacy fixtures omit the settings store; fall back to in-memory defaults.
   const settingsStore = useMemo(
     () => workspace.settings ?? new SettingsStore(),
@@ -475,6 +508,25 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const configureTray = (tray: TrayId, ids: readonly string[] | null) =>
     uiStateStore.update((current) => applyTrayConfigure(current, tray, ids));
 
+  // Scrollback the ring has evicted lives only in the host's spill file, so it
+  // is read a page at a time through the viewer rather than poured back into
+  // the terminal. Absent on legacy fixtures whose client cannot read history —
+  // the pane then never offers the bar at all.
+  const readHistory = workspace.client.readHistory?.bind(workspace.client);
+  const openHistory = useMemo(
+    () =>
+      readHistory
+        ? (sessionId: number, beforeOffset: bigint) =>
+          viewerRef.current?.openHistory({
+            sessionId,
+            title: `Session ${sessionId}`,
+            beforeOffset,
+            read: (before, maxBytes) => readHistory(sessionId, before, maxBytes),
+          })
+        : null,
+    [readHistory],
+  );
+
   const trayContext = useMemo<ActionContext>(
     () => ({
       newTab: () => void controller.createTab({ groupId: null, profile: null }),
@@ -512,192 +564,200 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   }, [conversationsStore, settings, controller, activeGroupId, noteScheduler]);
 
   return (
-    <div className="app-workspace">
-      <Sidebar
-        snapshot={snapshot}
-        actions={controller}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onOpenFolderSearch={(groupId) =>
-          setFolderSearch({ groupId, profile: null })}
-        maxGroupDepth={settings.maxGroupDepth}
-        {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
-        width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
-        onResize={(width) =>
-          uiStateStore.update((current) => setSidebarWidth(current, width))}
-        {...(sidebarConversations
-          ? { onExpandConversations: () => setConversationsFull(true) }
-          : {})}
-        sleeping={sleeping}
-        footerTray={
-          <Tray
-            trayId="sidebar-footer"
-            context={trayContext}
-            uiState={uiSnapshot}
-            onConfigure={configureTray}
-          />
-        }
+    <>
+      <ConnectionBanner
+        state={connectionState}
+        onRetry={() => connection?.retryNow()}
       />
-      <div
-        className="viewer-area"
-        style={{ flexDirection: viewerLayoutDirection(viewerGeometry) }}
-      >
-        <main className="app-main">
-          {allTabs.length === 0 ? (
-            <WorkspacePanel testId="workspace-empty" title="No terminal tabs">
-              Create a terminal from the sidebar to begin.
-            </WorkspacePanel>
-          ) : (
-            allTabs.map((tab) => (
-              <div
-                key={tab.id}
-                style={
-                  tab.id === activeTabId
-                    ? { display: "contents" }
-                    : { display: "none" }
-                }
-              >
-                <SplitLayout
-                  tabId={tab.id}
-                  root={tab.split}
-                  client={controller.attachments}
-                  paneStates={snapshot.paneStates}
-                  focusedSessionId={resolveFocusedSession(
-                    tab.split,
-                    focusByTab[tab.id],
-                  )}
-                  dismissingSessionIds={dismissing}
-                  restartingSessionIds={restarting}
-                  onSessionCwd={controller.reportSessionCwd}
-                  onSessionOutput={handleSessionOutput}
-                  onFocusPane={(sessionId) =>
-                    setFocusByTab((prev) =>
-                      prev[tab.id] === sessionId
-                        ? prev
-                        : { ...prev, [tab.id]: sessionId }
-                    )}
-                  actions={actionsFor(tab.id)}
-                  visible={tab.id === activeTabId}
-                  sleep={sleepController}
-                  sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
-                />
-              </div>
-            ))
-          )}
-        </main>
-        <ViewerHost
-          ref={viewerRef}
-          readFile={tauriReadTextFile}
-          geometry={viewerGeometry}
-          onGeometry={onViewerGeometry}
+      <div className="app-workspace">
+        <Sidebar
+          snapshot={snapshot}
+          actions={controller}
+          hostConnected={connectionState.phase === "connected"}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenFolderSearch={(groupId) =>
+            setFolderSearch({ groupId, profile: null })}
+          maxGroupDepth={settings.maxGroupDepth}
+          {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
+          width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
+          onResize={(width) =>
+            uiStateStore.update((current) => setSidebarWidth(current, width))}
+          {...(sidebarConversations
+            ? { onExpandConversations: () => setConversationsFull(true) }
+            : {})}
+          sleeping={sleeping}
+          footerTray={
+            <Tray
+              trayId="sidebar-footer"
+              context={trayContext}
+              uiState={uiSnapshot}
+              onConfigure={configureTray}
+            />
+          }
         />
-      </div>
-      {outputsOpen ? (
-        <div className="app-outputs-dock">
-          <OutputPane
-            sessionId={focusedSessionId}
-            sessionKey={null}
-            live={liveOutputs}
-            onOpenFile={(path) => viewerRef.current?.openFile(path)}
-            onClose={() => setOutputsOpen(false)}
+        <div
+          className="viewer-area"
+          style={{ flexDirection: viewerLayoutDirection(viewerGeometry) }}
+        >
+          <main className="app-main">
+            {allTabs.length === 0 ? (
+              <WorkspacePanel testId="workspace-empty" title="No terminal tabs">
+                Create a terminal from the sidebar to begin.
+              </WorkspacePanel>
+            ) : (
+              allTabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  style={
+                    tab.id === activeTabId
+                      ? { display: "contents" }
+                      : { display: "none" }
+                  }
+                >
+                  <SplitLayout
+                    tabId={tab.id}
+                    root={tab.split}
+                    client={controller.attachments}
+                    paneStates={snapshot.paneStates}
+                    focusedSessionId={resolveFocusedSession(
+                      tab.split,
+                      focusByTab[tab.id],
+                    )}
+                    dismissingSessionIds={dismissing}
+                    restartingSessionIds={restarting}
+                    onSessionCwd={controller.reportSessionCwd}
+                    onSessionOutput={handleSessionOutput}
+                    onFocusPane={(sessionId) =>
+                      setFocusByTab((prev) =>
+                        prev[tab.id] === sessionId
+                          ? prev
+                          : { ...prev, [tab.id]: sessionId }
+                      )}
+                    actions={actionsFor(tab.id)}
+                    visible={tab.id === activeTabId}
+                    sleep={sleepController}
+                    sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
+                    {...(openHistory ? { onLoadEarlier: openHistory } : {})}
+                  />
+                </div>
+              ))
+            )}
+          </main>
+          <ViewerHost
+            ref={viewerRef}
+            readFile={tauriReadTextFile}
+            geometry={viewerGeometry}
+            onGeometry={onViewerGeometry}
           />
         </div>
-      ) : null}
-      {settingsOpen ? (
-        <SettingsDialog
-          settings={settings}
-          onChange={settingsStore.update}
-          onClose={() => setSettingsOpen(false)}
-        />
-      ) : null}
-      <FeaturesDock
-        open={featuresOpen}
-        onClose={() => setFeaturesOpen(false)}
-        uiState={uiSnapshot}
-        onConfigure={configureTray}
-      />
-      {conversationsStore ? (
-        <SessionPalette
-          store={conversationsStore}
-          open={paletteOpen}
-          onClose={() => setPaletteOpen(false)}
-          onResume={(record) => {
-            setPaletteOpen(false);
-            handleResume(record);
-          }}
-        />
-      ) : null}
-      {conversationsFull && sidebarConversations ? (
-        <ConversationsFullscreen onClose={() => setConversationsFull(false)}>
-          <ConversationsRail
-            variant="expanded"
-            store={sidebarConversations.store}
-            settings={sidebarConversations.settings}
-            onResume={sidebarConversations.onResume}
-            onOpenTranscript={sidebarConversations.onOpenTranscript}
-            {...(sidebarConversations.listArtifacts
-              ? { listArtifacts: sidebarConversations.listArtifacts }
-              : {})}
-            {...(sidebarConversations.onOpenFile
-              ? { onOpenFile: sidebarConversations.onOpenFile }
-              : {})}
-            {...(sidebarConversations.onOpenFolder
-              ? { onOpenFolder: sidebarConversations.onOpenFolder }
-              : {})}
-            {...(sidebarConversations.onVisibleRecords
-              ? { onVisibleRecords: sidebarConversations.onVisibleRecords }
-              : {})}
-            {...(sidebarConversations.listOutputs
-              ? { listOutputs: sidebarConversations.listOutputs }
-              : {})}
-            {...(sidebarConversations.dismissOutput
-              ? { dismissOutput: sidebarConversations.dismissOutput }
-              : {})}
+        {outputsOpen ? (
+          <div className="app-outputs-dock">
+            <OutputPane
+              sessionId={focusedSessionId}
+              sessionKey={null}
+              live={liveOutputs}
+              onOpenFile={(path) => viewerRef.current?.openFile(path)}
+              onClose={() => setOutputsOpen(false)}
+            />
+          </div>
+        ) : null}
+        {settingsOpen ? (
+          <SettingsDialog
+            settings={settings}
+            onChange={settingsStore.update}
+            onClose={() => setSettingsOpen(false)}
           />
-        </ConversationsFullscreen>
-      ) : null}
-      <AlreadyOpenDialog
-        open={alreadyOpen !== null}
-        onSwitch={() => {
-          if (alreadyOpen) {
-            controller.activateTab(alreadyOpen.tabId);
-            setAlreadyOpen(null);
-            setConversationsFull(false);
-          }
-        }}
-        onOpenAnyway={() => {
-          if (alreadyOpen) {
-            const record = alreadyOpen.record;
-            setAlreadyOpen(null);
-            void controller.resumeSession(record, { force: true }).then((outcome) => {
-              if (outcome.kind === "opened") {
-                setConversationsFull(false);
-              }
-            });
-          }
-        }}
-        onCancel={() => setAlreadyOpen(null)}
-      />
-      <CloseGuard open={closeGuardOpen} onDecide={handleCloseDecision} />
-      {folderSearch ? (
-        <FolderSearch
-          recents={workspace.uiState?.getSnapshot().recentFolders ?? []}
-          listDirs={tauriListDirs}
-          onPick={(path) => {
-            setFolderSearch(null);
-            void controller.createTabWithCwd({
-              groupId: folderSearch.groupId,
-              profile: folderSearch.profile,
-              cwd: path,
-            });
-          }}
-          onBrowse={() => {
-            setFolderSearch(null);
-            void controller.createTabViaNativeDialog(folderSearch);
-          }}
-          onClose={() => setFolderSearch(null)}
+        ) : null}
+        <FeaturesDock
+          open={featuresOpen}
+          onClose={() => setFeaturesOpen(false)}
+          uiState={uiSnapshot}
+          onConfigure={configureTray}
         />
-      ) : null}
-    </div>
+        {conversationsStore ? (
+          <SessionPalette
+            store={conversationsStore}
+            open={paletteOpen}
+            onClose={() => setPaletteOpen(false)}
+            onResume={(record) => {
+              setPaletteOpen(false);
+              handleResume(record);
+            }}
+          />
+        ) : null}
+        {conversationsFull && sidebarConversations ? (
+          <ConversationsFullscreen onClose={() => setConversationsFull(false)}>
+            <ConversationsRail
+              variant="expanded"
+              store={sidebarConversations.store}
+              settings={sidebarConversations.settings}
+              onResume={sidebarConversations.onResume}
+              onOpenTranscript={sidebarConversations.onOpenTranscript}
+              {...(sidebarConversations.listArtifacts
+                ? { listArtifacts: sidebarConversations.listArtifacts }
+                : {})}
+              {...(sidebarConversations.onOpenFile
+                ? { onOpenFile: sidebarConversations.onOpenFile }
+                : {})}
+              {...(sidebarConversations.onOpenFolder
+                ? { onOpenFolder: sidebarConversations.onOpenFolder }
+                : {})}
+              {...(sidebarConversations.onVisibleRecords
+                ? { onVisibleRecords: sidebarConversations.onVisibleRecords }
+                : {})}
+              {...(sidebarConversations.listOutputs
+                ? { listOutputs: sidebarConversations.listOutputs }
+                : {})}
+              {...(sidebarConversations.dismissOutput
+                ? { dismissOutput: sidebarConversations.dismissOutput }
+                : {})}
+            />
+          </ConversationsFullscreen>
+        ) : null}
+        <AlreadyOpenDialog
+          open={alreadyOpen !== null}
+          onSwitch={() => {
+            if (alreadyOpen) {
+              controller.activateTab(alreadyOpen.tabId);
+              setAlreadyOpen(null);
+              setConversationsFull(false);
+            }
+          }}
+          onOpenAnyway={() => {
+            if (alreadyOpen) {
+              const record = alreadyOpen.record;
+              setAlreadyOpen(null);
+              void controller.resumeSession(record, { force: true }).then((outcome) => {
+                if (outcome.kind === "opened") {
+                  setConversationsFull(false);
+                }
+              });
+            }
+          }}
+          onCancel={() => setAlreadyOpen(null)}
+        />
+        <CloseGuard open={closeGuardOpen} onDecide={handleCloseDecision} />
+        {folderSearch ? (
+          <FolderSearch
+            recents={workspace.uiState?.getSnapshot().recentFolders ?? []}
+            listDirs={tauriListDirs}
+            onPick={(path) => {
+              setFolderSearch(null);
+              void controller.createTabWithCwd({
+                groupId: folderSearch.groupId,
+                profile: folderSearch.profile,
+                cwd: path,
+              });
+            }}
+            onBrowse={() => {
+              setFolderSearch(null);
+              void controller.createTabViaNativeDialog(folderSearch);
+            }}
+            onClose={() => setFolderSearch(null)}
+          />
+        ) : null}
+      </div>
+    </>
   );
 }
 

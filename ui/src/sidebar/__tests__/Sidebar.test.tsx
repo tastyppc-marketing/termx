@@ -1036,6 +1036,21 @@ describe("Sidebar context menus and creation", () => {
     expect(sidebarActions.createGroup).toHaveBeenCalledWith(null, "Infrastructure");
   });
 
+  it("refuses to offer a new terminal while the host connection is down", async () => {
+    await act(async () =>
+      root.render(<Sidebar snapshot={workspace()} actions={actions()} hostConnected={false} />),
+    );
+
+    const primary = container.querySelector<HTMLButtonElement>("[aria-label='New terminal']")!;
+    const options = container.querySelector<HTMLButtonElement>(
+      "[aria-label='New terminal options']",
+    )!;
+    expect(primary.disabled).toBe(true);
+    expect(primary.title).toBe("Waiting for host…");
+    expect(options.disabled).toBe(true);
+    expect(options.title).toBe("Waiting for host…");
+  });
+
   it("offers the exact default and profile-specific creation actions", async () => {
     const sidebarActions = await renderSidebar();
     const primary = container.querySelector<HTMLButtonElement>("[aria-label='New terminal']")!;

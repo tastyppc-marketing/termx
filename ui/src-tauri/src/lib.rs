@@ -5,6 +5,7 @@ mod folders;
 mod llm_sessions;
 mod outputs;
 mod paths;
+mod power;
 mod storage;
 mod transcript;
 
@@ -14,6 +15,13 @@ pub use bootstrap::{bootstrap_host, bootstrap_with, BootstrapOptions, BootstrapR
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Sleep kills the UI<->daemon socket silently; the renderer's reconnect
+        // machine needs to be TOLD, so it can drop the socket before the freeze
+        // and reconnect on wake instead of waiting on a corpse.
+        .setup(|app| {
+            power::start(app.handle().clone());
+            Ok(())
+        })
         // Every command added here also needs its name in build.rs (to generate
         // the allow-* ACL permission) and that permission in
         // capabilities/default.json, or the renderer's invoke is denied.

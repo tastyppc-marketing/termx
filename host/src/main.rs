@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::sync::Arc;
-use termx_host::{config, paths, registry::Registry, server};
+use termx_host::{config, history, paths, registry::Registry, server};
 
 /// Strict CLI parse: `--data-dir <path>` only. A typo'd flag or a missing
 /// value is an error, not a silent fall-through to the default data dir
@@ -140,6 +140,12 @@ fn main() -> Result<()> {
             return Ok(());
         }
         let cfg = config::load_or_create(&data_dir)?;
+        // ConPTY sessions cannot outlive the daemon that owns them, so every
+        // spill file on disk belongs to a session that no longer exists.
+        // Sweeping here (after already_running proved we are the only host for
+        // this data dir) keeps a machine that crashes often from accumulating
+        // orphaned history forever.
+        history::sweep_all(&data_dir);
         tracing::info!("termx-host starting; data dir {}", data_dir.display());
 
         let runtime = tokio::runtime::Runtime::new().context("tokio runtime")?;

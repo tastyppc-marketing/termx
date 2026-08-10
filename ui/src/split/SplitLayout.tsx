@@ -62,6 +62,11 @@ export interface SplitLayoutProps {
    * terminal before replay on every attach.
    */
   sessionDims?: Readonly<Record<number, TerminalDimensions>>;
+  /**
+   * Open the host's spilled scrollback for a session, from `beforeOffset`
+   * backward. Absent hides the earlier-output bar entirely.
+   */
+  onLoadEarlier?: (sessionId: number, beforeOffset: bigint) => void;
 }
 
 interface DividerDrag {
@@ -101,6 +106,7 @@ export function SplitLayout({
   visible = true,
   sleep,
   sessionDims,
+  onLoadEarlier,
 }: SplitLayoutProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [drag, setDrag] = useState<DividerDrag | null>(null);
@@ -333,6 +339,15 @@ export function SplitLayout({
                   <TerminalPane
                     client={client}
                     sessionId={sessionId}
+                    suspended={state.suspended ?? false}
+                    attachGeneration={state.attachGeneration ?? 0}
+                    historyBefore={state.historyBefore ?? 0n}
+                    {...(onLoadEarlier
+                      ? {
+                        onLoadEarlier: (beforeOffset: bigint) =>
+                          onLoadEarlier(sessionId, beforeOffset),
+                      }
+                      : {})}
                     recordedDims={sessionDims?.[sessionId] ?? null}
                     onCwd={(path, live) => onSessionCwd?.(sessionId, path, live)}
                     onOutput={(path) => onSessionOutput?.(sessionId, path)}

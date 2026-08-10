@@ -200,6 +200,39 @@
   word-break: break-word;
 }
 
+/* History mode: pages stack oldest-first, so the control that fetches more
+   sits above them — the direction the reader is travelling. */
+.viewer-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.viewer-history__older {
+  align-self: flex-start;
+  padding: 4px 12px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 0;
+  background: transparent;
+  color: #dfe2e8;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.viewer-history__older:hover:not(:disabled) {
+  background: rgb(255 255 255 / 8%);
+}
+
+.viewer-history__older:disabled {
+  color: var(--viewer-muted);
+  cursor: default;
+}
+
+.viewer-history__error {
+  color: #f4c2ba;
+  border-color: #713b42;
+}
+
 /* Minimized: a slim strip that reserves its own space, so the pill is always
    reachable and never floats over a control (spec §12 layout rule). */
 .viewer-tray-pill {

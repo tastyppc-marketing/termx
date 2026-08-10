@@ -6,6 +6,7 @@ import {
 import { conversationsFileIo, tauriSessionLister } from "../conversations/storage";
 import type { SessionLister } from "../conversations/types";
 import { HostClient, type HostClientConnectOptions } from "../host/client";
+import { HostBootstrapError, ReconnectingHostClient } from "../host/reconnect";
 import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
@@ -31,9 +32,10 @@ export type BootstrapWorkspaceClient = Pick<
   | "onSessionExited"
   | "setLayout"
 > &
-  // Optional so existing fixtures keep type-checking: a client without it
-  // degrades stop-all to a plain window close, never a crash (spec §15).
-  Partial<Pick<HostClient, "shutdown">>;
+  // Optional so existing fixtures keep type-checking: a client without
+  // `shutdown` degrades stop-all to a plain window close, never a crash (spec
+  // §15), and one without `readHistory` simply never offers earlier output.
+  Partial<Pick<HostClient, "shutdown" | "readHistory">>;
 
 export interface BootstrapWorkspaceOptions {
   invokeBootstrap?: () => Promise<unknown>;
@@ -45,9 +47,117 @@ export interface BootstrapWorkspaceOptions {
   listSessions?: SessionLister;
 }
 
+/**
+ * One long-lived client the workspace holds for its whole life, forwarding
+ * every call to whichever socket is currently up.
+ *
+ * `HostClient` is one-shot, so after a reconnect the object the controller
+ * captured at boot is a corpse. Rather than teaching every caller to re-fetch
+ * the client, this facade forwards through the reconnect machine: while
+ * disconnected each call rejects immediately with `HostDisconnectedError`
+ * (fail fast, never queue), and listeners registered once keep firing across
+ * however many sockets come and go.
+ */
+class ReconnectingWorkspaceClient implements BootstrapWorkspaceClient {
+  private readonly errorListeners = new Set<(error: Error) => void>();
+  private readonly closedListeners = new Set<(event: { sessionId: number }) => void>();
+  private readonly exitedListeners = new Set<
+    (event: { sessionId: number; exitCode: number | null }) => void
+  >();
+  private stopBridges: Array<() => void> = [];
+
+  constructor(
+    private readonly connection: ReconnectingHostClient<BootstrapWorkspaceClient>,
+  ) {
+    connection.onConnected((client) => this.bridge(client));
+    const current = connection.currentClient;
+    if (current) {
+      this.bridge(current);
+    }
+  }
+
+  attach: BootstrapWorkspaceClient["attach"] = (sessionId, callbacks, replay, sinceOffset) =>
+    this.connection.request((client) =>
+      client.attach(sessionId, callbacks, replay, sinceOffset),
+    );
+
+  createSession: BootstrapWorkspaceClient["createSession"] = (options) =>
+    this.connection.request((client) => client.createSession(options));
+
+  closeSession: BootstrapWorkspaceClient["closeSession"] = (sessionId) =>
+    this.connection.request((client) => client.closeSession(sessionId));
+
+  getState: BootstrapWorkspaceClient["getState"] = () =>
+    this.connection.request((client) => client.getState());
+
+  setLayout: BootstrapWorkspaceClient["setLayout"] = (layout) =>
+    this.connection.request((client) => client.setLayout(layout));
+
+  readHistory: HostClient["readHistory"] = (sessionId, beforeOffset, maxBytes) =>
+    this.connection.request((client) => {
+      if (!client.readHistory) {
+        throw new Error("This host connection cannot read scrollback history");
+      }
+      return client.readHistory(sessionId, beforeOffset, maxBytes);
+    });
+
+  onError(listener: (error: Error) => void): () => void {
+    this.errorListeners.add(listener);
+    return () => this.errorListeners.delete(listener);
+  }
+
+  onSessionClosed(listener: (event: { sessionId: number }) => void): () => void {
+    this.closedListeners.add(listener);
+    return () => this.closedListeners.delete(listener);
+  }
+
+  onSessionExited(
+    listener: (event: { sessionId: number; exitCode: number | null }) => void,
+  ): () => void {
+    this.exitedListeners.add(listener);
+    return () => this.exitedListeners.delete(listener);
+  }
+
+  /** Quitting: stop reconnecting, then drop the socket. */
+  close(): void {
+    this.connection.dispose();
+  }
+
+  shutdown(): void {
+    this.connection.currentClient?.shutdown?.();
+  }
+
+  private bridge(client: BootstrapWorkspaceClient): void {
+    for (const stop of this.stopBridges.splice(0)) {
+      try {
+        stop();
+      } catch {
+        // The old client is already gone; its listeners went with it.
+      }
+    }
+    this.stopBridges = [
+      client.onError((error) => fanOut(this.errorListeners, error)),
+      client.onSessionClosed((event) => fanOut(this.closedListeners, event)),
+      client.onSessionExited((event) => fanOut(this.exitedListeners, event)),
+    ];
+  }
+}
+
+function fanOut<T>(listeners: Set<(value: T) => void>, value: T): void {
+  for (const listener of [...listeners]) {
+    try {
+      listener(value);
+    } catch {
+      // One bad subscriber must not silence the others.
+    }
+  }
+}
+
 export interface BootstrappedWorkspace {
   client: BootstrapWorkspaceClient;
   controller: WorkspaceController;
+  /** The reconnect machine, for the connection banner and the power events. */
+  connection?: ReconnectingHostClient<BootstrapWorkspaceClient>;
   /** Absent only in legacy test fixtures; App falls back to an in-memory store. */
   settings?: SettingsStore;
   /** Scope paths + recent folders; absent only in legacy test fixtures. */
@@ -83,6 +193,7 @@ export async function bootstrapWorkspace(
   const connect = options.connect ?? ((connectOptions) => HostClient.connect(connectOptions));
   let client: BootstrapWorkspaceClient | null = null;
   let controller: WorkspaceController | null = null;
+  let connection: ReconnectingHostClient<BootstrapWorkspaceClient> | null = null;
 
   try {
     // Settings load never blocks or fails the workspace: read errors yield
@@ -106,7 +217,27 @@ export async function bootstrapWorkspace(
     });
 
     const bootstrap = parseBootstrapHostResult(await invokeBootstrap());
-    client = await connect(bootstrap);
+    const established = await connect(bootstrap);
+
+    // Every later attempt re-runs the WHOLE chain, not just the socket: a
+    // daemon that restarted has a new port and a new token, and one that died
+    // has to be spawned again. A failure in that part is what the user can act
+    // on, so it is typed distinctly for the banner.
+    connection = ReconnectingHostClient.start<BootstrapWorkspaceClient>({
+      initialClient: established,
+      connect: async () => {
+        let target: HostClientConnectOptions;
+        try {
+          target = parseBootstrapHostResult(await invokeBootstrap());
+        } catch (error) {
+          throw new HostBootstrapError(
+            error instanceof Error ? error.message : "Unable to start the TermX host",
+          );
+        }
+        return connect(target);
+      },
+    });
+    client = new ReconnectingWorkspaceClient(connection);
     const state = await client.getState();
     const restored = parseLayout(state.layout);
     const reconciled = reconcile(
@@ -149,7 +280,24 @@ export async function bootstrapWorkspace(
       await persistence.flush();
     }
 
-    return { client, controller, settings, uiState, conversations };
+    // Losing the socket suspends attachments; it never destroys them. The
+    // sessions are still running inside the daemon — only our connection to
+    // them is gone, so the panes stay live and show a reconnecting state.
+    const hubClient = client;
+    connection.onStateChange((connectionState) => {
+      if (connectionState.phase !== "connected") {
+        attachments.suspendAll();
+      }
+    });
+    connection.onConnected((_replacement, isReconnect) => {
+      if (isReconnect) {
+        // The facade is stable across sockets, so the hub re-attaches through
+        // it and never has to learn which socket it is on.
+        void attachments.resync(hubClient);
+      }
+    });
+
+    return { client, controller, connection, settings, uiState, conversations };
   } catch {
     try {
       controller?.dispose();
@@ -157,6 +305,9 @@ export async function bootstrapWorkspace(
       // Continue releasing the connected host client after partial setup.
     }
     try {
+      // Disposing the machine also closes whatever socket it holds; a partial
+      // boot must not leave a connection retrying behind an error screen.
+      connection?.dispose();
       client?.close();
     } catch {
       // Bootstrap failure remains a bounded renderer error.

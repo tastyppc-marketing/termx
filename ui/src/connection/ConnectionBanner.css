@@ -1,0 +1,51 @@
+/* Sits directly under the header, across the full width: an outage is not a
+   per-pane detail, it is the state of the whole app. Square corners and a hard
+   left rule, matching the rest of the shell. */
+.connection-banner {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  border-bottom: 1px solid #2a2f3a;
+  border-left: 3px solid #d99a2b;
+  background: #1a1710;
+  color: #f0d9a8;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+.connection-banner--failed {
+  border-left-color: #d9503f;
+  background: #1d1210;
+  color: #f4c2ba;
+}
+
+.connection-banner__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-banner__action {
+  flex: 0 0 auto;
+  padding: 3px 12px;
+  border: 1px solid #d9503f;
+  border-radius: 0;
+  background: transparent;
+  color: #f4c2ba;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.connection-banner__action:hover {
+  background: #d9503f;
+  color: #14100f;
+}
+
+.connection-banner__action:focus-visible {
+  outline: 2px solid #f4c2ba;
+  outline-offset: 1px;
+}

@@ -116,6 +116,48 @@
   color: #cbd5e1;
 }
 
+/* Anchored to the top edge, where the scrollback runs out — the bar is the
+   continuation of the buffer, so it belongs where the buffer ends. */
+.terminal-pane__load-earlier {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #394253;
+  border-radius: 0;
+  padding: 4px 8px;
+  color: #cbd5e1;
+  background: rgba(23, 27, 34, 0.94);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-align: center;
+  cursor: pointer;
+}
+
+.terminal-pane__load-earlier:hover {
+  color: #f6d889;
+  background: rgba(30, 35, 44, 0.98);
+}
+
+/* Top-right, out of the way of the status line and the search bar: this is a
+   standing condition, not an event, and the session underneath is still alive. */
+.terminal-pane__chip {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 10px;
+  border: 1px solid #665521;
+  border-radius: 0;
+  padding: 2px 8px;
+  color: #f6d889;
+  background: rgba(23, 27, 34, 0.94);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .terminal-search,
   .terminal-pane__loading,

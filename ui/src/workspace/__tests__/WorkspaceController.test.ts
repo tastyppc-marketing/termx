@@ -536,7 +536,13 @@ describe("WorkspaceController pane states", () => {
     });
 
     const { paneStates } = controller.getSnapshot();
-    expect(paneStates[1]).toEqual({ status: "live", exitCode: null });
+    expect(paneStates[1]).toEqual({
+      status: "live",
+      exitCode: null,
+      suspended: false,
+      attachGeneration: 0,
+      historyBefore: 0n,
+    });
     expect(paneStates[2]).toEqual({ status: "dead", exitCode: 5 });
     expect(paneStates[3]).toEqual({ status: "missing", exitCode: null });
   });
@@ -570,6 +576,9 @@ describe("WorkspaceController split actions", () => {
     expect(controller.getSnapshot().paneStates[50]).toEqual({
       status: "live",
       exitCode: null,
+      suspended: false,
+      attachGeneration: 0,
+      historyBefore: 0n,
     });
   });
 
@@ -777,6 +786,9 @@ describe("WorkspaceController dead-pane relaunch", () => {
     expect(controller.getSnapshot().paneStates[50]).toEqual({
       status: "live",
       exitCode: null,
+      suspended: false,
+      attachGeneration: 0,
+      historyBefore: 0n,
     });
   });
 

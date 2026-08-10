@@ -14,6 +14,15 @@ fn default_scrollback_bytes() -> usize {
 /// replay under it. Also stops a config typo (one extra zero) from defeating
 /// the memory-bound guarantee.
 pub const MAX_SCROLLBACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn default_history_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+/// Upper clamp on per-session disk history. Unlike the ring this costs disk,
+/// not memory, but a typo'd value must not fill the user's drive.
+pub const MAX_HISTORY_BYTES: u64 = 512 * 1024 * 1024;
+
 fn default_profile() -> String {
     "powershell".to_string()
 }
@@ -22,6 +31,11 @@ fn default_profile() -> String {
 pub struct Config {
     #[serde(default = "default_scrollback_bytes")]
     pub scrollback_bytes: usize,
+    /// Per-session scrollback spilled to `<data>/history/<id>.bin` once it is
+    /// evicted from the ring. 0 disables the spill entirely (no file, no
+    /// eviction bookkeeping).
+    #[serde(default = "default_history_bytes")]
+    pub history_bytes: u64,
     #[serde(default = "default_profile")]
     pub default_profile: String,
 }
@@ -30,6 +44,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             scrollback_bytes: default_scrollback_bytes(),
+            history_bytes: default_history_bytes(),
             default_profile: default_profile(),
         }
     }
@@ -56,6 +71,13 @@ pub fn load_or_create(data_dir: &Path) -> Result<Config> {
             );
             cfg.scrollback_bytes = MAX_SCROLLBACK_BYTES;
         }
+        if cfg.history_bytes > MAX_HISTORY_BYTES {
+            tracing::warn!(
+                "history_bytes {} exceeds max {MAX_HISTORY_BYTES}; clamping",
+                cfg.history_bytes
+            );
+            cfg.history_bytes = MAX_HISTORY_BYTES;
+        }
         Ok(cfg)
     } else {
         let cfg = Config::default();
@@ -74,6 +96,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = load_or_create(tmp.path()).unwrap();
         assert_eq!(cfg.scrollback_bytes, 4 * 1024 * 1024);
+        assert_eq!(cfg.history_bytes, 64 * 1024 * 1024);
         assert_eq!(cfg.default_profile, "powershell");
         assert!(tmp.path().join("config.json").is_file(), "writes the file");
     }
@@ -120,6 +143,28 @@ mod tests {
             cfg.scrollback_bytes, MAX_SCROLLBACK_BYTES,
             "typo'd giant value must not defeat the memory bound"
         );
+    }
+
+    /// 0 is a legitimate setting — "never spill scrollback to disk" — unlike
+    /// scrollback_bytes, where 0 would panic ring construction.
+    #[test]
+    fn zero_history_disables_the_spill_and_is_preserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("config.json"), r#"{ "history_bytes": 0 }"#).unwrap();
+        let cfg = load_or_create(tmp.path()).unwrap();
+        assert_eq!(cfg.history_bytes, 0);
+    }
+
+    #[test]
+    fn oversized_history_is_clamped() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{ "history_bytes": 999999999999 }"#,
+        )
+        .unwrap();
+        let cfg = load_or_create(tmp.path()).unwrap();
+        assert_eq!(cfg.history_bytes, MAX_HISTORY_BYTES);
     }
 
     #[test]

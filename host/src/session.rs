@@ -7,6 +7,7 @@
 //! closes the input channel, and fires `exit_watch` so every observer — any
 //! client's forwarder on any connection — learns the session ended.
 
+use crate::history::HistoryWriter;
 use crate::profiles::Profile;
 use crate::ring::RingBuffer;
 use anyhow::{bail, Context, Result};
@@ -296,6 +297,19 @@ impl Session {
         Self::spawn_with_broadcast_cap(profile, cwd, cols, rows, ring_cap, 256)
     }
 
+    /// `spawn` plus a disk-spill sink for ring-evicted bytes. `None` keeps the
+    /// old behavior exactly: evicted bytes are gone and nothing is written.
+    pub fn spawn_with_history(
+        profile: &Profile,
+        cwd: Option<&Path>,
+        cols: u16,
+        rows: u16,
+        ring_cap: usize,
+        history: Option<HistoryWriter>,
+    ) -> Result<Session> {
+        Self::spawn_inner(profile, cwd, cols, rows, ring_cap, 256, history)
+    }
+
     /// `broadcast_cap` is the live-listener chunk buffer (chunks, not bytes);
     /// laggards resync from the ring. Exposed so tests can force the Lagged
     /// path deterministically with a tiny capacity.
@@ -306,6 +320,19 @@ impl Session {
         rows: u16,
         ring_cap: usize,
         broadcast_cap: usize,
+    ) -> Result<Session> {
+        Self::spawn_inner(profile, cwd, cols, rows, ring_cap, broadcast_cap, None)
+    }
+
+    #[allow(clippy::too_many_arguments)] // spawn inputs are intentionally explicit
+    fn spawn_inner(
+        profile: &Profile,
+        cwd: Option<&Path>,
+        cols: u16,
+        rows: u16,
+        ring_cap: usize,
+        broadcast_cap: usize,
+        history: Option<HistoryWriter>,
     ) -> Result<Session> {
         let pty = native_pty_system();
         let pair = pty
@@ -380,14 +407,30 @@ impl Session {
             let _reader_done = ReaderDone(reader_done_tx);
             let mut buf = [0u8; 8192];
             let mut carry: Vec<u8> = Vec::new();
+            // RefCell, not a captured `mut`: `publish` is handed to
+            // `answer_dsr_then_publish` by value on every read, which requires
+            // it to stay Copy — so its spill state is borrowed, not owned.
+            let history = std::cell::RefCell::new(history);
             let publish = |bytes: Vec<u8>| {
                 if bytes.is_empty() {
                     return;
                 }
+                let mut writer = history.borrow_mut();
+                let mut evicted = Vec::new();
                 let mut ring = ring_r.lock().unwrap();
                 let offset = ring.end_offset();
-                ring.push(&bytes);
+                ring.push_evicting(&bytes, writer.as_ref().map(|_| &mut evicted));
                 drop(ring);
+                if let Some(spill) = writer.as_mut() {
+                    if let Err(error) = spill.append(&evicted) {
+                        // Losing old scrollback must never cost live output, and
+                        // a failing disk must not log on every read: retire the
+                        // writer after the first failure.
+                        tracing::warn!("scrollback history disabled after failure: {error:#}");
+                        *writer = None;
+                    }
+                }
+                drop(writer);
                 // Laggards get Lagged and resync via snapshot(); send() only
                 // errors when there are no receivers, which is fine.
                 let _ = tx_r.send(OutputChunk {
