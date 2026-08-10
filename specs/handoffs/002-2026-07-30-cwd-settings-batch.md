@@ -445,3 +445,123 @@ NEXT: (1) Rust wiring — lib.rs invoke_handler + build.rs + capabilities for ge
 **Open product items:** PU6 title-gap under disk-first (derived-title session with both notes on disk never gets a generated title); summaryContent is now display-only (bundle indivisible); conversations_v1.json old caches lack titles until next regeneration window.
 
 **NEXT SESSION:** Michael smoke (resize/fullscreen/dedupe/outputs/titles), PH1 deploy approval, delete .old exes, then Task #9 (WS reconnect resilience) is the next batch.
+
+## Delta 2026-08-02 — dead-pane Restart/New session buttons (SHIPPED)
+
+Michael's request: exited panes only offered "Dismiss"; he wanted "Restart session" and "New session" too.
+
+- Commit `87fbf99` on main (all gates green before commit: `npx tsc -b` clean, vitest **751** = 740 baseline + 11 new, e2e 5).
+- `ui/src/workspace/layoutOperations.ts`: new pure `replaceSessionInTab(layout, tabId, oldId, newId)` — swaps one pane's session id in place, `admitOrNull` invariant-validated.
+- `ui/src/workspace/WorkspaceController.ts`: `restartPane(tabId, deadSessionId, "restart"|"fresh")` — "restart" reuses dead session's profile+cwd via `createSessionDownChain([cwd, null])`, "fresh" uses default profile + null cwd; attaches, swaps into slot, splitPane-style rollback if layout moved, then `closeSessions([deadId])` frees the ring. Returns new session id for focus.
+- `ui/src/split/DeadPane.tsx`: three buttons (`.dead-pane__restart` primary, `.dead-pane__new-session`, `.dead-pane__dismiss`), all disabled while dismissing/restarting.
+- `ui/src/split/SplitLayout.tsx`: `SplitLayoutActions.restartPane` (required), new optional `restartingSessionIds` prop.
+- `ui/src/App.tsx`: `restarting` state set + actionsFor `restartPane` (focuses created session).
+- UI exe rebuilt via `npx tauri build --no-bundle` and restaged into `C:\Dev\TermX\dist-portable\TermX\` (host exes unchanged — UI-only feature).
+- Michael has STILL not restarted/smoked; one restart now picks up polish batch + this.
+
+## Roadmap note 2026-08-03 (from Michael, verbatim intent — NOT started)
+
+Two future majors, both requiring full brainstorm → spec → plan cycles ("can't be
+just an 'oh, let's do this and try to one-shot it'"):
+1. **SSH / remote-host sessions** — sessions resident on the VPS (survive local
+   shutdown, long-horizon tasks), TermX portable on USB/phone, local-feel terminal
+   with access to both the in-hand device and the VPS, file handling on the VPS.
+   Natural architecture seam: run termx-host on the VPS (UI already talks to the
+   host over WS). Task #9 (WS reconnect resilience) is a direct prerequisite.
+2. **Collaboration** — Ibrahim (Michael's assistant) joins the SAME session from
+   his machine (either direction, VPS or Michael's PC), each with their own Claude
+   Code; careful task delegation to avoid file collisions/duplicate work. NOT a
+   Claude-steering harness (ToS / API cost) — collaboration infrastructure only.
+
+Also for context: Michael is refining the **Showroom** dashboard
+(C:\Users\mjfos\code\showroom) himself — do not proactively work on it.
+
+## Delta 2026-08-06 — WS-disconnect failure confirmed in the wild + new roadmap signals
+
+- **Michael hit "can't open a terminal" on his live TermX.** Diagnosis (verified): his UI
+  is still the Aug 1 build (PID 42184, up 5 days); termx-host (PID 22712) is HEALTHY
+  (114 handles, port 61072 listening, sessions intact) but netstat shows ZERO established
+  connections — the UI's WS died across sleep/wake cycles and the old build has no
+  reconnect. Remedy given: restart the TermX window (daemon keeps sessions; also picks up
+  both staged builds). **Task #9 (WS reconnect resilience) is now non-negotiable next**
+  — Michael: "It needs to be able to be open for a really, really, really long time and
+  still have no issues." Auto-reconnect with backoff + resync, plus surviving daemon
+  restarts, plus UI surfacing reconnect state instead of dead panes.
+- **UI verdict from Michael (verbatim intent):** "I don't necessarily like the UI. I
+  actually kind of hate it. It just feels too soft." A UI-hardening pass is wanted —
+  reference aesthetic is the url-spinner/Showroom "sign shop" system (petrol ink, gold,
+  uppercase tracked labels, mono data). warp-ui study agent is extracting Warp's design
+  tokens for reference.
+- **Feature request: groups + subgroups** in the sidebar — e.g. group "Marketing" with a
+  subgroup per client. Today layout_v1 groups are a flat list with tabIds; nesting needs
+  a schema migration + sidebar tree UI. Needs spec/plan treatment.
+- **Warp went open source (May 2026):** client at github.com/warpdotdev/warp, AGPL v3
+  (UI framework crates MIT — verify per-crate). Shallow clone for study at
+  `C:\Dev\warp-study` (762MB, 78 crates). Four Opus study agents dispatched
+  (warp-sessions, warp-remote, warp-collab, warp-ui) mapped to TermX roadmap; findings
+  → study doc in C:\Dev\TermX\docs\. RULE: concepts only from AGPL code, never copy;
+  MIT crates + color palettes are fair game.
+
+## Delta 2026-08-07 — Warp study COMPLETE, committed
+
+All four study agents reported; synthesis + verbatim reports committed at
+`C:\Dev\TermX\docs\warp-study\` (README.md = synthesis; report-sessions-pty-persistence,
+report-remote-ssh, report-collaboration, report-ui-design-system). Key outcomes:
+- Task #9 now has a concrete action plan (docs/warp-study/README.md §Task 9): Windows
+  power-event socket teardown (WM_POWERBROADCAST), step-table backoff, proven-open
+  success, per-pane replay cursors, connection-scoped setup replay, reconnect UI states.
+- UI-hardening levers identified (hairlines@10% fg not shadows; radius 4/0; tint not
+  elevation; 12px/34px density; Phenomenon palette #121212/#FAF9F6/#E5A01A gold; theme
+  YAML schema adoptable for community-theme compat; WCAG contrast auto-correct).
+- VPS/SSH: Warp has NO persistent remote PTY (deleted tmux flow) — TermX builds that
+  itself; steal ControlMaster transport, setsid daemon singleton, host/session-scoped
+  request split, degraded-tier design.
+- Collab: build session-attach ONCE (humans + agents same path); daemon-hosted PTY makes
+  participants symmetric; daemon-side permission enforcement; agent collision avoidance
+  is OUR problem (worktrees/leases — Warp has nothing).
+- License wall: only warpui/warpui_core are MIT; everything else AGPL — concepts only.
+
+## Delta 2026-08-07 (compact checkpoint) — adoption-batch brainstorm IN PROGRESS
+
+Session renamed "termx". Michael's adoption blockers (his words): (1) groups+subgroups,
+(2) reliability. Plus: metal theme ("less soft, still soft on the eyes"), tab-color
+legibility (red fades into blue group), per-tab opacity.
+
+**Brainstorm state (superpowers:brainstorming active, at design-approval gate):**
+AskUserQuestion answers received:
+- Themes: build ALL THREE metal directions (Gunmetal+Brass #141619/#d9a441; Cold
+  Steel+Ice #12151a/#5fa8d3; Dark Iron+Copper #101113/#c4703f) PLUS 3 neutrals
+  (Graphite Dark, Slate Medium = "light-ish dark", Paper Light). → therefore a
+  token-based THEME ENGINE (3-color derivation per Warp study, color-mix ramps),
+  6 built-in themes, Settings picker, per-theme ANSI + tab-color hex sets, WCAG
+  auto-correct. Structural hardening theme-independent: hairlines not shadows,
+  radius 4/0, 12px base + 34px rows, tracked uppercase labels.
+- Tab colors: Michael CHOSE "stripe + optional fill" — 3px solid left stripe (never
+  blended) + per-tab fillStrength off/subtle(~8%)/strong(~18%) in context menu;
+  groups get colorable frame (1px) + ~8% wash (currently hardcoded slate).
+- Nesting: arbitrary nesting in schema + configurable max-depth SETTING (default 3)
+  = his "both options". layout_v1→v2 migration (groups contain groups|tabs).
+
+**Design presented to Michael as 4 sections (theme engine / tab colors / subgroups /
+reliability); AWAITING HIS APPROVAL before writing 3 specs:**
+A) Reliability Task #9 — requirements locked, plan in docs/warp-study/README.md §Task 9
+   (WM_POWERBROADCAST teardown, step backoff [1,2,5,10]s, proven-open success, per-pane
+   replay cursors, reconnect UI states, ConPTY hygiene incl. bundling OpenConsole).
+B) Theme engine + hardening + tab-color system (one spec — one visual system).
+C) Subgroups (nested tree schema migration + depth setting + drag-drop). Biggest UI item.
+Ship order: A parallel with C, then B (B and C both touch Sidebar).
+
+**Code facts gathered:** current palette is Tokyo Night pastels in
+`ui/src/state/layout.ts:19` (PALETTE_HEX) + `ui/src/sidebar/Sidebar.css:158-165`
+(data-color swatches); tab color today = small dot (`sidebar-tab__color`,
+Sidebar.tsx:537); groups hardcoded "slate" (WorkspaceController.ts:362, Sidebar.tsx:622).
+Tab schema: `{id,title,color:PaletteId,split}`; Group `{id,name,collapsed,tabIds}`.
+
+**Next steps after approval:** write 3 specs to docs/superpowers/specs/2026-08-07-*.md,
+self-review, Michael reviews, then writing-plans per spec; agents per lane (Opus),
+merge protocol per this handoff's earlier sections; gates: ui tsc + vitest (751
+baseline), e2e 5, cargo 157/130.
+
+**Also this window:** Warp study committed (`8ddc96d`, docs/warp-study/); dead-pane
+buttons shipped earlier (`87fbf99`); Michael's live TermX still needs a window restart
+to pick up staged builds + fix the dead-WS state (diagnosed 2026-08-06).
