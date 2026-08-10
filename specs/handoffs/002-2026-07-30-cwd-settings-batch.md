@@ -726,3 +726,31 @@ required (by me): wire settings fields into chat's `// SETTINGS-INTEGRATION`
 markers in ui/src/chat/chatDefaults.ts consumers.
 Gates: vitest 914, e2e 6, cargo host 154 (untouched), termx-ui 162
 (from ui/src-tauri). After merges: rebuild release + restage dist-portable.
+
+## 2026-08-10 (compact checkpoint) — WAITING on two build lanes
+
+State: nothing in progress in the main thread; BOTH lanes running as
+background Opus worktree agents named "lane-settings" and "lane-chat"
+(launched ~this hour; completion arrives as task-notifications which
+re-invoke the session). Working tree on main is clean at aedd1f0 + handoff
+commits; HEAD history: aedd1f0 plans, 409ff84 chat/settings specs, 9c1cc91
+adoption batch shipped (e5f0e5b themes, fefa27c reliability, 4a4f092 groups).
+
+ON WAKE / ON NOTIFICATION do the standard merge protocol per lane
+(documented fully in the 2026-08-09 deltas above): junction probe (cmd
+dir /AL /S), review diff (merge-base..HEAD, core files first), cherry-pick -n
+range onto main (sequencer may need --quit then pick remaining individually;
+single-quote PowerShell or use cmd), gates (ui tsc; vitest >=914; e2e >=6
+needs host binary; cargo termx-ui >=162 FROM ui/src-tauri; cargo host stays
+154), attributed commit, worktree remove + branch -D, verify ui/node_modules.
+THEN the cross-lane integration commit: wire agentPaneDefaultView/
+chatDefaultDensity from settings into ui/src/chat/chatDefaults.ts consumers
+(`// SETTINGS-INTEGRATION` markers). THEN release rebuild (ui: npx tauri
+build --no-bundle, ~9 min, verify custom_protocol no cfg(dev) in newest
+target/release/build/tauri-*/output; root: cargo build --release -p
+termx-host --bins) and restage all four exes into
+C:\Dev\TermX\dist-portable\TermX\ (running exes: rename aside first —
+.prev pattern). Tell Michael to restart TermX.
+
+Michael is live-testing the adoption batch; his bug reports take priority
+when they arrive.
