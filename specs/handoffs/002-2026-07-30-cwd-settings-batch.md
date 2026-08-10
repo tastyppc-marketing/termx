@@ -819,3 +819,27 @@ MICHAEL-GATED after restart: manual chat gate (real Claude Code session in
 chat view through a permission prompt, AskUserQuestion, plan approval —
 detector fixtures are transcriptions, live TUI contact unverified), eyeball
 SettingsSurface visually, delete .old/.prev in dist-portable.
+
+## 2026-08-10 delta 3 — chat-view batch STAGED; awaiting Michael's restart
+
+Release build done and staged 04:30. Details: two backgrounded tauri builds
+were killed by the harness (backgrounded npx tauri build does NOT survive —
+always run foreground; incremental artifacts accumulate across kills, third
+foreground run finished 9m19s). Verified newest
+target/release/build/tauri-<hash>/output: custom_protocol present, zero
+cargo:rustc-cfg=dev. Host release binaries were already current (host/
+untouched by this batch; md5 identical to staged) — only TermX.exe +
+termx-ui.exe restaged (Aug 10 04:30, 6,097,408 bytes). Michael's running
+adoption-batch exes renamed to *.prev2. dist-portable\TermX\ now carries
+.old/.prev/.prev2 generations — all deletable after restart.
+
+main tip: 549be39 (handoff) <- b87d94d (integration) <- 33dd87d (chat) <-
+0b05388 (handoff) <- a456393 (settings). Baselines: vitest 1007, e2e 6,
+cargo termx-ui 181, cargo host 154.
+
+NEXT: Michael restarts TermX from dist-portable. Then his manual gates:
+chat view on a real Claude Code session (permission prompt + AskUserQuestion
++ plan approval — the prompt detector's live-TUI contact is unverified;
+fixtures were transcriptions), SettingsSurface visual pass, adoption-batch
+bug reports still pending. Recorded follow-ups: Codex-native adapter,
+Warp-style blocks for plain shell, host log rotation, colored history.
