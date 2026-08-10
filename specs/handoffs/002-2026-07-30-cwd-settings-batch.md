@@ -710,3 +710,19 @@ Next: Michael spec-review (expect "go") -> writing-plans per spec ->
 lanes: settings-window first or parallel (small), chat-view big. Gates:
 vitest 914, e2e 6, cargo host 154, termx-ui 162 (from ui/src-tauri).
 Michael is live-testing the adoption batch; bugs may arrive mid-build.
+
+## 2026-08-10 — chat-view batch GO; two lanes launched
+
+Michael: "go". Plans committed (aedd1f0):
+docs/superpowers/plans/2026-08-10-{settings-window,chat-view}.md.
+Two Opus worktree agents running: "lane-settings" (small: SettingsSurface,
+new fields agentPaneDefaultView/chatDefaultDensity, dialog deleted) and
+"lane-chat" (big: chat_feed.rs adapter+commands, ChatView, PromptDetector,
+prompt cards, ChatInput, pane integration).
+Merge notes: lanes are disjoint by construction (chat lane forbidden from
+ui/src/settings; settings lane forbidden from ui/src/chat + panes). BOTH may
+touch App.tsx -> expect one small conflict. POST-MERGE INTEGRATION COMMIT
+required (by me): wire settings fields into chat's `// SETTINGS-INTEGRATION`
+markers in ui/src/chat/chatDefaults.ts consumers.
+Gates: vitest 914, e2e 6, cargo host 154 (untouched), termx-ui 162
+(from ui/src-tauri). After merges: rebuild release + restage dist-portable.
