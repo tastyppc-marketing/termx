@@ -565,3 +565,121 @@ baseline), e2e 5, cargo 157/130.
 **Also this window:** Warp study committed (`8ddc96d`, docs/warp-study/); dead-pane
 buttons shipped earlier (`87fbf99`); Michael's live TermX still needs a window restart
 to pick up staged builds + fix the dead-WS state (diagnosed 2026-08-06).
+
+---
+
+## 2026-08-09 — design APPROVED, specs written & committed (787a340)
+
+Michael approved all four design sections verbatim ("sounds good" on theme
+engine, subgroups, tab colors, reliability) with ONE addition: **scrollback
+lazy-load** — don't hard-cap history; spill ring-evicted bytes to disk on the
+daemon and lazy-load older output on demand. Folded into the reliability spec
+(§4: history spill file, read_history protocol request, Viewer-based lazy
+paging because xterm can't prepend).
+
+**Specs (committed, awaiting Michael's spec review):**
+- `docs/superpowers/specs/2026-08-09-reliability-reconnect-design.md` —
+  ReconnectingHostClient state machine, step backoff [1,2,5,10]s, auth_err
+  slow table + runtime.json re-read, WM_POWERBROADCAST via new
+  ui/src-tauri/src/power.rs, attach gains optional since_offset, AttachmentHub
+  suspend/resync, lazy history, ConnectionBanner, host hygiene audit.
+- `docs/superpowers/specs/2026-08-09-nested-groups-design.md` — **layout_v2
+  owner**: flat maps + Item refs, GroupV2 {color, items}, TabV2 {fill},
+  rootItems; v1→v2 one-way migration; maxGroupDepth setting (default 3, hard
+  parse cap 8); host untouched (layout is opaque blob).
+- `docs/superpowers/specs/2026-08-09-theme-engine-tab-colors-design.md` —
+  ui/src/theme/ tokens derived in TS from bg/fg/accent, WCAG binary-search
+  auto-correct, hardening pass (hairlines/radius 0 tabs/12px/34px/tracked
+  overlines), six themes (default gunmetal-brass #141619/#d6d9de/#d9a441),
+  3px stripe + fill off/subtle~8%/strong~18%, group frame + wash, per-theme
+  tabPalette overrides, settings theme field. DEPENDS on layout_v2 → ships
+  after nested-groups.
+
+**Ship order:** reliability ∥ nested-groups first, theme engine second.
+Next: Michael reviews specs → writing-plans per spec → Opus agent lanes per
+merge protocol; gates ui tsc + vitest ≥751, e2e 5, cargo 157/130.
+
+**New roadmap item (post-batch, Michael's ask):** block-based / chat-style
+terminal rendering — command+output grouped into discrete visual blocks like
+Claude Code/Codex UIs (what he saw elsewhere ≈ Warp blocks). Prior art fully
+mapped in docs/warp-study/ (OSC command markers via shell integration —
+TermX already injects OSC 9;9; blocks = extend hooks to command start/end;
+report-ui-design-system.md has the block chrome spec). Needs its own
+brainstorm/spec cycle after this batch.
+
+**Still Michael-gated:** restart TermX window (fixes dead WS now, loads
+staged dist-portable builds; then delete the .old exes).
+
+## 2026-08-09 later — GO given, build lanes launched
+
+Michael: "I can't read this, please just go" = spec approval + proceed.
+- Plans written+committed (e28c46e): docs/superpowers/plans/2026-08-09-reliability-reconnect.md and 2026-08-09-nested-groups.md.
+- Two background Opus agents running in isolated worktrees: "lane-groups" (nested groups, UI-only) and "lane-reliability" (reconnect+power+history, host+tauri+UI). Reports due as task notifications.
+- On lane completion: junction probe → review diffs → cherry-pick -n to main → run gates (ui tsc, vitest ≥751, e2e ≥5, cargo 157/130) → attributed commit → sever junctions → worktree remove → verify main node_modules intact.
+- After lane-groups merges: write theme-engine plan (spec 2026-08-09-theme-engine-tab-colors-design.md) and launch that lane.
+- After all three merge: rebuild release (npx tauri build --no-bundle; cargo build --release -p termx-host --bins), restage dist-portable, tell Michael to restart.
+
+## 2026-08-09 later — lane 1 MERGED, lane 3 launched
+
+- nested-groups lane DONE and merged to main as 4a4f092 (6 agent commits
+  squash-applied via cherry-pick -n; junction probe clean; gates on main:
+  tsc clean, vitest 800/800, e2e 5/5). NEW VITEST BASELINE: 800.
+  Agent follow-ups noted: moveTab/reorderGroup/closeGroup now dead code
+  (cleanup later); group colors/tab fill stored but unrendered (theme lane
+  renders); agent also fixed a real float bug in store.resizePane.
+- theme-engine plan committed (dbd82e1); "lane-themes" Opus agent launched
+  in worktree branched from post-merge main (baseline 800).
+- "lane-reliability" agent still running (branched from pre-merge main —
+  expect small conflicts in App.tsx/bootstrapWorkspace at its merge).
+
+## 2026-08-09 later — reliability MERGED (fefa27c)
+
+- reliability lane's 11 commits cherry-picked onto main; one conflict
+  (App.tsx: ConnectionBanner fragment vs maxGroupDepth prop) resolved by
+  keeping both. NEW BASELINES: vitest 870, e2e 6, cargo host 154 (133+6+12+3),
+  cargo termx-ui 162 (must run from ui/src-tauri — own workspace).
+- Notable agent deviations (all sound, documented in its report): power events
+  use RegisterSuspendResumeNotification (message-only windows never get
+  broadcasts); `failed` state still retries on slow table; panes rebind via
+  attachGeneration; history renders monochrome (Viewer has no VT path);
+  e2e severs socket under real termx-host.exe instead of fake WS server.
+- Known gaps to carry: history view monochrome; HistorySession title is
+  "Session <id>"; no interactive suspend/resume smoke test yet; host log
+  rotation pruned only at boot.
+- Worktree + branch removed, main node_modules verified intact.
+- REMAINING: lane-themes still running (branched post-groups/pre-reliability;
+  expect conflicts in TerminalPane.tsx/Sidebar.tsx/App.tsx at merge — its
+  vitest baseline was 800, main is now 870). After merge: rebuild release,
+  restage dist-portable, Michael restarts.
+
+## 2026-08-09 later — ALL THREE LANES MERGED; release build in progress
+
+- theme-engine lane merged as e5f0e5b (conflict in App.tsx resolved: fragment
+  keeps ConnectionBanner + ThemeProvider + maxGroupDepth). FINAL BASELINES:
+  vitest 914, e2e 6, cargo host 154, cargo termx-ui 162 (from ui/src-tauri).
+- Batch commits on main: 4a4f092 (nested groups), fefa27c (reliability),
+  e5f0e5b (themes). All worktrees/branches removed, node_modules verified.
+- Theme lane bonuses: fixed SettingsStore equality bug (maxGroupDepth-only
+  saves swallowed) and border-shorthand bug that would hide active-tab stripe.
+- Open items for Michael after restart: manual visual gate (flip 6 themes,
+  blue group + red tabs); known gaps: loading screen shows graphite-dark
+  fallback until bootstrap; paper-light text-sub≈text-hint; history viewer
+  monochrome; no interactive suspend/resume smoke yet.
+- Release: cargo host release built; tauri UI release building in background;
+  next = restage both exes into C:\Dev\TermX\dist-portable\TermX\ (per
+  docs/RELEASE.md: verify no cargo:rustc-cfg=dev in newest tauri build output),
+  then Michael restarts TermX.
+
+## 2026-08-09 final — BATCH SHIPPED, staged, awaiting Michael's restart
+
+- Release verified (tauri output shows custom_protocol, no cfg(dev)) and
+  staged: all four exes (TermX.exe, termx-ui.exe, termx-host.exe,
+  termx-output.exe) in C:\Dev\TermX\dist-portable\TermX\ are Aug 9 22:36
+  builds containing the full adoption batch. TermX.exe was file-locked
+  (running instance) -> renamed to TermX.exe.prev; .old (Aug 1) and .prev
+  (Aug 2) files are deletable after Michael restarts.
+- Michael's next actions: RESTART TermX (daemon keeps sessions; picks up
+  everything), flip through the 6 themes in Settings (visual gate), then
+  delete *.old / *.prev in dist-portable\TermX.
+- Next major (recorded in memory termx-blocks-ui-vision): block-based
+  chat-style terminal rendering — own brainstorm/spec cycle.
