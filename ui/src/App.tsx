@@ -38,6 +38,7 @@ import { OutputsStore } from "./outputs/outputsStore";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
+import { ThemeProvider } from "./theme/ThemeProvider";
 import { Sidebar, type SidebarConversations } from "./sidebar/Sidebar";
 import { SplitLayout, type SplitLayoutActions } from "./split/SplitLayout";
 import {
@@ -569,6 +570,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         state={connectionState}
         onRetry={() => connection?.retryNow()}
       />
+      <ThemeProvider themeId={settings.theme} />
       <div className="app-workspace">
         <Sidebar
           snapshot={snapshot}

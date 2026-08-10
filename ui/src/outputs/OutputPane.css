@@ -6,11 +6,11 @@
    positioning — the mounting slot owns placement. */
 
 .output-pane {
-  --output-bg: #161a22;
-  --output-raised: #232a36;
-  --output-text: #e6e6e6;
-  --output-muted: #8b93a7;
-  --output-accent: #7aa2f7;
+  --output-bg: var(--surface-1);
+  --output-raised: var(--surface-2);
+  --output-text: var(--text-main);
+  --output-muted: var(--text-sub);
+  --output-accent: var(--accent);
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -20,7 +20,7 @@
   overflow: hidden;
   color: var(--output-text);
   background: var(--output-bg);
-  border-left: 1px solid rgb(255 255 255 / 8%);
+  border-left: 1px solid var(--border);
   font: 12px/1.5 Inter, "Segoe UI", sans-serif;
 }
 
@@ -31,13 +31,13 @@
   align-items: center;
   gap: 8px;
   padding: 0 8px 0 14px;
-  border-bottom: 1px solid rgb(255 255 255 / 6%);
+  border-bottom: 1px solid var(--border);
   user-select: none;
 }
 
 .output-pane__title {
   flex: 0 0 auto;
-  color: #f2f3f5;
+  color: var(--text-main);
   font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.02em;
@@ -65,16 +65,16 @@
   color: var(--output-muted);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
 }
 
 .output-pane__action:hover {
-  color: #fff;
+  color: var(--text-main);
   background: var(--output-raised);
-  border-color: rgb(255 255 255 / 8%);
+  border-color: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 
 .output-pane__action:focus-visible {
@@ -83,9 +83,9 @@
 }
 
 .output-pane__action--close:hover {
-  color: #ffd7d7;
-  background: rgb(224 108 117 / 22%);
-  border-color: rgb(224 108 117 / 32%);
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 22%, transparent);
+  border-color: color-mix(in srgb, var(--error) 32%, transparent);
 }
 
 .output-pane__body {
@@ -94,7 +94,7 @@
   flex: 1 1 auto;
   overflow: auto;
   padding: 8px;
-  scrollbar-color: #3a4353 transparent;
+  scrollbar-color: var(--divider) transparent;
   scrollbar-width: thin;
 }
 
@@ -102,17 +102,17 @@
   margin: 0;
   padding: 10px 12px;
   color: var(--output-muted);
-  background: rgb(255 255 255 / 3%);
-  border: 1px solid rgb(255 255 255 / 7%);
-  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   font-size: 12px;
 }
 
 .output-pane__hint code {
   padding: 1px 5px;
-  color: #d7e0f5;
-  background: rgb(255 255 255 / 6%);
-  border-radius: 4px;
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-radius: var(--radius);
   font: 0.92em/1.4 "Cascadia Mono", Consolas, monospace;
 }
 
@@ -127,12 +127,12 @@
   align-items: center;
   gap: 8px;
   padding: 4px 6px;
-  border-radius: 6px;
-  color: #cbd5e1;
+  border-radius: var(--radius);
+  color: var(--text-main);
 }
 
 .output-pane__row:hover {
-  background: rgb(255 255 255 / 5%);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
 }
 
 .output-pane__row--missing {
@@ -184,15 +184,15 @@
   color: var(--output-muted);
   background: transparent;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius);
   cursor: pointer;
   font-size: 11px;
   line-height: 1;
 }
 
 .output-pane__dismiss:hover {
-  color: #ffd7d7;
-  background: rgb(224 108 117 / 22%);
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 22%, transparent);
 }
 
 .output-pane__dismiss:focus-visible {

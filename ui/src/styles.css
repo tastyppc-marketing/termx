@@ -1,15 +1,63 @@
+/**
+ * Global tokens.
+ *
+ * ThemeProvider overwrites every --token below on <html> at mount, live, from
+ * deriveTokens(). The literals here are the derived graphite-dark set, so the
+ * first frame — before any React has run — is already coherent rather than
+ * unstyled. Nothing but this block may declare a raw palette colour.
+ */
 :root {
+  --bg: #0f1115;
+  --fg: #e2e4e9;
+  --accent: #7aa2f7;
+  --surface-1: #1a1c20;
+  --surface-2: #24262a;
+  --surface-3: #2f3135;
+  --border: #24262a;
+  --divider: #2f3135;
+  --text-main: #cdcfd4;
+  --text-sub: #8e9094;
+  --text-hint: #7a7c80;
+  --text-disabled: #393b3f;
+  --accent-10: #1a202c;
+  --accent-25: #2a354e;
+  --accent-40: #3a4b6f;
+  --accent-60: #4f689d;
+  --error: #f7768e;
+  --warn: #e0af68;
+  --ok: #9ece6a;
+
+  /* Derived-from-token conveniences (never raw palette). */
+  --danger-bg: color-mix(in srgb, var(--error) 26%, var(--bg));
+  --danger-bg-hover: color-mix(in srgb, var(--error) 36%, var(--bg));
+  --danger-border: color-mix(in srgb, var(--error) 48%, var(--bg));
+
+  /* Structural scale — the hardening pass in one place. */
+  --radius: 4px;
+  --radius-overlay: 8px;
+  --row-chrome: 34px;
+  --row-list: 28px;
+  --icon-button: 24px;
+  /* The ONLY shadow in the app. Floating overlays (menus, dialogs,
+     palettes) may use it; nothing else separates with elevation. */
+  --shadow-overlay: 0 10px 30px rgb(0 0 0 / 38%);
+
   color-scheme: dark;
   font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  font-size: 12px;
   line-height: 1.4;
   font-weight: 400;
-  color: #e6e6e6;
-  background: #0f1115;
+  color: var(--text-main);
+  background: var(--bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* Section headers use the overline treatment directly in their own rules:
+   10 px, uppercase, letter-spacing 0.08em — the tracking is what sells the
+   sign-shop look. */
 
 * {
   box-sizing: border-box;
@@ -22,7 +70,7 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: #0f1115;
+  background: var(--bg);
 }
 
 button,
@@ -37,32 +85,34 @@ input {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  background: #0f1115;
+  background: var(--bg);
 }
 
 .app-header {
   display: flex;
-  min-height: 42px;
-  flex: 0 0 42px;
-  align-items: baseline;
+  min-height: var(--row-chrome);
+  flex: 0 0 var(--row-chrome);
+  align-items: center;
   gap: 12px;
-  padding: 10px 14px;
-  background: #0f1115;
-  border-bottom: 1px solid rgb(255 255 255 / 6%);
+  padding: 0 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
   user-select: none;
 }
 
 .app-brand {
-  color: #f8fafc;
-  font-size: 14px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
+  color: var(--text-main);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .app-subtitle {
-  color: #8b93a7;
-  font-size: 12px;
+  color: var(--text-sub);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .app-workspace {
@@ -79,8 +129,8 @@ input {
   min-width: 0;
   min-height: 0;
   display: flex;
-  border-left: 1px solid #1f2430;
-  background: #0f1115;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
 }
 
 .app-main {
@@ -90,18 +140,18 @@ input {
   flex: 1 1 auto;
   padding: 10px;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 75% 20%, rgb(35 42 54 / 26%), transparent 38%),
-    #0f1115;
+  /* Glow gradient removed: separation is by hairline, not by atmosphere. */
+  background: var(--bg);
 }
 
 .terminal-host {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #0f1115;
-  border: 1px solid #1f2430;
-  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  /* Terminal panes are square — the single biggest "less soft" lever. */
+  border-radius: 0;
 }
 
 .terminal-host .xterm {
@@ -121,10 +171,8 @@ input {
   height: 100%;
   place-items: center;
   padding: 32px;
-  color: #8b93a7;
-  background:
-    radial-gradient(circle at center, rgb(35 42 54 / 32%), transparent 42%),
-    #0f1115;
+  color: var(--text-sub);
+  background: var(--bg);
   text-align: center;
 }
 
@@ -134,29 +182,29 @@ input {
 
 .workspace-panel__mark {
   display: grid;
-  width: 42px;
-  height: 42px;
+  width: 34px;
+  height: 34px;
   margin: 0 auto 16px;
   place-items: center;
-  color: #0f1115;
-  background: #7aa2f7;
-  border-radius: 11px;
-  box-shadow: 0 8px 28px rgb(122 162 247 / 18%);
+  color: var(--bg);
+  background: var(--accent);
+  /* Glow removed with the rest of the elevation. */
+  border-radius: var(--radius);
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 700;
 }
 
 .workspace-panel h1 {
   margin: 0 0 7px;
-  color: #e6e6e6;
+  color: var(--text-main);
   font-size: 18px;
   font-weight: 650;
 }
 
 .workspace-panel p {
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.6;
 }
 

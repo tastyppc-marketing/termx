@@ -5,32 +5,32 @@
   display: grid;
   place-items: start center;
   padding-top: 12vh;
-  background: rgb(5 7 10 / 62%);
+  background: rgb(0 0 0 / 62%);
   backdrop-filter: blur(3px);
 }
 
 .folder-search {
   width: min(560px, calc(100% - 32px));
   overflow: hidden;
-  background: #1b202a;
-  border: 1px solid rgb(255 255 255 / 9%);
-  border-radius: 10px;
-  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
 }
 
 .folder-search__input {
   width: 100%;
   padding: 13px 16px;
-  color: #f1f5f9;
+  color: var(--text-main);
   background: transparent;
   border: 0;
-  border-bottom: 1px solid rgb(255 255 255 / 7%);
+  border-bottom: 1px solid var(--border);
   outline: 0;
   font: 14px Inter, "Segoe UI", sans-serif;
 }
 
 .folder-search__input::placeholder {
-  color: #626b7f;
+  color: var(--text-hint);
 }
 
 .folder-search__results {
@@ -46,21 +46,21 @@
   gap: 10px;
   align-items: center;
   padding: 8px 10px;
-  border-radius: 7px;
-  color: #cbd5e1;
-  font: 13px Consolas, "Cascadia Mono", monospace;
+  border-radius: var(--radius);
+  color: var(--text-main);
+  font: 12px Consolas, "Cascadia Mono", monospace;
   cursor: pointer;
 }
 
 .folder-search__row--active {
-  color: #f1f5f9;
-  background: rgb(122 162 247 / 14%);
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .folder-search__kind {
   flex: none;
   width: 16px;
-  color: #626b7f;
+  color: var(--text-hint);
   text-align: center;
 }
 
@@ -75,7 +75,7 @@
 .folder-search__parent {
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #8b93a7;
+  color: var(--text-sub);
 }
 
 .folder-search__leaf {
@@ -87,15 +87,15 @@
 .folder-search__tag {
   flex: none;
   padding: 1px 7px;
-  color: #8b93a7;
-  background: rgb(255 255 255 / 5%);
-  border-radius: 9px;
+  color: var(--text-sub);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border-radius: var(--radius);
   font: 11px Inter, "Segoe UI", sans-serif;
 }
 
 .folder-search__row--browse {
   margin-top: 2px;
-  border-top: 1px solid rgb(255 255 255 / 6%);
+  border-top: 1px solid var(--border);
   border-top-left-radius: 0;
   border-top-right-radius: 0;
   font-family: Inter, "Segoe UI", sans-serif;

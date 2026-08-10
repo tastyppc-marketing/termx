@@ -8,11 +8,12 @@
   height: 100%;
   min-width: 0;
   min-height: 0;
-  border: 1px solid #1f2430;
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  /* Stands in for a terminal pane, so it is square like one. */
+  border-radius: 0;
   padding: 12px;
-  color: #94a3b8;
-  background: #0f1115;
+  color: var(--text-sub);
+  background: var(--bg);
   cursor: pointer;
   text-align: center;
   font: 12px Inter, "Segoe UI", sans-serif;
@@ -20,20 +21,20 @@
 
 .sleeping-pane:hover,
 .sleeping-pane:focus-visible {
-  border-color: #384152;
-  color: #cbd5e1;
+  border-color: var(--divider);
+  color: var(--text-main);
   outline: 0;
 }
 
 .sleeping-pane__mark {
-  color: #7aa2f7;
+  color: var(--accent);
   font-size: 20px;
   letter-spacing: 1px;
 }
 
 .sleeping-pane__title {
-  color: #e2e8f0;
-  font-size: 13px;
+  color: var(--text-main);
+  font-size: 12px;
 }
 
 .sleeping-pane__detail {

@@ -15,21 +15,21 @@
   align-items: center;
   justify-content: center;
   padding: 0;
-  color: #dfe2e8;
-  background: #232a36;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 7px;
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   cursor: pointer;
   font: inherit;
 }
 
 .tray__chip:hover {
-  color: #fff;
-  background: #2b3442;
-  border-color: rgb(122 162 247 / 24%);
+  color: var(--text-main);
+  background: var(--surface-3);
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .tray__chip:focus-visible {
-  outline: 1px solid var(--sidebar-accent, #7aa2f7);
+  outline: 1px solid var(--sidebar-accent, var(--accent));
   outline-offset: 1px;
 }

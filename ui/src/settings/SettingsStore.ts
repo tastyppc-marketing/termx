@@ -58,7 +58,9 @@ export class SettingsStore {
       next.summaryContent === this.current.summaryContent &&
       next.summaryDisplay === this.current.summaryDisplay &&
       next.sleepHiddenTerminals === this.current.sleepHiddenTerminals &&
-      next.onWindowClose === this.current.onWindowClose
+      next.onWindowClose === this.current.onWindowClose &&
+      next.maxGroupDepth === this.current.maxGroupDepth &&
+      next.theme === this.current.theme
     ) {
       return;
     }

@@ -20,11 +20,11 @@
 }
 
 .viewer {
-  --viewer-bg: #161a22;
-  --viewer-raised: #232a36;
-  --viewer-text: #e6e6e6;
-  --viewer-muted: #8b93a7;
-  --viewer-accent: #7aa2f7;
+  --viewer-bg: var(--surface-1);
+  --viewer-raised: var(--surface-2);
+  --viewer-text: var(--text-main);
+  --viewer-muted: var(--text-sub);
+  --viewer-accent: var(--accent);
   position: relative;
   display: flex;
   min-width: 0;
@@ -33,7 +33,7 @@
   overflow: hidden;
   color: var(--viewer-text);
   background: var(--viewer-bg);
-  font: 13px/1.5 Inter, "Segoe UI", sans-serif;
+  font: 12px/1.5 Inter, "Segoe UI", sans-serif;
 }
 
 .viewer--docked {
@@ -45,21 +45,21 @@
 
 .viewer--dock-right.viewer--docked {
   height: 100%;
-  border-left: 1px solid rgb(255 255 255 / 8%);
+  border-left: 1px solid var(--border);
 }
 
 .viewer--dock-bottom.viewer--docked {
   width: 100%;
-  border-top: 1px solid rgb(255 255 255 / 8%);
+  border-top: 1px solid var(--border);
 }
 
 .viewer--overlay {
   position: absolute;
   z-index: 30;
   inset: 0;
-  border: 1px solid rgb(255 255 255 / 9%);
-  border-radius: 8px;
-  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
 }
 
 /* Resize handle — inside the viewer's own box on its inner edge, so it can
@@ -72,7 +72,7 @@
 
 .viewer__resize-handle:hover,
 .viewer__resize-handle:focus-visible {
-  background: rgb(122 162 247 / 28%);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
   outline: none;
 }
 
@@ -100,7 +100,7 @@
   gap: 8px;
   padding: 0 8px 0 14px;
   background: var(--viewer-bg);
-  border-bottom: 1px solid rgb(255 255 255 / 6%);
+  border-bottom: 1px solid var(--border);
   user-select: none;
 }
 
@@ -112,7 +112,7 @@
   overflow: hidden;
   min-width: 0;
   flex: 1 1 auto;
-  color: #f2f3f5;
+  color: var(--text-main);
   font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.02em;
@@ -137,16 +137,16 @@
   color: var(--viewer-muted);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
 }
 
 .viewer__action:hover {
-  color: #fff;
+  color: var(--text-main);
   background: var(--viewer-raised);
-  border-color: rgb(255 255 255 / 8%);
+  border-color: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 
 .viewer__action:focus-visible {
@@ -155,9 +155,9 @@
 }
 
 .viewer__action--close:hover {
-  color: #ffd7d7;
-  background: rgb(224 108 117 / 22%);
-  border-color: rgb(224 108 117 / 32%);
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 22%, transparent);
+  border-color: color-mix(in srgb, var(--error) 32%, transparent);
 }
 
 .viewer__body {
@@ -166,17 +166,17 @@
   flex: 1 1 auto;
   overflow: auto;
   padding: 12px 14px 20px;
-  scrollbar-color: #3a4353 transparent;
+  scrollbar-color: var(--divider) transparent;
   scrollbar-width: thin;
 }
 
 .viewer__banner {
   margin: 0 0 10px;
   padding: 6px 10px;
-  color: #f5d9a8;
-  background: rgb(224 175 104 / 14%);
-  border: 1px solid rgb(224 175 104 / 26%);
-  border-radius: 6px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 26%, transparent);
+  border-radius: var(--radius);
   font-size: 12px;
 }
 
@@ -185,15 +185,15 @@
   margin: 0;
   padding: 10px 12px;
   color: var(--viewer-muted);
-  background: rgb(255 255 255 / 3%);
-  border: 1px solid rgb(255 255 255 / 7%);
-  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   font-size: 12px;
 }
 
 .viewer__plain-text {
   margin: 0;
-  color: #dfe2e8;
+  color: var(--text-main);
   font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
   tab-size: 4;
   white-space: pre-wrap;
@@ -243,8 +243,8 @@
   gap: 6px;
   overflow: hidden;
   padding: 8px 0;
-  color: var(--sidebar-muted, #8b93a7);
-  background: #1b202a;
+  color: var(--sidebar-muted, var(--text-sub));
+  background: var(--surface-2);
   border: 0;
   cursor: pointer;
   font: 11px/1.2 Inter, "Segoe UI", sans-serif;
@@ -254,19 +254,19 @@
 }
 
 .viewer-tray-pill:hover {
-  color: #fff;
-  background: #232a36;
+  color: var(--text-main);
+  background: var(--surface-2);
 }
 
 .viewer-tray-pill:focus-visible {
-  outline: 1px solid var(--sidebar-accent, #7aa2f7);
+  outline: 1px solid var(--sidebar-accent, var(--accent));
   outline-offset: -2px;
 }
 
 .viewer-tray-pill--right {
   width: 26px;
   height: 100%;
-  border-left: 1px solid rgb(255 255 255 / 8%);
+  border-left: 1px solid var(--border);
   writing-mode: vertical-rl;
 }
 
@@ -274,7 +274,7 @@
   width: 100%;
   height: 26px;
   padding: 0 10px;
-  border-top: 1px solid rgb(255 255 255 / 8%);
+  border-top: 1px solid var(--border);
 }
 
 /* Markdown typography — quiet, readable, no highlighting. */
@@ -288,7 +288,7 @@
 .viewer-markdown h3,
 .viewer-markdown h4 {
   margin: 18px 0 8px;
-  color: #f2f3f5;
+  color: var(--text-main);
   font-weight: 650;
   line-height: 1.3;
 }
@@ -299,7 +299,7 @@
 
 .viewer-markdown h1 {
   padding-bottom: 6px;
-  border-bottom: 1px solid rgb(255 255 255 / 8%);
+  border-bottom: 1px solid var(--border);
   font-size: 18px;
 }
 
@@ -313,7 +313,7 @@
 
 .viewer-markdown h4 {
   color: var(--viewer-muted);
-  font-size: 12.5px;
+  font-size: 12px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
 }
@@ -340,21 +340,21 @@
 .viewer-markdown hr {
   margin: 16px 0;
   border: 0;
-  border-top: 1px solid rgb(255 255 255 / 10%);
+  border-top: 1px solid var(--border);
 }
 
 .viewer-markdown blockquote {
   margin: 0 0 10px;
   padding: 2px 0 2px 12px;
   color: var(--viewer-muted);
-  border-left: 2px solid rgb(122 162 247 / 40%);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .viewer-markdown__code {
   padding: 1px 5px;
-  color: #d7e0f5;
-  background: rgb(255 255 255 / 6%);
-  border-radius: 4px;
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-radius: var(--radius);
   font: 0.92em/1.4 "Cascadia Mono", Consolas, monospace;
 }
 
@@ -362,10 +362,10 @@
   margin: 0 0 12px;
   overflow-x: auto;
   padding: 10px 12px;
-  color: #dfe2e8;
-  background: #12161d;
-  border: 1px solid rgb(255 255 255 / 7%);
-  border-radius: 7px;
+  color: var(--text-main);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   font: 12px/1.55 "Cascadia Mono", Consolas, monospace;
   tab-size: 4;
 }
@@ -388,21 +388,21 @@
 .viewer-markdown__table th,
 .viewer-markdown__table td {
   padding: 5px 10px;
-  border: 1px solid rgb(255 255 255 / 9%);
+  border: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
 }
 
 .viewer-markdown__table th {
-  color: #f2f3f5;
-  background: rgb(255 255 255 / 4%);
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
   font-weight: 650;
 }
 
 /* Links are text: the title carries the href and nothing can navigate. */
 .viewer-markdown__link {
   color: var(--viewer-accent);
-  border-bottom: 1px dotted rgb(122 162 247 / 45%);
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent) 45%, transparent);
   cursor: help;
 }
 

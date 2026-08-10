@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
+  CSSProperties,
   KeyboardEvent,
   MouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -14,11 +15,13 @@ import type { LlmSessionRecord } from "../conversations/types";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
 import {
   canMoveItem,
-  PALETTE_HEX,
   PALETTE_IDS,
+  type FillStrength,
   type Item,
   type PaletteId,
 } from "../state/layout";
+import { useThemeId } from "../theme/ThemeProvider";
+import { resolveTabColor, themeById } from "../theme/themes";
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH } from "../workspace/uiState";
 import type {
   SidebarGroupModel,
@@ -40,6 +43,10 @@ export interface SidebarActions {
   activateTab(tabId: string): void;
   renameTab(tabId: string, title: string | null): void;
   recolorTab(tabId: string, color: PaletteId): void;
+  /** How strongly the tab's colour washes its row: off | subtle | strong. */
+  setTabFill(tabId: string, fill: FillStrength): void;
+  /** `null` returns the group to the neutral look. */
+  recolorGroup(groupId: string, color: PaletteId | null): void;
   /** Tabs and subgroups alike (layout_v2); false = the move was refused. */
   moveItem(item: Item, targetGroupId: string | null, index: number): boolean;
   /** `parentGroupId` null = a root group; null back = the depth cap refused it. */
@@ -159,6 +166,13 @@ interface ResizeDragState {
 /** Arrow-key step for the resize handle, matching the divider's nudge idiom. */
 const SIDEBAR_RESIZE_STEP = 16;
 
+/** How hard the tab colour washes its row (theme spec §5). */
+const FILL_OPTIONS: ReadonlyArray<{ value: FillStrength; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "subtle", label: "Subtle" },
+  { value: "strong", label: "Strong" },
+];
+
 interface PointerDragState {
   pointerId: number;
   source: DragSource;
@@ -189,6 +203,7 @@ export function Sidebar({
   footerTray,
   hostConnected = true,
 }: SidebarProps) {
+  const theme = themeById(useThemeId());
   const [mode, setMode] = useState<SidebarMode>("terminals");
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [confirmClose, setConfirmClose] = useState<ConfirmClose | null>(null);
@@ -568,7 +583,11 @@ export function Sidebar({
           active ? "sidebar-tab--active" : "",
           ended ? "sidebar-tab--ended" : "",
           tab.status === "attach_error" ? "sidebar-tab--error" : "",
+          tab.fill === "off" ? "" : `sidebar-tab--fill-${tab.fill}`,
         ].filter(Boolean).join(" ")}
+        /// The stripe is solid and never blended, so it reads at full strength
+        /// against any group wash behind it.
+        style={{ "--tab-color": resolveTabColor(theme, tab.color) } as CSSProperties}
         role="tab"
         aria-selected={active}
         tabIndex={focusedTabId === tab.id || (!focusedTabId && active) ? 0 : -1}
@@ -609,12 +628,6 @@ export function Sidebar({
         }}
         onKeyDown={(event) => handleTabKey(event, tab)}
       >
-        <span className="sidebar-tab__accent" aria-hidden="true" />
-        <span
-          className="sidebar-tab__color"
-          data-color={tab.color}
-          aria-label={`${tab.color} tab`}
-        />
         <span className="sidebar-tab__content">
           {renaming ? (
             <InlineRename
@@ -678,10 +691,19 @@ export function Sidebar({
     const renaming = renameTarget?.kind === "group" && renameTarget.id === group.id;
     return (
       <section
-        className="sidebar-group"
+        className={`sidebar-group${group.color ? " sidebar-group--colored" : ""}`}
         data-group-id={group.id}
         data-group-depth={depth}
         key={group.id}
+        /// A coloured group frames and washes its whole region, so the colour
+        /// is visible between and beside its tabs — not just on the header.
+        {...(group.color
+          ? {
+            style: {
+              "--group-color": resolveTabColor(theme, group.color),
+            } as CSSProperties,
+          }
+          : {})}
       >
         <div
           className="sidebar-group__header"
@@ -718,6 +740,7 @@ export function Sidebar({
           <span
             className="sidebar-group__color"
             data-color={group.color ?? "slate"}
+            style={{ backgroundColor: resolveTabColor(theme, group.color ?? "slate") }}
             aria-hidden="true"
           />
           <span
@@ -819,6 +842,28 @@ export function Sidebar({
     </ContextMenu>
   );
 
+  /// Swatches paint from `resolveTabColor`, so what the menu shows is exactly
+  /// what the stripe will be under the running theme.
+  const renderSwatchGrid = (label: string, onPick: (color: PaletteId) => void) => (
+    <div className="sidebar-color-grid" aria-label={label}>
+      {PALETTE_IDS.map((color) => (
+        <button
+          type="button"
+          role="menuitem"
+          className="sidebar-color-swatch"
+          aria-label={`Set color ${color}`}
+          title={color}
+          key={color}
+          style={{ backgroundColor: resolveTabColor(theme, color) }}
+          onClick={() => {
+            onPick(color);
+            closeMenu();
+          }}
+        />
+      ))}
+    </div>
+  );
+
   const renderedMenu = (() => {
     if (!menu) {
       return null;
@@ -833,21 +878,22 @@ export function Sidebar({
         return (
           <ContextMenu label={`Color for ${tab.title}`} point={menu.point} onClose={closeMenu}>
             <button type="button" role="menuitem" onClick={() => setMenuPanel("root")}>← Back</button>
-            <div className="sidebar-color-grid" aria-label="Tab colors">
-              {PALETTE_IDS.map((color) => (
+            {renderSwatchGrid("Tab colors", (color) => actions.recolorTab(tab.id, color))}
+            <div className="sidebar-fill-row" aria-label="Tab fill">
+              {FILL_OPTIONS.map((option) => (
                 <button
                   type="button"
                   role="menuitem"
-                  className="sidebar-color-swatch"
-                  aria-label={`Set color ${color}`}
-                  title={color}
-                  key={color}
-                  style={{ backgroundColor: PALETTE_HEX[color] }}
+                  className="sidebar-fill-option"
+                  key={option.value}
+                  aria-pressed={tab.fill === option.value}
                   onClick={() => {
-                    actions.recolorTab(tab.id, color);
+                    actions.setTabFill(tab.id, option.value);
                     closeMenu();
                   }}
-                />
+                >
+                  {option.label}
+                </button>
               ))}
             </div>
           </ContextMenu>
@@ -911,6 +957,23 @@ export function Sidebar({
           group.parentGroupId,
         );
       }
+      if (menuPanel === "color") {
+        return (
+          <ContextMenu label={`Color for ${group.name}`} point={menu.point} onClose={closeMenu}>
+            <button type="button" role="menuitem" onClick={() => setMenuPanel("root")}>← Back</button>
+            {renderSwatchGrid("Group colors", (color) => actions.recolorGroup(group.id, color))}
+            <button
+              type="button"
+              role="menuitem"
+              aria-pressed={group.color === null}
+              onClick={() => {
+                actions.recolorGroup(group.id, null);
+                closeMenu();
+              }}
+            >None</button>
+          </ContextMenu>
+        );
+      }
       const nestingBlocked = group.depth + 1 > maxGroupDepth;
       return (
         <ContextMenu label={`Actions for ${group.name}`} point={menu.point} onClose={closeMenu}>
@@ -940,6 +1003,7 @@ export function Sidebar({
               onOpenFolderSearch(group.id);
             }}>New tab in folder…</button>
           ) : null}
+          <button type="button" role="menuitem" onClick={() => setMenuPanel("color")}>Color</button>
           <button type="button" role="menuitem" onClick={() => setMenuPanel("move")}>Move to…</button>
           <button type="button" role="menuitem" onClick={() => {
             actions.toggleGroup(group.id);

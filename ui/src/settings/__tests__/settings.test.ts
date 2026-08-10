@@ -30,6 +30,7 @@ describe("parseSettings", () => {
       sleepHiddenTerminals: "60",
       onWindowClose: "stop-all",
       maxGroupDepth: 5,
+      theme: "paper-light",
     } as const;
     expect(parseSettings(serializeSettings(settings))).toEqual(settings);
   });
@@ -48,6 +49,7 @@ describe("parseSettings", () => {
         sleepHiddenTerminals: "30",
         onWindowClose: "explode",
         maxGroupDepth: 7,
+        theme: "neon",
       }),
     );
     expect(parsed).toEqual({
@@ -62,7 +64,19 @@ describe("parseSettings", () => {
       sleepHiddenTerminals: DEFAULT_SETTINGS.sleepHiddenTerminals,
       onWindowClose: DEFAULT_SETTINGS.onWindowClose,
       maxGroupDepth: DEFAULT_SETTINGS.maxGroupDepth,
+      theme: DEFAULT_SETTINGS.theme,
     });
+  });
+
+  it("theme: defaults to gunmetal-brass and rejects unknown ids", () => {
+    expect(DEFAULT_SETTINGS.theme).toBe("gunmetal-brass");
+    expect(parseSettings(JSON.stringify({})).theme).toBe("gunmetal-brass");
+    for (const bad of ["neon", "", 3, null, true, {}]) {
+      expect(parseSettings(JSON.stringify({ theme: bad, defaultProfile: "cmd" })))
+        .toMatchObject({ theme: "gunmetal-brass", defaultProfile: "cmd" });
+    }
+    expect(parseSettings(JSON.stringify({ theme: "paper-light" })).theme)
+      .toBe("paper-light");
   });
 
   it("maxGroupDepth: defaults to 3 and rejects anything off the ladder", () => {
@@ -200,6 +214,38 @@ describe("SettingsStore", () => {
     await store.flush();
 
     expect(store.getSnapshot().onWindowClose).toBe("stop-all");
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies and saves for a theme-only change (live switching)", async () => {
+    const save = vi.fn(() => Promise.resolve());
+    const store = new SettingsStore({ save });
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.update({ theme: "paper-light" });
+    await store.flush();
+
+    expect(store.getSnapshot().theme).toBe("paper-light");
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledTimes(1);
+
+    store.update({ theme: "paper-light" });
+    await store.flush();
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies and saves for a maxGroupDepth-only change", async () => {
+    const save = vi.fn(() => Promise.resolve());
+    const store = new SettingsStore({ save });
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.update({ maxGroupDepth: 5 });
+    await store.flush();
+
+    expect(store.getSnapshot().maxGroupDepth).toBe(5);
     expect(listener).toHaveBeenCalledTimes(1);
     expect(save).toHaveBeenCalledTimes(1);
   });

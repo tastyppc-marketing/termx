@@ -81,6 +81,8 @@ function actions(): SidebarActions {
     activateTab: vi.fn(),
     renameTab: vi.fn(),
     recolorTab: vi.fn(),
+    setTabFill: vi.fn(),
+    recolorGroup: vi.fn(),
     moveItem: vi.fn(() => true),
     createGroup: vi.fn(() => 'new-group'),
     renameGroup: vi.fn(),

@@ -195,6 +195,8 @@ function actions(): SidebarActions {
     activateTab: vi.fn(),
     renameTab: vi.fn(),
     recolorTab: vi.fn(),
+    setTabFill: vi.fn(),
+    recolorGroup: vi.fn(),
     moveItem: vi.fn(() => true),
     createGroup: vi.fn(() => "new-group"),
     renameGroup: vi.fn(),
@@ -291,7 +293,8 @@ describe("Sidebar structure", () => {
     const group = container.querySelector<HTMLElement>("[data-group-id='group-1']")!;
     expect(active.getAttribute("aria-selected")).toBe("true");
     expect(active.classList.contains("sidebar-tab--active")).toBe(true);
-    expect(active.querySelector("[data-color='blue']")).not.toBeNull();
+    // The palette shows as the row's stripe colour, not a dot.
+    expect(active.style.getPropertyValue("--tab-color")).toMatch(/^#[0-9a-f]{6}$/);
     expect(active.querySelector("[data-activity='unread']")).not.toBeNull();
     expect(active.querySelector("[aria-label='Close powershell · one']")).not.toBeNull();
     expect(dead.classList.contains("sidebar-tab--ended")).toBe(true);
@@ -990,7 +993,7 @@ describe("Sidebar context menus and creation", () => {
     expect(sidebarActions.dismissDeadTab).toHaveBeenCalledWith("tab-2");
   });
 
-  it("renders the exact group menu without a group color action", async () => {
+  it("renders the exact group menu, colour action included", async () => {
     const sidebarActions = await renderSidebar();
     const header = container.querySelector<HTMLElement>("[data-group-id='group-1'] .sidebar-group__header")!;
     await act(async () => header.dispatchEvent(new MouseEvent("contextmenu", {
@@ -1005,7 +1008,9 @@ describe("Sidebar context menus and creation", () => {
     expect(text).toContain("Move to…");
     expect(text).toContain("Collapse");
     expect(text).toContain("Delete group");
-    expect(text).not.toContain("Color");
+    // Groups are colourable now (theme spec §5); the panel itself is covered
+    // in SidebarColors.test.tsx.
+    expect(text).toContain("Color");
     const collapse = [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
       .find((button) => button.textContent === "Collapse")!;
     await act(async () => collapse.click());

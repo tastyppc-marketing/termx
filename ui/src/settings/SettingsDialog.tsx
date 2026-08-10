@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { deriveTokens } from "../theme/deriveTokens";
+import { THEME_IDS, THEMES } from "../theme/themes";
 import {
   MAX_GROUP_DEPTH_OPTIONS,
   type CloseBehavior,
@@ -206,6 +208,46 @@ export function SettingsDialog({ settings, onChange, onClose }: SettingsDialogPr
         }}
       >
         <h2>Settings</h2>
+
+        <fieldset className="settings-section">
+          <legend>Theme</legend>
+          <div className="settings-themes">
+            {THEME_IDS.map((id) => {
+              const theme = THEMES[id];
+              const tokens = deriveTokens(theme);
+              return (
+                <label className="settings-theme" key={id}>
+                  <input
+                    type="radio"
+                    name="theme"
+                    value={id}
+                    checked={settings.theme === id}
+                    onChange={() => onChange({ theme: id })}
+                  />
+                  <span
+                    className="settings-theme__swatch"
+                    aria-hidden="true"
+                    style={{
+                      background: theme.bg,
+                      borderColor: tokens["--divider"],
+                      color: tokens["--text-main"],
+                    }}
+                  >
+                    Aa
+                    <span
+                      className="settings-theme__accent"
+                      style={{ background: tokens["--accent"] }}
+                    />
+                  </span>
+                  <span className="settings-theme__name">{theme.name}</span>
+                </label>
+              );
+            })}
+          </div>
+          <p className="settings-section__note">
+            Switches instantly — running terminals retint as you click.
+          </p>
+        </fieldset>
 
         <fieldset className="settings-section">
           <legend>New terminals open in</legend>

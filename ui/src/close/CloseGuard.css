@@ -4,18 +4,18 @@
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgb(5 7 10 / 62%);
+  background: rgb(0 0 0 / 62%);
   backdrop-filter: blur(3px);
 }
 
 .close-guard {
   width: min(420px, calc(100% - 32px));
   padding: 20px;
-  color: #e6e6e6;
-  background: #1b202a;
-  border: 1px solid rgb(255 255 255 / 9%);
-  border-radius: 8px;
-  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
 }
 
 .close-guard h2 {
@@ -25,8 +25,8 @@
 
 .close-guard__body {
   margin: 0 0 16px;
-  color: #b7bdca;
-  font-size: 13px;
+  color: var(--text-sub);
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -36,17 +36,17 @@
   align-items: center;
   padding: 6px 4px;
   margin-bottom: 16px;
-  font-size: 13px;
-  border-radius: 6px;
+  font-size: 12px;
+  border-radius: var(--radius);
   cursor: pointer;
 }
 
 .close-guard__remember:hover {
-  background: rgb(255 255 255 / 4%);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
 
 .close-guard__remember input {
-  accent-color: #7aa2f7;
+  accent-color: var(--accent);
 }
 
 .close-guard__actions {
@@ -60,31 +60,31 @@
   padding: 0 16px;
   font: inherit;
   cursor: pointer;
-  border-radius: 7px;
+  border-radius: var(--radius);
   transition: border-color 120ms ease, background 120ms ease;
 }
 
 .close-guard__keep {
-  color: #10151d;
+  color: var(--bg);
   font-weight: 600;
-  background: #7aa2f7;
-  border: 1px solid #7aa2f7;
+  background: var(--accent);
+  border: 1px solid var(--accent);
 }
 
 .close-guard__keep:hover {
-  background: #8db2ff;
-  border-color: #8db2ff;
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 .close-guard__stop {
-  color: #e6e6e6;
-  background: #7e3544;
-  border: 1px solid #a4485b;
+  color: var(--text-main);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
 }
 
 .close-guard__stop:hover {
-  background: #8f3d4e;
-  border-color: #b45367;
+  background: var(--danger-bg-hover);
+  border-color: var(--danger-border);
 }
 
 @media (prefers-reduced-motion: reduce) {

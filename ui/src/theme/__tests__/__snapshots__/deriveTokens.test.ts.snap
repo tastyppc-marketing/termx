@@ -1,0 +1,25 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`deriveTokens > snapshots the default theme 1`] = `
+{
+  "--accent": "#d9a441",
+  "--accent-10": "#28241d",
+  "--accent-25": "#453a23",
+  "--accent-40": "#634f29",
+  "--accent-60": "#8a6b31",
+  "--bg": "#141619",
+  "--border": "#272a2d",
+  "--divider": "#313337",
+  "--error": "#d16a5f",
+  "--fg": "#d6d9de",
+  "--ok": "#8aa871",
+  "--surface-1": "#1e2023",
+  "--surface-2": "#272a2d",
+  "--surface-3": "#313337",
+  "--text-disabled": "#3b3d40",
+  "--text-hint": "#7d7f82",
+  "--text-main": "#c3c6ca",
+  "--text-sub": "#888b8f",
+  "--warn": "#d9a441",
+}
+`;

@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { THEME_IDS, THEMES } from "../../theme/themes";
 import { SettingsDialog } from "../SettingsDialog";
 import { DEFAULT_SETTINGS } from "../settings";
 
@@ -223,6 +224,37 @@ describe("SettingsDialog", () => {
       done?.click();
     });
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers all six themes and reports the pick as a one-field patch", async () => {
+    const onChange = vi.fn();
+    await render(
+      <SettingsDialog
+        settings={DEFAULT_SETTINGS}
+        onChange={onChange}
+        onClose={() => undefined}
+      />,
+    );
+
+    const swatches = Array.from(
+      container.querySelectorAll<HTMLInputElement>("input[name='theme']"),
+    );
+    expect(swatches.map((input) => input.value)).toEqual([...THEME_IDS]);
+    expect(swatches.find((input) => input.checked)?.value).toBe(DEFAULT_SETTINGS.theme);
+    // Every card previews its own theme, not the running one.
+    expect(container.querySelectorAll(".settings-theme__swatch")).toHaveLength(
+      THEME_IDS.length,
+    );
+    for (const id of THEME_IDS) {
+      expect(container.textContent).toContain(THEMES[id].name);
+    }
+
+    const paper = swatches.find((input) => input.value === "paper-light")!;
+    await act(async () => {
+      paper.click();
+    });
+    expect(onChange).toHaveBeenCalledWith({ theme: "paper-light" });
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   it("takes initial focus and wraps Tab at the edges", async () => {

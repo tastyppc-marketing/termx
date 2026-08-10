@@ -5,6 +5,13 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { HostClient } from "../host/client";
+import {
+  xtermSearchDecorations,
+  xtermTheme,
+  type XtermPalette,
+} from "../theme/deriveTokens";
+import { currentThemeId, onThemeChange } from "../theme/ThemeProvider";
+import { themeById } from "../theme/themes";
 import { InputMarks, type InputMark } from "./inputMarks";
 import {
   TerminalSessionBinding,
@@ -39,6 +46,12 @@ export interface TerminalPresentation {
    * legacy fit-first behaviour.
    */
   resize?(cols: number, rows: number): void;
+  /**
+   * Retint a LIVE terminal (theme spec §1: switching is instant). Optional so
+   * existing presentations and test fakes stay valid; a presentation without
+   * it simply keeps the palette it was built with.
+   */
+  setTheme?(palette: XtermPalette): void;
   findNext(query: string): boolean;
   findPrevious(query: string): boolean;
   focus(): void;
@@ -364,6 +377,16 @@ export function TerminalPane(props: TerminalPaneProps) {
     // can only stare at until they restart the app.
   }, [dependencies, props.client, props.sessionId, props.attachGeneration]);
 
+  // Live theme switching: the pane owns no theme state, it just forwards the
+  // new palette to whatever presentation is mounted right now.
+  useEffect(
+    () =>
+      onThemeChange((themeId) => {
+        presentationRef.current?.setTheme?.(xtermTheme(themeById(themeId)));
+      }),
+    [],
+  );
+
   const runSearch = (direction: "next" | "previous") => {
     if (searchQuery.length === 0) {
       return;
@@ -527,12 +550,7 @@ function createPresentation(
     fontSize: 14,
     scrollback: 10_000,
     windowsPty: { backend: "conpty" },
-    theme: {
-      background: "#0f1115",
-      foreground: "#e6e6e6",
-      cursor: "#7aa2f7",
-      selectionBackground: "#334155",
-    },
+    theme: xtermTheme(themeById(currentThemeId())),
   });
   const fit = new FitAddon();
   const search = new SearchAddon();
@@ -549,14 +567,11 @@ function createPresentation(
     throw error;
   }
 
-  const searchOptions = {
-    decorations: {
-      matchBackground: "#463f24",
-      matchOverviewRuler: "#d4a72c",
-      activeMatchBackground: "#7c5c18",
-      activeMatchColorOverviewRuler: "#f0c36a",
-    },
-  };
+  // Read per search, not captured once: a theme switch must reach the next
+  // highlight too.
+  const searchOptions = () => ({
+    decorations: xtermSearchDecorations(themeById(currentThemeId())),
+  });
 
   const port: TerminalPort = {
     get cols() {
@@ -581,8 +596,11 @@ function createPresentation(
     terminal: port,
     fit: () => fit.fit(),
     resize: (cols, rows) => terminal.resize(cols, rows),
-    findNext: (query) => search.findNext(query, searchOptions),
-    findPrevious: (query) => search.findPrevious(query, searchOptions),
+    setTheme: (palette) => {
+      terminal.options.theme = palette;
+    },
+    findNext: (query) => search.findNext(query, searchOptions()),
+    findPrevious: (query) => search.findPrevious(query, searchOptions()),
     focus: () => terminal.focus(),
     dispose: () => terminal.dispose(),
     registerInputMarker: () => {

@@ -7,6 +7,8 @@
  * actually changes a setting — a parser bug must never destroy the file.
  */
 
+import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from "../theme/themes";
+
 export const NEW_TAB_POLICIES = [
   "group-active",
   "active-tab",
@@ -69,6 +71,8 @@ export interface TermxSettings {
   readonly onWindowClose: CloseBehavior;
   /** How deep sidebar groups may be nested by creation or drag. */
   readonly maxGroupDepth: MaxGroupDepthOption;
+  /** Colour theme. Applies live — no restart, no confirmation. */
+  readonly theme: ThemeId;
 }
 
 export const DEFAULT_SETTINGS: TermxSettings = {
@@ -83,6 +87,7 @@ export const DEFAULT_SETTINGS: TermxSettings = {
   sleepHiddenTerminals: "15",
   onWindowClose: "ask",
   maxGroupDepth: 3,
+  theme: DEFAULT_THEME_ID,
 };
 
 function isNewTabPolicy(value: unknown): value is NewTabPolicy {
@@ -169,6 +174,7 @@ export function parseSettings(text: string | null): TermxSettings {
     maxGroupDepth: isMaxGroupDepth(record.maxGroupDepth)
       ? record.maxGroupDepth
       : DEFAULT_SETTINGS.maxGroupDepth,
+    theme: isThemeId(record.theme) ? record.theme : DEFAULT_SETTINGS.theme,
   };
 }
 

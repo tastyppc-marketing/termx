@@ -1,9 +1,9 @@
 .sidebar {
-  --sidebar-bg: #161a22;
-  --sidebar-raised: #232a36;
-  --sidebar-text: #e6e6e6;
-  --sidebar-muted: #8b93a7;
-  --sidebar-accent: #7aa2f7;
+  --sidebar-bg: var(--surface-1);
+  --sidebar-raised: var(--surface-2);
+  --sidebar-text: var(--text-main);
+  --sidebar-muted: var(--text-sub);
+  --sidebar-accent: var(--accent);
   position: relative;
   display: flex;
   flex: 0 0 252px;
@@ -14,32 +14,32 @@
   flex-direction: column;
   color: var(--sidebar-text);
   background: var(--sidebar-bg);
-  border-right: 1px solid rgb(255 255 255 / 6%);
-  font: 13px/1.35 Inter, "Segoe UI", sans-serif;
+  border-right: 1px solid var(--border);
+  font: 12px/1.35 Inter, "Segoe UI", sans-serif;
 }
 
 .sidebar__header {
   display: flex;
-  min-height: 48px;
+  min-height: var(--row-chrome);
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
-  color: #f2f3f5;
-  border-bottom: 1px solid rgb(255 255 255 / 6%);
-  font-size: 12px;
+  padding: 0 10px;
+  color: var(--text-main);
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .sidebar__mark {
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: var(--icon-button);
+  height: var(--icon-button);
   place-items: center;
-  color: #0f1115;
+  color: var(--bg);
   background: var(--sidebar-accent);
-  border-radius: 7px;
+  border-radius: var(--radius);
   font-size: 12px;
   letter-spacing: 0;
 }
@@ -48,15 +48,15 @@
    rail is on screen and the App wired the surface. */
 .sidebar__expand {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: var(--icon-button);
+  height: var(--icon-button);
   margin-left: auto;
   place-items: center;
   padding: 0;
   color: var(--sidebar-muted);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
@@ -64,8 +64,8 @@
 
 .sidebar__expand:hover {
   color: var(--sidebar-text);
-  background: rgb(255 255 255 / 6%);
-  border-color: rgb(122 162 247 / 20%);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 .sidebar__saving {
@@ -82,7 +82,7 @@
   overflow-x: hidden;
   overflow-y: auto;
   padding: 8px;
-  scrollbar-color: #3a4353 transparent;
+  scrollbar-color: var(--divider) transparent;
   scrollbar-width: thin;
 }
 
@@ -100,37 +100,46 @@
   margin: 2px 0 8px;
 }
 
+/* A coloured group shows its colour as a frame down its left edge plus a wash
+   over its whole region — visible BETWEEN and BESIDE its tabs, not only on the
+   header. `color: null` renders exactly the neutral group above. */
+.sidebar-group--colored {
+  padding-left: 5px;
+  border-left: 1px solid var(--group-color);
+  background: color-mix(in srgb, var(--group-color) 8%, transparent);
+}
+
 .sidebar-group__header {
   display: flex;
-  min-height: 32px;
+  min-height: var(--row-list);
   align-items: center;
   gap: 6px;
   padding: 0 6px 0 2px;
   color: var(--sidebar-muted);
-  border-radius: 7px;
+  border-radius: var(--radius);
 }
 
 .sidebar-group__header:hover {
   color: var(--sidebar-text);
-  background: rgb(255 255 255 / 3%);
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
 }
 
 .sidebar-group__toggle {
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: var(--icon-button);
+  height: var(--icon-button);
   padding: 0;
   place-items: center;
   color: inherit;
   background: transparent;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
 }
 
 .sidebar-group__toggle:hover {
   color: var(--sidebar-text);
-  background: rgb(255 255 255 / 6%);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
 }
 
 .sidebar-group__chevron {
@@ -144,34 +153,26 @@
   transform: rotate(0deg);
 }
 
-.sidebar-group__color,
-.sidebar-tab__color {
+/* The group's own dot. Tabs carry a stripe instead — the dot was too small to
+   survive a coloured group behind it. Colour comes from resolveTabColor()
+   inline, so it follows the theme's tab palette. */
+.sidebar-group__color {
   display: inline-block;
   flex: 0 0 auto;
   width: 8px;
   height: 8px;
-  background: #565f89;
   border-radius: 50%;
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 10%);
+  border: 1px solid var(--border);
 }
-
-[data-color="blue"] { background-color: #7aa2f7; }
-[data-color="cyan"] { background-color: #7dcfff; }
-[data-color="green"] { background-color: #9ece6a; }
-[data-color="yellow"] { background-color: #e0af68; }
-[data-color="orange"] { background-color: #ff9e64; }
-[data-color="red"] { background-color: #f7768e; }
-[data-color="magenta"] { background-color: #bb9af7; }
-[data-color="slate"] { background-color: #565f89; }
 
 .sidebar-group__name {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
   outline: none;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.055em;
+  letter-spacing: 0.08em;
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
@@ -179,7 +180,7 @@
 
 .sidebar-group__count {
   min-width: 18px;
-  color: #6f7789;
+  color: var(--text-hint);
   font-size: 10px;
   text-align: right;
 }
@@ -191,11 +192,11 @@
 }
 
 /* Nesting (layout_v2): one indent step per level, with a hairline guide down
-   the level it belongs to. --border comes from the theme spec once it lands. */
+   the level it belongs to. */
 .sidebar-group .sidebar-group__tabs {
   margin-left: var(--sidebar-indent, 12px);
   padding-left: calc(var(--sidebar-indent, 12px) / 2);
-  border-left: 1px solid var(--border, #2a3040);
+  border-left: 1px solid var(--border);
 }
 
 .sidebar-group .sidebar-group {
@@ -205,15 +206,19 @@
 .sidebar-tab {
   position: relative;
   display: flex;
-  min-height: 38px;
+  min-height: var(--row-list);
   align-items: center;
   gap: 8px;
-  padding: 4px 6px 4px 10px;
+  padding: 3px 6px 3px 8px;
   overflow: hidden;
-  color: #cfd2da;
+  color: var(--text-main);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 7px;
+  /* The colour carrier: solid, full opacity, never blended — so it stays
+     legible no matter what colour the surrounding group is washed with. */
+  border-left: 3px solid var(--tab-color);
+  /* Tabs are square. */
+  border-radius: 0;
   outline: none;
   cursor: default;
   transition:
@@ -225,28 +230,32 @@
   user-select: none;
 }
 
-.sidebar-tab:hover {
-  color: var(--sidebar-text);
-  background: rgb(255 255 255 / 4%);
+/* Optional wash of the tab's own colour over the row. Declared BEFORE the
+   hover/active rules so those surface tints win — the stripe, not the wash,
+   is what carries the colour. */
+.sidebar-tab--fill-subtle {
+  background: color-mix(in srgb, var(--tab-color) 8%, transparent);
 }
 
+.sidebar-tab--fill-strong {
+  background: color-mix(in srgb, var(--tab-color) 18%, transparent);
+}
+
+.sidebar-tab:hover {
+  color: var(--sidebar-text);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+/* Every state below names three sides explicitly: a `border-color` shorthand
+   here would repaint the left edge and swallow the stripe. */
 .sidebar-tab--active {
   color: var(--sidebar-text);
   background: var(--sidebar-raised);
-  border-color: rgb(122 162 247 / 14%);
-  box-shadow: 0 3px 12px rgb(0 0 0 / 16%);
-}
-
-.sidebar-tab__accent {
-  position: absolute;
-  inset: 6px auto 6px 0;
-  width: 2px;
-  background: transparent;
-  border-radius: 0 2px 2px 0;
-}
-
-.sidebar-tab--active .sidebar-tab__accent {
-  background: var(--sidebar-accent);
+  border-color:
+    color-mix(in srgb, var(--accent) 14%, transparent)
+    color-mix(in srgb, var(--accent) 14%, transparent)
+    color-mix(in srgb, var(--accent) 14%, transparent)
+    var(--tab-color);
 }
 
 .sidebar-tab--ended {
@@ -254,7 +263,11 @@
 }
 
 .sidebar-tab--error {
-  border-color: rgb(247 118 142 / 20%);
+  border-color:
+    color-mix(in srgb, var(--error) 20%, transparent)
+    color-mix(in srgb, var(--error) 20%, transparent)
+    color-mix(in srgb, var(--error) 20%, transparent)
+    var(--tab-color);
 }
 
 .sidebar-tab__content {
@@ -277,11 +290,11 @@
 }
 
 .sidebar-tab__badge--error {
-  color: #f7768e;
+  color: var(--error);
 }
 
 .sidebar-tab__badge--sleep {
-  color: #7aa2f7;
+  color: var(--accent);
   font-style: italic;
 }
 
@@ -294,26 +307,24 @@
 }
 
 .sidebar-tab__activity[data-activity="active"] {
-  background: #9ece6a;
-  box-shadow: 0 0 8px rgb(158 206 106 / 55%);
+  background: var(--ok);
 }
 
 .sidebar-tab__activity[data-activity="unread"] {
   background: var(--sidebar-accent);
-  box-shadow: 0 0 0 3px rgb(122 162 247 / 12%);
 }
 
 .sidebar-tab__close {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: var(--icon-button);
+  height: var(--icon-button);
   flex: 0 0 auto;
   padding: 0;
   place-items: center;
   color: var(--sidebar-muted);
   background: transparent;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius);
   opacity: 0;
   cursor: pointer;
   transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
@@ -326,8 +337,8 @@
 }
 
 .sidebar-tab__close:hover {
-  color: #fff;
-  background: rgb(247 118 142 / 16%);
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--error) 16%, transparent);
 }
 
 .inline-rename {
@@ -335,43 +346,42 @@
   width: 100%;
   min-width: 0;
   padding: 2px 5px;
-  color: var(--sidebar-text, #e6e6e6);
-  background: #0f1115;
-  border: 1px solid var(--sidebar-accent, #7aa2f7);
-  border-radius: 5px;
+  color: var(--sidebar-text, var(--text-main));
+  background: var(--bg);
+  border: 1px solid var(--sidebar-accent, var(--accent));
+  border-radius: var(--radius);
   outline: none;
   font: inherit;
-  box-shadow: 0 0 0 2px rgb(122 162 247 / 15%);
 }
 
 .sidebar-new-group {
   padding: 8px;
-  border-top: 1px solid rgb(255 255 255 / 6%);
+  border-top: 1px solid var(--border);
 }
 
 .sidebar-create {
   display: flex;
   flex: 0 0 auto;
   padding: 8px;
-  border-top: 1px solid rgb(255 255 255 / 6%);
+  border-top: 1px solid var(--border);
 }
 
 .sidebar-create button {
-  min-height: 34px;
-  color: #dfe2e8;
-  background: #232a36;
-  border: 1px solid rgb(255 255 255 / 8%);
+  min-height: var(--row-chrome);
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
   cursor: pointer;
 }
 
 .sidebar-create button:hover:not(:disabled) {
-  color: #fff;
-  background: #2b3442;
-  border-color: rgb(122 162 247 / 24%);
+  color: var(--text-main);
+  background: var(--surface-3);
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .sidebar-create button:disabled {
-  color: #747d8e;
+  color: var(--text-hint);
   cursor: default;
 }
 
@@ -381,7 +391,7 @@
   align-items: center;
   justify-content: center;
   gap: 7px;
-  border-radius: 7px 0 0 7px;
+  border-radius: var(--radius) 0 0 var(--radius);
   font: inherit;
   font-weight: 600;
 }
@@ -390,16 +400,16 @@
   width: 34px;
   padding: 0;
   border-left: 0 !important;
-  border-radius: 0 7px 7px 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
 }
 
 .sidebar__notice {
   margin: 8px;
   padding: 8px 10px;
-  color: #f3d7dc;
-  background: rgb(247 118 142 / 10%);
-  border: 1px solid rgb(247 118 142 / 18%);
-  border-radius: 7px;
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--error) 18%, transparent);
+  border-radius: var(--radius);
   font-size: 11px;
 }
 
@@ -409,7 +419,7 @@
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgb(5 7 10 / 62%);
+  background: rgb(0 0 0 / 62%);
   backdrop-filter: blur(3px);
 }
 
@@ -417,10 +427,10 @@
   width: min(360px, calc(100vw - 32px));
   padding: 20px;
   color: var(--sidebar-text);
-  background: #1b202a;
-  border: 1px solid rgb(255 255 255 / 9%);
-  border-radius: 8px;
-  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
 }
 
 .sidebar-dialog h2 {
@@ -445,13 +455,13 @@
   padding: 0 12px;
   color: var(--sidebar-text);
   background: var(--sidebar-raised);
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .sidebar-dialog__actions .sidebar-dialog__danger {
-  background: #7e3544;
-  border-color: #a4485b;
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 
 /* Width drag handle (polish P5): a 6px hit strip inside the right border (the
@@ -500,11 +510,11 @@
   max-width: 220px;
   padding: 7px 10px;
   overflow: hidden;
-  color: #e6e6e6;
-  background: #2a3240;
-  border: 1px solid rgb(122 162 247 / 35%);
-  border-radius: 7px;
-  box-shadow: 0 10px 28px rgb(0 0 0 / 42%);
+  color: var(--text-main);
+  background: var(--surface-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
   opacity: 0.9;
   pointer-events: none;
   text-overflow: ellipsis;
@@ -516,9 +526,8 @@
   position: fixed;
   z-index: 179;
   height: 2px;
-  background: #7aa2f7;
-  border-radius: 2px;
-  box-shadow: 0 0 7px rgb(122 162 247 / 65%);
+  background: var(--accent);
+  border-radius: 0;
   pointer-events: none;
 }
 
@@ -526,39 +535,39 @@
   z-index: 200;
   min-width: 184px;
   padding: 5px;
-  color: var(--sidebar-text, #e6e6e6);
-  background: #202631;
-  border: 1px solid rgb(255 255 255 / 9%);
-  border-radius: 8px;
-  box-shadow: 0 14px 38px rgb(0 0 0 / 42%);
+  color: var(--sidebar-text, var(--text-main));
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
 }
 
 .context-menu button[role="menuitem"] {
   display: flex;
   width: 100%;
-  min-height: 30px;
+  min-height: var(--row-list);
   align-items: center;
   padding: 0 9px;
   color: inherit;
   background: transparent;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius);
   font: inherit;
   text-align: left;
 }
 
 .context-menu button[role="menuitem"]:hover,
 .context-menu button[role="menuitem"]:focus-visible {
-  background: #2b3341;
+  background: var(--surface-3);
   outline: none;
 }
 
 .context-menu button[role="menuitem"]:disabled {
-  color: #666f80;
+  color: var(--text-hint);
 }
 
 .context-menu button.context-menu__danger {
-  color: #f59bad;
+  color: var(--error);
 }
 
 .sidebar-color-grid {
@@ -568,18 +577,45 @@
   padding: 6px 4px 4px;
 }
 
+/* The colour reads through a window in the menu surface — drawn with a thick
+   border rather than an inset shadow, so elevation stays overlay-only. */
 .context-menu button.sidebar-color-swatch {
   width: 34px;
-  min-height: 28px;
+  min-height: var(--row-list);
   padding: 0;
-  border: 1px solid rgb(255 255 255 / 16%);
-  box-shadow: inset 0 0 0 5px #202631;
+  border: 6px solid var(--surface-2);
+  border-radius: 0;
+  outline: 1px solid var(--border);
+  outline-offset: -1px;
 }
 
 .context-menu button.sidebar-color-swatch:hover,
 .context-menu button.sidebar-color-swatch:focus-visible {
-  border-color: #e6e6e6;
-  box-shadow: inset 0 0 0 4px #202631;
+  border-width: 5px;
+  outline-color: var(--text-main);
+}
+
+.sidebar-fill-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 4px 4px 2px;
+}
+
+.context-menu button.sidebar-fill-option {
+  justify-content: center;
+  min-height: var(--icon-button);
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.context-menu button.sidebar-fill-option[aria-pressed="true"] {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: transparent;
 }
 
 @media (max-width: 640px) {

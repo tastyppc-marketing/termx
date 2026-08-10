@@ -4,7 +4,7 @@
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgb(5 7 10 / 62%);
+  background: rgb(0 0 0 / 62%);
   backdrop-filter: blur(3px);
 }
 
@@ -13,11 +13,11 @@
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   padding: 20px;
-  color: #e6e6e6;
-  background: #1b202a;
-  border: 1px solid rgb(255 255 255 / 9%);
-  border-radius: 8px;
-  box-shadow: 0 18px 56px rgb(0 0 0 / 45%);
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
 }
 
 .settings-dialog h2 {
@@ -28,16 +28,17 @@
 .settings-section {
   margin: 0 0 14px;
   padding: 10px 12px 12px;
-  border: 1px solid rgb(255 255 255 / 7%);
-  border-radius: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .settings-section legend {
   padding: 0 6px;
-  color: #8b93a7;
-  font-size: 12px;
+  color: var(--text-sub);
+  font-size: 10px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.08em;
 }
 
 .settings-radio,
@@ -46,19 +47,19 @@
   gap: 10px;
   align-items: flex-start;
   padding: 6px 4px;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
 }
 
 .settings-radio:hover,
 .settings-check:hover {
-  background: rgb(255 255 255 / 4%);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
 
 .settings-radio input,
 .settings-check input {
   margin-top: 3px;
-  accent-color: #7aa2f7;
+  accent-color: var(--accent);
 }
 
 .settings-radio__text {
@@ -67,11 +68,11 @@
 }
 
 .settings-radio__label {
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .settings-radio__hint {
-  color: #8b93a7;
+  color: var(--text-sub);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -79,7 +80,7 @@
 .settings-subsection {
   margin-top: 6px;
   padding-top: 8px;
-  border-top: 1px solid rgb(255 255 255 / 6%);
+  border-top: 1px solid var(--border);
 }
 
 .settings-subsection:first-of-type {
@@ -88,10 +89,11 @@
 
 .settings-subsection__title {
   padding: 0 4px 2px;
-  color: #8b93a7;
-  font-size: 11px;
+  color: var(--text-sub);
+  font-size: 10px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.08em;
 }
 
 .settings-row {
@@ -103,16 +105,80 @@
 }
 
 .settings-row__label {
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .settings-row select {
   min-height: 30px;
   padding: 0 8px;
-  color: #e6e6e6;
-  background: #232a36;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 6px;
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* Theme picker: six cards, each previewing its OWN palette (never the running
+   one) so the choice is legible before it is made. */
+.settings-themes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px 0 2px;
+}
+
+.settings-theme {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.settings-theme:hover {
+  border-color: var(--accent);
+}
+
+.settings-theme:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-10);
+}
+
+.settings-theme__swatch {
+  position: relative;
+  display: grid;
+  width: 34px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid;
+  border-radius: var(--radius);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.settings-theme__accent {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+}
+
+.settings-theme__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-section__note {
+  margin: 6px 0 0;
+  color: var(--text-hint);
+  font-size: 11px;
 }
 
 .settings-dialog__actions {
@@ -123,17 +189,17 @@
 .settings-dialog__actions button {
   min-height: 32px;
   padding: 0 16px;
-  color: #e6e6e6;
-  background: #232a36;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 7px;
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease;
 }
 
 .settings-dialog__actions button:hover {
-  background: #2a3242;
-  border-color: rgb(122 162 247 / 55%);
+  background: var(--surface-3);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {
