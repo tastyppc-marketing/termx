@@ -683,3 +683,30 @@ Michael: "I can't read this, please just go" = spec approval + proceed.
   delete *.old / *.prev in dist-portable\TermX.
 - Next major (recorded in memory termx-blocks-ui-vision): block-based
   chat-style terminal rendering — own brainstorm/spec cycle.
+
+## 2026-08-10 — CHAT VIEW batch: design approved, specs committed
+
+Michael approved the chat-view design with ONE amendment: permission menus /
+questions must render as answerable cards IN the chat (PromptDetector over
+the live xterm buffer + keystroke synthesis; unknown prompts -> fallback card
+with terminal excerpt + keystroke box; detector never auto-answers).
+His AskUserQuestion answers: reading load is MOSTLY Claude Code/agents; full
+chat (read AND type, forwarded to pty); ALL THREE density modes as a toggle
+(chips/smart/full); chat replaces terminal view in-pane ("lives on top of
+it"); AND settings must move out of the piled-up modal into a full-window
+sectioned surface with a dedicated Chat View section.
+
+Specs committed:
+- docs/superpowers/specs/2026-08-10-chat-view-design.md (feed via
+  read_window_at tail-polling 500ms, ChatEntry normalized model,
+  react-markdown+rehype-sanitize, density toggle, prompt cards, bracketed-
+  paste multiline input; Claude-format JSONL covers claude-x fleet; codex-
+  native adapter = follow-up)
+- docs/superpowers/specs/2026-08-10-settings-window-design.md
+  (SettingsSurface fullscreen ConversationsFullscreen-pattern, 6 sections,
+  SettingsDialog deleted, +agentPaneDefaultView/+chatDefaultDensity)
+
+Next: Michael spec-review (expect "go") -> writing-plans per spec ->
+lanes: settings-window first or parallel (small), chat-view big. Gates:
+vitest 914, e2e 6, cargo host 154, termx-ui 162 (from ui/src-tauri).
+Michael is live-testing the adoption batch; bugs may arrive mid-build.
