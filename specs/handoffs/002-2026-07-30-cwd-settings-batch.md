@@ -780,3 +780,42 @@ now 929, cargo termx-ui from ui/src-tauri since chat lane HAS Rust changes),
 then cross-lane integration commit (wire settings into
 ui/src/chat/chatDefaults.ts at // SETTINGS-INTEGRATION markers — fields now
 exist on main), then release rebuild + restage per RELEASE.md.
+
+## 2026-08-10 delta 2 — chat lane MERGED (33dd87d) + integration (b87d94d); release build running
+
+lane-chat merged onto main as 33dd87d (squashed 8 lane commits, 54 files,
++6966). Reviewed before merge: chat_feed path guard (canonicalizes target AND
+roots, prefix check — traversal-safe, no arbitrary-file reader), promptWatcher
+retry only ever fires downstream of a user click (beginAnswer), one retry max.
+Cherry-pick auto-merged App.tsx with the settings lane — no manual conflict.
+Required `npm install` in ui/ (react-markdown + rehype-sanitize new deps).
+Gates on main: tsc clean; vitest 1003/1003 (86 files; NEW BASELINE 1003);
+e2e 6/6; cargo termx-ui 181 (NEW BASELINE, from ui/src-tauri); cargo host 154.
+One SettingsSurface test timed out under load on the first full run — passed
+13/13 isolated and full-green on rerun; load flake, same class as the earlier
+62-file interference artifact.
+
+Cross-lane integration committed as b87d94d: defaultChatViewMode/
+defaultChatDensity(settings?) narrow structural param; App.tsx passes
+`settings`; SETTINGS-INTEGRATION markers resolved/removed; 4-test
+chatDefaults.test.ts added (vitest baseline now 1007).
+
+Lane deviations (accepted, documented in lane report + code): promptWatcher.ts
+(not promptCard.ts — Windows case-collision with PromptCard.tsx); ChatOverlay
+owns feed lifecycle + 2s idle timer; POLL_MAX_BYTES 1MiB cap; arrow-keys-only
+answers; stateful ChatNormalizer with plan's pure fn kept test-only.
+NOTE from lane: exactOptionalPropertyTypes is NOT actually on in ui tsconfig
+(code written to the idiom anyway). Host test
+ring_eviction_spills_to_the_history_file is load-flaky (pre-existing).
+
+IN FLIGHT: `npx tauri build --no-bundle` backgrounded (task b4g0j1a19,
+output in scratchpad tasks dir). ON COMPLETION: verify newest
+ui/src-tauri/target/release/build/tauri-*/output has custom_protocol and NO
+cargo:rustc-cfg=dev; then `cargo build --release -p termx-host --bins` from
+root; then stage TermX.exe/termx-ui.exe (same binary), termx-host.exe,
+termx-output.exe into C:\Dev\TermX\dist-portable\TermX\ (rename running exes
+aside as .prev first). Tell Michael to restart TermX.
+MICHAEL-GATED after restart: manual chat gate (real Claude Code session in
+chat view through a permission prompt, AskUserQuestion, plan approval —
+detector fixtures are transcriptions, live TUI contact unverified), eyeball
+SettingsSurface visually, delete .old/.prev in dist-portable.
