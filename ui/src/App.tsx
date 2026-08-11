@@ -119,6 +119,12 @@ registerAction({
 
 const NO_LIVE_OUTPUTS: readonly LiveOutputRow[] = [];
 
+/** How often the workspace rescans agent sessions for pane↔chat linkage. */
+const CONVERSATIONS_RESCAN_MS = 30_000;
+const NO_RECORDS: readonly LlmSessionRecord[] = [];
+const emptyRecords = () => NO_RECORDS;
+const noopSubscribe = () => () => {};
+
 export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
   const [state, setState] = useState<AppState>({ type: "loading" });
 
@@ -286,6 +292,28 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     });
   }, [conversationsStore, settingsStore]);
   useEffect(() => () => noteScheduler?.dispose(), [noteScheduler]);
+
+  // Chat linkage needs a live session list. The rail refreshes when opened,
+  // but a pane running a freshly started agent session must gain its chat
+  // switch without the rail ever opening — so scan on mount and keep the list
+  // current while the workspace lives. Unforced scans are cheap: the Rust
+  // side skips unchanged transcripts via its mtime index.
+  const conversationsRecords = useSyncExternalStore(
+    conversationsStore?.subscribe ?? noopSubscribe,
+    conversationsStore
+      ? () => conversationsStore.getSnapshot().records
+      : emptyRecords,
+  );
+  useEffect(() => {
+    if (!conversationsStore) {
+      return;
+    }
+    void conversationsStore.refresh(false);
+    const timer = window.setInterval(() => {
+      void conversationsStore.refresh(false);
+    }, CONVERSATIONS_RESCAN_MS);
+    return () => window.clearInterval(timer);
+  }, [conversationsStore]);
 
   // Live OSC 9;77 output registrations (polish P4), keyed by termx session.
   // The dock follows the focused pane of the active tab; sidecar history is
@@ -572,7 +600,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   // it can be tied to a transcript: the session key a resume recorded, else
   // the pane's own directory, else nothing at all.
   const chatForSession = (sessionId: number, tabId: string) => {
-    const records = conversationsStore?.getSnapshot().records ?? [];
+    const records = conversationsRecords;
     if (records.length === 0) {
       return null;
     }
@@ -633,7 +661,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     return () => window.removeEventListener("keydown", handleKey, true);
     // chatForSession closes over the current stores and ui snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusedSessionId, activeTabId, uiSnapshot, conversationsStore, controller]);
+  }, [focusedSessionId, activeTabId, uiSnapshot, conversationsRecords, controller]);
 
   return (
     <>
