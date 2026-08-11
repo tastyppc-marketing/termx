@@ -843,3 +843,36 @@ chat view on a real Claude Code session (permission prompt + AskUserQuestion
 fixtures were transcriptions), SettingsSurface visual pass, adoption-batch
 bug reports still pending. Recorded follow-ups: Codex-native adapter,
 Warp-style blocks for plain shell, host log rotation, colored history.
+
+## 2026-08-10 delta 4 — LIVE INCIDENT root-caused, hotfixed (4404e69), restaged 20:37
+
+Michael restarted into the 04:30 build: every pane "Attach error", banner
+"Reconnecting to host… (attempt 1)" forever, new terminals refused. Diagnosis
+(via second TermX instance with WEBVIEW2_USER_DATA_FOLDER +
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port + CDP):
+host healthy (auth_ok, 4 sessions, replies to probes), UI socket received the
+5.5 MB replay then died 1006. ROOT CAUSE: client.ts decodeBase64's validation
+regex overflows V8's regex stack on multi-MB input ("Maximum call stack size
+exceeded"); receiveText's catch → terminate("Host sent an invalid message")
+→ socket closed → reconnect → same replay → loop. Armed overnight when
+session 24's ring filled to its 4 MiB cap (stream offset 144 MB). LATENT
+since M2 — not caused by the chat/settings batch; the .prev2 build breaks
+identically against a full ring.
+
+Second bug found same session: PATH_LINK_REGEX carried /g; web-links addon
+compiles urlRegex as flags+"g" → "gg" → SyntaxError storm on every hover
+(path links never worked). Pane now passes a flagless copy.
+
+Fix 4404e69: decodeBase64 drops the regex (length%4 + atob try/catch);
+regression tests (4 MiB replay attach; addon flag-concat). Gates: tsc clean,
+vitest 1009/1009 (baseline 1009). Rebuilt (7m39s — NOTE: backgrounded tauri
+builds get KILLED by the harness; always foreground) and restaged 20:37.
+VERIFIED live: diagnostic instance of the staged exe connects, no banner, no
+attach errors, only the legit "Earlier output is no longer available" notice.
+04:30 broken binaries kept as TermX.exe.bad/termx-ui.exe.bad. Michael: close
++ relaunch TermX (host keeps running; all 4 sessions intact). dist-portable
+now has .old/.prev/.prev2/.bad generations — all deletable.
+
+Debug recipe that cracked it (keep): isolated-profile TermX + CDP on 9223;
+Node probes with runtime.json creds; in-page Runtime.evaluate raw-WS probes;
+live WebSocket-constructor wrap to log the app socket from inside.
