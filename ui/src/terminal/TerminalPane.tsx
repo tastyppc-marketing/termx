@@ -633,7 +633,12 @@ function createPresentation(
     terminal.loadAddon(fit);
     terminal.loadAddon(search);
     terminal.loadAddon(new WebLinksAddon(openLink));
-    terminal.loadAddon(new WebLinksAddon(openLink, { urlRegex: PATH_LINK_REGEX }));
+    // The addon appends its own "g" when compiling urlRegex; passing the
+    // exported global regex through produced invalid "gg" flags and threw on
+    // every hover, so hand it a flagless copy.
+    terminal.loadAddon(
+      new WebLinksAddon(openLink, { urlRegex: new RegExp(PATH_LINK_REGEX.source) }),
+    );
     terminal.open(element);
     fit.fit();
   } catch (error) {

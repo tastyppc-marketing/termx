@@ -369,6 +369,33 @@ describe("HostClient session attachments", () => {
     ]);
   });
 
+  it("decodes a full-ring replay (multi-megabyte base64) without tearing down the connection", async () => {
+    // Regression: the old base64 validation regex overflowed V8's regex stack
+    // on multi-MB payloads ("Maximum call stack size exceeded"), which the
+    // message handler treated as "Host sent an invalid message" and closed the
+    // socket — an infinite reconnect loop for any session whose ring had
+    // filled (2026-08-10, live incident).
+    const { client, socket } = await connect();
+    const received: number[] = [];
+    const attachPromise = client.attach(9, {
+      onOutput: (event) => received.push(event.data.byteLength),
+    });
+    await flushPromises();
+
+    const ringBytes = 4 * 1024 * 1024; // termx-host's full ring cap
+    socket.receiveJson({
+      type: "replay",
+      session_id: 9,
+      start_offset: 144_622_698, // a realistic multi-hour stream offset
+      data_b64: base64("A".repeat(ringBytes)),
+    });
+
+    const handle = await attachPromise;
+    expect(handle.sessionId).toBe(9);
+    expect(received).toEqual([ringBytes]);
+    expect(socket.readyState).toBe(1);
+  });
+
   it("routes Replay during another pending request without resolving that request", async () => {
     const { client, socket } = await connect();
     const output = vi.fn();

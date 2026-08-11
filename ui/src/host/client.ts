@@ -962,10 +962,19 @@ function sessionsField(value: Record<string, unknown>): SessionInfo[] {
 }
 
 function decodeBase64(value: string): Uint8Array {
-  if (value.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+  // No regex here: V8 overflows its regex stack on multi-megabyte inputs
+  // (`(?:....)*$` over a full 4 MiB ring replay ≈ 5.5 MB of base64 throws
+  // "Maximum call stack size exceeded"). atob does the charset/padding
+  // validation itself and scales linearly.
+  if (value.length % 4 !== 0) {
     throw new Error("invalid replay encoding");
   }
-  const decoded = atob(value);
+  let decoded: string;
+  try {
+    decoded = atob(value);
+  } catch {
+    throw new Error("invalid replay encoding");
+  }
   return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
 }
 

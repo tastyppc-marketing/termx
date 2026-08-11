@@ -176,6 +176,18 @@ describe("TerminalPane", () => {
     expect(Array.from(text.matchAll(PATH_LINK_REGEX), (match) => match[0])).toEqual([]);
   });
 
+  it("survives the web-links addon's flag concatenation", () => {
+    // The addon compiles urlRegex as `new RegExp(source, flags + "g")`.
+    // Handing it the exported global regex produced invalid "gg" flags and a
+    // SyntaxError on every hover, so the pane must pass a flagless copy
+    // (regression, 2026-08-10).
+    const addonCompile = (regex: RegExp) =>
+      new RegExp(regex.source, `${regex.flags}g`);
+
+    expect(() => addonCompile(PATH_LINK_REGEX)).toThrow(SyntaxError);
+    expect(() => addonCompile(new RegExp(PATH_LINK_REGEX.source))).not.toThrow();
+  });
+
   it("does not misreport secure URL activation as blocked", async () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
 
