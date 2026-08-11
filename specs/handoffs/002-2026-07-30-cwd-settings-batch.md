@@ -876,3 +876,26 @@ now has .old/.prev/.prev2/.bad generations — all deletable.
 Debug recipe that cracked it (keep): isolated-profile TermX + CDP on 9223;
 Node probes with runtime.json creds; in-page Runtime.evaluate raw-WS probes;
 live WebSocket-constructor wrap to log the app socket from inside.
+
+## 2026-08-11 delta — live-session chat linkage FIXED (56d5890), restaged 15:30
+
+Michael: chat works on resumed transcripts but a live claude session stays
+TUI. Cause: conversations store (only linkage source) refreshed ONLY when
+the ConversationsRail mounted, and ReadyWorkspace read records without
+subscribing — fresh sessions never in records, no re-render on refresh, so
+chatForSession returned null and no switch rendered. Fix 56d5890 in App.tsx:
+useSyncExternalStore subscription to the store + refresh(false) on mount and
+every 30s (CONVERSATIONS_RESCAN_MS; unforced scans skip unchanged files via
+the Rust mtime index). Gates: tsc clean, vitest 1009/1009.
+
+Rebuilt (7m11s foreground) + restaged 15:30 (prior gen -> .prev3). VERIFIED
+LIVE via diagnostic instance (isolated WV2 + CDP 9224): connected, 5 chat
+switches on live panes; clicked one -> chat view mounted with 19 bubbles,
+3 tool chips, input box, density toggle. Michael restarted at 15:07 (before
+this restage) so he needs ONE more restart to get it.
+
+REMAINING KNOWN GAPS (not bugs): panes whose shell never emits OSC 9;9
+(sessions 25/26 cwd null) can't cwd-link — the spec's manual "Link
+conversation…" picker (onOpenLinkPicker) is supported by ChatView but NOT
+wired in App (no picker UI exists). Follow-up candidate. Two same-cwd
+equally-recent sessions -> no link by design.
