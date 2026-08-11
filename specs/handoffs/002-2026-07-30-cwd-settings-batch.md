@@ -899,3 +899,16 @@ REMAINING KNOWN GAPS (not bugs): panes whose shell never emits OSC 9;9
 conversation…" picker (onOpenLinkPicker) is supported by ChatView but NOT
 wired in App (no picker UI exists). Follow-up candidate. Two same-cwd
 equally-recent sessions -> no link by design.
+
+## 2026-08-11 (compact checkpoint) — IDLE, awaiting Michael
+
+Nothing in flight. Main tip 8e2ba1e; working tree clean apart from
+line-ending phantom "modified" files (Cargo.toml, permission TOMLs — no real
+diff). All fixes staged in C:\Dev\TermX\dist-portable\TermX\ (15:30 build);
+Michael's running instance predates it (15:07) — he owes ONE restart, then:
+chat switch on live claude panes within ~30s of session start, Ctrl+Shift+C
+flip, manual chat gate (permission prompt / AskUserQuestion / plan approval
+through prompt cards), SettingsSurface eyeball. His bug reports drive next
+steps. Queued follow-ups: wire the manual "Link conversation…" picker
+(ChatView supports onOpenLinkPicker; no picker UI in App), Codex-native
+adapter, Warp-style blocks for plain shell.
