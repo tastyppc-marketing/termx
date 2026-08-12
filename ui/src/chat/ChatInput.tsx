@@ -20,6 +20,15 @@ export const HISTORY_CAP = 50;
 export const PASTE_START = "\x1b[200~";
 export const PASTE_END = "\x1b[201~";
 
+/**
+ * Enter is ALWAYS its own write, a beat after the text. A TUI that receives
+ * "text\r" as one chunk reads it as a paste — the \r becomes a newline in the
+ * input box and nothing submits. Two writes with a gap is what real typing
+ * looks like, and it is the same trick tmux's send-keys uses.
+ */
+export const ENTER_KEY = "\r";
+export const ENTER_DELAY_MS = 40;
+
 export interface ChatInputProps {
   /** Raw PTY write. */
   sendKeys(data: string): void;
@@ -27,11 +36,9 @@ export interface ChatInputProps {
   promptActive?: boolean;
 }
 
-/** What actually goes down the wire for `text`. */
-export function keysForMessage(text: string): string {
-  return text.includes("\n")
-    ? `${PASTE_START}${text}${PASTE_END}\r`
-    : `${text}\r`;
+/** What goes down the wire for `text` — the Enter follows as its own write. */
+export function payloadForMessage(text: string): string {
+  return text.includes("\n") ? `${PASTE_START}${text}${PASTE_END}` : text;
 }
 
 export function ChatInput({ sendKeys, promptActive = false }: ChatInputProps) {
@@ -46,7 +53,8 @@ export function ChatInput({ sendKeys, promptActive = false }: ChatInputProps) {
     if (message.length === 0) {
       return;
     }
-    sendKeys(keysForMessage(message));
+    sendKeys(payloadForMessage(message));
+    window.setTimeout(() => sendKeys(ENTER_KEY), ENTER_DELAY_MS);
     setHistory((current) => [message, ...current].slice(0, HISTORY_CAP));
     cursor.current = -1;
     setText("");

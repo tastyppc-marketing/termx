@@ -21,6 +21,9 @@ export interface ChatOverlayProps {
   header: ChatHeaderProps;
   density: ChatDensity;
   onDensityChange(density: ChatDensity): void;
+  /** Whether reasoning rows start open (independent of `density`). */
+  showThinking: boolean;
+  onShowThinkingChange(showThinking: boolean): void;
   sendKeys(data: string): void;
   terminalSnapshot?: () => string[];
   /** Injected feed opener; production uses the tauri commands. */
@@ -32,6 +35,8 @@ export function ChatOverlay({
   header,
   density,
   onDensityChange,
+  showThinking,
+  onShowThinkingChange,
   sendKeys,
   terminalSnapshot,
   openFeed = openChatFeed,
@@ -120,6 +125,8 @@ export function ChatOverlay({
       feed={feed}
       density={density}
       onDensityChange={onDensityChange}
+      showThinking={showThinking}
+      onShowThinkingChange={onShowThinkingChange}
       sendKeys={sendKeys}
       header={header}
       transcriptIdle={idle}

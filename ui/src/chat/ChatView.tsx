@@ -46,6 +46,12 @@ export interface ChatViewProps {
   feed: ChatFeed;
   density: ChatDensity;
   onDensityChange(density: ChatDensity): void;
+  /**
+   * Whether reasoning rows start open. Deliberately independent of `density`:
+   * the thoughts are worth reading even while every tool stays a chip.
+   */
+  showThinking: boolean;
+  onShowThinkingChange(showThinking: boolean): void;
   /** Raw PTY write. The ONLY way this view produces input. */
   sendKeys(data: string): void;
   header: ChatHeaderProps;
@@ -113,6 +119,8 @@ export function ChatView({
   feed,
   density,
   onDensityChange,
+  showThinking,
+  onShowThinkingChange,
   sendKeys,
   header,
   terminalSnapshot,
@@ -174,19 +182,41 @@ export function ChatView({
     setPinned(true);
   };
 
-  const toggleTool = (id: string) => {
+  const defaultExpanded = (entry: ChatEntry) => {
+    if (entry.kind === "tool") {
+      return isExpandedByDefault(entry, density);
+    }
+    return entry.kind === "thinking" ? showThinking : false;
+  };
+
+  const toggleEntry = (id: string) => {
     setOverrides((current) => {
       const entry = entries.find((candidate) => candidate.id === id);
-      const fallback =
-        entry && entry.kind === "tool" ? isExpandedByDefault(entry, density) : false;
+      const fallback = entry ? defaultExpanded(entry) : false;
       return { ...current, [id]: !(current[id] ?? fallback) };
     });
   };
 
   const isExpanded = (entry: ChatEntry) =>
-    entry.kind === "tool"
-      ? (overrides[entry.id] ?? isExpandedByDefault(entry, density))
+    entry.kind === "tool" || entry.kind === "thinking"
+      ? (overrides[entry.id] ?? defaultExpanded(entry))
       : false;
+
+  // Flipping the header preference speaks for EVERY row again: per-row
+  // overrides on thinking are cleared so the change is visible immediately.
+  const toggleShowThinking = () => {
+    onShowThinkingChange(!showThinking);
+    setOverrides((current) => {
+      const next: Record<string, boolean> = {};
+      for (const [id, value] of Object.entries(current)) {
+        const entry = entries.find((candidate) => candidate.id === id);
+        if (entry?.kind !== "thinking") {
+          next[id] = value;
+        }
+      }
+      return next;
+    });
+  };
 
   return (
     <section className="chat-view" data-testid="chat-view" aria-label="Session chat">
@@ -210,6 +240,15 @@ export function ChatView({
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          className="chat-header__button"
+          aria-pressed={showThinking}
+          title="Keep the reasoning open in every row"
+          onClick={toggleShowThinking}
+        >
+          Thoughts
+        </button>
         {header.onOpenLinkPicker ? (
           <button
             type="button"
@@ -270,7 +309,7 @@ export function ChatView({
             key={entry.id}
             entry={entry}
             expanded={isExpanded(entry)}
-            onToggleTool={toggleTool}
+            onToggle={toggleEntry}
           />
         ))}
       </div>

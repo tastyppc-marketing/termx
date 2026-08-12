@@ -1,7 +1,13 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ChatInput, HISTORY_CAP, PASTE_END, PASTE_START } from "../ChatInput";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  ChatInput,
+  ENTER_DELAY_MS,
+  HISTORY_CAP,
+  PASTE_END,
+  PASTE_START,
+} from "../ChatInput";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -9,6 +15,7 @@ let root: Root;
 beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true;
+  vi.useFakeTimers();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -17,7 +24,15 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  vi.useRealTimers();
 });
+
+/** Let the delayed Enter write fire. */
+async function pressLands(): Promise<void> {
+  await act(async () => {
+    vi.advanceTimersByTime(ENTER_DELAY_MS);
+  });
+}
 
 function box(): HTMLTextAreaElement {
   const found = container.querySelector("textarea");
@@ -70,12 +85,15 @@ async function mount(props: { promptActive?: boolean } = {}) {
 }
 
 describe("ChatInput", () => {
-  it("sends a single line followed by a carriage return", async () => {
+  it("sends the text, then Enter as its OWN write a beat later", async () => {
     const sent = await mount();
     await type("run the tests");
     await press("Enter");
-    expect(sent).toEqual(["run the tests\r"]);
+    // One write would read as a paste on the far side — no submit.
+    expect(sent).toEqual(["run the tests"]);
     expect(box().value).toBe("");
+    await pressLands();
+    expect(sent).toEqual(["run the tests", "\r"]);
   });
 
   it("sends nothing for an empty box", async () => {
@@ -98,8 +116,10 @@ describe("ChatInput", () => {
     const sent = await mount();
     await type("first line\nsecond line");
     await press("Enter");
+    await pressLands();
     expect(sent).toEqual([
-      `${PASTE_START}first line\nsecond line${PASTE_END}\r`,
+      `${PASTE_START}first line\nsecond line${PASTE_END}`,
+      "\r",
     ]);
   });
 
@@ -107,9 +127,11 @@ describe("ChatInput", () => {
     const sent = await mount();
     await type("one");
     await press("Enter");
+    await pressLands();
     await type("two");
     await press("Enter");
-    expect(sent).toHaveLength(2);
+    await pressLands();
+    expect(sent).toEqual(["one", "\r", "two", "\r"]);
 
     await press("ArrowUp", { caret: 0 });
     expect(box().value).toBe("two");
@@ -150,7 +172,8 @@ describe("ChatInput", () => {
     expect(container.textContent).toContain("waiting on the card above");
     await type("something else");
     await press("Enter");
-    expect(sent).toEqual(["something else\r"]);
+    await pressLands();
+    expect(sent).toEqual(["something else", "\r"]);
   });
 
   it("shows no hint when nothing is waiting", async () => {

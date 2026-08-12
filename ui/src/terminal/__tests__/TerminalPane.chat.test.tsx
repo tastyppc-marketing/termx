@@ -148,8 +148,10 @@ function chatProps(overrides: Partial<PaneChatProps> = {}): PaneChatProps {
     title: "Chat view",
     mode: "terminal",
     density: "chips",
+    showThinking: false,
     onModeChange: vi.fn(),
     onDensityChange: vi.fn(),
+    onShowThinkingChange: vi.fn(),
     openFeed: opener.open as PaneChatProps["openFeed"],
     ...overrides,
   };

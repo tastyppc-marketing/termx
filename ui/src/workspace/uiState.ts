@@ -12,8 +12,10 @@
 import { DEFAULT_TRAYS, type TrayId } from "../actions/registry";
 import {
   DEFAULT_CHAT_DENSITY,
+  DEFAULT_CHAT_SHOW_THINKING,
   DEFAULT_CHAT_VIEW_MODE,
   parseChatDensity,
+  parseChatShowThinking,
   parseChatViewMode,
 } from "../chat/chatDefaults";
 import type { ChatDensity, ChatViewMode } from "../chat/types";
@@ -30,6 +32,8 @@ export const RECENT_FOLDERS_CAP = 50;
 export interface ChatPaneState {
   mode: ChatViewMode;
   density: ChatDensity;
+  /** Reasoning rows start open. Independent of `density`, which is tools-only. */
+  showThinking: boolean;
 }
 
 export interface UiStateV1 {
@@ -167,12 +171,14 @@ function parseChatPanes(
     const record = entry as Record<string, unknown>;
     const mode = parseChatViewMode(record.mode);
     const density = parseChatDensity(record.density);
-    if (mode === undefined && density === undefined) {
+    const showThinking = parseChatShowThinking(record.showThinking);
+    if (mode === undefined && density === undefined && showThinking === undefined) {
       continue;
     }
     result[key] = {
       mode: mode ?? DEFAULT_CHAT_VIEW_MODE,
       density: density ?? DEFAULT_CHAT_DENSITY,
+      showThinking: showThinking ?? DEFAULT_CHAT_SHOW_THINKING,
     };
   }
   return Object.keys(result).length > 0 ? result : undefined;
@@ -208,7 +214,11 @@ export function setChatPaneState(
     delete next.chatPanes;
     return next;
   }
-  if (current?.mode === chat.mode && current.density === chat.density) {
+  if (
+    current?.mode === chat.mode &&
+    current.density === chat.density &&
+    current.showThinking === chat.showThinking
+  ) {
     return state;
   }
   return { ...state, chatPanes: { ...state.chatPanes, [sessionId]: chat } };

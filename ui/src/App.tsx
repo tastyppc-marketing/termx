@@ -13,7 +13,11 @@ import {
 } from "./actions/registry";
 import { FeaturesDock } from "./actions/FeaturesDock";
 import { Tray } from "./actions/Tray";
-import { defaultChatDensity, defaultChatViewMode } from "./chat/chatDefaults";
+import {
+  DEFAULT_CHAT_SHOW_THINKING,
+  defaultChatDensity,
+  defaultChatViewMode,
+} from "./chat/chatDefaults";
 import { resolveLinkage } from "./chat/linkage";
 import type { ChatViewMode } from "./chat/types";
 import { CloseGuard } from "./close/CloseGuard";
@@ -617,16 +621,24 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     const stored = uiSnapshot.chatPanes?.[key];
     const mode = stored?.mode ?? defaultChatViewMode(settings);
     const density = stored?.density ?? defaultChatDensity(settings);
-    const write = (next: { mode: ChatViewMode; density: typeof density }) =>
-      uiStateStore.update((current) => setChatPaneState(current, key, next));
+    const showThinking = stored?.showThinking ?? DEFAULT_CHAT_SHOW_THINKING;
+    const write = (next: {
+      mode: ChatViewMode;
+      density: typeof density;
+      showThinking: boolean;
+    }) => uiStateStore.update((current) => setChatPaneState(current, key, next));
     return {
       filePath: link.record.filePath,
       title: link.record.title,
       mode,
       density,
-      onModeChange: (nextMode: ChatViewMode) => write({ mode: nextMode, density }),
+      showThinking,
+      onModeChange: (nextMode: ChatViewMode) =>
+        write({ mode: nextMode, density, showThinking }),
       onDensityChange: (nextDensity: typeof density) =>
-        write({ mode, density: nextDensity }),
+        write({ mode, density: nextDensity, showThinking }),
+      onShowThinkingChange: (nextShowThinking: boolean) =>
+        write({ mode, density, showThinking: nextShowThinking }),
     };
   };
 

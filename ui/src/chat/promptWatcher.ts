@@ -17,6 +17,7 @@
  * card so the user is never stuck arguing with a button.
  */
 
+import { ENTER_DELAY_MS, ENTER_KEY } from "./ChatInput";
 import { detectPrompt, keysForMenuAnswer, type DetectedPrompt } from "./promptDetector";
 
 /** How often the screen is sampled; also the debounce, since a card needs two
@@ -166,7 +167,7 @@ export function createPromptController(
       // Re-derive from what is on screen NOW: the selector may have moved even
       // though the dialog did not close.
       if (again.kind === "menu") {
-        options.sendKeys(keysForMenuAnswer(again, target));
+        sendSplittingEnter(keysForMenuAnswer(again, target));
       }
       state = { ...state, prompt: again };
       armRetry();
@@ -179,11 +180,27 @@ export function createPromptController(
     });
   };
 
+  /**
+   * Write `keys`, but a trailing Enter goes as its own write a beat later —
+   * a TUI that gets "answer\r" in one chunk reads it as a paste and does not
+   * submit (see `ENTER_DELAY_MS`).
+   */
+  const sendSplittingEnter = (keys: string) => {
+    const body = keys.endsWith(ENTER_KEY) ? keys.slice(0, -1) : keys;
+    if (body.length > 0) {
+      options.sendKeys(body);
+    }
+    if (body.length === keys.length) {
+      return;
+    }
+    schedule(() => options.sendKeys(ENTER_KEY), ENTER_DELAY_MS);
+  };
+
   const beginAnswer = (label: string, keys: string) => {
     if (state.prompt === null || state.status === "answering") {
       return;
     }
-    options.sendKeys(keys);
+    sendSplittingEnter(keys);
     retried = false;
     publish({ prompt: state.prompt, status: "answering", answeredLabel: label });
     armRetry();
@@ -214,7 +231,7 @@ export function createPromptController(
       if (text.length === 0) {
         return;
       }
-      options.sendKeys(`${text}\r`);
+      sendSplittingEnter(`${text}${ENTER_KEY}`);
       publish({ prompt: null, status: "answered", answeredLabel: text });
     },
     dismiss() {

@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ChatView } from "../ChatView";
 import type { ChatFeed } from "../feed";
+import { ENTER_DELAY_MS } from "../ChatInput";
 import { DETECT_INTERVAL_MS, PROMPT_RETRY_MS, type ScheduleFn } from "../promptWatcher";
 import permissionBash from "./fixtures/prompts/permission-bash.txt?raw";
 
@@ -90,6 +91,8 @@ async function mount(options: { idle?: boolean } = {}): Promise<Harness> {
         feed={emptyFeed}
         density="chips"
         onDensityChange={() => undefined}
+        showThinking={false}
+        onShowThinkingChange={() => undefined}
         sendKeys={(data) => sent.push(data)}
         header={{ title: "Session", onFlipToTerminal: () => undefined }}
         terminalSnapshot={() => screen}
@@ -144,7 +147,11 @@ describe("prompt cards", () => {
     await harness.settle();
 
     await act(async () => button("No, and tell Claude what to do differently (esc)").click());
-    expect(harness.sent).toEqual(["\x1b[B\x1b[B\r"]);
+    // The Enter is its own write, a beat after the arrows — one chunk with a
+    // trailing \r reads as a paste on the far side and never submits.
+    expect(harness.sent).toEqual(["\x1b[B\x1b[B"]);
+    await act(async () => harness.clock.advance(ENTER_DELAY_MS));
+    expect(harness.sent).toEqual(["\x1b[B\x1b[B", "\r"]);
     expect(container.querySelector('[data-testid="prompt-card"]')).not.toBeNull();
 
     // The dialog closes; the card confirms the answer took.
@@ -154,7 +161,7 @@ describe("prompt cards", () => {
     expect(
       container.querySelector('[data-testid="prompt-answered"]')?.textContent,
     ).toContain("No, and tell Claude what to do differently (esc)");
-    expect(harness.sent).toHaveLength(1);
+    expect(harness.sent).toHaveLength(2);
   });
 
   it("retries once against the screen as it stands, then degrades", async () => {
@@ -163,10 +170,13 @@ describe("prompt cards", () => {
     await harness.settle();
 
     await act(async () => button("Yes").click());
+    // "Yes" is already selected: the answer is a bare Enter, delayed.
+    await act(async () => harness.clock.advance(ENTER_DELAY_MS));
     expect(harness.sent).toEqual(["\r"]);
 
     // Nothing moved: one re-derived retry.
     await act(async () => harness.clock.advance(PROMPT_RETRY_MS));
+    await act(async () => harness.clock.advance(ENTER_DELAY_MS));
     expect(harness.sent).toEqual(["\r", "\r"]);
     expect(container.querySelector('[data-testid="prompt-card"]')?.getAttribute("data-kind")).toBe(
       "menu",
@@ -210,7 +220,9 @@ describe("prompt cards", () => {
         new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
       );
     });
-    expect(harness.sent).toEqual(["default\r"]);
+    expect(harness.sent).toEqual(["default"]);
+    await act(async () => harness.clock.advance(ENTER_DELAY_MS));
+    expect(harness.sent).toEqual(["default", "\r"]);
   });
 
   it("answers a y/N confirm with the key it showed", async () => {
@@ -222,7 +234,9 @@ describe("prompt cards", () => {
     ).toBe("confirm");
 
     await act(async () => button("Yes").click());
-    expect(harness.sent).toEqual(["y\r"]);
+    expect(harness.sent).toEqual(["y"]);
+    await act(async () => harness.clock.advance(ENTER_DELAY_MS));
+    expect(harness.sent).toEqual(["y", "\r"]);
   });
 
   it("stops watching when the chat unmounts", async () => {

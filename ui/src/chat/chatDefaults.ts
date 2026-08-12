@@ -19,6 +19,18 @@ export const DEFAULT_CHAT_DENSITY: ChatDensity = "smart";
 export const CHAT_DENSITIES: readonly ChatDensity[] = ["chips", "smart", "full"];
 
 /**
+ * Reasoning starts OPEN, independently of the tool density: the thoughts are
+ * the part worth reading while bash noise stays collapsed, and the body is a
+ * capped scroll box so an open row never swallows the conversation.
+ */
+export const DEFAULT_CHAT_SHOW_THINKING = true;
+
+/** Tolerant parse for the persisted thinking preference. */
+export function parseChatShowThinking(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+/**
  * The user's `agentPaneDefaultView` setting when given one, else the built-in
  * default. Structural parameter — `TermxSettings` satisfies it without this
  * module importing the settings layer.

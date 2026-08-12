@@ -9,7 +9,7 @@
  * with it.
  */
 
-import { Component, useState, type ReactNode } from "react";
+import { Component, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import { ToolChip } from "./ToolChip";
@@ -45,31 +45,43 @@ function AssistantBubble({ markdown }: { markdown: string }) {
   );
 }
 
-function ThinkingRow({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
+/**
+ * Owned by the view, like a tool chip: the default comes from the header's
+ * "Thoughts" preference and a click is a per-row override. The open body is a
+ * capped scroll box (CSS), so a long thought never swallows the conversation.
+ */
+function ThinkingRow({
+  text,
+  expanded,
+  onToggle,
+}: {
+  text: string;
+  expanded: boolean;
+  onToggle(): void;
+}) {
   return (
     <div className="chat-thinking" data-testid="chat-thinking">
       <button
         type="button"
         className="chat-thinking__toggle"
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        aria-expanded={expanded}
+        onClick={onToggle}
       >
-        {open ? "Thinking — hide" : "Thinking — show"}
+        {expanded ? "Thinking — hide" : "Thinking — show"}
       </button>
-      {open ? <pre className="chat-thinking__body">{text}</pre> : null}
+      {expanded ? <pre className="chat-thinking__body">{text}</pre> : null}
     </div>
   );
 }
 
 export interface ChatBubbleProps {
   entry: ChatEntry;
-  /** Whether a tool entry's body is open; ignored for other kinds. */
+  /** Whether a tool or thinking entry's body is open; ignored otherwise. */
   expanded: boolean;
-  onToggleTool(id: string): void;
+  onToggle(id: string): void;
 }
 
-export function ChatBubble({ entry, expanded, onToggleTool }: ChatBubbleProps) {
+export function ChatBubble({ entry, expanded, onToggle }: ChatBubbleProps) {
   switch (entry.kind) {
     case "user":
       return (
@@ -80,13 +92,19 @@ export function ChatBubble({ entry, expanded, onToggleTool }: ChatBubbleProps) {
     case "assistant":
       return <AssistantBubble markdown={entry.markdown} />;
     case "thinking":
-      return <ThinkingRow text={entry.text} />;
+      return (
+        <ThinkingRow
+          text={entry.text}
+          expanded={expanded}
+          onToggle={() => onToggle(entry.id)}
+        />
+      );
     case "tool":
       return (
         <ToolChip
           entry={entry}
           expanded={expanded}
-          onToggle={() => onToggleTool(entry.id)}
+          onToggle={() => onToggle(entry.id)}
         />
       );
     case "system":

@@ -92,8 +92,11 @@ export interface PaneChatProps {
   model?: string;
   mode: ChatViewMode;
   density: ChatDensity;
+  /** Whether reasoning rows start open (independent of `density`). */
+  showThinking: boolean;
   onModeChange(mode: ChatViewMode): void;
   onDensityChange(density: ChatDensity): void;
+  onShowThinkingChange(showThinking: boolean): void;
   onOpenLinkPicker?: () => void;
   /** Injected feed opener (tests). */
   openFeed?: typeof openChatFeed;
@@ -467,6 +470,8 @@ export function TerminalPane(props: TerminalPaneProps) {
           filePath={props.chat.filePath}
           density={props.chat.density}
           onDensityChange={props.chat.onDensityChange}
+          showThinking={props.chat.showThinking}
+          onShowThinkingChange={props.chat.onShowThinkingChange}
           sendKeys={(data) => bindingRef.current?.sendInput(data)}
           terminalSnapshot={() => presentationRef.current?.visibleLines?.() ?? []}
           header={{

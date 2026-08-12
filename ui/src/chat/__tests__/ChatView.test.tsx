@@ -66,6 +66,23 @@ function header(overrides: Partial<Parameters<typeof ChatView>[0]["header"]> = {
   return { title: "Session", onFlipToTerminal: () => undefined, ...overrides };
 }
 
+/** Every prop filled with an inert default; a test states only what it tests. */
+function view(
+  props: Partial<React.ComponentProps<typeof ChatView>> & { feed: ChatFeed },
+): React.ReactElement {
+  return (
+    <ChatView
+      density="chips"
+      onDensityChange={() => undefined}
+      showThinking={false}
+      onShowThinkingChange={() => undefined}
+      sendKeys={() => undefined}
+      header={header()}
+      {...props}
+    />
+  );
+}
+
 function button(text: string): HTMLButtonElement {
   const found = Array.from(container.querySelectorAll("button")).find(
     (candidate) => candidate.textContent?.trim() === text,
@@ -95,15 +112,7 @@ const entries: ChatEntry[] = [
 
 describe("ChatView", () => {
   it("renders one row per entry kind", async () => {
-    await render(
-      <ChatView
-        feed={fakeFeed(entries)}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed: fakeFeed(entries) }));
 
     expect(container.querySelector('[data-testid="chat-user"]')?.textContent).toBe(
       "run the tests",
@@ -121,8 +130,8 @@ describe("ChatView", () => {
 
   it("renders assistant markdown without letting raw HTML through", async () => {
     await render(
-      <ChatView
-        feed={fakeFeed([
+      view({
+        feed: fakeFeed([
           {
             kind: "assistant",
             id: "a2",
@@ -130,12 +139,8 @@ describe("ChatView", () => {
             markdown:
               '# Heading\n\n<img src="x" onerror="window.__pwned = true">\n\n<script>window.__pwned = true</script>\n\n`code`',
           },
-        ])}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
+        ]),
+      }),
     );
     const bubble = container.querySelector('[data-testid="chat-assistant"]');
     expect(bubble?.querySelector("h1")?.textContent).toBe("Heading");
@@ -147,41 +152,17 @@ describe("ChatView", () => {
 
   it("keeps a tool body closed on chips and open on full", async () => {
     const feed = fakeFeed(entries);
-    await render(
-      <ChatView
-        feed={feed}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed, density: "chips" }));
     expect(container.querySelector('[data-testid="chat-tool-detail"]')).toBeNull();
 
-    await render(
-      <ChatView
-        feed={feed}
-        density="full"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed, density: "full" }));
     expect(
       container.querySelector('[data-testid="chat-tool-detail"]')?.textContent,
     ).toBe("162 passed");
   });
 
   it("lets a click open one chip against the density", async () => {
-    await render(
-      <ChatView
-        feed={fakeFeed(entries)}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed: fakeFeed(entries), density: "chips" }));
     const chip = container.querySelector<HTMLButtonElement>(".chat-tool__line");
     await act(async () => chip?.click());
     expect(
@@ -190,16 +171,57 @@ describe("ChatView", () => {
     expect(chip?.getAttribute("aria-expanded")).toBe("true");
   });
 
+  it("opens the reasoning by default when the preference says so, in a scroll box", async () => {
+    const feed = fakeFeed(entries);
+    await render(view({ feed, showThinking: true, density: "chips" }));
+    // The thoughts are open even though every tool stays a chip.
+    expect(container.querySelector(".chat-thinking__body")?.textContent).toBe(
+      "weighing the options",
+    );
+    expect(container.querySelector('[data-testid="chat-tool-detail"]')).toBeNull();
+
+    await render(view({ feed, showThinking: false, density: "chips" }));
+    expect(container.querySelector(".chat-thinking__body")).toBeNull();
+  });
+
+  it("lets a click close one thought against the preference", async () => {
+    await render(view({ feed: fakeFeed(entries), showThinking: true }));
+    const toggle = container.querySelector<HTMLButtonElement>(".chat-thinking__toggle");
+    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => toggle?.click());
+    expect(container.querySelector(".chat-thinking__body")).toBeNull();
+    await act(async () => toggle?.click());
+    expect(container.querySelector(".chat-thinking__body")).not.toBeNull();
+  });
+
+  it("reports the Thoughts preference and clears per-row overrides with it", async () => {
+    const picked: boolean[] = [];
+    const feed = fakeFeed(entries);
+    await render(
+      view({ feed, showThinking: true, onShowThinkingChange: (next) => picked.push(next) }),
+    );
+
+    // Close this one row by hand, then flip the preference off and back on:
+    // the override must not survive, or the row would stay stuck closed.
+    const toggle = container.querySelector<HTMLButtonElement>(".chat-thinking__toggle");
+    await act(async () => toggle?.click());
+    expect(container.querySelector(".chat-thinking__body")).toBeNull();
+
+    await act(async () => button("Thoughts").click());
+    expect(picked).toEqual([false]);
+
+    await render(view({ feed, showThinking: true }));
+    expect(container.querySelector(".chat-thinking__body")).not.toBeNull();
+  });
+
   it("reports the density the user picked", async () => {
     const picked: string[] = [];
     await render(
-      <ChatView
-        feed={fakeFeed(entries)}
-        density="smart"
-        onDensityChange={(density) => picked.push(density)}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
+      view({
+        feed: fakeFeed(entries),
+        density: "smart",
+        onDensityChange: (density) => picked.push(density),
+      }),
     );
     await act(async () => button("full").click());
     expect(picked).toEqual(["full"]);
@@ -209,13 +231,7 @@ describe("ChatView", () => {
   it("sends Escape and Ctrl+C to the session, and nothing else on its own", async () => {
     const sent: string[] = [];
     await render(
-      <ChatView
-        feed={fakeFeed(entries)}
-        density="smart"
-        onDensityChange={() => undefined}
-        sendKeys={(data) => sent.push(data)}
-        header={header()}
-      />,
+      view({ feed: fakeFeed(entries), density: "smart", sendKeys: (data) => sent.push(data) }),
     );
     expect(sent).toEqual([]);
     await act(async () => button("Esc").click());
@@ -225,15 +241,7 @@ describe("ChatView", () => {
 
   it("shows new entries as the feed reports them", async () => {
     const feed = fakeFeed(entries);
-    await render(
-      <ChatView
-        feed={feed}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed }));
     await act(async () =>
       feed.push([{ kind: "user", id: "u2", ts: 6, text: "and again" }]),
     );
@@ -242,15 +250,7 @@ describe("ChatView", () => {
 
   it("raises a stale banner and takes it down again", async () => {
     const feed = fakeFeed(entries);
-    await render(
-      <ChatView
-        feed={feed}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed }));
     expect(container.querySelector('[data-testid="chat-stale"]')).toBeNull();
     await act(async () => feed.setStale(true));
     expect(container.querySelector('[data-testid="chat-stale"]')).not.toBeNull();
@@ -265,15 +265,7 @@ describe("ChatView", () => {
       ts: index,
       text: `message ${index}`,
     }));
-    await render(
-      <ChatView
-        feed={fakeFeed(many)}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed: fakeFeed(many) }));
     expect(container.querySelectorAll('[data-testid="chat-user"]')).toHaveLength(
       RENDER_WINDOW,
     );
@@ -284,15 +276,7 @@ describe("ChatView", () => {
   });
 
   it("offers a jump-to-latest pill once the reader scrolls up", async () => {
-    await render(
-      <ChatView
-        feed={fakeFeed(entries)}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed: fakeFeed(entries) }));
     expect(container.querySelector('[data-testid="chat-jump"]')).toBeNull();
 
     // jsdom has no layout: the scroll geometry has to be stated.
@@ -315,26 +299,12 @@ describe("ChatView", () => {
 
   it("hides the link picker until one is offered", async () => {
     const feed = fakeFeed(entries);
-    await render(
-      <ChatView
-        feed={feed}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header()}
-      />,
-    );
+    await render(view({ feed }));
     expect(() => button("Link conversation…")).toThrow();
 
     let opened = 0;
     await render(
-      <ChatView
-        feed={feed}
-        density="chips"
-        onDensityChange={() => undefined}
-        sendKeys={() => undefined}
-        header={header({ onOpenLinkPicker: () => (opened += 1) })}
-      />,
+      view({ feed, header: header({ onOpenLinkPicker: () => (opened += 1) }) }),
     );
     await act(async () => button("Link conversation…").click());
     expect(opened).toBe(1);

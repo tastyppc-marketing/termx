@@ -63,6 +63,14 @@
   top: 48px;
 }
 
+/* The chat view's header owns that same corner too (Terminal / Esc / Ctrl+C),
+   and it is always visible — a toolbar floating at top: 8px sits directly ON
+   those buttons. Same resolution: yield the corner and dock below the header
+   row (--row-chrome is 34px). */
+.split-pane:has(.chat-view) .split-pane__toolbar {
+  top: 44px;
+}
+
 .split-pane__toolbar button {
   display: grid;
   width: 24px;

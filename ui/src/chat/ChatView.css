@@ -85,6 +85,11 @@
   background: var(--surface-3);
 }
 
+.chat-header__button[aria-pressed="true"] {
+  background: var(--accent-25);
+  color: var(--text-main);
+}
+
 .chat-stale {
   flex: 0 0 auto;
   padding: 4px 8px;
