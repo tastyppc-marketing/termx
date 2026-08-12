@@ -912,3 +912,15 @@ through prompt cards), SettingsSurface eyeball. His bug reports drive next
 steps. Queued follow-ups: wire the manual "Link conversation…" picker
 (ChatView supports onOpenLinkPicker; no picker UI in App), Codex-native
 adapter, Warp-style blocks for plain shell.
+
+## Delta 2026-08-12 — chat feedback batch SHIPPED (2a3ab50)
+
+Michael's three chat-view complaints, all fixed, committed as `2a3ab50` on main, staged to `C:\Dev\TermX\dist-portable\TermX\` (exes 06:32, old pair renamed `.prev4`), and **live-verified via the CDP debug-instance recipe**:
+
+1. **Send bug (root cause + fix):** a TUI receiving `"text\r"` as one chunk treats it as a paste — the `\r` becomes a newline, nothing submits. Enter is now ALWAYS its own PTY write `ENTER_DELAY_MS` (40ms) after the text: `ui/src/chat/ChatInput.tsx` (`payloadForMessage` + delayed `ENTER_KEY`; `keysForMessage` is gone) and `ui/src/chat/promptWatcher.ts` (`sendSplittingEnter` for menu answers, y/N confirms, free text, and the one retry). **Live proof:** fresh session 33 in the debug instance, `claude` running in C:\Dev\TermX, message sent through the real ChatInput → TUI showed `> …` submitted and answered `● SEND-VERIFIED`; box cleared. Test session exited cleanly (exit 0) and its transcript is `claude --resume 81d97fb8-4579-466e-b385-ec4fa5c5ed19` if ever needed.
+2. **Header overlap:** `.split-pane__toolbar` now docks at `top: 44px` when the pane holds a `.chat-view` (same pattern as the Ctrl+F search yield) — `ui/src/split/SplitLayout.css`. Live hit-tests: Terminal/Esc/Ctrl+C/Thoughts all clickable; toolbar rect fully below header rect.
+3. **Per-kind visibility ("Thoughts"):** new header toggle, default ON, persisted per pane as `showThinking` in uiState `chatPanes` (tolerant parse; old files default to open). Thinking rows are now view-owned like tool chips (`ChatBubble.tsx` ThinkingRow is controlled; `ChatView.tsx` `defaultExpanded`/`toggleEntry`; flipping the toggle clears per-row thinking overrides). Density stays tools-only. Body was already a 320px scroll box — confirmed live (`max-height: 320px; overflow-y: auto`), 96 thinking rows open by default across restored panes. Plumbing: `chatDefaults.ts` (`DEFAULT_CHAT_SHOW_THINKING`, `parseChatShowThinking`) → `uiState.ts` → `App.tsx chatForSession` (`onShowThinkingChange`) → `PaneChatProps` → `ChatOverlay` → `ChatView`.
+
+Gates: `tsc -b` clean; vitest **1015/1015 (87 files)** solo run; Rust untouched. Build: `npx tauri build --no-bundle` rolled past the 599s foreground timeout into background but the harness now KEEPS it alive (completed 9m41s, exit 0) — the "backgrounded builds get killed" rule may be stale, but don't rely on it. Release verified: `custom_protocol` present, zero `dev` cfg (build dir `tauri-aebb2d4d7848249c`).
+
+**Michael-gated:** restart TermX to pick up the 06:32 exes (his running instance is from Aug 11 15:43 — predates even yesterday's 15:30 restage). Note: uiState key "33" now carries `mode: terminal` from the test; harmless. Known gap unchanged: manual "Link conversation…" picker still unwired.
