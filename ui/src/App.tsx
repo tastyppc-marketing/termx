@@ -642,15 +642,15 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     };
   };
 
-  // Ctrl+Shift+C flips the focused pane between the terminal and the chat.
-  // Verified free in this keymap (Ctrl+Shift+O and Ctrl+Shift+R are the only
-  // app chords) before it was claimed.
+  // Ctrl+Shift+A flips the focused pane between the terminal and the chat.
+  // It was Ctrl+Shift+C, but that chord is COPY in every terminal (Warp,
+  // Windows Terminal, VS Code) and now belongs to the selection.
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
         return;
       }
-      if (event.key.toLowerCase() !== "c") {
+      if (event.key.toLowerCase() !== "a") {
         return;
       }
       if (isEditableElement(document.activeElement)) {

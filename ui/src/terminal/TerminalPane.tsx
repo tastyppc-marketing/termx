@@ -491,7 +491,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           type="button"
           className="terminal-pane__chat-switch"
           data-testid="chat-switch"
-          title="Show this session as a chat (Ctrl+Shift+C)"
+          title="Show this session as a chat (Ctrl+Shift+A)"
           onClick={() => props.chat?.onModeChange("chat")}
         >
           Chat
@@ -651,6 +651,45 @@ function createPresentation(
     throw error;
   }
 
+  // Copy is a first-class terminal action (Warp / Windows Terminal manners):
+  // Ctrl+Shift+C always copies the selection, and plain Ctrl+C copies when a
+  // selection is active INSTEAD of interrupting — with nothing selected it
+  // stays the interrupt it has always been. xterm's selection is not DOM
+  // selection, so without this there is no way to copy at all.
+  const copySelection = (): boolean => {
+    const text = terminal.getSelection();
+    if (text.length === 0) {
+      return false;
+    }
+    void navigator.clipboard?.writeText?.(text).catch(() => undefined);
+    terminal.clearSelection();
+    return true;
+  };
+  terminal.attachCustomKeyEventHandler((event) => {
+    if (
+      event.type !== "keydown" ||
+      !event.ctrlKey ||
+      event.altKey ||
+      event.metaKey ||
+      event.key.toLowerCase() !== "c"
+    ) {
+      return true;
+    }
+    if (!copySelection()) {
+      return true;
+    }
+    event.preventDefault();
+    return false;
+  });
+  // Right-click with a selection copies it too; without one the native menu
+  // stays (it is how paste is reachable by mouse).
+  const onContextMenu = (event: MouseEvent) => {
+    if (terminal.hasSelection() && copySelection()) {
+      event.preventDefault();
+    }
+  };
+  element.addEventListener("contextmenu", onContextMenu);
+
   // Read per search, not captured once: a theme switch must reach the next
   // highlight too.
   const searchOptions = () => ({
@@ -686,7 +725,10 @@ function createPresentation(
     findNext: (query) => search.findNext(query, searchOptions()),
     findPrevious: (query) => search.findPrevious(query, searchOptions()),
     focus: () => terminal.focus(),
-    dispose: () => terminal.dispose(),
+    dispose: () => {
+      element.removeEventListener("contextmenu", onContextMenu);
+      terminal.dispose();
+    },
     registerInputMarker: () => {
       if (terminal.buffer.active.type === "alternate") {
         return undefined;
