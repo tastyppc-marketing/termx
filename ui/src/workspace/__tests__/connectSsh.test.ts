@@ -383,6 +383,24 @@ describe("WorkspaceController ssh password watcher", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("lets the watcher go once the remote shell reports its prompt", async () => {
+    const h = harness({ passwords: { myvps: "not-a-real-password" } });
+    await connectAndSettle(h);
+    expect(h.tapCount()).toBe(1);
+
+    // A rooted Unix cwd is the remote shell's own prompt: login succeeded, so
+    // no password will be asked again and the watcher must let go now — before
+    // its window can catch an unrelated later prompt.
+    h.controller.reportSessionCwd(50, "/root", true);
+    expect(h.tapCount()).toBe(0);
+    expect(h.disposedTaps()).toBe(1);
+
+    // The classic misfire: a `sudo` prompt after login must NOT be answered
+    // with the ssh password.
+    h.emitOutput(50, "[sudo] password for root: ");
+    expect(h.writes).toEqual([[50, `${sshConnectCommand("myvps")}\r`]]);
+  });
+
   it("matches a prompt split across two output frames", async () => {
     const h = harness({ passwords: { myvps: "not-a-real-password" } });
     await connectAndSettle(h);

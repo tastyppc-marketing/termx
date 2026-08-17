@@ -1069,6 +1069,13 @@ export class WorkspaceController {
     if (!live) {
       return;
     }
+    // A remote prompt is proof the login succeeded, so no password will be
+    // asked again — retire the watcher before its 60 s window can catch an
+    // unrelated later prompt (a `sudo` password:) and type the ssh password
+    // into it.
+    if (this.sshPanes.has(sessionId) && isRemoteCwd(path)) {
+      this.stopSshPasswordWatch(sessionId);
+    }
     // A LIVE report is the prompt-ready signal a pending resume waits for
     // (spec §5 step 3); replayed reports say nothing about the prompt. The path
     // travels with it so an ssh restore can tell the two shells apart.
@@ -1570,8 +1577,16 @@ export class WorkspaceController {
       isRemoteCwd,
     );
     if (ready !== "ready") {
-      // The connection failed or the shell died. Whatever ssh said is on screen
-      // already, and TermX adds nothing to it (spec §7).
+      // "gone": the connection failed or the shell died — whatever ssh said is
+      // on screen already, and TermX adds nothing to it (spec §7). "elapsed":
+      // the shell is up but no remote prompt was seen in time (slow box, or a
+      // bashrc that swallows the OSC), so nothing on screen explains why the
+      // resume never ran — say so, and leave the connected shell in place.
+      if (ready === "elapsed") {
+        this.setNotice(
+          "Connected, but the remote prompt was not detected — run the resume command yourself.",
+        );
+      }
       return;
     }
     const sent =

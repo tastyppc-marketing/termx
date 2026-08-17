@@ -745,7 +745,13 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       return;
     }
     if (sshCredentials) {
-      void sshCredentials.reencryptAll(settings.sshEncryptPasswords);
+      void sshCredentials
+        .reencryptAll(settings.sshEncryptPasswords)
+        .catch((error: unknown) => {
+          // A DPAPI failure must not look like a successful re-encrypt: the
+          // stored scheme stays as it was, so say so rather than swallow it.
+          console.error("failed to re-encrypt ssh passwords", error);
+        });
     }
   }, [settings.sshEncryptPasswords, sshCredentials]);
 
@@ -800,10 +806,19 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
               return;
             }
             setSavePrompt((current) =>
-              current && current.ssh?.host === sshInfo.host
+              current &&
+              current.ssh?.host === sshInfo.host &&
+              current.conversation?.id === conversation.id
                 ? {
                     ...current,
-                    prefill: { ...current.prefill, conversationLabel: title },
+                    // Both the suggested name and the "Resumes:" line: a remote
+                    // pin whose name would otherwise stay the raw id (the dialog
+                    // adopts the name only while the user has not edited it).
+                    prefill: {
+                      ...current.prefill,
+                      name: title,
+                      conversationLabel: title,
+                    },
                     conversation: current.conversation
                       ? { ...current.conversation, title }
                       : current.conversation,

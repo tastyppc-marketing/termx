@@ -348,6 +348,32 @@ describe("App ssh-hosts integration", () => {
     await unmount();
   });
 
+  it("adopts the probed /rename title as the remote pin's name", async () => {
+    probeRemoteTitle.mockResolvedValueOnce("Nightly deploy");
+    const { workspace, saved } = harness({
+      paneHost: "myvps",
+      capture: { provider: "claude", id: "conv-9" },
+    });
+    const { container, unmount } = await mount(workspace);
+
+    await act(async () => query(container, "pane-save").click());
+    // The name seeds from the raw id, then the async probe replaces it — the
+    // user did not touch the field, so the /rename wins.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(query<HTMLInputElement>(container, "save-session-name").value).toBe(
+      "Nightly deploy",
+    );
+    await act(async () => query(container, "save-session-save").click());
+    expect(saved.getSnapshot()[0]).toMatchObject({
+      name: "Nightly deploy",
+      ssh: { host: "myvps" },
+    });
+
+    await unmount();
+  });
+
   it("stores a password through the real credentials store, closing only after the write", async () => {
     const { workspace, sshCredentials } = harness({
       settings: {

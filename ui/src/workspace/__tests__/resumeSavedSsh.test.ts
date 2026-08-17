@@ -331,16 +331,21 @@ describe("WorkspaceController.resumeSaved over ssh", () => {
     expect(h.writes[1]).toEqual([50, "codex resume abc-123\r"]);
   });
 
-  it("gives up quietly when the remote shell never reports", async () => {
+  it("says so when the remote prompt never reports, rather than silently doing nothing", async () => {
     const h = harness();
 
     const { done } = await restoreToRemotePrompt(h, savedSsh());
     await vi.advanceTimersByTimeAsync(SSH_REMOTE_PROMPT_TIMEOUT_MS);
     await done;
 
-    // The ssh failure is already on screen; TermX adds nothing (spec §7).
+    // The shell is up but no prompt was seen (slow box, or a bashrc that eats
+    // the OSC), so nothing on screen explains why the resume never ran — unlike
+    // a dead connection, the timeout needs a word. The resume command is still
+    // NOT typed blind into whatever state the shell is in.
     expect(h.writes).toEqual([[50, CONNECT]]);
-    expect(h.notice()).toBeNull();
+    expect(h.notice()).toBe(
+      "Connected, but the remote prompt was not detected — run the resume command yourself.",
+    );
     expect(vi.getTimerCount()).toBe(0);
   });
 

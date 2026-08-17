@@ -42,6 +42,29 @@ describe("parseOsc9ConversationCapture", () => {
     });
   });
 
+  it("reduces a codex rollout filename stem to the bare session uuid", () => {
+    // The watcher reports the transcript file's stem, but `codex resume` wants
+    // the uuid inside it — so the stored/typed id must be the uuid, not the stem.
+    expect(
+      parseOsc9ConversationCapture(`78;codex;rollout-2026-08-17T10-00-00-${CLAUDE_ID}`),
+    ).toEqual({ provider: "codex", id: CLAUDE_ID });
+    // Claude reports a bare uuid already; it must be left untouched.
+    expect(parseOsc9ConversationCapture(`78;claude;${CLAUDE_ID}`)).toEqual({
+      provider: "claude",
+      id: CLAUDE_ID,
+    });
+    // A codex id that is not a rollout stem is passed through unchanged, and a
+    // stem that does not end in a uuid is left as-is (no worse than before).
+    expect(parseOsc9ConversationCapture("78;codex;abc-123")).toEqual({
+      provider: "codex",
+      id: "abc-123",
+    });
+    expect(parseOsc9ConversationCapture("78;codex;rollout-no-uuid-here")).toEqual({
+      provider: "codex",
+      id: "rollout-no-uuid-here",
+    });
+  });
+
   it("rejects other OSC 9 subcommands", () => {
     expect(parseOsc9ConversationCapture("9;C:\\Dev\\TermX")).toBeNull();
     expect(parseOsc9ConversationCapture("77;output;C:\\a.md")).toBeNull();

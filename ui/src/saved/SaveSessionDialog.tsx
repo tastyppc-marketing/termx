@@ -63,6 +63,7 @@ function SaveSessionForm({
 }: Omit<SaveSessionDialogProps, "open">) {
   const nameRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState(prefill.name);
+  const [nameEdited, setNameEdited] = useState(false);
   const [description, setDescription] = useState(prefill.description);
   const [cwd, setCwd] = useState(prefill.cwd);
   const title = prefill.updatesExisting ? "Update saved session" : "Save this session";
@@ -76,6 +77,18 @@ function SaveSessionForm({
     field?.focus();
     field?.select();
   }, []);
+
+  // For a remote pane the real name (a /rename) arrives async, after the dialog
+  // is already open, as a changed prefill.name. Adopt it — but only until the
+  // user takes over the field, so a late probe can never clobber what they are
+  // typing (the same guarantee the frozen-on-open fields give locally).
+  useEffect(() => {
+    if (nameEdited) {
+      return;
+    }
+    setName(prefill.name);
+    nameRef.current?.select();
+  }, [prefill.name, nameEdited]);
 
   const trimmedName = name.trim();
   // An empty folder would save an entry resume can only refuse ("folder no
@@ -138,7 +151,10 @@ function SaveSessionForm({
             type="text"
             value={name}
             spellCheck={false}
-            onChange={(event) => setName(event.currentTarget.value)}
+            onChange={(event) => {
+              setName(event.currentTarget.value);
+              setNameEdited(true);
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();

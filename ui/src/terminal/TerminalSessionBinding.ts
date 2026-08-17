@@ -603,6 +603,28 @@ const CAPTURE_PROVIDERS = ["claude", "codex"] as const;
 /** Same rule as `resumeCommand`: an id is a bare token or it is refused. */
 const CAPTURE_ID_PATTERN = /^[A-Za-z0-9-]+$/;
 
+/** The trailing session uuid inside a codex rollout filename stem. */
+const CODEX_ROLLOUT_UUID =
+  /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/**
+ * Codex's transcript file is `rollout-<timestamp>-<uuid>.jsonl`, so the watcher
+ * reports `rollout-<timestamp>-<uuid>` — but `codex resume` wants the bare
+ * session uuid, and typing the whole stem fails silently on the remote. Pull
+ * the uuid out so the id TermX stores and later types is the one codex accepts.
+ * Claude already reports a bare uuid, so only codex needs this; a stem that
+ * does not end in a uuid is left as-is (no worse than before).
+ */
+function normalizeCaptureId(provider: "claude" | "codex", id: string): string {
+  if (provider === "codex" && id.startsWith("rollout-")) {
+    const match = CODEX_ROLLOUT_UUID.exec(id);
+    if (match) {
+      return match[1]!;
+    }
+  }
+  return id;
+}
+
 /**
  * Parse an OSC 9 payload as a TermX conversation capture (ssh-sessions spec §2:
  * `ESC]9;78;<provider>;<id>ST`, emitted once per remote agent launch). Returns
@@ -631,7 +653,7 @@ export function parseOsc9ConversationCapture(
   if (provider === undefined || !CAPTURE_ID_PATTERN.test(id)) {
     return null;
   }
-  return { provider, id };
+  return { provider, id: normalizeCaptureId(provider, id) };
 }
 
 /**
