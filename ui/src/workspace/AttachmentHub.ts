@@ -82,6 +82,11 @@ interface SessionRecord {
    * sleeping pane's scrollback was produced at, so the dims a wake must
    * re-apply before its replay (spec §13). */
   lastDims: { cols: number; rows: number } | null;
+  /** Output observers that own no terminal (ssh-sessions spec §2). */
+  taps: Set<(text: string) => void>;
+  /** Streaming decoder for the taps, created with the first one so a session
+   *  nobody is watching pays nothing. */
+  tapDecoder: TextDecoder | null;
 }
 
 export class AttachmentHub implements AttachmentClient {
@@ -259,6 +264,40 @@ export class AttachmentHub implements AttachmentClient {
     }
   }
 
+  /// Observe a session's decoded LIVE output without attaching a terminal
+  /// (ssh-sessions spec §2: the password watcher). Multiple taps are allowed;
+  /// dispose to stop. Unknown sessions get an inert handle rather than a throw —
+  /// a watcher is armed around a session that may already be gone.
+  ///
+  /// Replayed scrollback is deliberately NOT delivered: a tap is a trigger for
+  /// ACTION (typing a password), and history must never make something happen a
+  /// second time. Text is decoded once per session and shared by every tap, so
+  /// a multi-byte character split across two frames still arrives whole.
+  tapOutput(
+    sessionId: number,
+    listener: (text: string) => void,
+  ): { dispose(): void } {
+    const record = this.records.get(sessionId);
+    if (this.closed || !record) {
+      return { dispose: () => undefined };
+    }
+    record.taps.add(listener);
+    record.tapDecoder ??= new TextDecoder();
+    let disposed = false;
+    return {
+      dispose: () => {
+        if (disposed) {
+          return;
+        }
+        disposed = true;
+        record.taps.delete(listener);
+        if (record.taps.size === 0) {
+          record.tapDecoder = null;
+        }
+      },
+    };
+  }
+
   /// The dimensions the session's pty last ran at, from the terminal's own
   /// resize calls — the recorded dims a wake must re-apply before replay
   /// (spec §13). Null until a terminal has resized the session, or when the
@@ -381,6 +420,8 @@ export class AttachmentHub implements AttachmentClient {
       invokeCleanup(() => record.physical?.detach());
       record.terminalCallbacks = null;
       record.physical = null;
+      record.taps.clear();
+      record.tapDecoder = null;
     }
     this.records.clear();
     this.listeners.clear();
@@ -450,8 +491,31 @@ export class AttachmentHub implements AttachmentClient {
     }
 
     invokeConsumer(record.terminalCallbacks?.onOutput, event);
+    this.feedTaps(record, event);
     if (event.source === "live" && event.data.byteLength > 0) {
       this.pulse(record);
+    }
+  }
+
+  /// Decode once, hand the text to every tap. A tap that throws is contained
+  /// like any other consumer — an output watcher must never break the session
+  /// it is watching.
+  private feedTaps(record: SessionRecord, event: SessionOutputEvent): void {
+    const decoder = record.tapDecoder;
+    if (decoder === null || record.taps.size === 0 || event.source !== "live") {
+      return;
+    }
+    let text: string;
+    try {
+      text = decoder.decode(event.data, { stream: true });
+    } catch {
+      return;
+    }
+    if (text.length === 0) {
+      return;
+    }
+    for (const tap of [...record.taps]) {
+      invokeConsumer(tap, text);
     }
   }
 
@@ -543,6 +607,8 @@ export class AttachmentHub implements AttachmentClient {
       attachGeneration: 0,
       activityTimer: null,
       lastDims: null,
+      taps: new Set(),
+      tapDecoder: null,
     };
     this.records.set(sessionId, record);
     this.publish();
@@ -558,6 +624,8 @@ export class AttachmentHub implements AttachmentClient {
     this.clearActivityTimer(record);
     invokeConsumer(record.terminalCallbacks?.onDisconnect);
     record.terminalCallbacks = null;
+    record.taps.clear();
+    record.tapDecoder = null;
     if (detachPhysical) {
       invokeCleanup(() => record.physical?.detach());
     }

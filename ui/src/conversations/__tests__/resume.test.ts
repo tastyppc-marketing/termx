@@ -22,10 +22,12 @@ import {
   type WorkspaceHostClient,
   type WorkspacePersistence,
 } from "../../workspace/WorkspaceController";
+import type { SavedProvider } from "../../saved/types";
 import {
   RESUME_FIXED_DELAY_MS,
   RESUME_PROMPT_TIMEOUT_MS,
   dirExistsVia,
+  remoteResumeCommand,
   resumeCommand,
 } from "../resume";
 import type { DirExists } from "../resume";
@@ -228,6 +230,41 @@ describe("resumeCommand", () => {
     for (const provider of ["", "grok", "gemini", "Claude", "constructor", "toString"]) {
       expect(resumeCommand({ provider, id: CLAUDE_ID })).toBeNull();
     }
+  });
+});
+
+describe("remoteResumeCommand", () => {
+  it("builds the same verbs a local resume uses", () => {
+    expect(
+      remoteResumeCommand({ provider: "claude", id: CLAUDE_ID, title: "Work" }),
+    ).toBe(`claude --resume ${CLAUDE_ID}`);
+    expect(
+      remoteResumeCommand({ provider: "codex", id: CODEX_ID, title: "Thread" }),
+    ).toBe(`codex resume ${CODEX_ID}`);
+  });
+
+  it("types nothing for a bare-shell save", () => {
+    // No conversation is not a failure: the remote shell in the saved folder IS
+    // the whole of what was pinned (spec §5).
+    expect(remoteResumeCommand(undefined)).toBeNull();
+  });
+
+  it("refuses an id the remote side could have chosen", () => {
+    // The id comes from a remote FILENAME, so it is treated exactly as
+    // hostilely here as a local record's id is.
+    for (const id of ["../evil", "id; calc", "id$(calc)", "", "idé"]) {
+      expect(remoteResumeCommand({ provider: "claude", id, title: "x" })).toBeNull();
+    }
+  });
+
+  it("refuses a provider TermX has no verb for", () => {
+    expect(
+      remoteResumeCommand({
+        provider: "grok" as unknown as SavedProvider,
+        id: CLAUDE_ID,
+        title: "x",
+      }),
+    ).toBeNull();
   });
 });
 

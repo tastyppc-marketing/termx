@@ -109,6 +109,12 @@ export interface TerminalPaneDependencies {
   activateLink(link: string): Promise<string | null>;
 }
 
+/** Reports one remote agent launch: `(sessionId, capture)` (spec §2). */
+export type ConversationCaptureReporter = (
+  sessionId: number,
+  capture: { provider: "claude" | "codex"; id: string },
+) => void;
+
 type TerminalPaneProps =
   | {
       client?: undefined;
@@ -116,6 +122,7 @@ type TerminalPaneProps =
       dependencies?: TerminalPaneDependencies;
       onCwd?: (path: string, live: boolean) => void;
       onOutput?: (path: string) => void;
+      onConversationCaptured?: ConversationCaptureReporter;
       recordedDims?: TerminalDimensions | null;
       chat?: PaneChatProps;
       suspended?: undefined;
@@ -130,6 +137,12 @@ type TerminalPaneProps =
       onCwd?: (path: string, live: boolean) => void;
       /** OSC 9;77 deliverable report (polish P4); live registrations only. */
       onOutput?: (path: string) => void;
+      /**
+       * OSC 9;78 conversation capture from a tracked ssh pane (ssh-sessions
+       * spec §2); live captures only. The session id is stamped here because
+       * the pane is the only place that knows it.
+       */
+      onConversationCaptured?: ConversationCaptureReporter;
       /**
        * The session's host-recorded cols/rows (SessionInfo). When known the
        * terminal is sized to them before replay and only fits to the container
@@ -195,6 +208,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   onCwdRef.current = props.onCwd;
   const onOutputRef = useRef(props.onOutput);
   onOutputRef.current = props.onOutput;
+  const onCaptureRef = useRef(props.onConversationCaptured);
+  onCaptureRef.current = props.onConversationCaptured;
   // Read at attach time only: a dims change must not remount the terminal.
   const recordedDimsRef = useRef(props.recordedDims);
   recordedDimsRef.current = props.recordedDims;
@@ -333,6 +348,8 @@ export function TerminalPane(props: TerminalPaneProps) {
           onCleanupError: reportCleanupError,
           onCwd: (path, live) => onCwdRef.current?.(path, live),
           onOutputRegistered: (path) => onOutputRef.current?.(path),
+          onConversationCaptured: (capture) =>
+            onCaptureRef.current?.(supplied.sessionId, capture),
           onUserInput: (data) =>
             inputMarks.onUserInput(data, () => presentation.registerInputMarker()),
           onReplayFinished: () => {

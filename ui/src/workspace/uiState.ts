@@ -36,6 +36,20 @@ export interface ChatPaneState {
   showThinking: boolean;
 }
 
+/**
+ * One tracked ssh pane (ssh-sessions spec §2), keyed by host session id: which
+ * config alias it is connected to, plus the conversation its remote watcher
+ * last reported. Only TermX-launched connections are tracked, so a pane without
+ * an entry here is an ordinary local pane — including one where the user typed
+ * `ssh` by hand.
+ */
+export interface SshPaneState {
+  /** `~/.ssh/config` alias; the config itself stays the source of truth. */
+  host: string;
+  capturedProvider?: "claude" | "codex";
+  capturedId?: string;
+}
+
 export interface UiStateV1 {
   readonly scopePaths: ScopePathsState;
   readonly recentFolders: readonly string[];
@@ -58,6 +72,12 @@ export interface UiStateV1 {
    * means every pane starts on the defaults from `chatDefaults.ts`.
    */
   readonly chatPanes?: Readonly<Record<string, ChatPaneState>>;
+  /**
+   * Tracked ssh panes, keyed by session id. Absent — or unparseable — means no
+   * pane is remembered as an ssh session, which is exactly the state a machine
+   * that has never connected to one is in.
+   */
+  readonly sshPanes?: Readonly<Record<string, SshPaneState>>;
 }
 
 export const MIN_SIDEBAR_WIDTH = 200;
@@ -184,6 +204,95 @@ function parseChatPanes(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+/** Providers a stored capture may name (spec §2). */
+const SSH_CAPTURE_PROVIDERS = ["claude", "codex"] as const;
+
+/**
+ * Ids are bare tokens — the same rule `resumeCommand` enforces, applied here
+ * too because this file is machine-written but hand-editable, and a stored id
+ * eventually becomes `claude --resume <id>` in a terminal.
+ */
+const SSH_CAPTURE_ID_PATTERN = /^[A-Za-z0-9-]+$/;
+
+/**
+ * SSH panes are optional per pane: an entry without a usable `host` is dropped
+ * entirely (a pane whose host is unknown is not a tracked ssh pane), while an
+ * untrustworthy capture degrades away and leaves the pane — losing the id costs
+ * a pin's conversation, keeping a bad one would type it into a shell.
+ */
+function parseSshPanes(
+  value: unknown,
+): Readonly<Record<string, SshPaneState>> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const result: Record<string, SshPaneState> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "object" || entry === null) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.host !== "string" || record.host.length === 0) {
+      continue;
+    }
+    const provider = SSH_CAPTURE_PROVIDERS.find(
+      (known) => known === record.capturedProvider,
+    );
+    const id =
+      typeof record.capturedId === "string" &&
+      SSH_CAPTURE_ID_PATTERN.test(record.capturedId)
+        ? record.capturedId
+        : undefined;
+    result[key] = {
+      host: record.host,
+      ...(provider !== undefined && id !== undefined
+        ? { capturedProvider: provider, capturedId: id }
+        : {}),
+    };
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Store one ssh pane. `null` is the reset sentinel — the pane stopped being an
+ * ssh pane (its session is gone) — and the whole field disappears once no pane
+ * is tracked. Same-ref return when nothing changed: a capture is re-reported on
+ * every agent launch and an unchanged write must not schedule a save.
+ */
+export function setSshPaneState(
+  state: UiStateV1,
+  sessionId: string,
+  pane: SshPaneState | null,
+): UiStateV1 {
+  const current = state.sshPanes?.[sessionId];
+  if (pane === null) {
+    if (current === undefined) {
+      return state;
+    }
+    const rest: Record<string, SshPaneState> = {};
+    for (const [key, value] of Object.entries(state.sshPanes ?? {})) {
+      if (key !== sessionId) {
+        rest[key] = value;
+      }
+    }
+    if (Object.keys(rest).length > 0) {
+      return { ...state, sshPanes: rest };
+    }
+    // Spread-then-delete keeps any unrelated fields this state may carry.
+    const next: { -readonly [K in keyof UiStateV1]: UiStateV1[K] } = { ...state };
+    delete next.sshPanes;
+    return next;
+  }
+  if (
+    current?.host === pane.host &&
+    current.capturedProvider === pane.capturedProvider &&
+    current.capturedId === pane.capturedId
+  ) {
+    return state;
+  }
+  return { ...state, sshPanes: { ...state.sshPanes, [sessionId]: pane } };
+}
+
 /**
  * Store one pane's chat state. `null` is the reset sentinel — it drops the
  * pane's key so it falls back on the defaults, and the whole field disappears
@@ -252,6 +361,7 @@ export function parseUiState(text: string | null): UiStateV1 {
   const viewerGeometry = parseViewerGeometry(record.viewerGeometry);
   const sidebarWidth = parseSidebarWidth(record.sidebarWidth);
   const chatPanes = parseChatPanes(record.chatPanes);
+  const sshPanes = parseSshPanes(record.sshPanes);
   return {
     scopePaths: {
       seeds: parsePathRecord(scopePathsRaw.seeds),
@@ -262,6 +372,7 @@ export function parseUiState(text: string | null): UiStateV1 {
     ...(viewerGeometry ? { viewerGeometry } : {}),
     ...(sidebarWidth !== undefined ? { sidebarWidth } : {}),
     ...(chatPanes ? { chatPanes } : {}),
+    ...(sshPanes ? { sshPanes } : {}),
   };
 }
 

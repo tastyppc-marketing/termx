@@ -10,6 +10,7 @@ fn main() {
                 "read_ssh_config",
                 "protect_secret",
                 "unprotect_secret",
+                "ssh_probe",
                 "list_dirs",
                 "list_llm_sessions",
                 "generate_session_note",

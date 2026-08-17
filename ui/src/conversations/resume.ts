@@ -10,6 +10,7 @@
  */
 
 import { tauriListDirs, type ListDirs } from "../native/folders";
+import type { SavedConversationRef } from "../saved/types";
 
 /** Spec §5: ids are uuids; anything else is refused. */
 export const RESUME_ID_PATTERN = /^[A-Za-z0-9-]+$/;
@@ -55,6 +56,32 @@ export function resumeCommand(record: {
     return null;
   }
   return `${verb} ${record.id}`;
+}
+
+/**
+ * The command to type into a tracked REMOTE shell to resume a saved
+ * conversation (ssh-sessions spec §5), or null when there is nothing to type.
+ *
+ * Null means two different things to the caller, and only the caller can tell
+ * them apart: NO conversation is a bare-shell save (the remote shell in the
+ * saved folder is all that was pinned — type nothing, resume succeeds), while a
+ * conversation whose id fails validation is a corrupt record and must refuse
+ * the whole resume. There is no `--continue` fallback: the model carries no
+ * provider hint without a conversation, so "no conversation" can only ever mean
+ * a bare shell.
+ *
+ * The verbs are identical to the local ones on purpose — the agent CLIs are the
+ * same programs over there — but the remote path gets its own function because
+ * its input is a saved record with a title, and because remote verbs are free
+ * to diverge later without touching the local resume.
+ */
+export function remoteResumeCommand(
+  conversation: SavedConversationRef | undefined,
+): string | null {
+  if (conversation === undefined) {
+    return null;
+  }
+  return resumeCommand(conversation);
 }
 
 /** Injected directory probe — tests fake it; production uses `list_dirs`. */

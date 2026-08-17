@@ -131,9 +131,254 @@ pub fn unprotect_secret(data: String) -> Result<String, String> {
     String::from_utf8(plain).map_err(|_| "decrypted secret is not valid UTF-8".to_string())
 }
 
+/// How often the probe's timeout loop checks on the child.
+const PROBE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Upper bound on a probe's wall clock, whatever the renderer asks for: a probe
+/// is a "while you wait" lookup behind an already-open dialog (spec §3).
+const PROBE_MAX_TIMEOUT_MS: u64 = 30_000;
+const PROBE_MIN_TIMEOUT_MS: u64 = 250;
+
+/// A config alias is a NAME. Validated here as well as in the renderer, because
+/// this is the side that hands it to a process.
+fn alias_is_plain_name(alias: &str) -> bool {
+    !alias.is_empty()
+        // A leading dash is the one shape that turns a "name" into an option:
+        // ssh has no `--` end-of-options marker for its host argument, so
+        // `-oProxyCommand=…` would be honoured as a flag. Refused outright.
+        && !alias.starts_with('-')
+        && alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// The exact argv for a probe, or an error for an alias that is not a name.
+///
+/// `BatchMode=yes` is what makes this a health check rather than a login: ssh
+/// fails instead of prompting, so a probe can never sit waiting for a password
+/// nobody is there to type. The remote `command` is passed as ONE argv entry —
+/// the remote shell is what interprets it, exactly as with a hand-typed ssh.
+fn probe_args(alias: &str, command: &str) -> Result<Vec<String>, String> {
+    if !alias_is_plain_name(alias) {
+        return Err(format!("{alias:?} is not a plain ssh config alias"));
+    }
+    Ok(vec![
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=5".to_string(),
+        alias.to_string(),
+        command.to_string(),
+    ])
+}
+
+/// Run a probe child and return its stdout, or an error for a spawn failure, a
+/// non-zero exit, or a child that outlived `timeout` (which is killed).
+///
+/// stdout is drained on its own thread: a child that fills the pipe would
+/// otherwise block forever while we block on `try_wait`.
+fn run_probe(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // The UI is a windowed app with no console, so a console child would flash
+    // a terminal window on screen for every probe.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().map_err(|e| format!("running ssh: {e}"))?;
+    let reader = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let finished = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(PROBE_POLL_INTERVAL)
+            }
+            Ok(None) => break None,
+            Err(_) => break None,
+        }
+    };
+
+    let Some(status) = finished else {
+        // Kill and reap; the reader thread ends by itself once the pipe closes,
+        // so it is left detached rather than joined.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("the ssh probe timed out".to_string());
+    };
+    if !status.success() {
+        return Err("the ssh probe failed".to_string());
+    }
+    let bytes = reader
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    // Remote output is whatever the far end sent; lossy decoding keeps a stray
+    // byte from turning a title into an error.
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Tauri command: run one short command on a host over ssh and hand back its
+/// stdout (ssh-sessions spec §3 — reading a remote conversation's current
+/// title at pin time, and the health check that comes with it).
+///
+/// Every failure is an `Err` the renderer degrades from; it never blocks a
+/// dialog, and the probe is bounded so a wedged network cannot hold a thread.
+#[tauri::command]
+pub async fn ssh_probe(
+    alias: String,
+    command: String,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let args = probe_args(&alias, &command)?;
+    let timeout = std::time::Duration::from_millis(
+        timeout_ms.clamp(PROBE_MIN_TIMEOUT_MS, PROBE_MAX_TIMEOUT_MS),
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut child = std::process::Command::new("ssh");
+        child.args(&args);
+        run_probe(child, timeout)
+    })
+    .await
+    .map_err(|_| "the ssh probe could not be started".to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn a_probe_alias_must_be_a_plain_name() {
+        for alias in [
+            "myvps",
+            "my.vps-01",
+            "TastyVPS",
+            "a_b",
+        ] {
+            assert!(probe_args(alias, "true").is_ok(), "{alias:?} is a name");
+        }
+        for alias in [
+            "",
+            "evil; calc",
+            "a b",
+            "$(id)",
+            "a|b",
+            "a&b",
+            "a\nb",
+            "vps:22",
+            "vps/../x",
+            // A leading dash would be read by ssh as an OPTION, not a host —
+            // the one shape that turns a "name" into an argument injection.
+            "-oProxyCommand=calc",
+            "-v",
+        ] {
+            assert!(probe_args(alias, "true").is_err(), "{alias:?} is not a name");
+        }
+    }
+
+    #[test]
+    fn a_probe_runs_batch_mode_with_a_short_connect_timeout() {
+        // BatchMode is what keeps a probe from ever blocking on a password
+        // prompt: it is a health check, not a login.
+        assert_eq!(
+            probe_args("myvps", "echo hi").unwrap(),
+            vec![
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                "-o".to_string(),
+                "ConnectTimeout=5".to_string(),
+                "myvps".to_string(),
+                "echo hi".to_string(),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    fn printing(text: &str) -> Command {
+        let mut command = Command::new("cmd");
+        command.args(["/c", &format!("echo {text}")]);
+        command
+    }
+    #[cfg(not(windows))]
+    fn printing(text: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", &format!("printf '%s' {text}")]);
+        command
+    }
+
+    /// Outlives any test timeout.
+    #[cfg(windows)]
+    fn slow() -> Command {
+        let mut command = Command::new("ping");
+        command.args(["-n", "20", "127.0.0.1"]);
+        command
+    }
+    #[cfg(not(windows))]
+    fn slow() -> Command {
+        let mut command = Command::new("sleep");
+        command.arg("20");
+        command
+    }
+
+    #[cfg(windows)]
+    fn failing() -> Command {
+        let mut command = Command::new("cmd");
+        command.args(["/c", "exit 1"]);
+        command
+    }
+    #[cfg(not(windows))]
+    fn failing() -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 1"]);
+        command
+    }
+
+    #[test]
+    fn a_successful_probe_returns_its_stdout() {
+        let out = run_probe(printing("hello"), Duration::from_secs(10)).unwrap();
+        assert_eq!(out.trim(), "hello");
+    }
+
+    #[test]
+    fn a_probe_that_fails_is_an_error() {
+        assert!(run_probe(failing(), Duration::from_secs(10)).is_err());
+    }
+
+    #[test]
+    fn a_missing_ssh_binary_is_an_error_not_a_panic() {
+        assert!(run_probe(
+            Command::new("termx-no-such-binary-8f3a1c"),
+            Duration::from_secs(10)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_hung_probe_is_killed_at_the_timeout() {
+        let started = std::time::Instant::now();
+        assert!(run_probe(slow(), Duration::from_millis(150)).is_err());
+        // Proof it did not wait out the child: the stub runs for ~20 s.
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn a_missing_config_reads_as_none() {

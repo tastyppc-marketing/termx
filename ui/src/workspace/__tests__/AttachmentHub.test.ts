@@ -614,3 +614,104 @@ describe("AttachmentHub reconnect resync", () => {
     expect(hub.getSnapshot().sessions[5]!.attachGeneration).toBe(0);
   });
 });
+
+/**
+ * The output tap (ssh-sessions spec §2): a way to WATCH a session's live
+ * output without owning its terminal, which is what the ssh password watcher
+ * needs — `attach` refuses a second terminal, and the pane already holds the
+ * one there is.
+ */
+describe("AttachmentHub output taps", () => {
+  async function hubWithSession(sessionId: number) {
+    const host = createFakeHost();
+    const hub = new AttachmentHub(host);
+    const attaching = hub.attachAll([sessionId]);
+    resolvePhysical(host, sessionId);
+    await attaching;
+    return { host, hub };
+  }
+
+  function bytes(text: string): Uint8Array {
+    return new TextEncoder().encode(text);
+  }
+
+  it("hands a tap the decoded live output and stops on dispose", async () => {
+    const { host, hub } = await hubWithSession(21);
+    const seen: string[] = [];
+
+    const tap = hub.tapOutput(21, (text) => seen.push(text));
+    emitOutput(host, 21, {
+      offset: 0n,
+      data: bytes("root@vps's password: "),
+      source: "live",
+    });
+    tap.dispose();
+    emitOutput(host, 21, { offset: 40n, data: bytes("after"), source: "live" });
+
+    expect(seen).toEqual(["root@vps's password: "]);
+    hub.close();
+  });
+
+  it("never hands a tap replayed scrollback", async () => {
+    const { host, hub } = await hubWithSession(21);
+    const seen: string[] = [];
+
+    hub.tapOutput(21, (text) => seen.push(text));
+    emitOutput(host, 21, {
+      offset: 0n,
+      data: bytes("old password: "),
+      source: "replay",
+    });
+    emitOutput(host, 21, { offset: 20n, data: bytes("new"), source: "live" });
+
+    expect(seen).toEqual(["new"]);
+    hub.close();
+  });
+
+  it("decodes multi-byte characters split across chunks", async () => {
+    const { host, hub } = await hubWithSession(21);
+    const seen: string[] = [];
+    const encoded = bytes("é");
+
+    hub.tapOutput(21, (text) => seen.push(text));
+    emitOutput(host, 21, { offset: 0n, data: encoded.slice(0, 1), source: "live" });
+    emitOutput(host, 21, { offset: 1n, data: encoded.slice(1), source: "live" });
+
+    expect(seen.join("")).toBe("é");
+    hub.close();
+  });
+
+  it("keeps every other tap alive when one of them throws", async () => {
+    const { host, hub } = await hubWithSession(21);
+    const seen: string[] = [];
+
+    hub.tapOutput(21, () => {
+      throw new Error("tap consumer failed");
+    });
+    hub.tapOutput(21, (text) => seen.push(text));
+    emitOutput(host, 21, { offset: 0n, data: bytes("alive"), source: "live" });
+
+    expect(seen).toEqual(["alive"]);
+    hub.close();
+  });
+
+  it("survives the terminal detaching, and a session it has never seen", async () => {
+    const { host, hub } = await hubWithSession(21);
+    const seen: string[] = [];
+    const terminal = await hub.attach(21, {}, false);
+
+    hub.tapOutput(21, (text) => seen.push(text));
+    terminal.detach();
+    emitOutput(host, 21, {
+      offset: 0n,
+      data: bytes("after detach"),
+      source: "live",
+    });
+
+    expect(seen).toEqual(["after detach"]);
+    // A tap on an unknown session is inert, never a throw: the watcher is
+    // armed around a session that may already have died.
+    expect(() => hub.tapOutput(999, () => undefined).dispose()).not.toThrow();
+    hub.close();
+  });
+});

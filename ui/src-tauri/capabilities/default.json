@@ -13,6 +13,7 @@
     "allow-read-ssh-config",
     "allow-protect-secret",
     "allow-unprotect-secret",
+    "allow-ssh-probe",
     "allow-list-dirs",
     "allow-list-llm-sessions",
     "allow-generate-session-note",
