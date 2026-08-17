@@ -32,6 +32,8 @@ pub fn run() {
             storage::read_app_file,
             storage::write_app_file,
             ssh::read_ssh_config,
+            ssh::protect_secret,
+            ssh::unprotect_secret,
             folders::list_dirs,
             llm_sessions::list_llm_sessions,
             llm_sessions::generate_session_note,

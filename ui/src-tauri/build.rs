@@ -8,6 +8,8 @@ fn main() {
                 "read_app_file",
                 "write_app_file",
                 "read_ssh_config",
+                "protect_secret",
+                "unprotect_secret",
                 "list_dirs",
                 "list_llm_sessions",
                 "generate_session_note",
