@@ -362,6 +362,31 @@
   background: var(--surface-3);
 }
 
+/* Saved sessions: the secondary sibling of Resume — same shape, no accent, so
+   the row still has exactly one primary action. */
+.conversation-row__save {
+  flex: 0 0 auto;
+  min-height: 22px;
+  align-self: center;
+  padding: 0 8px;
+  color: var(--conversations-muted);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.conversation-row__save:hover:not(:disabled) {
+  color: var(--text-main);
+}
+
+.conversation-row__save:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .conversations__footer {
   display: flex;
   flex: 0 0 auto;
@@ -516,7 +541,8 @@
   white-space: normal;
 }
 
-.conversations--expanded .conversation-row__resume {
+.conversations--expanded .conversation-row__resume,
+.conversations--expanded .conversation-row__save {
   min-height: 28px;
   padding: 0 12px;
   font-size: 12px;

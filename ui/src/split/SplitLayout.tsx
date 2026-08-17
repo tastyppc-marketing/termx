@@ -34,6 +34,12 @@ export interface SplitLayoutActions {
   resizePane(path: number[], sizes: [number, number]): void;
   /** Spec §16: extract this pane into its own tab. Absent hides the chip. */
   popOutPane?(paneSessionId: number): void;
+  /**
+   * Saved sessions: pin this pane's session (name + folder + linked
+   * conversation) so it can be resumed later. Absent hides the button, which
+   * is how the `savedPaneButton` setting turns the surface off.
+   */
+  savePane?(paneSessionId: number): void;
 }
 
 export interface SplitLayoutProps {
@@ -390,6 +396,15 @@ export function SplitLayout({
                       title="Pop out to own tab"
                       onClick={() => actions.popOutPane?.(sessionId)}
                     >⇱</button>
+                  ) : null}
+                  {actions.savePane ? (
+                    <button
+                      type="button"
+                      data-testid="pane-save"
+                      aria-label="Save this session"
+                      title="Save this session…"
+                      onClick={() => actions.savePane?.(sessionId)}
+                    >⚑</button>
                   ) : null}
                   <button
                     type="button"
