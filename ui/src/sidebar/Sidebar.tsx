@@ -1382,6 +1382,26 @@ export function Sidebar({
           closeMenu();
           void createTab(null, "cmd");
         }}>Command Prompt</button>
+        {/* SSH targets last: they are the exception, a local shell the norm. */}
+        {hosts?.menuEnabled && hosts.hosts.length > 0 ? (
+          <>
+            <span className="context-menu__group" aria-hidden="true">Hosts</span>
+            {hosts.hosts.map((entry) => (
+              <button
+                key={entry.alias}
+                type="button"
+                role="menuitem"
+                data-testid={`create-menu-host-${entry.alias}`}
+                onClick={() => {
+                  closeMenu();
+                  hosts.onConnect(entry.alias);
+                }}
+              >
+                ssh {entry.alias}
+              </button>
+            ))}
+          </>
+        ) : null}
       </ContextMenu>
     );
   })();

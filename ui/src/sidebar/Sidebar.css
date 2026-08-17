@@ -873,6 +873,20 @@
   color: var(--error);
 }
 
+/* Overline heading inside a menu (the SSH hosts group): a hairline above and
+   the same 10 px tracking every section header in the app uses. */
+.context-menu__group {
+  display: block;
+  margin-top: 5px;
+  padding: 6px 9px 2px;
+  color: var(--text-hint);
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .sidebar-color-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

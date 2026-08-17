@@ -147,6 +147,14 @@ async function click(element: Element): Promise<void> {
   );
 }
 
+async function openCreateMenu(): Promise<void> {
+  await click(button("New terminal options"));
+}
+
+function menuItem(testid: string): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>(`[data-testid='${testid}']`);
+}
+
 describe("Sidebar hosts section", () => {
   it("renders nothing when the caller wires no hosts", async () => {
     await renderSidebar(undefined);
@@ -291,5 +299,73 @@ describe("Sidebar hosts section", () => {
 
     const section = container.querySelector("[data-testid='hosts-section']")!;
     expect(section.outerHTML).not.toContain("password-value");
+  });
+});
+
+describe("Sidebar new-terminal menu hosts", () => {
+  it("lists each host as a connect target", async () => {
+    const { hosts, onConnect } = hostsProps();
+    await renderSidebar(hosts);
+
+    await openCreateMenu();
+
+    const item = menuItem("create-menu-host-myvps");
+    expect(item).not.toBeNull();
+    expect(item!.textContent).toBe("ssh myvps");
+    expect(menuItem("create-menu-host-buildbox")).not.toBeNull();
+    expect(menuItem("create-menu-host-bare")).not.toBeNull();
+
+    await click(item!);
+
+    expect(onConnect).toHaveBeenCalledWith("myvps");
+    // Picking a target closes the menu, like every other item in it.
+    expect(document.querySelector("[role='menu']")).toBeNull();
+  });
+
+  it("keeps the profile items above the hosts", async () => {
+    const { hosts } = hostsProps();
+    await renderSidebar(hosts);
+
+    await openCreateMenu();
+
+    const items = [
+      ...document.querySelectorAll<HTMLButtonElement>("[role='menu'] button[role='menuitem']"),
+    ].map((item) => item.textContent);
+    expect(items.slice(0, 3)).toEqual([
+      "Default",
+      "Windows PowerShell",
+      "Command Prompt",
+    ]);
+    expect(items.slice(3)).toEqual(["ssh myvps", "ssh buildbox", "ssh bare"]);
+  });
+
+  it("omits the hosts group when the menu setting is off", async () => {
+    const { hosts } = hostsProps({ menuEnabled: false });
+    await renderSidebar(hosts);
+
+    await openCreateMenu();
+
+    expect(document.querySelector("[role='menu']")).not.toBeNull();
+    expect(menuItem("create-menu-host-myvps")).toBeNull();
+  });
+
+  it("omits the hosts group when the inventory is empty", async () => {
+    const { hosts } = hostsProps({ hosts: [] });
+    await renderSidebar(hosts);
+
+    await openCreateMenu();
+
+    expect(document.querySelector("[role='menu']")).not.toBeNull();
+    expect(menuItem("create-menu-host-myvps")).toBeNull();
+  });
+
+  it("still lists hosts in the menu when the sidebar section is switched off", async () => {
+    const { hosts } = hostsProps({ enabled: false });
+    await renderSidebar(hosts);
+
+    await openCreateMenu();
+
+    expect(container.querySelector("[data-testid='hosts-section']")).toBeNull();
+    expect(menuItem("create-menu-host-myvps")).not.toBeNull();
   });
 });
