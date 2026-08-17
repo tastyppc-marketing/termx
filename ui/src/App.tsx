@@ -46,7 +46,14 @@ import {
   SaveSessionDialog,
   type SaveSessionPrefill,
 } from "./saved/SaveSessionDialog";
-import type { SavedConversationRef, SavedSession } from "./saved/types";
+import type {
+  SavedConversationRef,
+  SavedSession,
+  SavedSshRef,
+} from "./saved/types";
+import { probeRemoteTitle } from "./native/sshProbe";
+import { SetPasswordDialog } from "./ssh/SetPasswordDialog";
+import type { SshHost } from "./ssh/types";
 import { SettingsSurface } from "./settings/SettingsSurface";
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
@@ -54,6 +61,7 @@ import { ThemeProvider } from "./theme/ThemeProvider";
 import {
   Sidebar,
   type SidebarConversations,
+  type SidebarHosts,
   type SidebarSaved,
 } from "./sidebar/Sidebar";
 import { SplitLayout, type SplitLayoutActions } from "./split/SplitLayout";
@@ -149,8 +157,12 @@ function folderTail(path: string): string {
 interface SavePromptState {
   prefill: SaveSessionPrefill;
   conversation?: SavedConversationRef;
+  ssh?: SavedSshRef;
   lastDaemonSessionId?: number;
 }
+
+const NO_SSH_HOSTS: readonly SshHost[] = [];
+const EMPTY_WITH_PASSWORD: ReadonlySet<string> = new Set();
 const noopSubscribe = () => () => {};
 
 export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
@@ -680,6 +692,63 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     };
   }, [savedStore, savedEntries, settings.savedSidebarList, controller]);
 
+  // SSH hosts + credentials (ssh-sessions spec §1). The inventory is read once
+  // at boot; the credentials store is machine-written like the saved store.
+  const sshHosts = workspace.sshHosts ?? NO_SSH_HOSTS;
+  const sshCredentials = workspace.sshCredentials ?? null;
+  const withPassword = useSyncExternalStore(
+    sshCredentials?.subscribe ?? noopSubscribe,
+    sshCredentials ? sshCredentials.getSnapshot : () => EMPTY_WITH_PASSWORD,
+  );
+  const hostByAlias = (alias: string): SshHost | null =>
+    sshHosts.find((host) => host.aliases.includes(alias)) ?? null;
+  // The set-password dialog target (ssh-sessions spec §6); null = closed.
+  const [passwordAlias, setPasswordAlias] = useState<string | null>(null);
+
+  const sidebarHosts = useMemo<SidebarHosts | null>(() => {
+    if (sshHosts.length === 0 && !sshCredentials) {
+      return null;
+    }
+    return {
+      enabled: settings.sshHostsSidebar,
+      menuEnabled: settings.sshHostsMenu,
+      hosts: sshHosts,
+      onConnect: (alias) => {
+        const host = hostByAlias(alias);
+        if (host) {
+          void controller.connectSshHost(host);
+        }
+      },
+      // Storing is offered only under the "store" policy (spec §6).
+      ...(sshCredentials && settings.sshPasswordPolicy === "store"
+        ? { onSetPassword: (alias: string) => setPasswordAlias(alias) }
+        : {}),
+      withPassword,
+    };
+  }, [
+    sshHosts,
+    sshCredentials,
+    withPassword,
+    settings.sshHostsSidebar,
+    settings.sshHostsMenu,
+    settings.sshPasswordPolicy,
+    controller,
+  ]);
+
+  // Flipping the "encrypt stored passwords" setting rewrites every stored
+  // secret to match (spec §6). Skip the first render — the setting did not
+  // change, and reencrypting the freshly-loaded store would be pointless work.
+  const encryptFlipSeen = useRef(false);
+  useEffect(() => {
+    if (!encryptFlipSeen.current) {
+      encryptFlipSeen.current = true;
+      return;
+    }
+    if (sshCredentials) {
+      void sshCredentials.reencryptAll(settings.sshEncryptPasswords);
+    }
+  }, [settings.sshEncryptPasswords, sshCredentials]);
+
   // Save dialog (saved-sessions spec §"Save flow"). One dialog serves both the
   // pane pin button and the conversations-rail action; savePrompt carries what
   // the dialog does not edit (conversation ref, daemon session id).
@@ -690,23 +759,18 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       return;
     }
     const cwd = controller.sessionCwd(sessionId) ?? "";
-    const link = resolveLinkage({
-      explicitKey: controller.resumedSessionKeyForTab(tabId),
-      paneCwd: cwd === "" ? null : cwd,
-      candidates: conversationsRecords,
-    });
-    const conversation: SavedConversationRef | undefined = link
-      ? {
-          provider: link.record.provider,
-          id: link.record.id,
-          title: link.record.title,
-        }
-      : undefined;
+    // An SSH pane knows its host + captured conversation directly; a local
+    // pane resolves the conversation the way the chat view does.
+    const sshInfo = controller.sshPaneInfo(sessionId);
+    const conversation = sshInfo
+      ? sshConversationForPane(sessionId)
+      : localConversationForPane(tabId, cwd);
     // save() upserts by conversation id and treats its input as the whole
     // entry, so an existing save must feed its fields back through the dialog.
     const existing = conversation
       ? savedEntries.find((entry) => entry.conversation?.id === conversation.id)
       : undefined;
+    const sshLabel = sshInfo ? sshHostLabel(sshInfo.host) : null;
     setSavePrompt({
       prefill: {
         name:
@@ -718,13 +782,71 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         // stored folder is only a fallback when the pane's is unknown.
         cwd: cwd || (existing?.cwd ?? ""),
         conversationLabel: conversation?.title ?? null,
+        sshLabel,
         updatesExisting: existing !== undefined,
       },
       ...(conversation ? { conversation } : {}),
+      ...(sshInfo ? { ssh: { host: sshInfo.host } } : {}),
       lastDaemonSessionId: sessionId,
     });
+    // The remote title (a /rename the user did) lands async — refresh the open
+    // dialog for this same pane when the probe resolves (spec §3).
+    if (sshInfo && conversation && !existing) {
+      const host = hostByAlias(sshInfo.host);
+      if (host) {
+        void probeRemoteTitle(host.alias, conversation.provider, conversation.id)
+          .then((title) => {
+            if (!title) {
+              return;
+            }
+            setSavePrompt((current) =>
+              current && current.ssh?.host === sshInfo.host
+                ? {
+                    ...current,
+                    prefill: { ...current.prefill, conversationLabel: title },
+                    conversation: current.conversation
+                      ? { ...current.conversation, title }
+                      : current.conversation,
+                  }
+                : current,
+            );
+          });
+      }
+    }
   };
   openSaveForPaneRef.current = openSaveForPane;
+
+  // A local pane's conversation, resolved by explicit resume key or cwd match.
+  const localConversationForPane = (
+    tabId: string,
+    cwd: string,
+  ): SavedConversationRef | undefined => {
+    const link = resolveLinkage({
+      explicitKey: controller.resumedSessionKeyForTab(tabId),
+      paneCwd: cwd === "" ? null : cwd,
+      candidates: conversationsRecords,
+    });
+    return link
+      ? { provider: link.record.provider, id: link.record.id, title: link.record.title }
+      : undefined;
+  };
+
+  // An SSH pane's conversation from the id captured when claude/codex started.
+  const sshConversationForPane = (
+    sessionId: number,
+  ): SavedConversationRef | undefined => {
+    const capture = controller.capturedConversation(sessionId);
+    return capture
+      ? { provider: capture.provider, id: capture.id, title: capture.id }
+      : undefined;
+  };
+
+  // "SSH: user@host" for the save dialog, from the parsed inventory.
+  const sshHostLabel = (alias: string): string => {
+    const host = hostByAlias(alias);
+    const target = host?.hostName ?? alias;
+    return host?.user ? `SSH: ${host.user}@${target}` : `SSH: ${target}`;
+  };
 
   const openSaveForRecord = (record: LlmSessionRecord) => {
     // The rail disables its Save button without a cwd; this is the backstop.
@@ -774,6 +896,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       ...(savePrompt.conversation
         ? { conversation: savePrompt.conversation }
         : {}),
+      ...(savePrompt.ssh ? { ssh: savePrompt.ssh } : {}),
       ...(savePrompt.lastDaemonSessionId !== undefined
         ? { lastDaemonSessionId: savePrompt.lastDaemonSessionId }
         : {}),
@@ -874,6 +997,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           maxGroupDepth={settings.maxGroupDepth}
           {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
           {...(sidebarSaved ? { saved: sidebarSaved } : {})}
+          {...(sidebarHosts ? { hosts: sidebarHosts } : {})}
           width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
           onResize={(width) =>
             uiStateStore.update((current) => setSidebarWidth(current, width))}
@@ -921,6 +1045,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     dismissingSessionIds={dismissing}
                     restartingSessionIds={restarting}
                     onSessionCwd={controller.reportSessionCwd}
+                    onConversationCaptured={controller.reportCapturedConversation}
                     onSessionOutput={handleSessionOutput}
                     onFocusPane={(sessionId) =>
                       setFocusByTab((prev) =>
@@ -1045,6 +1170,33 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
             prefill={savePrompt.prefill}
             onSave={commitSave}
             onCancel={() => setSavePrompt(null)}
+          />
+        ) : null}
+        {sshCredentials && passwordAlias !== null ? (
+          <SetPasswordDialog
+            open
+            alias={passwordAlias}
+            hasExisting={withPassword.has(passwordAlias)}
+            onSave={(password) => {
+              // Rejects if encryption is on and DPAPI fails; leave the dialog
+              // open in that case so the secret is not silently lost, and never
+              // let the rejection go unhandled.
+              void sshCredentials
+                .setPassword(passwordAlias, password, settings.sshEncryptPasswords)
+                .then(() => setPasswordAlias(null))
+                .catch((error: unknown) => {
+                  console.error("failed to store ssh password", error);
+                });
+            }}
+            onRemove={() => {
+              void sshCredentials.removePassword(passwordAlias).catch(
+                (error: unknown) => {
+                  console.error("failed to remove ssh password", error);
+                },
+              );
+              setPasswordAlias(null);
+            }}
+            onCancel={() => setPasswordAlias(null)}
           />
         ) : null}
         {folderSearch ? (

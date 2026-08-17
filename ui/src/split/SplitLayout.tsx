@@ -5,6 +5,7 @@ import { SleepingPane } from "../terminal/SleepingPane";
 import { useSleepingSessions, type SleepController } from "../terminal/sleep";
 import type {
   PaneChatProps,
+  ConversationCaptureReporter,
   PaneHostClient,
   TerminalDimensions,
 } from "../terminal/TerminalPane";
@@ -55,6 +56,8 @@ export interface SplitLayoutProps {
   onSessionCwd?: (sessionId: number, path: string, live: boolean) => void;
   /** OSC 9;77 deliverable report (polish P4); fires for live output only. */
   onSessionOutput?: (sessionId: number, path: string) => void;
+  /** Remote conversation-id capture from an SSH pane (ssh-sessions spec §2). */
+  onConversationCaptured?: ConversationCaptureReporter;
   actions: SplitLayoutActions;
   /**
    * Whether this layout's tab is on screen. Panes of a visible layout NEVER
@@ -118,6 +121,7 @@ export function SplitLayout({
   onFocusPane,
   onSessionCwd,
   onSessionOutput,
+  onConversationCaptured,
   actions,
   visible = true,
   sleep,
@@ -368,6 +372,9 @@ export function SplitLayout({
                     recordedDims={sessionDims?.[sessionId] ?? null}
                     onCwd={(path, live) => onSessionCwd?.(sessionId, path, live)}
                     onOutput={(path) => onSessionOutput?.(sessionId, path)}
+                    {...(onConversationCaptured
+                      ? { onConversationCaptured }
+                      : {})}
                     {...(() => {
                       const chat = chatForSession?.(sessionId) ?? null;
                       return chat ? { chat } : {};

@@ -11,6 +11,14 @@ import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
 import {
+  tauriProtectSecret,
+  tauriReadSshConfig,
+  tauriUnprotectSecret,
+} from "../native/sshNative";
+import { parseSshConfig } from "../ssh/config";
+import { createSshCredentialsStore, type SshCredentialsStore } from "../ssh/credentials";
+import type { SshHost } from "../ssh/types";
+import {
   createSavedSessionsStore,
   type SavedSessionsStoreHandle,
 } from "../saved/store";
@@ -176,6 +184,13 @@ export interface BootstrappedWorkspace {
    * legacy test fixtures; the sidebar then simply has no Saved section.
    */
   saved?: SavedSessionsStoreHandle;
+  /**
+   * SSH host inventory parsed from `~/.ssh/config` (ssh-sessions spec §1) and
+   * the credentials store. Absent in legacy fixtures; the sidebar then has no
+   * Hosts section.
+   */
+  sshHosts?: readonly SshHost[];
+  sshCredentials?: SshCredentialsStore;
 }
 
 export function parseBootstrapHostResult(value: unknown): HostClientConnectOptions {
@@ -221,6 +236,15 @@ export async function bootstrapWorkspace(
     // reads as an empty list rather than failing the boot.
     const saved = createSavedSessionsStore(appFiles);
     await saved.ready();
+    // SSH inventory + credentials (ssh-sessions spec). The config is read
+    // once at boot (a rescan needs a restart — the file rarely changes); a
+    // missing/unparseable file yields an empty inventory and never blocks.
+    const sshHosts = parseSshConfig(await tauriReadSshConfig());
+    const sshCredentials = createSshCredentialsStore(appFiles, {
+      protect: tauriProtectSecret,
+      unprotect: tauriUnprotectSecret,
+    });
+    await sshCredentials.ready();
     // Same optional-field contract as settings/ui-state: a read failure yields
     // empty state and never blocks the workspace.
     const conversationsIo = conversationsFileIo(appFiles);
@@ -271,6 +295,8 @@ export async function bootstrapWorkspace(
       settings,
       uiState,
       savedSessions: saved,
+      sshPasswords: { passwordFor: (alias: string) => sshCredentials.passwordFor(alias) },
+      sshHosts: { byAlias: (alias: string) => sshHosts.find((host) => host.aliases.includes(alias)) ?? null },
       ...(options.generateId ? { generateId: options.generateId } : {}),
       ...(options.pickFolder ? { pickFolder: options.pickFolder } : {}),
     };
@@ -320,6 +346,8 @@ export async function bootstrapWorkspace(
       uiState,
       conversations,
       saved,
+      sshHosts,
+      sshCredentials,
     };
   } catch {
     try {
