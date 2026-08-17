@@ -10,16 +10,20 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The only names `read_app_file` / `write_app_file` will accept. Three of them
+/// The only names `read_app_file` / `write_app_file` will accept. Four of them
 /// arrived after the originals: `llm_sessions` persists its scan index through
-/// this same path, and saved sessions their pinned list, so every side shares
-/// one allowlist and one atomic write rather than growing a second storage API.
-pub const ALLOWED_FILES: [&str; 5] = [
+/// this same path, saved sessions their pinned list, and ssh its per-host
+/// passwords, so every side shares one allowlist and one atomic write rather
+/// than growing a second storage API. The ssh file holds secrets, but it needs
+/// no special handling HERE — encryption happens renderer-side (src/ssh.rs's
+/// DPAPI commands) before the bytes ever reach this module.
+pub const ALLOWED_FILES: [&str; 6] = [
     "settings_v1.json",
     "ui_state_v1.json",
     "sessions_index_v1.json",
     "conversations_v1.json",
     "saved_sessions_v1.json",
+    "ssh_credentials_v1.json",
 ];
 
 /// Keeps concurrent temp files distinct within one process (two debounced
@@ -104,7 +108,7 @@ mod tests {
     const SETTINGS: &str = "settings_v1.json";
 
     #[test]
-    fn allowlist_is_exactly_the_five_app_files() {
+    fn allowlist_is_exactly_the_six_app_files() {
         assert_eq!(
             ALLOWED_FILES,
             [
@@ -113,6 +117,7 @@ mod tests {
                 "sessions_index_v1.json",
                 "conversations_v1.json",
                 "saved_sessions_v1.json",
+                "ssh_credentials_v1.json",
             ]
         );
     }
@@ -128,6 +133,18 @@ mod tests {
                 Some("{\"version\":1}")
             );
         }
+    }
+
+    #[test]
+    fn the_ssh_credentials_file_reads_and_writes_like_the_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "ssh_credentials_v1.json";
+        assert_eq!(read_file_in(tmp.path(), name).unwrap(), None);
+        write_file_in(tmp.path(), name, "{\"version\":1,\"hosts\":{}}").unwrap();
+        assert_eq!(
+            read_file_in(tmp.path(), name).unwrap().as_deref(),
+            Some("{\"version\":1,\"hosts\":{}}")
+        );
     }
 
     #[test]
