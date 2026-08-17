@@ -19,6 +19,8 @@ import {
   type DirExists,
 } from "../conversations/resume";
 import { sessionKey, type LlmSessionRecord, type SessionKey } from "../conversations/types";
+import type { SavedSessionsStore } from "../saved/store";
+import type { SavedSession } from "../saved/types";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
 import {
   dropScope,
@@ -188,6 +190,13 @@ export interface SettingsReader {
   getSnapshot(): TermxSettings;
 }
 
+/**
+ * The slice of the saved-sessions store a resume writes back to: which daemon
+ * session the saved entry now names. Narrowed to that one method so the
+ * controller can never drift into owning the saved list itself.
+ */
+export type SavedSessionsRecorder = Pick<SavedSessionsStore, "touchDaemonSession">;
+
 /** Target for a deferred "pick a folder first" create (searcher palette). */
 export interface FolderSearchTarget {
   groupId: string | null;
@@ -206,6 +215,13 @@ export interface WorkspaceControllerOptions {
   uiState?: UiStateStore;
   /** Directory probe for the resume flow (spec §5); defaults to `list_dirs`. */
   dirExists?: DirExists;
+  /**
+   * Saved sessions (saved-sessions spec). Absent — legacy fixtures, and any
+   * caller that does not persist saves — means a `resumeSaved` still resumes
+   * exactly as it should; only the "this entry now runs session N" write-back
+   * is skipped.
+   */
+  savedSessions?: SavedSessionsRecorder;
 }
 
 /** How a resume's wait for the new session's prompt ended. */
@@ -243,6 +259,7 @@ export class WorkspaceController {
   private readonly settings: SettingsReader;
   private readonly uiState: UiStateStore;
   private readonly dirExists: DirExists;
+  private readonly savedSessions: SavedSessionsRecorder | null;
   private folderSearchHandler: ((target: FolderSearchTarget) => void) | null = null;
   /// One-shot resume waiters keyed by the session the resume just created.
   private readonly resumeWaiters = new Map<number, ResumeWaiter>();
@@ -290,6 +307,7 @@ export class WorkspaceController {
     this.settings = options.settings ?? { getSnapshot: () => DEFAULT_SETTINGS };
     this.uiState = options.uiState ?? new UiStateStore();
     this.dirExists = options.dirExists ?? tauriDirExists;
+    this.savedSessions = options.savedSessions ?? null;
     for (const session of options.sessions) {
       this.sessions.set(session.id, session);
     }
@@ -712,38 +730,90 @@ export class WorkspaceController {
       return { kind: "refused" };
     }
 
-    // Arm the waiter before the session is attached: once a terminal binds to
-    // it, its first OSC 9;9 report can land inside any later await.
-    const awaitPrompt = this.settings.getSnapshot().shellIntegration;
-    const ready = this.armResumeWait(
-      created.id,
-      awaitPrompt ? RESUME_PROMPT_TIMEOUT_MS : RESUME_FIXED_DELAY_MS,
-      awaitPrompt,
-    );
-    let tabId: string;
-    try {
-      tabId = await this.addSessionTab(created, null);
-    } catch {
-      this.settleResumeWait(created.id, "gone");
-      await ready;
-      this.setNotice("The terminal session could not be created.");
-      return { kind: "refused" };
-    }
-    // The tab is live in the layout from this point on — record it before
-    // awaiting further so a session death mid-wait purges itself through the
-    // normal onSessionExited/onSessionClosed path instead of needing a
-    // special case here.
-    this.resumedTabs.set(key, tabId);
+    // The tab is recorded for dedupe the moment it exists — before the prompt
+    // wait — so a session death mid-wait purges itself through the normal
+    // onSessionExited/onSessionClosed path instead of needing a special case.
+    const opened = await this.openResumedTab(created, command, (tabId) => {
+      this.resumedTabs.set(key, tabId);
+    });
+    return opened ? { kind: "opened" } : { kind: "refused" };
+  };
 
-    if ((await ready) === "gone") {
-      this.setNotice("The terminal ended before the session could be resumed.");
-      return { kind: "refused" };
+  /// Resume a saved session (saved-sessions spec §"Resume flow"). Two shapes:
+  ///
+  /// 1. REATTACH. The daemon still runs the terminal the save came from, so
+  ///    the saved session is already alive: focus the tab that holds it, or
+  ///    open a tab onto it when the layout has none. Nothing is created and
+  ///    NOTHING is typed — the agent is still sitting in that shell.
+  /// 2. FRESH RESTORE. A new shell in the saved folder, then the provider's
+  ///    resume command once the prompt reports (a bare-shell save types
+  ///    nothing at all, and does not wait for a prompt it has no use for).
+  ///
+  /// A saved session IS its folder — claude conversations are keyed to their
+  /// project directory and the user pinned this one deliberately — so a
+  /// vanished folder is a refusal, never a shell somewhere else, and the host
+  /// default directory is never a fallback here.
+  resumeSaved = async (entry: SavedSession): Promise<void> => {
+    this.setNotice(null);
+
+    const recordedSessionId = entry.lastDaemonSessionId;
+    if (
+      recordedSessionId !== undefined &&
+      this.sessions.get(recordedSessionId)?.alive === true
+    ) {
+      const existingTabId = this.tabHoldingSession(recordedSessionId);
+      if (existingTabId !== null) {
+        this.activateTab(existingTabId);
+      } else {
+        // Alive but tabless: the session outlived its tab (a merge, a
+        // dismissed layout, a restore that dropped it). Give it a tab back
+        // rather than starting a second shell beside it.
+        try {
+          await this.addSessionTab(this.sessions.get(recordedSessionId)!, null);
+        } catch {
+          this.setNotice("The saved session could not be reopened.");
+          return;
+        }
+      }
+      this.recordDaemonSession(entry, recordedSessionId);
+      return;
     }
-    const sent = this.attachments.sendInput?.(created.id, `${command}\r`) ?? false;
-    if (!sent) {
-      this.setNotice("The resume command could not be sent to the terminal.");
+
+    // The command is built from the provider and id ALONE, and only after
+    // `resumeCommand` validates the id — a corrupt store row is refused here,
+    // before a terminal exists.
+    const conversation = entry.conversation;
+    let command: string | null = null;
+    if (conversation) {
+      command = resumeCommand(conversation);
+      if (command === null) {
+        this.setNotice("That session cannot be resumed: its id is not valid.");
+        return;
+      }
     }
-    return { kind: "opened" };
+
+    if (!(await this.probeDir(entry.cwd))) {
+      this.setNotice(
+        `The saved session's folder no longer exists (${entry.cwd}).`,
+      );
+      return;
+    }
+
+    const profile = this.settings.getSnapshot().defaultProfile;
+    let created: SessionInfo;
+    try {
+      created = await this.createSessionDownChain(profile, [entry.cwd]);
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+      return;
+    }
+
+    await this.openResumedTab(created, command, (tabId) => {
+      if (conversation) {
+        this.resumedTabs.set(sessionKey(conversation), tabId);
+      }
+      this.recordDaemonSession(entry, created.id);
+    });
   };
 
   /// Recorded dims per session for reattach-before-replay (spec §13): the
@@ -1183,6 +1253,77 @@ export class WorkspaceController {
     }
     this.publish();
     return tabId;
+  }
+
+  /// The shared tail of both resume flows: arm the prompt wait BEFORE the
+  /// session is attached (once a terminal binds to it, its first OSC 9;9
+  /// report can land inside any later await), open the tab, then type
+  /// `command` once the shell reports its prompt. `onTabOpened` runs the
+  /// instant the tab exists in the layout — the point from which a mid-wait
+  /// death cleans itself up through the normal listeners.
+  ///
+  /// A null `command` (a bare-shell saved session) types nothing and waits for
+  /// nothing: there is no prompt to race. Returns false when the resume was
+  /// refused, in which case a notice is already set.
+  private async openResumedTab(
+    created: SessionInfo,
+    command: string | null,
+    onTabOpened: (tabId: string) => void,
+  ): Promise<boolean> {
+    const awaitPrompt = this.settings.getSnapshot().shellIntegration;
+    const ready = command === null
+      ? null
+      : this.armResumeWait(
+        created.id,
+        awaitPrompt ? RESUME_PROMPT_TIMEOUT_MS : RESUME_FIXED_DELAY_MS,
+        awaitPrompt,
+      );
+    let tabId: string;
+    try {
+      tabId = await this.addSessionTab(created, null);
+    } catch {
+      this.settleResumeWait(created.id, "gone");
+      if (ready !== null) {
+        await ready;
+      }
+      this.setNotice("The terminal session could not be created.");
+      return false;
+    }
+    onTabOpened(tabId);
+
+    if (ready !== null && (await ready) === "gone") {
+      this.setNotice("The terminal ended before the session could be resumed.");
+      return false;
+    }
+    if (command !== null) {
+      const sent = this.attachments.sendInput?.(created.id, `${command}\r`) ?? false;
+      if (!sent) {
+        this.setNotice("The resume command could not be sent to the terminal.");
+      }
+    }
+    return true;
+  }
+
+  /// The tab whose split holds `sessionId`, when the layout has one.
+  private tabHoldingSession(sessionId: number): string | null {
+    const layout = this.store.getState();
+    for (const [tabId, tab] of Object.entries(layout.tabs)) {
+      if (sessionIdsInTab(tab).includes(sessionId)) {
+        return tabId;
+      }
+    }
+    return null;
+  }
+
+  /// Write back which daemon session a saved entry now names. Skipped when it
+  /// already names this one (the reattach case), so a resume that changed
+  /// nothing does not bump the entry's `updatedAtMs` — and therefore does not
+  /// reshuffle the sidebar's most-recent-first order for no reason.
+  private recordDaemonSession(entry: SavedSession, sessionId: number): void {
+    if (entry.lastDaemonSessionId === sessionId) {
+      return;
+    }
+    this.savedSessions?.touchDaemonSession(entry.id, sessionId);
   }
 
   /// The user's nesting ceiling for CREATION and MOVEMENT (spec §3). Parsing

@@ -96,6 +96,158 @@
   min-height: 20px;
 }
 
+/* Saved sessions (saved-sessions spec): pinned folder + conversation pairs,
+   above the terminal groups and separated from them by a hairline. Square rows
+   and a hover-revealed action tray, exactly like the tab rows below. */
+.sidebar-saved {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-saved__header {
+  display: flex;
+  min-height: var(--row-list);
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 2px;
+  color: var(--sidebar-muted);
+}
+
+.sidebar-saved__label {
+  flex: 1 1 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar-saved__count {
+  min-width: 18px;
+  color: var(--text-hint);
+  font-size: 10px;
+  text-align: right;
+}
+
+.sidebar-saved__empty {
+  margin: 0;
+  padding: 0 6px 2px 8px;
+  color: var(--text-hint);
+  font-size: 11px;
+}
+
+.sidebar-saved__rows {
+  display: grid;
+  gap: 2px;
+}
+
+.sidebar-saved__row {
+  display: flex;
+  min-height: var(--row-list);
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px 3px 8px;
+  overflow: hidden;
+  color: var(--text-main);
+  background: transparent;
+  border: 1px solid transparent;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 0;
+  outline: none;
+  cursor: default;
+  transition: color 130ms ease, background-color 130ms ease;
+  user-select: none;
+}
+
+.sidebar-saved__row:hover {
+  color: var(--sidebar-text);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.sidebar-saved__row:focus-visible {
+  border-color:
+    color-mix(in srgb, var(--accent) 40%, transparent)
+    color-mix(in srgb, var(--accent) 40%, transparent)
+    color-mix(in srgb, var(--accent) 40%, transparent)
+    color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.sidebar-saved__content {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.sidebar-saved__title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.sidebar-saved__name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The provider the row will resume, when a conversation rides along. */
+.sidebar-saved__badge {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  color: var(--sidebar-muted);
+  border: 1px solid var(--border);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sidebar-saved__folder {
+  overflow: hidden;
+  color: var(--sidebar-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-saved__actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.sidebar-saved__action {
+  display: grid;
+  width: var(--icon-button);
+  height: var(--icon-button);
+  padding: 0;
+  place-items: center;
+  color: var(--sidebar-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+
+.sidebar-saved__row:hover .sidebar-saved__action,
+.sidebar-saved__row:focus-within .sidebar-saved__action,
+.sidebar-saved__action:focus-visible {
+  opacity: 1;
+}
+
+.sidebar-saved__action:hover {
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.sidebar-saved__action--danger:hover {
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+}
+
 .sidebar-group {
   margin: 2px 0 8px;
 }

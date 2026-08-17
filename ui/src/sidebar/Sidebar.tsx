@@ -12,6 +12,7 @@ import {
 } from "../conversations/ConversationsRail";
 import type { ConversationsStore } from "../conversations/store";
 import type { LlmSessionRecord } from "../conversations/types";
+import type { SavedSession } from "../saved/types";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
 import {
   canMoveItem,
@@ -85,6 +86,23 @@ export interface SidebarConversations {
   dismissOutput?: ConversationsRailProps["dismissOutput"];
 }
 
+/**
+ * Saved sessions (saved-sessions spec §"Resume flow"): the pinned folder +
+ * conversation pairs, listed above the terminal groups. `enabled` carries
+ * `settings.savedSidebarList`, so the section is gated one prop away from the
+ * render — an App that persists saves but has the list switched off passes the
+ * entries and simply gets no section.
+ */
+export interface SidebarSaved {
+  enabled: boolean;
+  entries: readonly SavedSession[];
+  /** Row click: reattach if the daemon still runs it, else restore it. */
+  onResume(entry: SavedSession): void;
+  /** Inline rename. Description edits belong to the save dialog. */
+  onRename(id: string, name: string): void;
+  onDelete(id: string): void;
+}
+
 export interface SidebarProps {
   snapshot: WorkspaceSnapshot;
   actions: SidebarActions;
@@ -99,6 +117,11 @@ export interface SidebarProps {
    */
   maxGroupDepth?: number;
   conversations?: SidebarConversations;
+  /**
+   * Saved sessions section (saved-sessions spec). Omitted — or disabled in
+   * settings — leaves the sidebar exactly as it was.
+   */
+  saved?: SidebarSaved;
   /**
    * Persisted sidebar width in px (polish P5), already clamped by
    * `uiState.setSidebarWidth`. Absent = the stylesheet's own width, so a
@@ -145,7 +168,8 @@ type RenameTarget =
 
 type ConfirmClose =
   | { kind: "tab"; id: string; title: string }
-  | { kind: "group"; id: string; title: string };
+  | { kind: "group"; id: string; title: string }
+  | { kind: "saved"; id: string; title: string };
 
 type SidebarMenu =
   | { kind: "tab"; id: string; point: MenuPoint }
@@ -196,6 +220,7 @@ export function Sidebar({
   onOpenFolderSearch,
   maxGroupDepth = DEFAULT_SETTINGS.maxGroupDepth,
   conversations,
+  saved,
   width,
   onResize,
   onExpandConversations,
@@ -206,6 +231,8 @@ export function Sidebar({
   const theme = themeById(useThemeId());
   const [mode, setMode] = useState<SidebarMode>("terminals");
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
+  /// Id of the saved row whose name is being edited inline, if any.
+  const [savedRenameId, setSavedRenameId] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState<ConfirmClose | null>(null);
   const [busy, setBusy] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -250,6 +277,16 @@ export function Sidebar({
     return out;
   }, [snapshot.rootItems]);
   const visibleTabIds = useMemo(() => visibleTabs.map((tab) => tab.id), [visibleTabs]);
+
+  /// Saved rows, most recently touched first — a resume or a re-save is what
+  /// the user is working on, so it rises. Names break ties so the order is
+  /// stable across renders of a freshly imported list.
+  const savedRows = useMemo(() => {
+    const entries = saved?.entries ?? [];
+    return [...entries].sort((left, right) =>
+      right.updatedAtMs - left.updatedAtMs || left.name.localeCompare(right.name)
+    );
+  }, [saved?.entries]);
 
   useLayoutEffect(() => {
     if (focusedTabId && visibleTabIds.includes(focusedTabId)) {
@@ -789,6 +826,136 @@ export function Sidebar({
     );
   };
 
+  const requestSavedDelete = (entry: SavedSession, opener?: HTMLElement | null) => {
+    openConfirmation({ kind: "saved", id: entry.id, title: entry.name }, opener);
+  };
+
+  /// One saved session: the name it was pinned under, the folder it restores,
+  /// and the provider badge when a conversation rides along. The whole row is
+  /// the resume affordance; rename and delete sit in the hover tray, exactly
+  /// like a tab's close button.
+  const renderSavedRow = (entry: SavedSession) => {
+    const renaming = savedRenameId === entry.id;
+    const provider = entry.conversation?.provider ?? null;
+    const resume = () => {
+      if (!renaming) {
+        saved?.onResume(entry);
+      }
+    };
+    return (
+      <div
+        key={entry.id}
+        className="sidebar-saved__row"
+        data-testid="saved-row"
+        data-saved-id={entry.id}
+        role="button"
+        tabIndex={0}
+        /// The description is the row's tooltip; without one the full path is
+        /// more use than repeating the truncated tail.
+        title={entry.description ?? entry.cwd}
+        onClick={(event) => {
+          const target = event.target as HTMLElement;
+          if (target.closest("button") || target.closest("input")) {
+            return;
+          }
+          resume();
+        }}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) {
+            return;
+          }
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            resume();
+          } else if (event.key === "F2") {
+            event.preventDefault();
+            setSavedRenameId(entry.id);
+          } else if (event.key === "Delete") {
+            event.preventDefault();
+            requestSavedDelete(entry);
+          }
+        }}
+      >
+        <span className="sidebar-saved__content">
+          {renaming ? (
+            <InlineRename
+              value={entry.name}
+              ariaLabel={`Rename ${entry.name}`}
+              onCommit={(value) => {
+                saved?.onRename(entry.id, value);
+                setSavedRenameId(null);
+              }}
+              onCancel={() => setSavedRenameId(null)}
+            />
+          ) : (
+            <span className="sidebar-saved__title">
+              <span className="sidebar-saved__name">{entry.name}</span>
+              {provider ? (
+                <span className="sidebar-saved__badge" data-provider={provider}>
+                  {provider}
+                </span>
+              ) : null}
+            </span>
+          )}
+          <span className="sidebar-saved__folder">{folderTail(entry.cwd)}</span>
+        </span>
+        {/* Hidden while renaming: the editor already owns the row, and a second
+            "Rename …" control would duplicate its label. */}
+        {renaming ? null : (
+          <span className="sidebar-saved__actions">
+            <button
+              type="button"
+              className="sidebar-saved__action"
+              aria-label={`Rename ${entry.name}`}
+              title="Rename"
+              onClick={(event) => {
+                event.stopPropagation();
+                setSavedRenameId(entry.id);
+              }}
+            >
+              ✎
+            </button>
+            <button
+              type="button"
+              className="sidebar-saved__action sidebar-saved__action--danger"
+              aria-label={`Delete ${entry.name}`}
+              title="Delete saved session"
+              onClick={(event) => {
+                event.stopPropagation();
+                requestSavedDelete(entry, event.currentTarget);
+              }}
+            >
+              ×
+            </button>
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  /// The section stays on screen while the setting is on even with nothing in
+  /// it: the one-line hint is how the feature explains itself, and an empty
+  /// list that vanishes teaches nobody where saves land.
+  const savedSection = saved?.enabled ? (
+    <section
+      className="sidebar-saved"
+      data-testid="saved-section"
+      aria-label="Saved sessions"
+    >
+      <div className="sidebar-saved__header">
+        <span className="sidebar-saved__label">Saved</span>
+        <span className="sidebar-saved__count">{savedRows.length}</span>
+      </div>
+      {savedRows.length === 0 ? (
+        <p className="sidebar-saved__empty">
+          Pin a terminal to keep its folder and conversation here.
+        </p>
+      ) : (
+        <div className="sidebar-saved__rows">{savedRows.map(renderSavedRow)}</div>
+      )}
+    </section>
+  ) : null;
+
   /// Containers the item may move into, minus the one it already sits in —
   /// the menu twin of the drag eligibility set, each with the append index for
   /// that container.
@@ -1156,6 +1323,7 @@ export function Sidebar({
       ) : (
       <>
       <div className="sidebar__scroll">
+        {savedSection}
         <div
           className="sidebar__root"
           role="tablist"
@@ -1274,7 +1442,7 @@ export function Sidebar({
             role="dialog"
             aria-modal="true"
             aria-busy={busy}
-            aria-label={confirmClose.kind === "tab" ? "Close terminal" : "Delete group"}
+            aria-label={CONFIRM_LABELS[confirmClose.kind].dialog}
             tabIndex={-1}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
@@ -1307,12 +1475,8 @@ export function Sidebar({
               }
             }}
           >
-            <h2>{confirmClose.kind === "tab" ? "Close terminal?" : "Delete group?"}</h2>
-            <p>
-              {confirmClose.kind === "tab"
-                ? `Close “${confirmClose.title}” and end its running shell?`
-                : `Delete “${confirmClose.title}”? Its terminals move up a level, or close with it.`}
-            </p>
+            <h2>{CONFIRM_LABELS[confirmClose.kind].heading}</h2>
+            <p>{confirmPrompt(confirmClose)}</p>
             <div className="sidebar-dialog__actions">
               <button
                 ref={dialogCancelRef}
@@ -1333,14 +1497,19 @@ export function Sidebar({
                 type="button"
                 className="sidebar-dialog__danger"
                 disabled={busy}
-                onClick={() => void runConfirmation(() =>
-                  confirmClose.kind === "tab"
-                    ? actions.closeLiveTab(confirmClose.id)
-                    : actions.deleteGroup(confirmClose.id, "close-tabs"))}
+                onClick={() => void runConfirmation(async () => {
+                  if (confirmClose.kind === "tab") {
+                    await actions.closeLiveTab(confirmClose.id);
+                  } else if (confirmClose.kind === "group") {
+                    await actions.deleteGroup(confirmClose.id, "close-tabs");
+                  } else {
+                    saved?.onDelete(confirmClose.id);
+                  }
+                })}
               >
                 {busy
-                  ? "Closing…"
-                  : (confirmClose.kind === "tab" ? "Close terminal" : "Close terminals")}
+                  ? CONFIRM_LABELS[confirmClose.kind].busy
+                  : CONFIRM_LABELS[confirmClose.kind].confirm}
               </button>
             </div>
           </div>
@@ -1376,6 +1545,48 @@ export function Sidebar({
       ) : null}
     </aside>
   );
+}
+
+/** Wording per destructive confirmation, so the dialog stays one component. */
+const CONFIRM_LABELS: Record<
+  ConfirmClose["kind"],
+  { dialog: string; heading: string; confirm: string; busy: string }
+> = {
+  tab: {
+    dialog: "Close terminal",
+    heading: "Close terminal?",
+    confirm: "Close terminal",
+    busy: "Closing…",
+  },
+  group: {
+    dialog: "Delete group",
+    heading: "Delete group?",
+    confirm: "Close terminals",
+    busy: "Closing…",
+  },
+  saved: {
+    dialog: "Delete saved session",
+    heading: "Delete saved session?",
+    confirm: "Delete",
+    busy: "Deleting…",
+  },
+};
+
+function confirmPrompt(confirm: ConfirmClose): string {
+  if (confirm.kind === "tab") {
+    return `Close “${confirm.title}” and end its running shell?`;
+  }
+  if (confirm.kind === "group") {
+    return `Delete “${confirm.title}”? Its terminals move up a level, or close with it.`;
+  }
+  // Deleting a save throws away a bookmark, never a terminal or a transcript.
+  return `Remove “${confirm.title}” from Saved? Its terminal and conversation are left alone.`;
+}
+
+/** Last path segment of a folder — the row's secondary line. */
+function folderTail(cwd: string): string {
+  const parts = cwd.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? cwd;
 }
 
 function activityLabel(activity: SidebarTabModel["activity"]): string {

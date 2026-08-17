@@ -10,6 +10,10 @@ import { HostBootstrapError, ReconnectingHostClient } from "../host/reconnect";
 import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
+import {
+  createSavedSessionsStore,
+  type SavedSessionsStoreHandle,
+} from "../saved/store";
 import { SettingsStore, loadSettingsStore } from "../settings/SettingsStore";
 import { UiStateStore, loadUiStateStore } from "./uiState";
 import { parseLayout } from "../state/layout";
@@ -167,6 +171,11 @@ export interface BootstrappedWorkspace {
    * file-only — no session scan happens until the rail asks for one.
    */
   conversations?: ConversationsStore;
+  /**
+   * Pinned folder + conversation pairs (saved-sessions spec). Absent only in
+   * legacy test fixtures; the sidebar then simply has no Saved section.
+   */
+  saved?: SavedSessionsStoreHandle;
 }
 
 export function parseBootstrapHostResult(value: unknown): HostClientConnectOptions {
@@ -207,6 +216,11 @@ export async function bootstrapWorkspace(
       read: () => appFiles.read("ui_state_v1.json"),
       save: (text) => appFiles.write("ui_state_v1.json", text),
     });
+    // Same discipline again: the store is usable from construction and gains
+    // its persisted entries when the read lands, and a corrupt or missing file
+    // reads as an empty list rather than failing the boot.
+    const saved = createSavedSessionsStore(appFiles);
+    await saved.ready();
     // Same optional-field contract as settings/ui-state: a read failure yields
     // empty state and never blocks the workspace.
     const conversationsIo = conversationsFileIo(appFiles);
@@ -256,6 +270,7 @@ export async function bootstrapWorkspace(
       sessions: state.sessions as readonly SessionInfo[],
       settings,
       uiState,
+      savedSessions: saved,
       ...(options.generateId ? { generateId: options.generateId } : {}),
       ...(options.pickFolder ? { pickFolder: options.pickFolder } : {}),
     };
@@ -297,7 +312,15 @@ export async function bootstrapWorkspace(
       }
     });
 
-    return { client, controller, connection, settings, uiState, conversations };
+    return {
+      client,
+      controller,
+      connection,
+      settings,
+      uiState,
+      conversations,
+      saved,
+    };
   } catch {
     try {
       controller?.dispose();

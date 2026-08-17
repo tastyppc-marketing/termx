@@ -1,0 +1,457 @@
+/**
+ * `WorkspaceController.resumeSaved` (saved-sessions spec §"Resume flow").
+ *
+ * Two shapes of resume live here: REATTACH (the daemon still runs the terminal
+ * the save came from, so nothing is created and nothing is typed) and FRESH
+ * RESTORE (a new shell in the saved folder, then the provider's resume command
+ * once the prompt reports). The refusal paths — a vanished folder, an id that
+ * is not a bare token — are proven to stop before any terminal exists.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SessionAttachment } from "../../host/client";
+import type { SessionInfo } from "../../host/protocol";
+import { emptyLayout, type LayoutV2 } from "../../state/layout";
+import { createLayoutStore } from "../../state/store";
+import { DEFAULT_SETTINGS, type TermxSettings } from "../../settings/settings";
+import type { DirExists } from "../../conversations/resume";
+import { RESUME_PROMPT_TIMEOUT_MS } from "../../conversations/resume";
+import type { SavedProvider, SavedSession } from "../../saved/types";
+import {
+  WorkspaceController,
+  type WorkspaceAttachmentHub,
+  type WorkspaceHostClient,
+  type WorkspacePersistence,
+} from "../WorkspaceController";
+
+const CLAUDE_ID = "0f4b1c2e-9a77-4d31-8b0e-2c5d6e7f8a90";
+
+function saved(overrides: Partial<SavedSession> = {}): SavedSession {
+  return {
+    id: "saved-1",
+    name: "TermX daemon work",
+    cwd: "C:\\Dev\\TermX",
+    conversation: { provider: "claude", id: CLAUDE_ID, title: "Daemon work" },
+    createdAtMs: 10,
+    updatedAtMs: 20,
+    ...overrides,
+  };
+}
+
+function session(id: number, overrides: Partial<SessionInfo> = {}): SessionInfo {
+  return {
+    id,
+    profile: "powershell",
+    cwd: "C:\\Dev\\TermX",
+    cols: 120,
+    rows: 30,
+    alive: true,
+    pid: 4000 + id,
+    ...overrides,
+  };
+}
+
+/** A layout holding one tab over `sessionId`, with nothing active yet. */
+function layoutWithTab(tabId: string, sessionId: number): LayoutV2 {
+  const layout = emptyLayout();
+  layout.tabs[tabId] = {
+    id: tabId,
+    title: null,
+    color: "blue",
+    fill: "off",
+    split: { kind: "pane", sessionId },
+  };
+  layout.rootItems = [{ kind: "tab", id: tabId }];
+  layout.activeTabId = null;
+  return layout;
+}
+
+/** Yield long enough for every awaited step of a resume to settle. */
+async function settleMicrotasks(): Promise<void> {
+  for (let index = 0; index < 25; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+function harness(options: {
+  settings?: Partial<TermxSettings>;
+  dirExists?: DirExists;
+  sessions?: readonly SessionInfo[];
+  layout?: LayoutV2;
+  createSession?: (cwd: string | null) => Promise<SessionInfo>;
+} = {}) {
+  const exitListeners = new Set<
+    (event: { sessionId: number; exitCode: number | null }) => void
+  >();
+  const createdCwds: Array<string | null> = [];
+  const createdSessionIds: number[] = [];
+  const writes: Array<[number, string | Uint8Array]> = [];
+  let nextSessionId = 50;
+
+  const createSession = vi.fn(
+    async (createOptions: {
+      profile: string | null;
+      cwd: string | null;
+      cols: number;
+      rows: number;
+    }): Promise<SessionInfo> => {
+      createdCwds.push(createOptions.cwd);
+      const created = options.createSession
+        ? await options.createSession(createOptions.cwd)
+        : session(nextSessionId++, {
+            profile: createOptions.profile ?? "powershell",
+            cwd: createOptions.cwd,
+            cols: createOptions.cols,
+            rows: createOptions.rows,
+          });
+      createdSessionIds.push(created.id);
+      return created;
+    },
+  );
+
+  const client: WorkspaceHostClient = {
+    createSession,
+    closeSession: vi.fn(async () => undefined),
+    onSessionExited(listener) {
+      exitListeners.add(listener);
+      return () => exitListeners.delete(listener);
+    },
+    onSessionClosed: () => () => undefined,
+    onError: () => () => undefined,
+  };
+
+  const persistence: WorkspacePersistence = {
+    getSnapshot: () => ({ saving: false, error: null }),
+    subscribe: () => () => undefined,
+    record: vi.fn(),
+    flush: async () => undefined,
+    dispose: vi.fn(),
+  };
+
+  const attachments: WorkspaceAttachmentHub = {
+    getSnapshot: () => ({ sessions: {} }),
+    subscribe: () => () => undefined,
+    attachSession: vi.fn(async () => undefined),
+    markExited: vi.fn(),
+    forgetSession: vi.fn(),
+    attach: vi.fn(async (sessionId: number) => ({
+      sessionId,
+      nextOffset: 0n,
+      sendInput: vi.fn(),
+      resize: vi.fn(),
+      detach: vi.fn(),
+    } satisfies SessionAttachment)),
+    sendInput: vi.fn((sessionId: number, data: string | Uint8Array) => {
+      writes.push([sessionId, data]);
+      return true;
+    }),
+    onError: () => () => undefined,
+    close: vi.fn(),
+  };
+
+  const dirExists = vi.fn(options.dirExists ?? (async () => true));
+  const touchDaemonSession = vi.fn();
+  let nextTabId = 1;
+  const controller = new WorkspaceController({
+    client,
+    store: createLayoutStore(options.layout ?? emptyLayout()),
+    persistence,
+    attachments,
+    sessions: options.sessions ?? [],
+    generateId: () => `saved-tab-${nextTabId++}`,
+    settings: { getSnapshot: () => ({ ...DEFAULT_SETTINGS, ...options.settings }) },
+    dirExists,
+    savedSessions: { touchDaemonSession },
+  });
+
+  return {
+    controller,
+    createSession,
+    createdCwds,
+    createdSessionIds,
+    dirExists,
+    touchDaemonSession,
+    writes,
+    notice: () => controller.getSnapshot().notice,
+    activeTabId: () => controller.getSnapshot().activeTabId,
+    tabCount: () => controller.getSnapshot().ungroupedTabs.length,
+    tabIds: () => controller.getSnapshot().ungroupedTabs.map((tab) => tab.id),
+    emitExit(sessionId: number) {
+      for (const listener of exitListeners) {
+        listener({ sessionId, exitCode: 1 });
+      }
+    },
+  };
+}
+
+/** Drive a fresh restore through its prompt-ready report. */
+async function resumeAndSettle(
+  h: ReturnType<typeof harness>,
+  entry: SavedSession,
+): Promise<void> {
+  const done = h.controller.resumeSaved(entry);
+  await settleMicrotasks();
+  const sessionId = h.createdSessionIds.at(-1);
+  if (sessionId !== undefined) {
+    h.controller.reportSessionCwd(sessionId, entry.cwd, true);
+  }
+  return done;
+}
+
+describe("WorkspaceController.resumeSaved reattach", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("activates the tab that already holds the live daemon session, creating nothing", async () => {
+    const h = harness({
+      sessions: [session(7)],
+      layout: layoutWithTab("existing-tab", 7),
+    });
+
+    await h.controller.resumeSaved(saved({ lastDaemonSessionId: 7 }));
+
+    expect(h.activeTabId()).toBe("existing-tab");
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.dirExists).not.toHaveBeenCalled();
+    expect(h.tabCount()).toBe(1);
+    expect(h.writes).toEqual([]);
+    expect(h.notice()).toBeNull();
+  });
+
+  it("opens a tab onto a live but tabless session without creating a shell", async () => {
+    const h = harness({ sessions: [session(7)] });
+
+    await h.controller.resumeSaved(saved({ lastDaemonSessionId: 7 }));
+
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.tabCount()).toBe(1);
+    expect(h.controller.getSnapshot().ungroupedTabs[0]?.primarySessionId).toBe(7);
+    expect(h.writes).toEqual([]);
+    expect(h.notice()).toBeNull();
+  });
+
+  it("leaves the recorded daemon session untouched when the reattach changes nothing", async () => {
+    const h = harness({ sessions: [session(7)] });
+
+    await h.controller.resumeSaved(saved({ lastDaemonSessionId: 7 }));
+
+    expect(h.touchDaemonSession).not.toHaveBeenCalled();
+  });
+
+  it("falls through to a fresh restore when the recorded session is dead", async () => {
+    const h = harness({ sessions: [session(7, { alive: false })] });
+    const entry = saved({ lastDaemonSessionId: 7 });
+
+    await resumeAndSettle(h, entry);
+
+    expect(h.createdCwds).toEqual(["C:\\Dev\\TermX"]);
+    expect(h.writes).toEqual([[50, `claude --resume ${CLAUDE_ID}\r`]]);
+    expect(h.touchDaemonSession).toHaveBeenCalledWith("saved-1", 50);
+  });
+
+  it("falls through to a fresh restore when the host never knew the session", async () => {
+    const h = harness();
+
+    await resumeAndSettle(h, saved({ lastDaemonSessionId: 999 }));
+
+    expect(h.createSession).toHaveBeenCalledTimes(1);
+    expect(h.writes).toEqual([[50, `claude --resume ${CLAUDE_ID}\r`]]);
+  });
+});
+
+describe("WorkspaceController.resumeSaved fresh restore", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("creates the shell in the saved folder and types the resume command on prompt-ready", async () => {
+    const h = harness();
+    const entry = saved();
+
+    const done = h.controller.resumeSaved(entry);
+    await settleMicrotasks();
+    expect(h.writes).toEqual([]);
+
+    h.controller.reportSessionCwd(50, "C:\\Dev\\TermX", true);
+    await done;
+
+    expect(h.createdCwds).toEqual(["C:\\Dev\\TermX"]);
+    expect(h.writes).toEqual([[50, `claude --resume ${CLAUDE_ID}\r`]]);
+    expect(h.tabCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(h.notice()).toBeNull();
+  });
+
+  it("never falls back to the host default directory", async () => {
+    const h = harness({
+      createSession: async (cwd) => {
+        if (cwd === null) {
+          throw new Error("the default dir must never be tried");
+        }
+        throw new Error("host refused");
+      },
+    });
+
+    await h.controller.resumeSaved(saved());
+
+    expect(h.createdCwds).toEqual(["C:\\Dev\\TermX"]);
+    expect(h.notice()).toBe("The terminal session could not be created.");
+    expect(h.tabCount()).toBe(0);
+  });
+
+  it("records the created daemon session and the resume key for chat linkage", async () => {
+    const h = harness();
+
+    await resumeAndSettle(h, saved());
+
+    expect(h.touchDaemonSession).toHaveBeenCalledWith("saved-1", 50);
+    const tabId = h.tabIds()[0]!;
+    expect(h.controller.resumedSessionKeyForTab(tabId)).toBe(`claude:${CLAUDE_ID}`);
+  });
+
+  it("types the codex verb for a codex conversation", async () => {
+    const h = harness();
+
+    await resumeAndSettle(
+      h,
+      saved({ conversation: { provider: "codex", id: "abc-123", title: "Thread" } }),
+    );
+
+    expect(h.writes).toEqual([[50, "codex resume abc-123\r"]]);
+  });
+
+  it("types nothing for a bare-shell save, but still opens the folder and records the session", async () => {
+    const h = harness();
+    const entry = saved({ conversation: undefined });
+
+    await h.controller.resumeSaved(entry);
+
+    expect(h.createdCwds).toEqual(["C:\\Dev\\TermX"]);
+    expect(h.tabCount()).toBe(1);
+    expect(h.writes).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(h.touchDaemonSession).toHaveBeenCalledWith("saved-1", 50);
+    const tabId = h.tabIds()[0]!;
+    expect(h.controller.resumedSessionKeyForTab(tabId)).toBeNull();
+    expect(h.notice()).toBeNull();
+  });
+
+  it("sends anyway when the prompt never reports within 15 s", async () => {
+    const h = harness();
+
+    const done = h.controller.resumeSaved(saved());
+    await settleMicrotasks();
+    await vi.advanceTimersByTimeAsync(RESUME_PROMPT_TIMEOUT_MS - 1);
+    expect(h.writes).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await done;
+    expect(h.writes).toEqual([[50, `claude --resume ${CLAUDE_ID}\r`]]);
+  });
+
+  it("sends nothing when the terminal dies before the prompt arrives", async () => {
+    const h = harness();
+
+    const done = h.controller.resumeSaved(saved());
+    await settleMicrotasks();
+    h.emitExit(50);
+    await done;
+
+    expect(h.writes).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(h.notice()).toBe("The terminal ended before the session could be resumed.");
+  });
+});
+
+describe("WorkspaceController.resumeSaved refusals", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refuses a vanished folder by name, without creating a terminal", async () => {
+    const h = harness({ dirExists: async () => false });
+
+    await h.controller.resumeSaved(saved({ cwd: "D:\\gone\\project" }));
+
+    expect(h.dirExists).toHaveBeenCalledWith("D:\\gone\\project");
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.tabCount()).toBe(0);
+    expect(h.notice()).toBe(
+      "The saved session's folder no longer exists (D:\\gone\\project).",
+    );
+  });
+
+  it("refuses a bare-shell save whose folder is gone", async () => {
+    const h = harness({ dirExists: async () => false });
+
+    await h.controller.resumeSaved(saved({ conversation: undefined }));
+
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.notice()).toBe(
+      "The saved session's folder no longer exists (C:\\Dev\\TermX).",
+    );
+  });
+
+  it("treats a probe that throws as a vanished folder", async () => {
+    const h = harness({
+      dirExists: async () => {
+        throw new Error("ipc down");
+      },
+    });
+
+    await h.controller.resumeSaved(saved());
+
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.notice()).toBe(
+      "The saved session's folder no longer exists (C:\\Dev\\TermX).",
+    );
+  });
+
+  it("refuses an id that is not a bare token before probing the disk", async () => {
+    const h = harness();
+
+    await h.controller.resumeSaved(
+      saved({
+        conversation: { provider: "claude", id: "../evil; calc", title: "Hostile" },
+      }),
+    );
+
+    expect(h.dirExists).not.toHaveBeenCalled();
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.writes).toEqual([]);
+    expect(h.touchDaemonSession).not.toHaveBeenCalled();
+    expect(h.notice()).toBe("That session cannot be resumed: its id is not valid.");
+  });
+
+  it("refuses an unknown provider the same way", async () => {
+    const h = harness();
+
+    await h.controller.resumeSaved(
+      saved({
+        conversation: {
+          // A corrupt store row could name any provider; the command builder
+          // is the only thing standing between it and a terminal.
+          provider: "grok" as unknown as SavedProvider,
+          id: CLAUDE_ID,
+          title: "Unknown",
+        },
+      }),
+    );
+
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.notice()).toBe("That session cannot be resumed: its id is not valid.");
+  });
+});
