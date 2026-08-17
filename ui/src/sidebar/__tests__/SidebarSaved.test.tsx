@@ -94,10 +94,12 @@ function savedProps(overrides: Partial<SidebarSaved> = {}): {
   saved: SidebarSaved;
   onResume: ReturnType<typeof vi.fn>;
   onRename: ReturnType<typeof vi.fn>;
+  onDescribe: ReturnType<typeof vi.fn>;
   onDelete: ReturnType<typeof vi.fn>;
 } {
   const onResume = vi.fn();
   const onRename = vi.fn();
+  const onDescribe = vi.fn();
   const onDelete = vi.fn();
   return {
     saved: {
@@ -105,11 +107,13 @@ function savedProps(overrides: Partial<SidebarSaved> = {}): {
       entries: ENTRIES,
       onResume,
       onRename,
+      onDescribe,
       onDelete,
       ...overrides,
     },
     onResume,
     onRename,
+    onDescribe,
     onDelete,
   };
 }
@@ -265,6 +269,32 @@ describe("Sidebar saved sessions section", () => {
     expect(onResume).not.toHaveBeenCalled();
     // The editor closes once committed.
     expect(row("newer").querySelector("input.inline-rename")).toBeNull();
+  });
+
+  it("edits the description inline, and an empty commit clears it", async () => {
+    const { saved, onDescribe, onResume } = savedProps();
+    await renderSidebar(saved);
+
+    await click(button("Edit description for TermX daemon work"));
+    const input = row("newer").querySelector<HTMLInputElement>("input.inline-rename")!;
+    input.value = "resume nightly";
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }))
+    );
+
+    expect(onDescribe).toHaveBeenCalledWith("newer", "resume nightly");
+    expect(onResume).not.toHaveBeenCalled();
+    expect(row("newer").querySelector("input.inline-rename")).toBeNull();
+
+    // Clearing: an empty commit still reaches the store (unlike a rename,
+    // where blank cancels) — it is the only way to remove a description.
+    await click(button("Edit description for TermX daemon work"));
+    const again = row("newer").querySelector<HTMLInputElement>("input.inline-rename")!;
+    again.value = "";
+    await act(async () =>
+      again.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }))
+    );
+    expect(onDescribe).toHaveBeenLastCalledWith("newer", "");
   });
 
   it("deletes only after the confirmation is accepted", async () => {

@@ -167,6 +167,19 @@ describe("SaveSessionDialog", () => {
     expect(saveButton().disabled).toBe(false);
   });
 
+  it("disables Save when the folder is blank", async () => {
+    // An empty folder would only ever produce resume's "folder no longer
+    // exists ()" refusal, so it never gets saved in the first place.
+    await render();
+    expect(saveButton().disabled).toBe(false);
+
+    await type(cwdField(), "   ");
+    expect(saveButton().disabled).toBe(true);
+
+    await type(cwdField(), "C:\\Dev\\TermX");
+    expect(saveButton().disabled).toBe(false);
+  });
+
   it("reports the trimmed edited values on Save", async () => {
     const { onSave } = await render();
     await type(nameField(), "  Renamed  ");

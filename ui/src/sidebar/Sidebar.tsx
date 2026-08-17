@@ -100,8 +100,10 @@ export interface SidebarSaved {
   entries: readonly SavedSession[];
   /** Row click: reattach if the daemon still runs it, else restore it. */
   onResume(entry: SavedSession): void;
-  /** Inline rename. Description edits belong to the save dialog. */
+  /** Inline rename. */
   onRename(id: string, name: string): void;
+  /** Inline description edit; "" clears it (a bare-shell entry's only path). */
+  onDescribe(id: string, description: string): void;
   onDelete(id: string): void;
 }
 
@@ -235,6 +237,7 @@ export function Sidebar({
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   /// Id of the saved row whose name is being edited inline, if any.
   const [savedRenameId, setSavedRenameId] = useState<string | null>(null);
+  const [savedDescribeId, setSavedDescribeId] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState<ConfirmClose | null>(null);
   const [busy, setBusy] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -838,9 +841,11 @@ export function Sidebar({
   /// like a tab's close button.
   const renderSavedRow = (entry: SavedSession) => {
     const renaming = savedRenameId === entry.id;
+    const describing = savedDescribeId === entry.id;
+    const editing = renaming || describing;
     const provider = entry.conversation?.provider ?? null;
     const resume = () => {
-      if (!renaming) {
+      if (!editing) {
         saved?.onResume(entry);
       }
     };
@@ -899,11 +904,26 @@ export function Sidebar({
               ) : null}
             </span>
           )}
-          <span className="sidebar-saved__folder">{folderTail(entry.cwd)}</span>
+          {describing ? (
+            <InlineRename
+              value={entry.description ?? ""}
+              ariaLabel={`Edit description for ${entry.name}`}
+              allowEmpty
+              maxLength={200}
+              placeholder="Description (empty clears it)"
+              onCommit={(value) => {
+                saved?.onDescribe(entry.id, value);
+                setSavedDescribeId(null);
+              }}
+              onCancel={() => setSavedDescribeId(null)}
+            />
+          ) : (
+            <span className="sidebar-saved__folder">{folderTail(entry.cwd)}</span>
+          )}
         </span>
-        {/* Hidden while renaming: the editor already owns the row, and a second
-            "Rename …" control would duplicate its label. */}
-        {renaming ? null : (
+        {/* Hidden while editing: the editor already owns the row, and a second
+            control would duplicate its label. */}
+        {editing ? null : (
           <span className="sidebar-saved__actions">
             <button
               type="button"
@@ -916,6 +936,18 @@ export function Sidebar({
               }}
             >
               ✎
+            </button>
+            <button
+              type="button"
+              className="sidebar-saved__action"
+              aria-label={`Edit description for ${entry.name}`}
+              title="Edit description"
+              onClick={(event) => {
+                event.stopPropagation();
+                setSavedDescribeId(entry.id);
+              }}
+            >
+              ≡
             </button>
             <button
               type="button"

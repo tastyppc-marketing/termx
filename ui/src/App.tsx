@@ -675,6 +675,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       entries: savedEntries,
       onResume: (entry) => void controller.resumeSaved(entry),
       onRename: (id, name) => savedStore.update(id, { name }),
+      onDescribe: (id, description) => savedStore.update(id, { description }),
       onDelete: (id) => savedStore.remove(id),
     };
   }, [savedStore, savedEntries, settings.savedSidebarList, controller]);
@@ -713,7 +714,9 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           conversation?.title ??
           (folderTail(cwd) || `Session ${sessionId}`),
         description: existing?.description ?? "",
-        cwd: existing?.cwd ?? cwd,
+        // The pane's live cwd wins (spec: "prefilled from sessionCwd") — the
+        // stored folder is only a fallback when the pane's is unknown.
+        cwd: cwd || (existing?.cwd ?? ""),
         conversationLabel: conversation?.title ?? null,
         updatesExisting: existing !== undefined,
       },
@@ -744,6 +747,12 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         id: record.id,
         title: record.title,
       },
+      // A rail save knows no pane, but save() replaces the whole entry — so
+      // the stored reattach link must ride along or a description tweak from
+      // the rail would downgrade the next resume to a fresh restore.
+      ...(existing?.lastDaemonSessionId !== undefined
+        ? { lastDaemonSessionId: existing.lastDaemonSessionId }
+        : {}),
     });
   };
   openSaveForRecordRef.current = openSaveForRecord;

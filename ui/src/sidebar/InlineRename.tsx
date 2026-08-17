@@ -5,6 +5,13 @@ export interface InlineRenameProps {
   ariaLabel: string;
   onCommit(value: string): void;
   onCancel(): void;
+  /**
+   * Names must not be blank, so by default an empty commit cancels. Fields
+   * where blank MEANS "clear it" (a saved session's description) opt in.
+   */
+  allowEmpty?: boolean;
+  maxLength?: number;
+  placeholder?: string;
 }
 
 export function InlineRename({
@@ -12,6 +19,9 @@ export function InlineRename({
   ariaLabel,
   onCommit,
   onCancel,
+  allowEmpty = false,
+  maxLength = 64,
+  placeholder,
 }: InlineRenameProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const settledRef = useRef(false);
@@ -34,7 +44,7 @@ export function InlineRename({
       return;
     }
     const next = inputRef.current?.value.trim() ?? "";
-    if (next.length === 0) {
+    if (next.length === 0 && !allowEmpty) {
       cancel();
       return;
     }
@@ -48,7 +58,8 @@ export function InlineRename({
       className="inline-rename"
       defaultValue={value}
       aria-label={ariaLabel}
-      maxLength={64}
+      maxLength={maxLength}
+      {...(placeholder !== undefined ? { placeholder } : {})}
       onBlur={commit}
       onClick={(event) => event.stopPropagation()}
       onDoubleClick={(event) => event.stopPropagation()}

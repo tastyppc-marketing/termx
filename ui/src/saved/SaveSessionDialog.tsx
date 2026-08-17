@@ -70,7 +70,9 @@ function SaveSessionForm({
   }, []);
 
   const trimmedName = name.trim();
-  const valid = trimmedName.length > 0;
+  // An empty folder would save an entry resume can only refuse ("folder no
+  // longer exists ()") — stop it here where it can still be fixed.
+  const valid = trimmedName.length > 0 && cwd.trim().length > 0;
 
   const commit = () => {
     if (!valid) {
@@ -193,7 +195,9 @@ function SaveSessionForm({
             data-testid="save-session-save"
             className="save-session__save"
             disabled={!valid}
-            {...(valid ? {} : { title: "A saved session needs a name" })}
+            {...(valid
+              ? {}
+              : { title: "A saved session needs a name and a folder" })}
             onClick={commit}
           >
             {prefill.updatesExisting ? "Update" : "Save"}

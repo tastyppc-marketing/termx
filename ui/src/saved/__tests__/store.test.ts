@@ -260,8 +260,9 @@ describe("createSavedSessionsStore", () => {
     first.store.save({ name: "scratch", cwd: "C:\\scratch" });
     await first.store.flush();
 
-    // Debounced: two saves in one window collapse into one file write.
-    expect(files.writes).toHaveLength(1);
+    // User-initiated saves write immediately (a pin made just before closing
+    // the window must survive), so each save is its own file write.
+    expect(files.writes).toHaveLength(2);
 
     const second = testStore(files);
     await second.store.ready();
@@ -285,6 +286,35 @@ describe("createSavedSessionsStore", () => {
         updatedAtMs: 1_050,
       },
     ]);
+  });
+
+  it("writes user mutations immediately but keeps touchDaemonSession debounced", async () => {
+    const files = fakeFiles();
+    const { store } = testStore(files);
+    await store.ready();
+
+    // save/update/remove are things the user just did — each hits the disk
+    // without waiting out a debounce a window close could interrupt.
+    const entry = store.save({ name: "pin", cwd: "C:\\x" });
+    await store.flush();
+    expect(files.writes).toHaveLength(1);
+
+    store.update(entry.id, { name: "pin 2" });
+    await store.flush();
+    expect(files.writes).toHaveLength(2);
+
+    // Machine bookkeeping stays debounced: no write until the timer (or an
+    // explicit flush) runs it.
+    store.touchDaemonSession(entry.id, 7);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(files.writes).toHaveLength(2);
+    await store.flush();
+    expect(files.writes).toHaveLength(3);
+
+    store.remove(entry.id);
+    await store.flush();
+    expect(files.writes).toHaveLength(4);
   });
 
   it("upserts by conversation id, keeping id and createdAtMs", async () => {

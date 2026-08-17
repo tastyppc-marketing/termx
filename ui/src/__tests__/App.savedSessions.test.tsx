@@ -14,7 +14,34 @@ import type {
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
 
 vi.mock("../sidebar/Sidebar", () => ({
-  Sidebar: () => <div data-testid="workspace-sidebar" />,
+  // The real rail lives inside the Sidebar; the mock surfaces just the save
+  // callback so the App-side wiring (gating, prefill, commit) is testable.
+  Sidebar: (props: {
+    conversations?: {
+      onSaveConversation?: (record: LlmSessionRecord) => void;
+    };
+  }) => (
+    <div data-testid="workspace-sidebar">
+      {props.conversations?.onSaveConversation ? (
+        <button
+          type="button"
+          data-testid="mock-rail-save"
+          onClick={() =>
+            props.conversations!.onSaveConversation!({
+              provider: "claude",
+              id: "abc-123",
+              title: "Fix the daemon",
+              cwd: "C:\\work\\project",
+              filePath: "C:\\transcripts\\abc-123.jsonl",
+              updatedAtMs: 111,
+              summary: null,
+              recap: null,
+            })
+          }
+        />
+      ) : null}
+    </div>
+  ),
 }));
 vi.mock("../terminal/TerminalPane", () => ({
   TerminalPane: ({ sessionId }: { sessionId: number }) => (
@@ -282,6 +309,61 @@ describe("App saved-sessions integration", () => {
       name: "Daemon work",
       description: "resume nightly",
       conversation: { provider: "claude", id: "abc-123" },
+    });
+
+    await unmount();
+  });
+
+  it("keeps the live pane cwd in the prefill over the stored folder", async () => {
+    const { workspace, saved } = harness({ records: [record()] });
+    saved.save({
+      name: "Fix the daemon",
+      cwd: "C:\\old\\place",
+      conversation: { provider: "claude", id: "abc-123", title: "Fix the daemon" },
+    });
+    const { container, unmount } = await mount(workspace);
+
+    await act(async () => query(container, "pane-save").click());
+    // The spec prefills the folder from sessionCwd; the stored folder is only
+    // a fallback — otherwise an Update quietly keeps snapshotting a stale dir.
+    expect(query<HTMLInputElement>(container, "save-session-cwd").value).toBe(
+      PANE_CWD,
+    );
+
+    await unmount();
+  });
+
+  it("rail re-save keeps the stored reattach link, and the rail action is gated", async () => {
+    const gated = await mount(harness({ records: [record()] }).workspace);
+    expect(
+      gated.container.querySelector("[data-testid='mock-rail-save']"),
+    ).toBeNull();
+    await gated.unmount();
+
+    const { workspace, saved } = harness({
+      records: [record()],
+      settings: { savedConversationsRail: true },
+    });
+    const { container, unmount } = await mount(workspace);
+
+    // Pin from the pane first: the entry now carries daemon session 1.
+    await act(async () => query(container, "pane-save").click());
+    await act(async () => query(container, "save-session-save").click());
+    expect(saved.getSnapshot()[0]).toMatchObject({ lastDaemonSessionId: 1 });
+
+    // A rail save knows no pane, but must not strip the reattach link.
+    await act(async () => query(container, "mock-rail-save").click());
+    await type(
+      query<HTMLTextAreaElement>(container, "save-session-description"),
+      "tweaked from the rail",
+    );
+    await act(async () => query(container, "save-session-save").click());
+
+    const entries = saved.getSnapshot();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      description: "tweaked from the rail",
+      lastDaemonSessionId: 1,
     });
 
     await unmount();

@@ -241,6 +241,7 @@ class SavedSessions implements SavedSessionsStoreHandle {
       };
       this.commit(
         this.saved.map((entry, index) => (index === existing ? next : entry)),
+        { immediate: true },
       );
       return next;
     }
@@ -250,7 +251,7 @@ class SavedSessions implements SavedSessionsStoreHandle {
       createdAtMs: stamp,
       updatedAtMs: stamp,
     };
-    this.commit([...this.saved, created]);
+    this.commit([...this.saved, created], { immediate: true });
     return created;
   };
 
@@ -289,7 +290,10 @@ class SavedSessions implements SavedSessionsStoreHandle {
     } else {
       delete next.description;
     }
-    this.commit(this.saved.map((entry, at) => (at === index ? next : entry)));
+    this.commit(
+      this.saved.map((entry, at) => (at === index ? next : entry)),
+      { immediate: true },
+    );
   };
 
   remove = (id: string): void => {
@@ -297,7 +301,7 @@ class SavedSessions implements SavedSessionsStoreHandle {
     if (rest.length === this.saved.length) {
       return;
     }
-    this.commit(rest);
+    this.commit(rest, { immediate: true });
   };
 
   touchDaemonSession = (id: string, daemonSession: number): void => {
@@ -342,13 +346,30 @@ class SavedSessions implements SavedSessionsStoreHandle {
     }
     if (this.dirtyBeforeHydration) {
       this.dirtyBeforeHydration = false;
-      this.scheduleSave();
+      this.enqueueSave();
     }
   }
 
-  private commit(saved: readonly SavedSession[]): void {
+  /**
+   * User-initiated mutations (save/update/remove) write immediately: losing a
+   * pin the user made moments before closing the window would break the
+   * feature's whole promise. Only `touchDaemonSession` — machine bookkeeping
+   * that can fire in bursts during resumes — keeps the trailing debounce.
+   */
+  private commit(
+    saved: readonly SavedSession[],
+    options: { immediate?: boolean } = {},
+  ): void {
     this.saved = saved;
     this.notify();
+    if (options.immediate && this.hydrated) {
+      if (this.timer !== null) {
+        clearTimeout(this.timer);
+        this.timer = null;
+      }
+      this.enqueueSave();
+      return;
+    }
     this.scheduleSave();
   }
 
