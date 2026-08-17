@@ -42,6 +42,12 @@ export interface ConversationsRailProps {
   settings: TermxSettings;
   onResume(record: LlmSessionRecord): void;
   onOpenTranscript(record: LlmSessionRecord): void;
+  /**
+   * Saved sessions: pin this conversation (folder + conversation ref) for later
+   * resume. Absent hides the row action entirely, which is how the
+   * `savedConversationsRail` setting turns the surface off.
+   */
+  onSaveConversation?(record: LlmSessionRecord): void;
   /** Injected `list_session_artifacts` for the detail pane (§11); absent = static hint. */
   listArtifacts?: ArtifactLister;
   /** Detail-pane file row click (§11). */
@@ -98,6 +104,7 @@ export function ConversationsRail({
   settings,
   onResume,
   onOpenTranscript,
+  onSaveConversation,
   listArtifacts,
   onOpenFile,
   onOpenFolder,
@@ -367,6 +374,29 @@ export function ConversationsRail({
             <span className="conversation-row__recap">{note.recap}</span>
           ) : null}
         </span>
+        {isSelected && onSaveConversation ? (
+          // Same selection-gated affordance as Resume beside it. A record with
+          // no recorded folder has nothing to restore, so it is offered but
+          // refused rather than silently saving a folderless entry.
+          <button
+            type="button"
+            className="conversation-row__save"
+            data-testid="conversation-save"
+            aria-label={`Save ${title}`}
+            title={
+              record.cwd === null
+                ? "No folder recorded for this session"
+                : "Save this session…"
+            }
+            disabled={record.cwd === null}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSaveConversation(record);
+            }}
+          >
+            Save
+          </button>
+        ) : null}
         {isSelected ? (
           <button
             type="button"

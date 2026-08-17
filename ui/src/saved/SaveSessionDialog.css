@@ -1,0 +1,135 @@
+/* Save-session dialog. Same modal shell as .close-guard (backdrop, overlay
+   radius, hairline border) so the two dialogs read as one family. */
+
+.save-session-backdrop {
+  position: fixed;
+  z-index: 200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 62%);
+  backdrop-filter: blur(3px);
+}
+
+.save-session {
+  box-sizing: border-box;
+  width: min(440px, calc(100% - 32px));
+  padding: 20px;
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
+}
+
+.save-session h2 {
+  margin: 0 0 14px;
+  font-size: 16px;
+}
+
+.save-session__field {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.save-session__label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-sub);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.save-session__optional {
+  color: var(--text-sub);
+  font-size: 10px;
+  letter-spacing: 0;
+  opacity: 0.75;
+  text-transform: none;
+}
+
+.save-session__input,
+.save-session__textarea {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  color: var(--text-main);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  font: inherit;
+  font-size: 12px;
+}
+
+.save-session__textarea {
+  min-height: 56px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.save-session__input:focus-visible,
+.save-session__textarea:focus-visible {
+  border-color: var(--accent);
+}
+
+.save-session__conversation {
+  margin: 0 0 4px;
+  color: var(--text-sub);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.save-session__note {
+  margin: 0 0 4px;
+  color: var(--text-sub);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.save-session__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.save-session__actions button {
+  min-height: 34px;
+  padding: 0 16px;
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.save-session__cancel {
+  color: var(--text-main);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+}
+
+.save-session__cancel:hover {
+  background: color-mix(in srgb, var(--fg) 8%, var(--surface-3));
+}
+
+.save-session__save {
+  color: var(--bg);
+  font-weight: 600;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.save-session__save:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .save-session__actions button {
+    transition: none;
+  }
+}
