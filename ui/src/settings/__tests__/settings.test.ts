@@ -30,6 +30,10 @@ const ALTERNATE_SETTINGS: TermxSettings = {
   savedPaneButton: false,
   savedSidebarList: false,
   savedConversationsRail: true,
+  sshHostsSidebar: false,
+  sshHostsMenu: false,
+  sshPasswordPolicy: "never",
+  sshEncryptPasswords: false,
 };
 
 describe("parseSettings", () => {
@@ -62,6 +66,10 @@ describe("parseSettings", () => {
       savedPaneButton: false,
       savedSidebarList: false,
       savedConversationsRail: true,
+      sshHostsSidebar: false,
+      sshHostsMenu: false,
+      sshPasswordPolicy: "never",
+      sshEncryptPasswords: false,
     } as const;
     expect(parseSettings(serializeSettings(settings))).toEqual(settings);
   });
@@ -86,6 +94,10 @@ describe("parseSettings", () => {
         savedPaneButton: "on",
         savedSidebarList: 1,
         savedConversationsRail: null,
+        sshHostsSidebar: "yes",
+        sshHostsMenu: 1,
+        sshPasswordPolicy: "sometimes",
+        sshEncryptPasswords: "dpapi",
       }),
     );
     expect(parsed).toEqual({
@@ -106,6 +118,10 @@ describe("parseSettings", () => {
       savedPaneButton: DEFAULT_SETTINGS.savedPaneButton,
       savedSidebarList: DEFAULT_SETTINGS.savedSidebarList,
       savedConversationsRail: DEFAULT_SETTINGS.savedConversationsRail,
+      sshHostsSidebar: DEFAULT_SETTINGS.sshHostsSidebar,
+      sshHostsMenu: DEFAULT_SETTINGS.sshHostsMenu,
+      sshPasswordPolicy: DEFAULT_SETTINGS.sshPasswordPolicy,
+      sshEncryptPasswords: DEFAULT_SETTINGS.sshEncryptPasswords,
     });
   });
 
@@ -178,6 +194,54 @@ describe("parseSettings", () => {
       savedSidebarList: true,
       savedConversationsRail: false,
     });
+  });
+
+  it("ssh: both surfaces on, passwords stored and encrypted by default", () => {
+    // Spec §6: the default is the one that makes connecting effortless, with
+    // encryption on so "stored" never means "in the clear" unless asked.
+    expect(DEFAULT_SETTINGS.sshHostsSidebar).toBe(true);
+    expect(DEFAULT_SETTINGS.sshHostsMenu).toBe(true);
+    expect(DEFAULT_SETTINGS.sshPasswordPolicy).toBe("store");
+    expect(DEFAULT_SETTINGS.sshEncryptPasswords).toBe(true);
+    expect(parseSettings(JSON.stringify({}))).toMatchObject({
+      sshHostsSidebar: true,
+      sshHostsMenu: true,
+      sshPasswordPolicy: "store",
+      sshEncryptPasswords: true,
+    });
+  });
+
+  it("ssh: junk values fall back per field, other fields survive", () => {
+    for (const bad of ["true", "", 0, 1, null, [], {}]) {
+      expect(
+        parseSettings(
+          JSON.stringify({
+            sshHostsSidebar: bad,
+            sshHostsMenu: bad,
+            sshPasswordPolicy: bad,
+            sshEncryptPasswords: bad,
+            defaultProfile: "cmd",
+          }),
+        ),
+      ).toMatchObject({
+        sshHostsSidebar: DEFAULT_SETTINGS.sshHostsSidebar,
+        sshHostsMenu: DEFAULT_SETTINGS.sshHostsMenu,
+        sshPasswordPolicy: DEFAULT_SETTINGS.sshPasswordPolicy,
+        sshEncryptPasswords: DEFAULT_SETTINGS.sshEncryptPasswords,
+        defaultProfile: "cmd",
+      });
+    }
+  });
+
+  it("ssh: keys-only mode is a legal password policy", () => {
+    expect(
+      parseSettings(JSON.stringify({ sshPasswordPolicy: "never" }))
+        .sshPasswordPolicy,
+    ).toBe("never");
+    expect(
+      parseSettings(JSON.stringify({ sshPasswordPolicy: "store" }))
+        .sshPasswordPolicy,
+    ).toBe("store");
   });
 
   it("saved-session surfaces: non-booleans fall back, other fields survive", () => {

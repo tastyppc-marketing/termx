@@ -13,7 +13,8 @@ export type SettingsSectionId =
   | "groups"
   | "conversations"
   | "chat"
-  | "saved";
+  | "saved"
+  | "ssh";
 
 export interface SettingsSection {
   readonly id: SettingsSectionId;
@@ -55,5 +56,15 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "saved",
     label: "Saved sessions",
     fields: ["savedPaneButton", "savedSidebarList", "savedConversationsRail"],
+  },
+  {
+    id: "ssh",
+    label: "SSH",
+    fields: [
+      "sshHostsSidebar",
+      "sshHostsMenu",
+      "sshPasswordPolicy",
+      "sshEncryptPasswords",
+    ],
   },
 ];

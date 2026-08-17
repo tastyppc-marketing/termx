@@ -330,6 +330,54 @@ describe("SettingsSurface controls", () => {
     expect(save).toHaveBeenCalledTimes(3);
   });
 
+  it("SSH: the two surface toggles and the encryption toggle", async () => {
+    const { store, save } = storeWithSave();
+    await renderSurface(store);
+    await selectSection("ssh");
+
+    const sidebar = input("input[name='sshHostsSidebar']");
+    expect(sidebar.checked).toBe(true);
+    await click(sidebar);
+    expect(store.getSnapshot().sshHostsSidebar).toBe(false);
+
+    const menu = input("input[name='sshHostsMenu']");
+    expect(menu.checked).toBe(true);
+    await click(menu);
+    expect(store.getSnapshot().sshHostsMenu).toBe(false);
+
+    const encrypt = input("input[name='sshEncryptPasswords']");
+    expect(encrypt.checked).toBe(true);
+    await click(encrypt);
+    expect(store.getSnapshot().sshEncryptPasswords).toBe(false);
+
+    await store.flush();
+    expect(save).toHaveBeenCalledTimes(3);
+  });
+
+  it("SSH: the password policy ladder switches to keys-only", async () => {
+    const { store } = storeWithSave();
+    await renderSurface(store);
+    await selectSection("ssh");
+
+    expect(input("input[name='sshPasswordPolicy'][value='store']").checked).toBe(
+      true,
+    );
+    await click(input("input[name='sshPasswordPolicy'][value='never']"));
+    expect(store.getSnapshot().sshPasswordPolicy).toBe("never");
+  });
+
+  it("SSH: the encryption hint says plainly what off means", async () => {
+    const { store } = storeWithSave();
+    await renderSurface(store);
+    await selectSection("ssh");
+
+    // Spec §6: no euphemism for "plain text on disk".
+    const field = container.querySelector(
+      ".settings-field[data-field='sshEncryptPasswords']",
+    );
+    expect(field?.textContent).toMatch(/plain text/i);
+  });
+
   it("re-renders live when the store changes underneath it", async () => {
     const { store } = storeWithSave();
     await renderSurface(store);

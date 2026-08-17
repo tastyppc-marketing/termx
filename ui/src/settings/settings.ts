@@ -56,6 +56,11 @@ export const CHAT_DENSITIES = ["chips", "smart", "full"] as const;
 
 export type ChatDensity = (typeof CHAT_DENSITIES)[number];
 
+/** "never" is keys/agent-only mode: TermX stores and uses no passwords at all. */
+export const SSH_PASSWORD_POLICIES = ["store", "never"] as const;
+
+export type SshPasswordPolicy = (typeof SSH_PASSWORD_POLICIES)[number];
+
 export interface TermxSettings {
   /** Where a plain "new tab" opens. Default: follow the group's CDs. */
   readonly newTabPolicy: NewTabPolicy;
@@ -91,6 +96,14 @@ export interface TermxSettings {
   readonly savedSidebarList: boolean;
   /** Offer a save action on conversation rows in the Conversations rail. */
   readonly savedConversationsRail: boolean;
+  /** Show the Hosts section (from `~/.ssh/config`) in the sidebar. */
+  readonly sshHostsSidebar: boolean;
+  /** Offer the same hosts as connect targets in the new-terminal menu. */
+  readonly sshHostsMenu: boolean;
+  /** Whether TermX may store SSH passwords at all. */
+  readonly sshPasswordPolicy: SshPasswordPolicy;
+  /** Encrypt stored passwords at rest (Windows DPAPI, no passphrase). */
+  readonly sshEncryptPasswords: boolean;
 }
 
 export const DEFAULT_SETTINGS: TermxSettings = {
@@ -111,6 +124,10 @@ export const DEFAULT_SETTINGS: TermxSettings = {
   savedPaneButton: true,
   savedSidebarList: true,
   savedConversationsRail: false,
+  sshHostsSidebar: true,
+  sshHostsMenu: true,
+  sshPasswordPolicy: "store",
+  sshEncryptPasswords: true,
 };
 
 function isNewTabPolicy(value: unknown): value is NewTabPolicy {
@@ -151,6 +168,10 @@ function isAgentPaneView(value: unknown): value is AgentPaneView {
 
 function isChatDensity(value: unknown): value is ChatDensity {
   return (CHAT_DENSITIES as readonly unknown[]).includes(value);
+}
+
+function isSshPasswordPolicy(value: unknown): value is SshPasswordPolicy {
+  return (SSH_PASSWORD_POLICIES as readonly unknown[]).includes(value);
 }
 
 /** Parse settings text (null = missing file). Never throws. */
@@ -224,6 +245,21 @@ export function parseSettings(text: string | null): TermxSettings {
       typeof record.savedConversationsRail === "boolean"
         ? record.savedConversationsRail
         : DEFAULT_SETTINGS.savedConversationsRail,
+    sshHostsSidebar:
+      typeof record.sshHostsSidebar === "boolean"
+        ? record.sshHostsSidebar
+        : DEFAULT_SETTINGS.sshHostsSidebar,
+    sshHostsMenu:
+      typeof record.sshHostsMenu === "boolean"
+        ? record.sshHostsMenu
+        : DEFAULT_SETTINGS.sshHostsMenu,
+    sshPasswordPolicy: isSshPasswordPolicy(record.sshPasswordPolicy)
+      ? record.sshPasswordPolicy
+      : DEFAULT_SETTINGS.sshPasswordPolicy,
+    sshEncryptPasswords:
+      typeof record.sshEncryptPasswords === "boolean"
+        ? record.sshEncryptPasswords
+        : DEFAULT_SETTINGS.sshEncryptPasswords,
   };
 }
 

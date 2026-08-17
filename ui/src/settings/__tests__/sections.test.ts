@@ -9,7 +9,7 @@ import { SETTINGS_SECTIONS } from "../sections";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings";
 
 describe("SETTINGS_SECTIONS", () => {
-  it("lists the seven sections in spec order with their labels", () => {
+  it("lists the eight sections in spec order with their labels", () => {
     expect(SETTINGS_SECTIONS.map((section) => [section.id, section.label])).toEqual([
       ["general", "General"],
       ["appearance", "Appearance"],
@@ -18,6 +18,7 @@ describe("SETTINGS_SECTIONS", () => {
       ["conversations", "Conversations"],
       ["chat", "Chat View"],
       ["saved", "Saved sessions"],
+      ["ssh", "SSH"],
     ]);
   });
 
@@ -58,6 +59,12 @@ describe("SETTINGS_SECTIONS", () => {
       "savedPaneButton",
       "savedSidebarList",
       "savedConversationsRail",
+    ]);
+    expect(byId.ssh).toEqual([
+      "sshHostsSidebar",
+      "sshHostsMenu",
+      "sshPasswordPolicy",
+      "sshEncryptPasswords",
     ]);
   });
 });
