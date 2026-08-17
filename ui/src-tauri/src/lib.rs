@@ -7,6 +7,7 @@ mod llm_sessions;
 mod outputs;
 mod paths;
 mod power;
+mod ssh;
 mod storage;
 mod transcript;
 
@@ -30,6 +31,7 @@ pub fn run() {
             bootstrap::bootstrap_host,
             storage::read_app_file,
             storage::write_app_file,
+            ssh::read_ssh_config,
             folders::list_dirs,
             llm_sessions::list_llm_sessions,
             llm_sessions::generate_session_note,

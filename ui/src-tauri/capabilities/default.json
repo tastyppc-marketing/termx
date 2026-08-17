@@ -10,6 +10,7 @@
     "allow-bootstrap-host",
     "allow-read-app-file",
     "allow-write-app-file",
+    "allow-read-ssh-config",
     "allow-list-dirs",
     "allow-list-llm-sessions",
     "allow-generate-session-note",

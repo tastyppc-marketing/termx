@@ -7,6 +7,7 @@ fn main() {
                 "bootstrap_host",
                 "read_app_file",
                 "write_app_file",
+                "read_ssh_config",
                 "list_dirs",
                 "list_llm_sessions",
                 "generate_session_note",

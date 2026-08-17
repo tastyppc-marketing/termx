@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-read-ssh-config"
+description = "Enables the read_ssh_config command without any pre-configured scope."
+commands.allow = ["read_ssh_config"]
+
+[[permission]]
+identifier = "deny-read-ssh-config"
+description = "Denies the read_ssh_config command without any pre-configured scope."
+commands.deny = ["read_ssh_config"]
