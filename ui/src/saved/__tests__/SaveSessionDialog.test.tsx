@@ -74,6 +74,13 @@ function cwdField(): HTMLInputElement {
   return container.querySelector<HTMLInputElement>("[data-testid='save-session-cwd']")!;
 }
 
+/** The overline above the folder input — "Folder" locally, "Remote folder" over SSH. */
+function folderLabel(): string | undefined {
+  return container
+    .querySelector("label[for='save-session-cwd'] .save-session__label")
+    ?.textContent ?? undefined;
+}
+
 function saveButton(): HTMLButtonElement {
   return container.querySelector<HTMLButtonElement>("[data-testid='save-session-save']")!;
 }
@@ -244,6 +251,57 @@ describe("SaveSessionDialog", () => {
 
     const backward = await press(focusables[0]!, "Tab");
     expect(backward.defaultPrevented).toBe(false);
+  });
+
+  it("says nothing about SSH for a local save", async () => {
+    await render();
+    expect(container.querySelector("[data-testid='save-session-ssh']")).toBeNull();
+    expect(folderLabel()).toBe("Folder");
+
+    // An explicit null is the same statement as omitting the field.
+    await render({ prefill: prefill({ sshLabel: null }) });
+    expect(container.querySelector("[data-testid='save-session-ssh']")).toBeNull();
+    expect(folderLabel()).toBe("Folder");
+  });
+
+  it("names the host and calls the folder remote for an SSH save", async () => {
+    await render({ prefill: prefill({ sshLabel: "SSH: root@myvps", cwd: "/root/apps" }) });
+
+    const host = container.querySelector("[data-testid='save-session-ssh']");
+    expect(host?.textContent).toBe("SSH: root@myvps");
+    // The folder field carries a remote path, and the label has to say so —
+    // "Folder" reads as a local one, which is what resume would then look for.
+    expect(folderLabel()).toBe("Remote folder");
+    expect(cwdField().value).toBe("/root/apps");
+  });
+
+  it("puts the host line above the conversation line", async () => {
+    await render({ prefill: prefill({ sshLabel: "SSH: root@myvps" }) });
+
+    const lines = [
+      ...container.querySelectorAll<HTMLElement>(
+        "[data-testid='save-session-ssh'], [data-testid='save-session-conversation']",
+      ),
+    ];
+    expect(lines.map((line) => line.dataset.testid)).toEqual([
+      "save-session-ssh",
+      "save-session-conversation",
+    ]);
+  });
+
+  it("saves an SSH prefill unchanged — the host is not the dialog's business", async () => {
+    const { onSave } = await render({
+      prefill: prefill({ sshLabel: "SSH: root@myvps", cwd: "/root/apps" }),
+    });
+
+    await act(async () => saveButton().click());
+
+    // The caller already knows the host; the dialog reports only what it edits.
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({
+      name: "Parser work",
+      description: "",
+      cwd: "/root/apps",
+    });
   });
 
   it("re-seeds the fields from the prefill each time it opens", async () => {

@@ -19,6 +19,12 @@ export interface SaveSessionPrefill {
   readonly cwd: string;
   /** Line describing what resume will do; null = bare-shell save. */
   readonly conversationLabel: string | null;
+  /**
+   * The SSH host this pane is connected to, ready to display (e.g.
+   * `"SSH: root@myvps"`) — ssh-sessions spec §5. Absent or null = a local
+   * save, which is every existing caller, and renders exactly as before.
+   */
+  readonly sshLabel?: string | null;
   /** True when this save will UPDATE an existing entry (upsert). */
   readonly updatesExisting: boolean;
 }
@@ -60,6 +66,8 @@ function SaveSessionForm({
   const [description, setDescription] = useState(prefill.description);
   const [cwd, setCwd] = useState(prefill.cwd);
   const title = prefill.updatesExisting ? "Update saved session" : "Save this session";
+  /// Where this session lives: an SSH host, or this machine.
+  const remote = prefill.sshLabel ?? null;
 
   // Selected, not just focused: the prefilled name is usually right, and when
   // it is not the first keystroke replaces it whole.
@@ -156,7 +164,11 @@ function SaveSessionForm({
         </label>
 
         <label className="save-session__field" htmlFor="save-session-cwd">
-          <span className="save-session__label">Folder</span>
+          {/* Over SSH this is a remote path, and a label reading "Folder" would
+              invite editing it into a local one that resume can only refuse. */}
+          <span className="save-session__label">
+            {remote ? "Remote folder" : "Folder"}
+          </span>
           <input
             id="save-session-cwd"
             data-testid="save-session-cwd"
@@ -167,6 +179,14 @@ function SaveSessionForm({
             onChange={(event) => setCwd(event.currentTarget.value)}
           />
         </label>
+
+        {/* Above the conversation line: which machine first, what runs on it
+            second — the same order the resume itself happens in. */}
+        {remote ? (
+          <p className="save-session__conversation" data-testid="save-session-ssh">
+            {remote}
+          </p>
+        ) : null}
 
         <p className="save-session__conversation" data-testid="save-session-conversation">
           {prefill.conversationLabel === null
