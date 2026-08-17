@@ -42,11 +42,16 @@ import {
 } from "./native/sessionData";
 import { OutputPane, type LiveOutputRow } from "./outputs/OutputPane";
 import { OutputsStore } from "./outputs/outputsStore";
+import type { SavedSession } from "./saved/types";
 import { SettingsSurface } from "./settings/SettingsSurface";
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
 import { ThemeProvider } from "./theme/ThemeProvider";
-import { Sidebar, type SidebarConversations } from "./sidebar/Sidebar";
+import {
+  Sidebar,
+  type SidebarConversations,
+  type SidebarSaved,
+} from "./sidebar/Sidebar";
 import { SplitLayout, type SplitLayoutActions } from "./split/SplitLayout";
 import {
   findContainer,
@@ -127,6 +132,8 @@ const NO_LIVE_OUTPUTS: readonly LiveOutputRow[] = [];
 const CONVERSATIONS_RESCAN_MS = 30_000;
 const NO_RECORDS: readonly LlmSessionRecord[] = [];
 const emptyRecords = () => NO_RECORDS;
+const NO_SAVED: readonly SavedSession[] = [];
+const emptySaved = () => NO_SAVED;
 const noopSubscribe = () => () => {};
 
 export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
@@ -600,6 +607,27 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationsStore, settings, controller, activeGroupId, noteScheduler]);
 
+  // Saved sessions (saved-sessions spec). The store is machine-written and
+  // lives with the workspace; the sidebar only reads the list and asks the
+  // controller to resume a row.
+  const savedStore = workspace.saved ?? null;
+  const savedEntries = useSyncExternalStore(
+    savedStore?.subscribe ?? noopSubscribe,
+    savedStore ? savedStore.getSnapshot : emptySaved,
+  );
+  const sidebarSaved = useMemo<SidebarSaved | null>(() => {
+    if (!savedStore) {
+      return null;
+    }
+    return {
+      enabled: settings.savedSidebarList,
+      entries: savedEntries,
+      onResume: (entry) => void controller.resumeSaved(entry),
+      onRename: (id, name) => savedStore.update(id, { name }),
+      onDelete: (id) => savedStore.remove(id),
+    };
+  }, [savedStore, savedEntries, settings.savedSidebarList, controller]);
+
   // Chat view (chat-view spec §1/§2). A pane is offered the switch only when
   // it can be tied to a transcript: the session key a resume recorded, else
   // the pane's own directory, else nothing at all.
@@ -692,6 +720,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
             setFolderSearch({ groupId, profile: null })}
           maxGroupDepth={settings.maxGroupDepth}
           {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
+          {...(sidebarSaved ? { saved: sidebarSaved } : {})}
           width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
           onResize={(width) =>
             uiStateStore.update((current) => setSidebarWidth(current, width))}
