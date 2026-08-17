@@ -34,6 +34,7 @@ pub fn run() {
             ssh::read_ssh_config,
             ssh::protect_secret,
             ssh::unprotect_secret,
+            ssh::ssh_probe,
             folders::list_dirs,
             llm_sessions::list_llm_sessions,
             llm_sessions::generate_session_note,

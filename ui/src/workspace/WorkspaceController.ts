@@ -14,6 +14,7 @@ import type { FolderPicker } from "../native/dialog";
 import {
   RESUME_FIXED_DELAY_MS,
   RESUME_PROMPT_TIMEOUT_MS,
+  remoteResumeCommand,
   resumeCommand,
   tauriDirExists,
   type DirExists,
@@ -245,6 +246,13 @@ export interface WorkspaceControllerOptions {
    * types it himself; the connection is still tracked either way.
    */
   sshPasswords?: { passwordFor(alias: string): Promise<string | null> };
+  /**
+   * The parsed ssh host inventory, for validating a saved entry's alias against
+   * the CURRENT config (ssh-sessions spec §5). Absent — legacy fixtures — skips
+   * that check and restores anyway; the ssh error would then be visible in the
+   * terminal, which is the same place every other ssh failure surfaces.
+   */
+  sshHosts?: { byAlias(alias: string): SshHost | null };
 }
 
 /** How long a connect watches its pane for a password prompt (spec §2). */
@@ -260,6 +268,13 @@ const SSH_PASSWORD_TAIL_CHARS = 512;
  * scrollback is followed by more output, a real prompt is where output stops.
  */
 const SSH_PASSWORD_PROMPT = /password[^\n]*:[ \t]*$/i;
+
+/**
+ * How long an ssh restore waits for the REMOTE shell's first prompt (spec §5).
+ * Far longer than the local wait: this covers dialling a VPS, a key handshake
+ * and the bootstrap's own startup, any of which can be slow on a bad link.
+ */
+export const SSH_REMOTE_PROMPT_TIMEOUT_MS = 45_000;
 
 
 /** How a resume's wait for the new session's prompt ended. */
@@ -284,6 +299,18 @@ interface ResumeWaiter {
   settle: (outcome: ResumeWaitOutcome) => void;
   /** False for the fixed-delay path: cwd reports must not shorten the wait. */
   awaitPrompt: boolean;
+  /**
+   * Which cwd reports count as "ready". Absent = any of them, the local
+   * behavior. The ssh restore sets it so the LOCAL shell's prompt cannot settle
+   * the wait meant for the REMOTE one — that mistake would type
+   * `claude --resume` into Windows powershell (spec §5).
+   */
+  accept?: (path: string) => boolean;
+}
+
+/** True for a rooted Unix path — i.e. a report from the REMOTE shell (§2). */
+function isRemoteCwd(path: string): boolean {
+  return path.startsWith("/");
 }
 
 /** A tracked ssh pane: its host, and the newest conversation captured in it. */
@@ -307,6 +334,7 @@ export class WorkspaceController {
   private readonly sshPasswords:
     | { passwordFor(alias: string): Promise<string | null> }
     | null;
+  private readonly sshHosts: { byAlias(alias: string): SshHost | null } | null;
   /// Tracked ssh panes by session id (spec §2), mirrored into ui state so a
   /// restart still knows which panes are remote.
   private readonly sshPanes = new Map<number, SshPaneRecord>();
@@ -363,6 +391,7 @@ export class WorkspaceController {
     this.dirExists = options.dirExists ?? tauriDirExists;
     this.savedSessions = options.savedSessions ?? null;
     this.sshPasswords = options.sshPasswords ?? null;
+    this.sshHosts = options.sshHosts ?? null;
     for (const session of options.sessions) {
       this.sessions.set(session.id, session);
     }
@@ -856,6 +885,14 @@ export class WorkspaceController {
       }
     }
 
+    // An ssh entry's `cwd` is REMOTE, so there is nothing local to probe and no
+    // local shell to open in it (spec §5).
+    const ssh = entry.ssh;
+    if (ssh) {
+      await this.resumeSavedOverSsh(entry, ssh.host);
+      return;
+    }
+
     if (!(await this.probeDir(entry.cwd))) {
       this.setNotice(
         `The saved session's folder no longer exists (${entry.cwd}).`,
@@ -1033,8 +1070,9 @@ export class WorkspaceController {
       return;
     }
     // A LIVE report is the prompt-ready signal a pending resume waits for
-    // (spec §5 step 3); replayed reports say nothing about the prompt.
-    this.settleResumeWait(sessionId, "ready");
+    // (spec §5 step 3); replayed reports say nothing about the prompt. The path
+    // travels with it so an ssh restore can tell the two shells apart.
+    this.settleResumeWait(sessionId, "ready", path);
     const key = this.scopeKeyOfSession(sessionId);
     if (key === null) {
       return;
@@ -1465,6 +1503,84 @@ export class WorkspaceController {
     return true;
   }
 
+  /// Fresh restore of a saved SSH session (spec §5) — the "as if he never left"
+  /// path: ssh back in, land in the remote folder, resume the exact remote
+  /// conversation.
+  ///
+  /// It is the local restore with one extra beat. TWO prompts have to be waited
+  /// for, not one: the LOCAL shell's (after which the connect command can be
+  /// typed) and then the REMOTE shell's, which only a rooted-Unix cwd report can
+  /// prove. Anything less would type `claude --resume` into powershell.
+  ///
+  /// The `cd` is not typed — it rides inside the bootstrap the connect command
+  /// carries — so a folder that has moved on the far end surfaces where it
+  /// belongs: in the terminal (spec §5).
+  private async resumeSavedOverSsh(
+    entry: SavedSession,
+    alias: string,
+  ): Promise<void> {
+    // The config is the source of truth for hosts, so a save can outlive its
+    // host. Say so by name rather than dialling something that is not there.
+    if (this.sshHosts && this.sshHosts.byAlias(alias) === null) {
+      this.setNotice(`Host ${alias} is no longer in your SSH config.`);
+      return;
+    }
+    let connect: string;
+    try {
+      connect = sshConnectCommand(alias, { remoteCwd: entry.cwd });
+    } catch {
+      this.setNotice(
+        "That SSH host cannot be connected: its alias is not a plain name.",
+      );
+      return;
+    }
+
+    const password = await this.storedSshPassword(alias);
+    const profile = this.settings.getSnapshot().defaultProfile;
+    let created: SessionInfo;
+    try {
+      created = await this.createSessionDownChain(profile, [null]);
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+      return;
+    }
+
+    const conversation = entry.conversation;
+    const opened = await this.openResumedTab(created, connect, (tabId) => {
+      this.recordSshPane(created.id, alias);
+      if (conversation) {
+        this.resumedTabs.set(sessionKey(conversation), tabId);
+      }
+      this.recordDaemonSession(entry, created.id);
+      if (password !== null) {
+        this.watchForSshPasswordPrompt(created.id, password);
+      }
+    });
+    // A bare-shell save is finished here: the remote shell in the saved folder
+    // is the whole of what was pinned.
+    const remoteCommand = remoteResumeCommand(conversation);
+    if (!opened || remoteCommand === null) {
+      return;
+    }
+
+    const ready = await this.armResumeWait(
+      created.id,
+      SSH_REMOTE_PROMPT_TIMEOUT_MS,
+      true,
+      isRemoteCwd,
+    );
+    if (ready !== "ready") {
+      // The connection failed or the shell died. Whatever ssh said is on screen
+      // already, and TermX adds nothing to it (spec §7).
+      return;
+    }
+    const sent =
+      this.attachments.sendInput?.(created.id, `${remoteCommand}\r`) ?? false;
+    if (!sent) {
+      this.setNotice("The resume command could not be sent to the terminal.");
+    }
+  }
+
   /// Remember a pane as an ssh pane and mirror it to disk (spec §2).
   private recordSshPane(sessionId: number, host: string): void {
     this.sshPanes.set(sessionId, { host, captured: null });
@@ -1669,6 +1785,7 @@ export class WorkspaceController {
     sessionId: number,
     timeoutMs: number,
     awaitPrompt: boolean,
+    accept?: (path: string) => boolean,
   ): Promise<ResumeWaitOutcome> {
     this.settleResumeWait(sessionId, "gone");
     return new Promise<ResumeWaitOutcome>((resolve) => {
@@ -1678,6 +1795,7 @@ export class WorkspaceController {
       );
       const waiter: ResumeWaiter = {
         awaitPrompt,
+        ...(accept ? { accept } : {}),
         settle: (outcome) => {
           clearTimeout(timer);
           resolve(outcome);
@@ -1687,9 +1805,23 @@ export class WorkspaceController {
     });
   }
 
-  private settleResumeWait(sessionId: number, outcome: ResumeWaitOutcome): void {
+  /// `path` is the reported cwd, present only for a "ready" from a cwd report:
+  /// a waiter with an `accept` predicate stays armed for reports it does not
+  /// recognise as its own shell's.
+  private settleResumeWait(
+    sessionId: number,
+    outcome: ResumeWaitOutcome,
+    path?: string,
+  ): void {
     const waiter = this.resumeWaiters.get(sessionId);
     if (!waiter || (outcome === "ready" && !waiter.awaitPrompt)) {
+      return;
+    }
+    if (
+      outcome === "ready" &&
+      waiter.accept !== undefined &&
+      (path === undefined || !waiter.accept(path))
+    ) {
       return;
     }
     this.resumeWaiters.delete(sessionId);
