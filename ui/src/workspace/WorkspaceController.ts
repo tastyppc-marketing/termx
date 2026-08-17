@@ -21,6 +21,8 @@ import {
 import { sessionKey, type LlmSessionRecord, type SessionKey } from "../conversations/types";
 import type { SavedSessionsStore } from "../saved/store";
 import type { SavedSession } from "../saved/types";
+import { sshConnectCommand } from "../ssh/bootstrap";
+import type { SshHost } from "../ssh/types";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
 import {
   dropScope,
@@ -30,7 +32,12 @@ import {
   seedScope,
   type ScopeKey,
 } from "./scopePaths";
-import { UiStateStore, touchRecentFolder, updateScopePaths } from "./uiState";
+import {
+  setSshPaneState,
+  UiStateStore,
+  touchRecentFolder,
+  updateScopePaths,
+} from "./uiState";
 import {
   canMoveItem,
   collectSubtreeTabIds,
@@ -97,6 +104,16 @@ export interface WorkspaceAttachmentHub {
    * type-checking — absent means "no recorded dims", never an error.
    */
   lastDims?(sessionId: number): { cols: number; rows: number } | null;
+  /**
+   * Watch a session's decoded live output without owning its terminal
+   * (ssh-sessions spec §2); AttachmentHub implements it. Optional so existing
+   * hub fakes keep type-checking — a hub without it simply never types a
+   * stored ssh password, and the user types it themselves as they always could.
+   */
+  tapOutput?(
+    sessionId: number,
+    listener: (text: string) => void,
+  ): { dispose(): void };
   onError(listener: (error: Error) => void): () => void;
   close(): void;
 }
@@ -222,7 +239,28 @@ export interface WorkspaceControllerOptions {
    * is skipped.
    */
   savedSessions?: SavedSessionsRecorder;
+  /**
+   * Stored ssh passwords (ssh-sessions spec §2). Absent — or a policy that
+   * stores none — means a password host prompts in the terminal and Michael
+   * types it himself; the connection is still tracked either way.
+   */
+  sshPasswords?: { passwordFor(alias: string): Promise<string | null> };
 }
+
+/** How long a connect watches its pane for a password prompt (spec §2). */
+export const SSH_PASSWORD_WATCH_MS = 60_000;
+
+/** How much of the tail the prompt matcher keeps — a prompt is one short line. */
+const SSH_PASSWORD_TAIL_CHARS = 512;
+
+/**
+ * An ssh password prompt: the word "password", then anything but a newline, a
+ * colon, and the end of what has arrived so far. Anchored at the END because
+ * that is what makes it a PROMPT rather than a mention — `cat password:` in the
+ * scrollback is followed by more output, a real prompt is where output stops.
+ */
+const SSH_PASSWORD_PROMPT = /password[^\n]*:[ \t]*$/i;
+
 
 /** How a resume's wait for the new session's prompt ended. */
 type ResumeWaitOutcome = "ready" | "elapsed" | "gone";
@@ -248,6 +286,12 @@ interface ResumeWaiter {
   awaitPrompt: boolean;
 }
 
+/** A tracked ssh pane: its host, and the newest conversation captured in it. */
+interface SshPaneRecord {
+  host: string;
+  captured: { provider: "claude" | "codex"; id: string } | null;
+}
+
 export class WorkspaceController {
   readonly attachments: WorkspaceAttachmentHub;
 
@@ -260,6 +304,16 @@ export class WorkspaceController {
   private readonly uiState: UiStateStore;
   private readonly dirExists: DirExists;
   private readonly savedSessions: SavedSessionsRecorder | null;
+  private readonly sshPasswords:
+    | { passwordFor(alias: string): Promise<string | null> }
+    | null;
+  /// Tracked ssh panes by session id (spec §2), mirrored into ui state so a
+  /// restart still knows which panes are remote.
+  private readonly sshPanes = new Map<number, SshPaneRecord>();
+  /// Live password watchers by session id, so a pane's death or a second
+  /// connect can shut one down. The password itself is never in here — only the
+  /// function that stops watching.
+  private readonly sshPasswordWatchers = new Map<number, () => void>();
   private folderSearchHandler: ((target: FolderSearchTarget) => void) | null = null;
   /// One-shot resume waiters keyed by the session the resume just created.
   private readonly resumeWaiters = new Map<number, ResumeWaiter>();
@@ -308,9 +362,11 @@ export class WorkspaceController {
     this.uiState = options.uiState ?? new UiStateStore();
     this.dirExists = options.dirExists ?? tauriDirExists;
     this.savedSessions = options.savedSessions ?? null;
+    this.sshPasswords = options.sshPasswords ?? null;
     for (const session of options.sessions) {
       this.sessions.set(session.id, session);
     }
+    this.hydrateSshPanes();
 
     // Seed scopes from the restored layout so group-aware policies work
     // immediately on layouts that predate scope tracking. seedScope never
@@ -357,6 +413,9 @@ export class WorkspaceController {
           this.sessionsRevision += 1;
         }
         this.settleResumeWait(sessionId, "gone");
+        // Nothing may be typed into a shell that is gone — least of all a
+        // password (spec §2).
+        this.stopSshPasswordWatch(sessionId);
         this.attachments.markExited(sessionId, exitCode);
         // Pane death (spec P6): the tab may still be sitting in the layout as
         // "dead" (nothing dismissed it yet), so the generic post-mutation
@@ -369,6 +428,11 @@ export class WorkspaceController {
           this.sessionsRevision += 1;
         }
         this.settleResumeWait(sessionId, "gone");
+        this.stopSshPasswordWatch(sessionId);
+        // The host has forgotten this session for good, so its ssh identity
+        // goes too — session ids are reused after a daemon restart, and a
+        // stale entry would make a fresh local pane look remote.
+        this.forgetSshPane(sessionId);
         this.attachments.forgetSession(sessionId);
         this.purgeResumedTabForSession(sessionId);
         this.publish();
@@ -816,6 +880,99 @@ export class WorkspaceController {
     });
   };
 
+  /// One-click connect to an ssh host (ssh-sessions spec §2). Deliberately the
+  /// resume machinery again — open a local shell, wait for ITS prompt, type one
+  /// command — because that path is already proven against shells that answer
+  /// slowly, and because the whole remote bootstrap travels inside that one
+  /// command (nothing is installed on the far end).
+  ///
+  /// The pane is recorded as an ssh pane the moment its tab exists, which is
+  /// what later makes it pin-able as a remote save. A stored password is typed
+  /// by a bounded watcher over the pane's own output; without one the prompt is
+  /// simply left on screen for Michael, and the connection is tracked either
+  /// way.
+  connectSshHost = async (
+    host: SshHost,
+    options?: { groupId?: string | null },
+  ): Promise<void> => {
+    this.setNotice(null);
+    let command: string;
+    try {
+      command = sshConnectCommand(host.alias);
+    } catch {
+      // An alias reaches a command line verbatim, so a name that is not a name
+      // is refused rather than escaped — before any terminal exists.
+      this.setNotice(
+        "That SSH host cannot be connected: its alias is not a plain name.",
+      );
+      return;
+    }
+
+    // Read BEFORE the shell exists so the watcher can be armed the instant the
+    // tab does. The plain value lives only in this local and in the watcher's
+    // closure, never on the controller.
+    const password = await this.storedSshPassword(host.alias);
+    const profile = this.settings.getSnapshot().defaultProfile;
+    let created: SessionInfo;
+    try {
+      // No cwd chain: the local shell is a launcher, and where it starts is
+      // invisible — the cwd that matters is the remote one.
+      created = await this.createSessionDownChain(profile, [null]);
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+      return;
+    }
+
+    await this.openResumedTab(
+      created,
+      command,
+      () => {
+        this.recordSshPane(created.id, host.alias);
+        if (password !== null) {
+          this.watchForSshPasswordPrompt(created.id, password);
+        }
+      },
+      { groupId: options?.groupId ?? null },
+    );
+  };
+
+  /// The ssh host a pane is connected to, when TermX opened the connection
+  /// itself. Null for every ordinary local pane — including one where the user
+  /// typed `ssh` by hand, which stays untracked by design (spec "Decisions").
+  sshPaneInfo = (sessionId: number): { host: string } | null => {
+    const record = this.sshPanes.get(sessionId);
+    return record ? { host: record.host } : null;
+  };
+
+  /// The newest conversation the remote watcher reported for this pane — the
+  /// exact id, captured at launch, never guessed.
+  capturedConversation = (
+    sessionId: number,
+  ): { provider: "claude" | "codex"; id: string } | null =>
+    this.sshPanes.get(sessionId)?.captured ?? null;
+
+  /// A remote agent just started in this pane (OSC 9;78). The newest capture
+  /// wins: a second `claude` in the same shell IS the pane's conversation now.
+  /// Captures for panes TermX does not know as ssh panes are ignored — only a
+  /// tracked connection has a host to attach the id to.
+  reportCapturedConversation = (
+    sessionId: number,
+    capture: { provider: "claude" | "codex"; id: string },
+  ): void => {
+    const record = this.sshPanes.get(sessionId);
+    if (!record) {
+      return;
+    }
+    if (
+      record.captured?.provider === capture.provider &&
+      record.captured.id === capture.id
+    ) {
+      return;
+    }
+    record.captured = capture;
+    this.writeSshPane(sessionId);
+  };
+
   /// Recorded dims per session for reattach-before-replay (spec §13): the
   /// hub's live resize record wins (the dims the pty actually ran at), the
   /// host's creation-time SessionInfo is the fallback for sessions no
@@ -1213,6 +1370,9 @@ export class WorkspaceController {
     for (const sessionId of [...this.resumeWaiters.keys()]) {
       this.settleResumeWait(sessionId, "gone");
     }
+    for (const stop of [...this.sshPasswordWatchers.values()]) {
+      stop();
+    }
     for (const cleanup of this.cleanups.splice(0)) {
       try {
         cleanup();
@@ -1269,6 +1429,7 @@ export class WorkspaceController {
     created: SessionInfo,
     command: string | null,
     onTabOpened: (tabId: string) => void,
+    options?: { groupId?: string | null },
   ): Promise<boolean> {
     const awaitPrompt = this.settings.getSnapshot().shellIntegration;
     const ready = command === null
@@ -1280,7 +1441,7 @@ export class WorkspaceController {
       );
     let tabId: string;
     try {
-      tabId = await this.addSessionTab(created, null);
+      tabId = await this.addSessionTab(created, options?.groupId ?? null);
     } catch {
       this.settleResumeWait(created.id, "gone");
       if (ready !== null) {
@@ -1302,6 +1463,164 @@ export class WorkspaceController {
       }
     }
     return true;
+  }
+
+  /// Remember a pane as an ssh pane and mirror it to disk (spec §2).
+  private recordSshPane(sessionId: number, host: string): void {
+    this.sshPanes.set(sessionId, { host, captured: null });
+    this.writeSshPane(sessionId);
+  }
+
+  /// A session the host has forgotten stops being an ssh pane, in memory and on
+  /// disk both.
+  private forgetSshPane(sessionId: number): void {
+    if (!this.sshPanes.delete(sessionId)) {
+      return;
+    }
+    this.writeSshPane(sessionId);
+  }
+
+  /// Push one pane's ssh state into ui state (absent from the map = delete).
+  private writeSshPane(sessionId: number): void {
+    const record = this.sshPanes.get(sessionId);
+    this.uiState.update((state) =>
+      setSshPaneState(
+        state,
+        String(sessionId),
+        record === undefined
+          ? null
+          : {
+              host: record.host,
+              ...(record.captured
+                ? {
+                    capturedProvider: record.captured.provider,
+                    capturedId: record.captured.id,
+                  }
+                : {}),
+            },
+      ),
+    );
+  }
+
+  /// Restore tracked ssh panes at construction, keeping only sessions the host
+  /// still has. The rest are swept out of the file rather than merely ignored:
+  /// the daemon reuses session ids after a restart, and a stale entry would
+  /// eventually make a fresh LOCAL pane look like a remote one.
+  private hydrateSshPanes(): void {
+    const stored = this.uiState.getSnapshot().sshPanes;
+    if (!stored) {
+      return;
+    }
+    const stale: string[] = [];
+    for (const [key, pane] of Object.entries(stored)) {
+      const sessionId = Number(key);
+      if (!Number.isInteger(sessionId) || !this.sessions.has(sessionId)) {
+        stale.push(key);
+        continue;
+      }
+      this.sshPanes.set(sessionId, {
+        host: pane.host,
+        captured:
+          pane.capturedProvider !== undefined && pane.capturedId !== undefined
+            ? { provider: pane.capturedProvider, id: pane.capturedId }
+            : null,
+      });
+    }
+    if (stale.length > 0) {
+      this.uiState.update((state) =>
+        stale.reduce((next, key) => setSshPaneState(next, key, null), state),
+      );
+    }
+  }
+
+  /// The stored password for a host, or null — no store, no policy, no entry, a
+  /// store that threw, an empty string, or a hub with no output tap to watch
+  /// with. Every one of those means the same thing to the caller: nobody types
+  /// anything, and the prompt is left on screen where the user can answer it.
+  private async storedSshPassword(alias: string): Promise<string | null> {
+    if (!this.sshPasswords || !this.attachments.tapOutput) {
+      return null;
+    }
+    try {
+      const stored = await this.sshPasswords.passwordFor(alias);
+      return stored !== null && stored.length > 0 ? stored : null;
+    } catch {
+      // A credentials store that cannot answer is not an error worth a notice:
+      // the terminal is about to ask for the password anyway.
+      return null;
+    }
+  }
+
+  /// Watch a connecting pane for its password prompt and type the stored
+  /// password ONCE (spec §2).
+  ///
+  /// Bounded three ways — one match, one 60 s window, and the session's own
+  /// death — because a watcher that outlived its window would be a thing that
+  /// types a password into whatever came next. The value never leaves this
+  /// closure: not into state, not into a notice, not into the scrollback (the
+  /// pty echoes nothing for a password prompt).
+  private watchForSshPasswordPrompt(sessionId: number, password: string): void {
+    const tapOutput = this.attachments.tapOutput;
+    if (!tapOutput) {
+      return;
+    }
+    this.stopSshPasswordWatch(sessionId);
+    let tap: { dispose(): void } | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let finished = false;
+    let tail = "";
+    const finish = (): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (this.sshPasswordWatchers.get(sessionId) === finish) {
+        this.sshPasswordWatchers.delete(sessionId);
+      }
+      const active = tap;
+      tap = null;
+      try {
+        active?.dispose();
+      } catch {
+        // The tap belongs to a session that may already be gone.
+      }
+    };
+    this.sshPasswordWatchers.set(sessionId, finish);
+    timer = setTimeout(finish, SSH_PASSWORD_WATCH_MS);
+    const installed = tapOutput.call(this.attachments, sessionId, (text) => {
+      if (finished) {
+        return;
+      }
+      // Only the tail can hold a prompt: it is one short line, and a prompt is
+      // recognised by output STOPPING at it.
+      tail = (tail + text).slice(-SSH_PASSWORD_TAIL_CHARS);
+      if (!SSH_PASSWORD_PROMPT.test(tail)) {
+        return;
+      }
+      // Stop watching BEFORE typing, so nothing the send itself produces can
+      // be read as a second prompt.
+      finish();
+      this.attachments.sendInput?.(sessionId, `${password}\r`);
+    });
+    if (finished) {
+      // The window closed while the tap was being installed.
+      try {
+        installed.dispose();
+      } catch {
+        // Nothing left to clean up.
+      }
+      return;
+    }
+    tap = installed;
+  }
+
+  /// Stop this session's password watcher, if it has one. Idempotent.
+  private stopSshPasswordWatch(sessionId: number): void {
+    this.sshPasswordWatchers.get(sessionId)?.();
   }
 
   /// The tab whose split holds `sessionId`, when the layout has one.
