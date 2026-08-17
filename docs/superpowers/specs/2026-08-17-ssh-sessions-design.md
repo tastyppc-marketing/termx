@@ -126,8 +126,9 @@ Credentials file `ssh_credentials_v1.json` (new app-file allowlist entry):
   notice "Host <alias> is no longer in your SSH config."), create a local
   session, type the connect command with `cd <remote dir>` baked into the
   bootstrap, then — once the remote shell reports ready (first remote cwd
-  report) — type `claude --resume <id>` / `codex resume <id>`; `--continue`
-  is typed only when the entry has no captured id. `touchDaemonSession` and
+  report) — type `claude --resume <id>` / `codex resume <id>`. An entry with
+  no captured conversation restores the remote shell only (bare-save
+  semantics, same as local saves). `touchDaemonSession` and
   chat-linkage registration as in the local path. No `probeDir` for remote
   cwds (the remote cd failing surfaces in the terminal itself).
 
