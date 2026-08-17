@@ -85,6 +85,12 @@ export interface TermxSettings {
   readonly agentPaneDefaultView: AgentPaneView;
   /** How much of each chat message the chat view shows by default. */
   readonly chatDefaultDensity: ChatDensity;
+  /** Show the save (pin) button in the split-pane floating toolbar. */
+  readonly savedPaneButton: boolean;
+  /** Show the Saved section at the top of the sidebar. */
+  readonly savedSidebarList: boolean;
+  /** Offer a save action on conversation rows in the Conversations rail. */
+  readonly savedConversationsRail: boolean;
 }
 
 export const DEFAULT_SETTINGS: TermxSettings = {
@@ -102,6 +108,9 @@ export const DEFAULT_SETTINGS: TermxSettings = {
   theme: DEFAULT_THEME_ID,
   agentPaneDefaultView: "terminal",
   chatDefaultDensity: "smart",
+  savedPaneButton: true,
+  savedSidebarList: true,
+  savedConversationsRail: false,
 };
 
 function isNewTabPolicy(value: unknown): value is NewTabPolicy {
@@ -203,6 +212,18 @@ export function parseSettings(text: string | null): TermxSettings {
     chatDefaultDensity: isChatDensity(record.chatDefaultDensity)
       ? record.chatDefaultDensity
       : DEFAULT_SETTINGS.chatDefaultDensity,
+    savedPaneButton:
+      typeof record.savedPaneButton === "boolean"
+        ? record.savedPaneButton
+        : DEFAULT_SETTINGS.savedPaneButton,
+    savedSidebarList:
+      typeof record.savedSidebarList === "boolean"
+        ? record.savedSidebarList
+        : DEFAULT_SETTINGS.savedSidebarList,
+    savedConversationsRail:
+      typeof record.savedConversationsRail === "boolean"
+        ? record.savedConversationsRail
+        : DEFAULT_SETTINGS.savedConversationsRail,
   };
 }
 

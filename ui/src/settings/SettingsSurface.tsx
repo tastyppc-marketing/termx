@@ -548,6 +548,36 @@ function SettingsControl({
           onPick={(value) => onChange({ chatDefaultDensity: value })}
         />
       );
+    case "savedPaneButton":
+      return (
+        <Toggle
+          name="savedPaneButton"
+          label="Save button on panes"
+          hint="Adds a pin button to the pane toolbar, next to split and close."
+          checked={settings.savedPaneButton}
+          onToggle={(checked) => onChange({ savedPaneButton: checked })}
+        />
+      );
+    case "savedSidebarList":
+      return (
+        <Toggle
+          name="savedSidebarList"
+          label="Show the Saved list in the sidebar"
+          hint="Lists saved sessions above the terminals; click a row to resume it."
+          checked={settings.savedSidebarList}
+          onToggle={(checked) => onChange({ savedSidebarList: checked })}
+        />
+      );
+    case "savedConversationsRail":
+      return (
+        <Toggle
+          name="savedConversationsRail"
+          label="Save from conversation rows"
+          hint="Adds a save action to rows in the Conversations rail (folder only, no terminal)."
+          checked={settings.savedConversationsRail}
+          onToggle={(checked) => onChange({ savedConversationsRail: checked })}
+        />
+      );
     default: {
       // Exhaustive: a new field without a control fails the build here, and
       // `sections.test.ts` fails if it has no section at all.

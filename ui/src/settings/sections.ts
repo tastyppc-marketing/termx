@@ -12,7 +12,8 @@ export type SettingsSectionId =
   | "terminal"
   | "groups"
   | "conversations"
-  | "chat";
+  | "chat"
+  | "saved";
 
 export interface SettingsSection {
   readonly id: SettingsSectionId;
@@ -49,5 +50,10 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "chat",
     label: "Chat View",
     fields: ["agentPaneDefaultView", "chatDefaultDensity"],
+  },
+  {
+    id: "saved",
+    label: "Saved sessions",
+    fields: ["savedPaneButton", "savedSidebarList", "savedConversationsRail"],
   },
 ];

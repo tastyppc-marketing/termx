@@ -62,7 +62,10 @@ export class SettingsStore {
       next.maxGroupDepth === this.current.maxGroupDepth &&
       next.theme === this.current.theme &&
       next.agentPaneDefaultView === this.current.agentPaneDefaultView &&
-      next.chatDefaultDensity === this.current.chatDefaultDensity
+      next.chatDefaultDensity === this.current.chatDefaultDensity &&
+      next.savedPaneButton === this.current.savedPaneButton &&
+      next.savedSidebarList === this.current.savedSidebarList &&
+      next.savedConversationsRail === this.current.savedConversationsRail
     ) {
       return;
     }

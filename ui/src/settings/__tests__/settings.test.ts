@@ -27,6 +27,9 @@ const ALTERNATE_SETTINGS: TermxSettings = {
   theme: "paper-light",
   agentPaneDefaultView: "chat",
   chatDefaultDensity: "full",
+  savedPaneButton: false,
+  savedSidebarList: false,
+  savedConversationsRail: true,
 };
 
 describe("parseSettings", () => {
@@ -56,6 +59,9 @@ describe("parseSettings", () => {
       theme: "paper-light",
       agentPaneDefaultView: "chat",
       chatDefaultDensity: "chips",
+      savedPaneButton: false,
+      savedSidebarList: false,
+      savedConversationsRail: true,
     } as const;
     expect(parseSettings(serializeSettings(settings))).toEqual(settings);
   });
@@ -77,6 +83,9 @@ describe("parseSettings", () => {
         theme: "neon",
         agentPaneDefaultView: "bubble",
         chatDefaultDensity: 7,
+        savedPaneButton: "on",
+        savedSidebarList: 1,
+        savedConversationsRail: null,
       }),
     );
     expect(parsed).toEqual({
@@ -94,6 +103,9 @@ describe("parseSettings", () => {
       theme: DEFAULT_SETTINGS.theme,
       agentPaneDefaultView: DEFAULT_SETTINGS.agentPaneDefaultView,
       chatDefaultDensity: DEFAULT_SETTINGS.chatDefaultDensity,
+      savedPaneButton: DEFAULT_SETTINGS.savedPaneButton,
+      savedSidebarList: DEFAULT_SETTINGS.savedSidebarList,
+      savedConversationsRail: DEFAULT_SETTINGS.savedConversationsRail,
     });
   });
 
@@ -155,6 +167,50 @@ describe("parseSettings", () => {
           .chatDefaultDensity,
       ).toBe(good);
     }
+  });
+
+  it("saved-session surfaces: pane button and sidebar list on, rail off", () => {
+    expect(DEFAULT_SETTINGS.savedPaneButton).toBe(true);
+    expect(DEFAULT_SETTINGS.savedSidebarList).toBe(true);
+    expect(DEFAULT_SETTINGS.savedConversationsRail).toBe(false);
+    expect(parseSettings(JSON.stringify({}))).toMatchObject({
+      savedPaneButton: true,
+      savedSidebarList: true,
+      savedConversationsRail: false,
+    });
+  });
+
+  it("saved-session surfaces: non-booleans fall back, other fields survive", () => {
+    for (const bad of ["true", "", 0, 1, null, [], {}]) {
+      expect(
+        parseSettings(
+          JSON.stringify({
+            savedPaneButton: bad,
+            savedSidebarList: bad,
+            savedConversationsRail: bad,
+            defaultProfile: "cmd",
+          }),
+        ),
+      ).toMatchObject({
+        savedPaneButton: DEFAULT_SETTINGS.savedPaneButton,
+        savedSidebarList: DEFAULT_SETTINGS.savedSidebarList,
+        savedConversationsRail: DEFAULT_SETTINGS.savedConversationsRail,
+        defaultProfile: "cmd",
+      });
+    }
+    expect(
+      parseSettings(
+        JSON.stringify({
+          savedPaneButton: false,
+          savedSidebarList: false,
+          savedConversationsRail: true,
+        }),
+      ),
+    ).toMatchObject({
+      savedPaneButton: false,
+      savedSidebarList: false,
+      savedConversationsRail: true,
+    });
   });
 
   it("ignores unknown fields", () => {

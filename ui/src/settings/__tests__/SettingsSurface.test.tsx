@@ -306,6 +306,30 @@ describe("SettingsSurface controls", () => {
     expect(save).toHaveBeenCalledTimes(3);
   });
 
+  it("Saved sessions: the three surface toggles", async () => {
+    const { store, save } = storeWithSave();
+    await renderSurface(store);
+    await selectSection("saved");
+
+    const paneButton = input("input[name='savedPaneButton']");
+    expect(paneButton.checked).toBe(true);
+    await click(paneButton);
+    expect(store.getSnapshot().savedPaneButton).toBe(false);
+
+    const sidebarList = input("input[name='savedSidebarList']");
+    expect(sidebarList.checked).toBe(true);
+    await click(sidebarList);
+    expect(store.getSnapshot().savedSidebarList).toBe(false);
+
+    const rail = input("input[name='savedConversationsRail']");
+    expect(rail.checked).toBe(false);
+    await click(rail);
+    expect(store.getSnapshot().savedConversationsRail).toBe(true);
+
+    await store.flush();
+    expect(save).toHaveBeenCalledTimes(3);
+  });
+
   it("re-renders live when the store changes underneath it", async () => {
     const { store } = storeWithSave();
     await renderSurface(store);

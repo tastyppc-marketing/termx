@@ -9,7 +9,7 @@ import { SETTINGS_SECTIONS } from "../sections";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings";
 
 describe("SETTINGS_SECTIONS", () => {
-  it("lists the six sections in spec order with their labels", () => {
+  it("lists the seven sections in spec order with their labels", () => {
     expect(SETTINGS_SECTIONS.map((section) => [section.id, section.label])).toEqual([
       ["general", "General"],
       ["appearance", "Appearance"],
@@ -17,6 +17,7 @@ describe("SETTINGS_SECTIONS", () => {
       ["groups", "Groups & Tabs"],
       ["conversations", "Conversations"],
       ["chat", "Chat View"],
+      ["saved", "Saved sessions"],
     ]);
   });
 
@@ -53,5 +54,10 @@ describe("SETTINGS_SECTIONS", () => {
       "summaryDisplay",
     ]);
     expect(byId.chat).toEqual(["agentPaneDefaultView", "chatDefaultDensity"]);
+    expect(byId.saved).toEqual([
+      "savedPaneButton",
+      "savedSidebarList",
+      "savedConversationsRail",
+    ]);
   });
 });
