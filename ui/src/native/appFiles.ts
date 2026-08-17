@@ -6,7 +6,10 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-export type AppFileName = "settings_v1.json" | "ui_state_v1.json";
+export type AppFileName =
+  | "settings_v1.json"
+  | "ui_state_v1.json"
+  | "saved_sessions_v1.json";
 
 export interface AppFileStore {
   /** Returns file contents, or null when the file doesn't exist yet. */
