@@ -84,6 +84,8 @@ export interface SidebarConversations {
   /** Detail-pane outputs IO (polish P4), forwarded verbatim to the rail. */
   listOutputs?: ConversationsRailProps["listOutputs"];
   dismissOutput?: ConversationsRailProps["dismissOutput"];
+  /** Saved-sessions rail action (saved-sessions spec), forwarded verbatim. */
+  onSaveConversation?: ConversationsRailProps["onSaveConversation"];
 }
 
 /**
@@ -1318,6 +1320,9 @@ export function Sidebar({
             : {})}
           {...(conversations.dismissOutput
             ? { dismissOutput: conversations.dismissOutput }
+            : {})}
+          {...(conversations.onSaveConversation
+            ? { onSaveConversation: conversations.onSaveConversation }
             : {})}
         />
       ) : (

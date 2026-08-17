@@ -42,7 +42,11 @@ import {
 } from "./native/sessionData";
 import { OutputPane, type LiveOutputRow } from "./outputs/OutputPane";
 import { OutputsStore } from "./outputs/outputsStore";
-import type { SavedSession } from "./saved/types";
+import {
+  SaveSessionDialog,
+  type SaveSessionPrefill,
+} from "./saved/SaveSessionDialog";
+import type { SavedConversationRef, SavedSession } from "./saved/types";
 import { SettingsSurface } from "./settings/SettingsSurface";
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
@@ -134,6 +138,19 @@ const NO_RECORDS: readonly LlmSessionRecord[] = [];
 const emptyRecords = () => NO_RECORDS;
 const NO_SAVED: readonly SavedSession[] = [];
 const emptySaved = () => NO_SAVED;
+
+/** Last path segment, for a save-dialog name a human would recognise. */
+function folderTail(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  return trimmed.split(/[\\/]/).filter(Boolean).pop() ?? "";
+}
+
+/** Everything a committed save needs beyond what the dialog edits. */
+interface SavePromptState {
+  prefill: SaveSessionPrefill;
+  conversation?: SavedConversationRef;
+  lastDaemonSessionId?: number;
+}
 const noopSubscribe = () => () => {};
 
 export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
@@ -489,6 +506,20 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     void closeWindow(decision === "stop-all");
   };
 
+  // The pane pin button reads through a ref: the actions cache below outlives
+  // any single render, and the save handler closes over per-render snapshots
+  // (records, saved entries) that must be current at CLICK time.
+  const openSaveForPaneRef = useRef<(tabId: string, sessionId: number) => void>(
+    () => undefined,
+  );
+  const openSaveForRecordRef = useRef<(record: LlmSessionRecord) => void>(
+    () => undefined,
+  );
+  const paneSaveEnabled =
+    (workspace.saved ?? null) !== null && settings.savedPaneButton;
+  const railSaveEnabled =
+    (workspace.saved ?? null) !== null && settings.savedConversationsRail;
+
   // Per-tab SplitLayout actions, cached so hidden layouts keep stable props.
   const actionsFor = useMemo(() => {
     const cache = new Map<string, SplitLayoutActions>();
@@ -539,12 +570,19 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           popOutPane(sessionId) {
             controller.popOutPane(tabId, sessionId);
           },
+          ...(paneSaveEnabled
+            ? {
+                savePane(sessionId: number) {
+                  openSaveForPaneRef.current(tabId, sessionId);
+                },
+              }
+            : {}),
         };
         cache.set(tabId, cached);
       }
       return cached;
     };
-  }, [controller]);
+  }, [controller, paneSaveEnabled]);
 
   const viewerGeometry = uiSnapshot.viewerGeometry ?? DEFAULT_VIEWER_GEOMETRY;
   const onViewerGeometry = (geometry: ViewerGeometry) =>
@@ -602,10 +640,23 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       onVisibleRecords: (keys) => noteScheduler?.reconcile([...keys]),
       listOutputs: tauriListOutputs,
       dismissOutput: tauriDismissOutput,
+      ...(railSaveEnabled
+        ? {
+            onSaveConversation: (record: LlmSessionRecord) =>
+              openSaveForRecordRef.current(record),
+          }
+        : {}),
     };
     // handleResume is recreated per render but closes only over stable refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationsStore, settings, controller, activeGroupId, noteScheduler]);
+  }, [
+    conversationsStore,
+    settings,
+    controller,
+    activeGroupId,
+    noteScheduler,
+    railSaveEnabled,
+  ]);
 
   // Saved sessions (saved-sessions spec). The store is machine-written and
   // lives with the workspace; the sidebar only reads the list and asks the
@@ -627,6 +678,99 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       onDelete: (id) => savedStore.remove(id),
     };
   }, [savedStore, savedEntries, settings.savedSidebarList, controller]);
+
+  // Save dialog (saved-sessions spec §"Save flow"). One dialog serves both the
+  // pane pin button and the conversations-rail action; savePrompt carries what
+  // the dialog does not edit (conversation ref, daemon session id).
+  const [savePrompt, setSavePrompt] = useState<SavePromptState | null>(null);
+
+  const openSaveForPane = (tabId: string, sessionId: number) => {
+    if (!savedStore) {
+      return;
+    }
+    const cwd = controller.sessionCwd(sessionId) ?? "";
+    const link = resolveLinkage({
+      explicitKey: controller.resumedSessionKeyForTab(tabId),
+      paneCwd: cwd === "" ? null : cwd,
+      candidates: conversationsRecords,
+    });
+    const conversation: SavedConversationRef | undefined = link
+      ? {
+          provider: link.record.provider,
+          id: link.record.id,
+          title: link.record.title,
+        }
+      : undefined;
+    // save() upserts by conversation id and treats its input as the whole
+    // entry, so an existing save must feed its fields back through the dialog.
+    const existing = conversation
+      ? savedEntries.find((entry) => entry.conversation?.id === conversation.id)
+      : undefined;
+    setSavePrompt({
+      prefill: {
+        name:
+          existing?.name ??
+          conversation?.title ??
+          (folderTail(cwd) || `Session ${sessionId}`),
+        description: existing?.description ?? "",
+        cwd: existing?.cwd ?? cwd,
+        conversationLabel: conversation?.title ?? null,
+        updatesExisting: existing !== undefined,
+      },
+      ...(conversation ? { conversation } : {}),
+      lastDaemonSessionId: sessionId,
+    });
+  };
+  openSaveForPaneRef.current = openSaveForPane;
+
+  const openSaveForRecord = (record: LlmSessionRecord) => {
+    // The rail disables its Save button without a cwd; this is the backstop.
+    if (!savedStore || record.cwd === null) {
+      return;
+    }
+    const existing = savedEntries.find(
+      (entry) => entry.conversation?.id === record.id,
+    );
+    setSavePrompt({
+      prefill: {
+        name: existing?.name ?? record.title,
+        description: existing?.description ?? "",
+        cwd: existing?.cwd ?? record.cwd,
+        conversationLabel: record.title,
+        updatesExisting: existing !== undefined,
+      },
+      conversation: {
+        provider: record.provider,
+        id: record.id,
+        title: record.title,
+      },
+    });
+  };
+  openSaveForRecordRef.current = openSaveForRecord;
+
+  const commitSave = (result: {
+    name: string;
+    description: string;
+    cwd: string;
+  }) => {
+    if (!savedStore || !savePrompt) {
+      return;
+    }
+    savedStore.save({
+      name: result.name,
+      ...(result.description.length > 0
+        ? { description: result.description }
+        : {}),
+      cwd: result.cwd,
+      ...(savePrompt.conversation
+        ? { conversation: savePrompt.conversation }
+        : {}),
+      ...(savePrompt.lastDaemonSessionId !== undefined
+        ? { lastDaemonSessionId: savePrompt.lastDaemonSessionId }
+        : {}),
+    });
+    setSavePrompt(null);
+  };
 
   // Chat view (chat-view spec §1/§2). A pane is offered the switch only when
   // it can be tied to a transcript: the session key a resume recorded, else
@@ -854,6 +998,12 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
               {...(sidebarConversations.dismissOutput
                 ? { dismissOutput: sidebarConversations.dismissOutput }
                 : {})}
+              {...(sidebarConversations.onSaveConversation
+                ? {
+                    onSaveConversation:
+                      sidebarConversations.onSaveConversation,
+                  }
+                : {})}
             />
           </ConversationsFullscreen>
         ) : null}
@@ -880,6 +1030,14 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           onCancel={() => setAlreadyOpen(null)}
         />
         <CloseGuard open={closeGuardOpen} onDecide={handleCloseDecision} />
+        {savePrompt ? (
+          <SaveSessionDialog
+            open
+            prefill={savePrompt.prefill}
+            onSave={commitSave}
+            onCancel={() => setSavePrompt(null)}
+          />
+        ) : null}
         {folderSearch ? (
           <FolderSearch
             recents={workspace.uiState?.getSnapshot().recentFolders ?? []}
