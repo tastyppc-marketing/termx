@@ -26,7 +26,9 @@
  */
 
 /** A config alias is a name; nothing else is ever interpolated into a command. */
-const SAFE_ALIAS = /^[A-Za-z0-9._-]+$/;
+// No leading dash: ssh has no `--` for its host argument, so an alias like
+// `-oProxyCommand=…` would be honoured as a flag (ssh_probe refuses the same).
+const SAFE_ALIAS = /^[A-Za-z0-9._][A-Za-z0-9._-]*$/;
 
 /** How long the id watcher waits for a transcript to appear: 240 × 0.5s. */
 const WATCH_TICKS = 240;

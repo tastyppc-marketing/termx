@@ -58,6 +58,10 @@ describe("sshConnectCommand", () => {
       "host&",
       "`id`",
       "-oProxyCommand=x",
+      // Leading dash alone: ssh has no `--` before its host argument, so a
+      // dash-led "alias" is parsed as a flag even when every char is benign.
+      "-v",
+      "-oBatchMode",
     ]) {
       expect(() => sshConnectCommand(alias), alias).toThrow(/alias/i);
     }
