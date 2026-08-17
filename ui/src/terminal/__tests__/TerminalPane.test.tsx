@@ -20,11 +20,35 @@ class FakePresentationTerminal {
   cols = 80;
   rows = 24;
   readonly writes: string[] = [];
+  /** OSC handlers the binding installed, keyed by identifier, so a test can
+   *  feed the OSC 9 one a payload exactly as xterm's parser would. */
+  readonly oscHandlers = new Map<number, Array<(data: string) => boolean>>();
   readonly parser = {
     registerCsiHandler: () => ({ dispose: () => undefined }),
     registerDcsHandler: () => ({ dispose: () => undefined }),
-    registerOscHandler: () => ({ dispose: () => undefined }),
+    registerOscHandler: (identifier: number, handler: (data: string) => boolean) => {
+      const list = this.oscHandlers.get(identifier) ?? [];
+      list.push(handler);
+      this.oscHandlers.set(identifier, list);
+      return {
+        dispose: () => {
+          this.oscHandlers.set(
+            identifier,
+            (this.oscHandlers.get(identifier) ?? []).filter(
+              (entry) => entry !== handler,
+            ),
+          );
+        },
+      };
+    },
   };
+
+  /** Deliver one OSC 9 payload (everything after `ESC]9;`). */
+  emitOsc9(data: string) {
+    for (const handler of this.oscHandlers.get(9) ?? []) {
+      handler(data);
+    }
+  }
 
   onData(_listener: (data: string) => void) {
     return { dispose: () => undefined };
@@ -100,6 +124,7 @@ function paneFixture() {
     client,
     dependencies,
     dispose,
+    terminal,
     emitHostError(error: Error) {
       if (!hostErrorListener) {
         throw new Error("host error listener is not installed");
@@ -248,6 +273,45 @@ describe("TerminalPane", () => {
     expect(fixture.client.close).toHaveBeenCalledOnce();
     expect(fixture.dispose).toHaveBeenCalledOnce();
     expect(fixture.stopObserving).toHaveBeenCalledOnce();
+  });
+
+  // ssh-sessions spec §2: the pane is the only thing that knows which session
+  // an OSC 9;78 capture belongs to, so it stamps the id on the way out.
+  it("forwards conversation captures with the session id they came from", async () => {
+    const fixture = paneFixture();
+    const captures: Array<[number, { provider: string; id: string }]> = [];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          dependencies={fixture.dependencies}
+          onConversationCaptured={(sessionId, capture) =>
+            captures.push([sessionId, capture])
+          }
+        />,
+      );
+      await flushPromises();
+    });
+
+    // Replay has to be over before a capture counts as current.
+    await act(async () => {
+      fixture.callbacks.onOutput?.({
+        offset: 0n,
+        data: new TextEncoder().encode("prompt"),
+        source: "live",
+      });
+      await flushPromises();
+    });
+    await act(async () => {
+      fixture.terminal.emitOsc9("78;claude;abc-123");
+    });
+
+    expect(captures).toEqual([[7, { provider: "claude", id: "abc-123" }]]);
+
+    await act(async () => root.unmount());
   });
 
   it("closes an owned client immediately when attach fails", async () => {
