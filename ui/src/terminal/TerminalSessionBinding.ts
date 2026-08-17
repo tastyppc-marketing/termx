@@ -87,6 +87,17 @@ export interface TerminalSessionBindingOptions {
    * replayed report is dropped outright rather than flagged.
    */
   onOutputRegistered?: (path: string) => void;
+  /**
+   * OSC `9;78;<provider>;<id>` conversation capture (ssh-sessions spec §2,
+   * emitted by the remote bootstrap's watcher the moment an agent's transcript
+   * appears). LIVE ONLY, for the same reason as the output report: replayed
+   * scrollback re-plays every launch this pane ever made, and re-reporting an
+   * old one would overwrite the pane's CURRENT conversation with history.
+   */
+  onConversationCaptured?: (capture: {
+    provider: "claude" | "codex";
+    id: string;
+  }) => void;
   /** User keystrokes actually forwarded to the PTY (input-mark tracking). */
   onUserInput?: (data: string) => void;
   /**
@@ -101,9 +112,10 @@ export class TerminalSessionBinding {
   private readonly decoder = new TextDecoder();
   private readonly dataSubscription: Disposable;
   /**
-   * The single OSC 9 registration: both the 9;9 cwd report and the 9;77
-   * output report arrive through it. Named for the cwd case because the
-   * cleanup-operation contract (`"cwd_subscription"`) is public API.
+   * The single OSC 9 registration: the 9;9 cwd report, the 9;77 output report
+   * and the 9;78 conversation capture all arrive through it. Named for the cwd
+   * case because the cleanup-operation contract (`"cwd_subscription"`) is
+   * public API.
    */
   private readonly cwdSubscription: Disposable | null;
   private attachment: SessionAttachment | null = null;
@@ -131,13 +143,23 @@ export class TerminalSessionBinding {
       }
     });
     this.cwdSubscription =
-      options.onCwd || options.onOutputRegistered
+      options.onCwd || options.onOutputRegistered || options.onConversationCaptured
         ? options.terminal.parser.registerOscHandler(9, (data) => {
             const output = parseOsc9OutputReport(data);
             if (output !== null) {
               // Replayed registrations are history the sidecar already holds.
               if (!this.disposed && this.replayFinished) {
                 this.options.onOutputRegistered?.(output);
+              }
+              return true;
+            }
+            // Before the cwd parse: a capture payload starts "78;" where a cwd
+            // report starts "9;", so the two can never be confused — but the
+            // cheaper check for the far more frequent report goes first.
+            const capture = parseOsc9ConversationCapture(data);
+            if (capture !== null) {
+              if (!this.disposed && this.replayFinished) {
+                this.options.onConversationCaptured?.(capture);
               }
               return true;
             }
@@ -547,8 +569,13 @@ export class TerminalSessionBinding {
 /**
  * Parse an OSC 9 payload as a 9;9 working-directory report (Windows Terminal
  * convention: `ESC]9;9;<path>ST`, path optionally double-quoted). Returns the
- * absolute Windows path, or null for anything else (other ConEmu OSC 9
- * subcommands, relative junk, empty payloads).
+ * absolute path, or null for anything else (other ConEmu OSC 9 subcommands,
+ * relative junk, empty payloads).
+ *
+ * Rooted Unix paths are accepted too (ssh-sessions spec §2): a tracked remote
+ * shell reports its cwd through this same channel, and since only powershell
+ * and cmd ever get the injected local hook, a `/…` report is unambiguously
+ * remote. Windows shapes are untouched.
  */
 export function parseOsc9CwdReport(data: string): string | null {
   if (!data.startsWith("9;")) {
@@ -563,10 +590,48 @@ export function parseOsc9CwdReport(data: string): string | null {
   }
   const driveAbsolute = /^[A-Za-z]:[\\/]/.test(path) || /^[A-Za-z]:$/.test(path);
   const uncAbsolute = path.startsWith("\\\\") && path.length > 2;
-  if (!driveAbsolute && !uncAbsolute) {
+  const unixAbsolute = path.startsWith("/");
+  if (!driveAbsolute && !uncAbsolute && !unixAbsolute) {
     return null;
   }
   return path;
+}
+
+/** Providers TermX can resume; anything else is not a capture (spec §2). */
+const CAPTURE_PROVIDERS = ["claude", "codex"] as const;
+
+/** Same rule as `resumeCommand`: an id is a bare token or it is refused. */
+const CAPTURE_ID_PATTERN = /^[A-Za-z0-9-]+$/;
+
+/**
+ * Parse an OSC 9 payload as a TermX conversation capture (ssh-sessions spec §2:
+ * `ESC]9;78;<provider>;<id>ST`, emitted once per remote agent launch). Returns
+ * the capture, or null for every other OSC 9 subcommand and for anything
+ * malformed.
+ *
+ * SECURITY. This id becomes `claude --resume <id>` in a terminal later, so the
+ * validation is the same one `resumeCommand` applies and for the same reason:
+ * the remote side derives the id from a FILENAME, and a filename is something
+ * an attacker could choose. A capture that is not a known provider plus a bare
+ * `[A-Za-z0-9-]+` token is dropped here, before it can be stored.
+ */
+export function parseOsc9ConversationCapture(
+  data: string,
+): { provider: "claude" | "codex"; id: string } | null {
+  const prefix = "78;";
+  if (!data.startsWith(prefix)) {
+    return null;
+  }
+  const fields = data.slice(prefix.length).split(";");
+  if (fields.length !== 2) {
+    return null;
+  }
+  const provider = CAPTURE_PROVIDERS.find((known) => known === fields[0]!.trim());
+  const id = fields[1]!.trim();
+  if (provider === undefined || !CAPTURE_ID_PATTERN.test(id)) {
+    return null;
+  }
+  return { provider, id };
 }
 
 /**

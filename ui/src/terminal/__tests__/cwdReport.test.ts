@@ -19,10 +19,23 @@ describe("parseOsc9CwdReport", () => {
     expect(parseOsc9CwdReport("9;\\\\server\\share")).toBe("\\\\server\\share");
   });
 
+  // ssh-sessions spec §2: a remote shell reports its Unix cwd through the very
+  // same channel. Only powershell/cmd get the injected local hook, so a
+  // rooted Unix path can only have come from a tracked ssh pane.
+  it("accepts rooted Unix paths from remote panes", () => {
+    expect(parseOsc9CwdReport("9;/root")).toBe("/root");
+    expect(parseOsc9CwdReport("9;/")).toBe("/");
+    expect(parseOsc9CwdReport("9;/home/mike/my app")).toBe("/home/mike/my app");
+    expect(parseOsc9CwdReport('9;"/home/mike/my app"')).toBe("/home/mike/my app");
+    expect(parseOsc9CwdReport("9;/srv/naïve-Ünïcode")).toBe("/srv/naïve-Ünïcode");
+  });
+
   it("rejects other OSC 9 subcommands and non-absolute junk", () => {
     expect(parseOsc9CwdReport("4;100")).toBeNull(); // ConEmu progress
     expect(parseOsc9CwdReport("notify;hello")).toBeNull();
     expect(parseOsc9CwdReport("9;relative\\path")).toBeNull();
+    expect(parseOsc9CwdReport("9;relative/path")).toBeNull();
+    expect(parseOsc9CwdReport("9;~/root")).toBeNull();
     expect(parseOsc9CwdReport("9;")).toBeNull();
     expect(parseOsc9CwdReport('9;""')).toBeNull();
     expect(parseOsc9CwdReport("9;C:\\bad\u0007path")).toBeNull();
