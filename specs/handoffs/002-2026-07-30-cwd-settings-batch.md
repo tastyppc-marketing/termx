@@ -946,3 +946,40 @@ Execution per Michael: Opus coder agents + Fable adversarial reviewer (functiona
 - **After merge**: my integration commit wires B's optional props into App gated on settings; then Fable-fork adversarial review; fixes; tsc+vitest+cargo; tauri build; restage dist-portable (rename-aside); live CDP verify save→kill terminal→resume and reattach path.
 - Worktree lore: junctions must be made with PowerShell New-Item -ItemType Junction (cmd mklink silently fails under Git Bash); sever junction with `cmd //c rmdir` before `git worktree remove` (done for lane A).
 - Also this morning: close+copy fixes shipped/staged (9ae95b1, exes Aug 17 03:03; chat flip now Ctrl+Shift+A).
+
+## Delta 2026-08-17 (later still) — all three lanes MERGED + integration committed; Fable adversarial fork running
+
+- **Lane B merged** (a9d0ffb ← 491257a): `ui/src/saved/SaveSessionDialog.tsx/.css` (+11 tests; prefill {name, description, cwd, conversationLabel, updatesExisting}; onSave gets trimmed values, "" description when empty; "Update" label when updatesExisting; Esc cancel, Enter-in-name saves; testids save-session-*), SplitLayout `savePane?` action → ⚑ button `data-testid="pane-save"` (live panes only), ConversationsRail `onSaveConversation?` Save button (disabled when record.cwd null).
+- **Lane C merged** (daf27c5 ← 053861d): `WorkspaceController.resumeSaved` (reattach if `sessions.get(lastDaemonSessionId)?.alive` → activateTab; else validate resumeCommand FIRST, probeDir, createSessionDownChain([cwd]) no-fallback, shared `openResumedTab` tail; bare-shell types nothing), `recordDaemonSession` skips unchanged ids, bootstrapWorkspace hydrates saved store (`BootstrappedWorkspace.saved`, awaited ready()), Sidebar Saved section (InlineRename, ConfirmClose kind "saved", gated on enabled).
+- **Integration COMMITTED (1c21778)**: App.tsx wires everything — `openSaveForPane` (cwd from sessionCwd, linkage via resolveLinkage exactly like chatForSession, prefill-back from existing entry because save() replaces the whole entry), `openSaveForRecord` (rail), `commitSave`, `SavePromptState` + `<SaveSessionDialog>` next to CloseGuard, refs (`openSaveForPaneRef`/`openSaveForRecordRef` declared BEFORE actionsFor to dodge TDZ; assigned each render), `paneSaveEnabled`/`railSaveEnabled` gates in actionsFor deps + sidebarConversations; Sidebar.tsx forwards `onSaveConversation`; fullscreen ConversationsRail forwards it too. New `ui/src/__tests__/App.savedSessions.test.tsx` (3 tests: bare-shell save w/ folder-tail prefill + daemon id; conversation-linked save → upsert w/ description prefill-back + "Update"; gating off-setting + no-store). Test-harness gotchas: controller getSnapshot must return a STABLE ref (else infinite useSyncExternalStore loop) and a conversations fake needs `data.generated` (SessionPalette reads it).
+- **Gates on main**: tsc clean; vitest **1093/1093 (95 files)** solo; cargo untouched since 181/181.
+- **RUNNING**: Fable adversarial fork (functionality + usability per Michael) — attack list includes daemon-id-reuse-after-restart reattach hazard (#1 concern), debounce-loss-on-close (no flush on exit?), description-clearing semantics, gating on all three surfaces, dialog keyboard flow, Saved-list empty state.
+- **NEXT after findings fixed**: full gates → `npx tauri build --no-bundle` → restage dist-portable (rename-aside) → live CDP verify (save real session → kill terminal → resume; reattach path) → tell Michael to restart. Then batch 2 (SSH) and later the chat-parity batch.
+
+## Delta 2026-08-17 — adversarial review DONE, fixes committed (8794808); release build running
+
+Fable fork's verdict: 2 must-fix + 3 fast follow-ups, all fixed in 8794808:
+1. **BLOCKER fixed** — save/update/remove now write `saved_sessions_v1.json` IMMEDIATELY (commit(…, {immediate:true}) in ui/src/saved/store.ts); only touchDaemonSession keeps the 800ms debounce; pre-hydration dirty state also flushes on hydrate. Was: a pin made <800ms before closing the window was silently lost.
+2. **Rail re-save kept the reattach link** — openSaveForRecord now carries existing?.lastDaemonSessionId through save()'s whole-entry replacement (App.tsx). Was: a description tweak from the rail downgraded resume to a duplicate fresh restore.
+3. Pane prefill cwd: live sessionCwd wins, stored folder is fallback (was inverted).
+4. Saved rows: inline description editor (new ≡ hover action; InlineRename gains allowEmpty/maxLength/placeholder; empty commit clears; SidebarSaved.onDescribe → store.update(id,{description})).
+5. Dialog refuses blank folder (Save disabled; tooltip "needs a name and a folder").
+Recorded, no action: dead panes have no pin button (rail is the path); daemon id reuse after restart is a non-issue (host registry persists a monotonic next_id in state.json).
+What held up: reattach logic, fresh-restore ordering, junk tolerance, gating on all three surfaces, actionsFor cache rebuild on toggle, keyboard flow (~2s pin), empty-state hint.
+
+Gates: tsc clean; vitest **1098/1098 (95 files)** solo; cargo untouched since 181/181. Commits: 1c21778 (integration) → 8794808 (fixes). `npx tauri build --no-bundle` running in background.
+NEXT: verify build output (custom_protocol, no dev cfg) → stage dist-portable (rename running exes aside, copy termx-ui.exe as both TermX.exe and termx-ui.exe) → live CDP verify (pin a real session via ⚑ → kill only that terminal → resume from Saved list → same conversation in right folder; then reattach path) → tell Michael to restart TermX.
+
+## Delta 2026-08-17 — SAVED SESSIONS SHIPPED + LIVE-VERIFIED; Michael-gated: restart TermX
+
+Build (exit 0, custom_protocol ✓, zero dev cfg, dir tauri-aebb2d4d7848249c) staged to `C:\Dev\TermX\dist-portable\TermX\` (exes Aug 17 04:29/04:31; previous pair → `.prev6`). Commits on main: a983780 spec → 505dd4b lane A → a9d0ffb lane B → daf27c5 lane C → 1c21778 integration → 8794808 adversarial fixes.
+
+**Live CDP verification (debug instance, isolated profile wv2-6, shared real daemon 65396 — all test sessions were my own, exited + dismissed after; profile removed):**
+- Empty state renders ("Pin a terminal…"). Created session 42, `cd C:\Dev\TermX` → ⚑ opened dialog with LIVE cwd, name focused+selected, real conversation linked by cwd (81d97fb8… SEND-VERIFIED convo).
+- Save → row appeared (name + claude badge + folder tail + ✎≡× actions) AND `C:\Users\mjfos\AppData\Roaming\TermX\saved_sessions_v1.json` written IMMEDIATELY (blocker fix proven).
+- **Reattach**: row click with 42 alive → focused existing pane, zero new sessions.
+- **Fresh restore (flagship)**: exited 42, dismissed, row click → new session 43 opened at `PS C:\Dev\TermX>`, typed `claude --resume 81d97fb8-…`, claude booted, trust prompt confirmed → **full prior conversation on screen (SEND-VERIFIED exchange)**. As if never left.
+- ≡ description edit → "verified live" persisted to file instantly; × delete + confirm → file back to `{"saved":[]}`, empty state back.
+- WM_CLOSE → window closed, process exited (close fix still good in this build).
+
+**GATE: Michael restarts TermX** (nothing of his was running — he task-killed it earlier). Then: batch 2 = SSH (spec §Decisions: ~/.ssh/config inventory, ssh -t remote resume, settings credential policy w/ optional encryption); later = chat TUI-parity batch (+ bare-terminal send guard). Recorded no-action: dead panes have no ⚑ (rail is the path); bare-shell re-save duplicates by design.
