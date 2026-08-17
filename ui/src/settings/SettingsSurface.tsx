@@ -23,6 +23,7 @@ import {
   type MaxGroupDepthOption,
   type NewTabPolicy,
   type SleepOption,
+  type SshPasswordPolicy,
   type SummaryContent,
   type SummaryDisplay,
   type SummaryEngine,
@@ -182,6 +183,21 @@ const CHAT_DENSITY_OPTIONS: ReadonlyArray<LadderOption<ChatDensity>> = [
     value: "full",
     label: "Full",
     hint: "Nothing collapses — every message and tool result shown in full.",
+  },
+];
+
+const SSH_PASSWORD_POLICY_OPTIONS: ReadonlyArray<
+  LadderOption<SshPasswordPolicy>
+> = [
+  {
+    value: "store",
+    label: "Remember passwords",
+    hint: "TermX can save a password per host and type it for you on connect.",
+  },
+  {
+    value: "never",
+    label: "Keys and agent only",
+    hint: "No password is ever stored or used; any already saved is ignored.",
   },
 ];
 
@@ -576,6 +592,47 @@ function SettingsControl({
           hint="Adds a save action to rows in the Conversations rail (folder only, no terminal)."
           checked={settings.savedConversationsRail}
           onToggle={(checked) => onChange({ savedConversationsRail: checked })}
+        />
+      );
+    case "sshHostsSidebar":
+      return (
+        <Toggle
+          name="sshHostsSidebar"
+          label="Show Hosts in the sidebar"
+          hint="Lists the hosts from your SSH config; click a row to connect in a new tab."
+          checked={settings.sshHostsSidebar}
+          onToggle={(checked) => onChange({ sshHostsSidebar: checked })}
+        />
+      );
+    case "sshHostsMenu":
+      return (
+        <Toggle
+          name="sshHostsMenu"
+          label="Offer hosts in the new-terminal menu"
+          hint="Adds each host as a connect target alongside the shell profiles."
+          checked={settings.sshHostsMenu}
+          onToggle={(checked) => onChange({ sshHostsMenu: checked })}
+        />
+      );
+    case "sshPasswordPolicy":
+      return (
+        <RadioLadder
+          name="sshPasswordPolicy"
+          title="SSH passwords"
+          options={SSH_PASSWORD_POLICY_OPTIONS}
+          value={settings.sshPasswordPolicy}
+          onPick={(value) => onChange({ sshPasswordPolicy: value })}
+        />
+      );
+    case "sshEncryptPasswords":
+      return (
+        <Toggle
+          name="sshEncryptPasswords"
+          label="Encrypt stored passwords"
+          // Says exactly what off means (spec §6): no euphemism for plaintext.
+          hint="Windows encrypts them for your account, with no passphrase to remember. Off means they sit in plain text in TermX's data folder."
+          checked={settings.sshEncryptPasswords}
+          onToggle={(checked) => onChange({ sshEncryptPasswords: checked })}
         />
       );
     default: {

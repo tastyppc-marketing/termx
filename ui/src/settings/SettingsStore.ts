@@ -48,25 +48,15 @@ export class SettingsStore {
 
   update = (patch: Partial<TermxSettings>): void => {
     const next = { ...this.current, ...patch };
-    if (
-      next.newTabPolicy === this.current.newTabPolicy &&
-      next.shellIntegration === this.current.shellIntegration &&
-      next.defaultProfile === this.current.defaultProfile &&
-      next.conversationsRail === this.current.conversationsRail &&
-      next.conversationsPalette === this.current.conversationsPalette &&
-      next.summaryEngine === this.current.summaryEngine &&
-      next.summaryContent === this.current.summaryContent &&
-      next.summaryDisplay === this.current.summaryDisplay &&
-      next.sleepHiddenTerminals === this.current.sleepHiddenTerminals &&
-      next.onWindowClose === this.current.onWindowClose &&
-      next.maxGroupDepth === this.current.maxGroupDepth &&
-      next.theme === this.current.theme &&
-      next.agentPaneDefaultView === this.current.agentPaneDefaultView &&
-      next.chatDefaultDensity === this.current.chatDefaultDensity &&
-      next.savedPaneButton === this.current.savedPaneButton &&
-      next.savedSidebarList === this.current.savedSidebarList &&
-      next.savedConversationsRail === this.current.savedConversationsRail
-    ) {
+    // Driven by the patch's own keys rather than a hand-listed comparison of
+    // every field: `next` can only differ from `current` where the patch
+    // touched it, and a field missing from a hand-written list is silently
+    // unsaveable (the maxGroupDepth-swallow bug, which every new settings
+    // batch would otherwise re-introduce).
+    const changed = (Object.keys(patch) as (keyof TermxSettings)[]).some(
+      (key) => next[key] !== this.current[key],
+    );
+    if (!changed) {
       return;
     }
     this.current = next;

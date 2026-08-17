@@ -16,6 +16,7 @@ import {
   type SavedConversationRef,
   type SavedProvider,
   type SavedSession,
+  type SavedSshRef,
 } from "./types";
 
 export const SAVED_SESSIONS_FILE: AppFileName = "saved_sessions_v1.json";
@@ -32,6 +33,8 @@ export interface SavedSessionsStore {
     description?: string;
     cwd: string;
     conversation?: SavedConversationRef;
+    /** Present = an SSH save; `cwd` is then the remote path. */
+    ssh?: SavedSshRef;
     lastDaemonSessionId?: number;
   }): SavedSession;
   /** Rename / re-describe. Unknown id is a no-op. */
@@ -111,6 +114,18 @@ function parseConversation(value: unknown): SavedConversationRef | undefined {
 }
 
 /**
+ * An `ssh` block is only usable with a host alias in it; anything else degrades
+ * the entry to a local save rather than dropping a session the user pinned.
+ */
+function parseSsh(value: unknown): SavedSshRef | undefined {
+  if (!isRecordObject(value)) {
+    return undefined;
+  }
+  const host = requiredText(value.host);
+  return host === null ? undefined : { host };
+}
+
+/**
  * Parse the store file (null = missing). Never throws. An entry without an id,
  * a name, or a cwd is not resumable, so it is dropped; everything optional
  * degrades in place — a broken conversation ref leaves a folder-only save
@@ -144,6 +159,7 @@ export function parseSavedSessions(text: string | null): SavedSession[] {
     seen.add(id);
     const description = requiredText(entry.description);
     const conversation = parseConversation(entry.conversation);
+    const ssh = parseSsh(entry.ssh);
     const lastDaemonSessionId = daemonSessionId(entry.lastDaemonSessionId);
     saved.push({
       id,
@@ -151,6 +167,7 @@ export function parseSavedSessions(text: string | null): SavedSession[] {
       ...(description !== null ? { description } : {}),
       cwd,
       ...(conversation ? { conversation } : {}),
+      ...(ssh ? { ssh } : {}),
       ...(lastDaemonSessionId !== undefined ? { lastDaemonSessionId } : {}),
       createdAtMs: timestamp(entry.createdAtMs),
       updatedAtMs: timestamp(entry.updatedAtMs),
@@ -208,6 +225,7 @@ class SavedSessions implements SavedSessionsStoreHandle {
     description?: string;
     cwd: string;
     conversation?: SavedConversationRef;
+    ssh?: SavedSshRef;
     lastDaemonSessionId?: number;
   }): SavedSession => {
     const stamp = this.now();
@@ -219,6 +237,9 @@ class SavedSessions implements SavedSessionsStoreHandle {
         : {}),
       cwd: input.cwd,
       ...(conversation ? { conversation } : {}),
+      // Whole-input, like every other field: re-pinning the same conversation
+      // from a local pane must not leave a stale host on the entry.
+      ...(input.ssh ? { ssh: input.ssh } : {}),
       ...(input.lastDaemonSessionId !== undefined
         ? { lastDaemonSessionId: input.lastDaemonSessionId }
         : {}),

@@ -178,6 +178,37 @@ describe("parseSavedSessions", () => {
     });
   });
 
+  it("keeps an ssh block with a real host and degrades anything else", () => {
+    const blocks = [
+      { host: "myvps" },
+      { host: "" },
+      { host: "   " },
+      { host: 7 },
+      { user: "root" },
+      "myvps",
+      null,
+      [],
+    ];
+    const parsed = parseSavedSessions(
+      fileOf(
+        blocks.map((ssh, index) => ({
+          id: `id-${index}`,
+          name: "keeper",
+          cwd: "/root/code",
+          ssh: ssh as never,
+          createdAtMs: 1,
+          updatedAtMs: 1,
+        })),
+      ),
+    );
+    // A junk ssh block leaves a local save (spec §4), never a dropped entry.
+    expect(parsed).toHaveLength(blocks.length);
+    expect(parsed.map((entry) => entry.ssh)).toEqual([
+      { host: "myvps" },
+      ...blocks.slice(1).map(() => undefined),
+    ]);
+  });
+
   it("keeps only a usable daemon session id", () => {
     const ids = [7, 0, -1, 2.5, Number.POSITIVE_INFINITY, null, "7"];
     const parsed = parseSavedSessions(
@@ -286,6 +317,44 @@ describe("createSavedSessionsStore", () => {
         updatedAtMs: 1_050,
       },
     ]);
+  });
+
+  it("carries an ssh save through the file with its remote cwd", async () => {
+    const files = fakeFiles();
+    const first = testStore(files);
+    await first.store.ready();
+
+    const saved = first.store.save({
+      name: "VPS audit",
+      cwd: "/root/code/open-seo", // REMOTE path for an ssh save (spec §4)
+      conversation: { provider: "claude", id: "conv-remote", title: "VPS audit" },
+      ssh: { host: "myvps" },
+    });
+    await first.store.flush();
+
+    expect(saved.ssh).toEqual({ host: "myvps" });
+    const second = testStore(files);
+    await second.store.ready();
+    expect(second.store.getSnapshot()).toEqual([saved]);
+  });
+
+  it("drops the ssh block when a re-save of the same conversation is local", async () => {
+    const files = fakeFiles();
+    const { store } = testStore(files);
+    await store.ready();
+
+    const conversation = {
+      provider: "claude" as const,
+      id: "conv-a",
+      title: "audit",
+    };
+    store.save({ name: "remote", cwd: "/root/code", conversation, ssh: { host: "myvps" } });
+    // The input is the whole save, exactly like description and cwd: pinning the
+    // same conversation from a local pane must not leave a stale host behind.
+    const local = store.save({ name: "local", cwd: "C:\\code", conversation });
+
+    expect(local.ssh).toBeUndefined();
+    expect(store.getSnapshot()).toEqual([local]);
   });
 
   it("writes user mutations immediately but keeps touchDaemonSession debounced", async () => {
