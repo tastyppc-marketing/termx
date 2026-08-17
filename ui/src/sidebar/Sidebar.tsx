@@ -14,6 +14,7 @@ import type { ConversationsStore } from "../conversations/store";
 import type { LlmSessionRecord } from "../conversations/types";
 import type { SavedSession } from "../saved/types";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
+import type { SshHost } from "../ssh/types";
 import {
   canMoveItem,
   PALETTE_IDS,
@@ -107,6 +108,26 @@ export interface SidebarSaved {
   onDelete(id: string): void;
 }
 
+/**
+ * SSH hosts (ssh-sessions spec §1): the read-only `~/.ssh/config` inventory,
+ * listed under Saved. `enabled` carries `settings.sshHostsSidebar` and
+ * `menuEnabled` carries `settings.sshHostsMenu`, so each surface is gated one
+ * prop away from the render and the two are independent — the menu can list
+ * hosts the section is hiding.
+ */
+export interface SidebarHosts {
+  enabled: boolean;
+  menuEnabled: boolean;
+  /** Config order: the file is the source of truth, so the file's order is. */
+  hosts: readonly SshHost[];
+  /** Row click / Enter: connect in a new tab. */
+  onConnect(alias: string): void;
+  /** Present only when the password policy allows storing. */
+  onSetPassword?(alias: string): void;
+  /** Aliases that currently have a stored password (badge + "Change password…"). */
+  withPassword?: ReadonlySet<string>;
+}
+
 export interface SidebarProps {
   snapshot: WorkspaceSnapshot;
   actions: SidebarActions;
@@ -126,6 +147,11 @@ export interface SidebarProps {
    * settings — leaves the sidebar exactly as it was.
    */
   saved?: SidebarSaved;
+  /**
+   * SSH hosts section and new-terminal menu targets (ssh-sessions spec §1).
+   * Omitted — or disabled in settings — leaves the sidebar exactly as it was.
+   */
+  hosts?: SidebarHosts;
   /**
    * Persisted sidebar width in px (polish P5), already clamped by
    * `uiState.setSidebarWidth`. Absent = the stylesheet's own width, so a
@@ -225,6 +251,7 @@ export function Sidebar({
   maxGroupDepth = DEFAULT_SETTINGS.maxGroupDepth,
   conversations,
   saved,
+  hosts,
   width,
   onResize,
   onExpandConversations,
@@ -990,6 +1017,99 @@ export function Sidebar({
     </section>
   ) : null;
 
+  /// One SSH host: the alias it is known by and, muted underneath, where that
+  /// alias actually goes. The whole row is the connect affordance, mirroring a
+  /// saved row's resume; the key sits in the hover tray, and only when the
+  /// password policy allows storing one at all.
+  const renderHostRow = (entry: SshHost) => {
+    const target = entry.hostName === null
+      ? null
+      : (entry.user === null ? entry.hostName : `${entry.user}@${entry.hostName}`);
+    const stored = hosts?.withPassword?.has(entry.alias) ?? false;
+    const connect = () => hosts?.onConnect(entry.alias);
+    const setPassword = hosts?.onSetPassword;
+    return (
+      <div
+        key={entry.alias}
+        className="sidebar-hosts__row"
+        data-testid="host-row"
+        data-host-alias={entry.alias}
+        role="button"
+        tabIndex={0}
+        /// What clicking will run — the row is a one-click `ssh <alias>`, and
+        /// saying so is how the section explains itself.
+        title={`ssh ${entry.alias}`}
+        onClick={(event) => {
+          if ((event.target as HTMLElement).closest("button")) {
+            return;
+          }
+          connect();
+        }}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) {
+            return;
+          }
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            connect();
+          }
+        }}
+      >
+        <span className="sidebar-hosts__content">
+          <span className="sidebar-hosts__title">
+            <span className="sidebar-hosts__alias">{entry.alias}</span>
+            {/* Presence only — a stored password is never displayed, anywhere. */}
+            {stored ? (
+              <span
+                className="sidebar-hosts__badge"
+                data-testid="host-password-badge"
+                title="Password stored"
+              >
+                pw
+              </span>
+            ) : null}
+          </span>
+          {target ? <span className="sidebar-hosts__target">{target}</span> : null}
+        </span>
+        {setPassword ? (
+          <span className="sidebar-hosts__actions">
+            <button
+              type="button"
+              className="sidebar-hosts__action"
+              aria-label={`Set password for ${entry.alias}`}
+              title={stored ? "Change password…" : "Set password…"}
+              onClick={(event) => {
+                event.stopPropagation();
+                setPassword(entry.alias);
+              }}
+            >
+              🔑
+            </button>
+          </span>
+        ) : null}
+      </div>
+    );
+  };
+
+  /// Like Saved: the section stays while the setting is on even with nothing in
+  /// it, because the hint is how a user with no parseable ssh config finds out
+  /// where hosts would have come from.
+  const hostsSection = hosts?.enabled ? (
+    <section className="sidebar-hosts" data-testid="hosts-section" aria-label="SSH hosts">
+      <div className="sidebar-hosts__header">
+        <span className="sidebar-hosts__label">Hosts</span>
+        <span className="sidebar-hosts__count">{hosts.hosts.length}</span>
+      </div>
+      {hosts.hosts.length === 0 ? (
+        <p className="sidebar-hosts__empty">
+          Hosts from your SSH config appear here.
+        </p>
+      ) : (
+        <div className="sidebar-hosts__rows">{hosts.hosts.map(renderHostRow)}</div>
+      )}
+    </section>
+  ) : null;
+
   /// Containers the item may move into, minus the one it already sits in —
   /// the menu twin of the drag eligibility set, each with the append index for
   /// that container.
@@ -1262,6 +1382,26 @@ export function Sidebar({
           closeMenu();
           void createTab(null, "cmd");
         }}>Command Prompt</button>
+        {/* SSH targets last: they are the exception, a local shell the norm. */}
+        {hosts?.menuEnabled && hosts.hosts.length > 0 ? (
+          <>
+            <span className="context-menu__group" aria-hidden="true">Hosts</span>
+            {hosts.hosts.map((entry) => (
+              <button
+                key={entry.alias}
+                type="button"
+                role="menuitem"
+                data-testid={`create-menu-host-${entry.alias}`}
+                onClick={() => {
+                  closeMenu();
+                  hosts.onConnect(entry.alias);
+                }}
+              >
+                ssh {entry.alias}
+              </button>
+            ))}
+          </>
+        ) : null}
       </ContextMenu>
     );
   })();
@@ -1361,6 +1501,7 @@ export function Sidebar({
       <>
       <div className="sidebar__scroll">
         {savedSection}
+        {hostsSection}
         <div
           className="sidebar__root"
           role="tablist"
