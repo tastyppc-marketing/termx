@@ -1090,6 +1090,12 @@ export class WorkspaceController {
     if (entry === undefined) {
       return;
     }
+    // Another tab already owns `newKey` — two resumes in one folder can each
+    // nominate the same successor. Adopting it here would silently CLOBBER the
+    // other tab's binding; keeping the old key is the honest failure.
+    if (this.resumedTabs.has(newKey)) {
+      return;
+    }
     this.resumedTabs.delete(oldKey);
     this.resumedTabs.set(newKey, entry);
   };
