@@ -171,6 +171,23 @@ describe("createRevealController", () => {
     expect(harness.controller.state()).toEqual({ revealed: false, reason: null });
   });
 
+  it("reveals for a LATE boot signal, with the same auto-hide as an initial one", () => {
+    // A real resume announces its boot only after the resume command is typed
+    // — after the controller was built. The late signal must behave exactly
+    // like `initial.boot`: reveal as "boot", then settle away.
+    const harness = build();
+    harness.setScreen(ASKING_SCREEN);
+    harness.controller.noteBoot();
+    expect(harness.controller.state()).toEqual({ revealed: true, reason: "boot" });
+
+    harness.clock.advance(AUTO_HIDE_POLL_MS);
+    expect(harness.controller.state().revealed).toBe(true); // still booting
+
+    harness.setScreen(QUIET_SCREEN);
+    harness.clock.advance(AUTO_HIDE_POLL_MS);
+    expect(harness.controller.state()).toEqual({ revealed: false, reason: null });
+  });
+
   it("stops polling once hidden, and again once disposed", () => {
     const harness = build();
     harness.controller.userTypedSlash();

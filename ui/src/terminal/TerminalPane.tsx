@@ -232,7 +232,10 @@ export function TerminalPane(props: TerminalPaneProps) {
   // The dock swaps who owns the keyboard (chat v2 §3): revealed, the real
   // terminal takes every keystroke; hidden, the chat's box takes them back.
   // The xterm is also pinned to its bottom — that is where claude draws its
-  // input box and menus, and the whole point of the slice.
+  // input box and menus, and the whole point of the slice. The swap only
+  // happens INSIDE the pane that already holds focus: every mounted pane runs
+  // this effect (hidden tabs included), and a dock opening in one pane must
+  // never yank the keyboard away from wherever the user is actually typing.
   useEffect(() => {
     const element = containerRef.current;
     const pane = element?.closest(".terminal-pane");
@@ -244,6 +247,11 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (viewport instanceof HTMLElement) {
         viewport.scrollTop = viewport.scrollHeight;
       }
+    }
+    if (!pane.contains(document.activeElement)) {
+      return;
+    }
+    if (dockRevealed) {
       element.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea")?.focus();
     } else {
       pane.querySelector<HTMLTextAreaElement>(".chat-input__box")?.focus();

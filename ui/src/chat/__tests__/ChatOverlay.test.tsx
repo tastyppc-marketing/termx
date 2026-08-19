@@ -121,6 +121,41 @@ describe("ChatOverlay", () => {
     expect(query("chat-reveal")).not.toBeNull();
   });
 
+  it("raises the dock when the boot signal lands after mount (spec §4)", async () => {
+    // A real resume announces its boot only once the resume command is typed —
+    // seconds after the pane linked and this overlay mounted. The prop arrives
+    // as a change, not an initial value, and must still open the dock.
+    const clock = testScheduler();
+    const reveals: RevealState[] = [];
+    const openFeed = () => Promise.resolve(emptyFeed);
+    const render = async (bootReveal: boolean | undefined) =>
+      act(async () =>
+        root.render(
+          <ChatOverlay
+            filePath="C:\\transcripts\\session.jsonl"
+            header={{ title: "Session", onFlipToTerminal: () => undefined }}
+            density="chips"
+            onDensityChange={() => undefined}
+            showThinking={false}
+            onShowThinkingChange={() => undefined}
+            sendKeys={() => undefined}
+            terminalSnapshot={() => QUIET_SCREEN}
+            openFeed={openFeed}
+            onRevealChange={(state) => reveals.push(state)}
+            schedule={clock.schedule}
+            {...(bootReveal === undefined ? {} : { bootReveal })}
+          />,
+        ),
+      );
+
+    await render(undefined);
+    expect(reveals).toEqual([]);
+
+    await render(true);
+    expect(reveals).toEqual([{ revealed: true, reason: "boot" }]);
+    expect(query("chat-reveal-hide")).not.toBeNull();
+  });
+
   it("raises the dock when the detector sees claude asking", async () => {
     const harness = await mount();
     harness.setScreen(PROMPT_SCREEN);

@@ -286,9 +286,16 @@ describe("resume boot reveal (spec §4)", () => {
 
 describe("transcript handoff (spec §4)", () => {
   it("rebinds the resumed tab to the successor and repoints the pane", async () => {
+    // Adoption only happens within a short window of the resume, so the entry
+    // must be recent by the real clock the App reads.
+    const now = Date.now();
     const fixture = harness({
       records: [record()],
-      resumedEntry: { key: "claude:orig", tabId: "tab-1", resumedAtMs: 1_000 },
+      resumedEntry: {
+        key: "claude:orig",
+        tabId: "tab-1",
+        resumedAtMs: now - 5_000,
+      },
     });
     const { container, root } = await mountApp(fixture);
 
@@ -302,7 +309,7 @@ describe("transcript handoff (spec §4)", () => {
       id: "succ",
       title: "Resumed conversation",
       filePath: "C:\\transcripts\\succ.jsonl",
-      updatedAtMs: 2_000,
+      updatedAtMs: now,
     });
     fixture.setRecords([record(), successor]);
     await act(async () => {

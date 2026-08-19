@@ -139,6 +139,17 @@ export function ChatOverlay({
     };
   }, [schedule]);
 
+  // A real resume announces its boot AFTER this overlay mounts: the controller
+  // only signals once the prompt arrived and the resume command was typed,
+  // while the pane linked (and the overlay mounted) the moment the tab opened.
+  // So the boot must also be honoured as a rising EDGE, not just an initial
+  // value. Reveals are sticky — a boot that already happened is a no-op.
+  useEffect(() => {
+    if (bootReveal === true) {
+      revealRef.current?.noteBoot();
+    }
+  }, [bootReveal]);
+
   // The detector's only remaining job: notice claude asking something and open
   // the dock so its REAL question is on screen. It never answers — the cards
   // are retired (spec §6), so its write path is a no-op by construction.

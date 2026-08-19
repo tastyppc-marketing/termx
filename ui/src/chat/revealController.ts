@@ -45,6 +45,12 @@ export interface RevealController {
   userTypedSlash(): void;
   /** The prompt detector says claude is asking something. */
   notePromptDetected(): void;
+  /**
+   * The pane's resume announced its boot AFTER construction (spec §4): the
+   * controller only signals once the resume command is typed, which can be
+   * seconds after the overlay mounted. Same sticky reveal as the initial one.
+   */
+  noteBoot(): void;
   manualToggle(): void;
   manualHide(): void;
   dispose(): void;
@@ -121,6 +127,7 @@ export function createRevealController(
     state: () => state,
     userTypedSlash: () => reveal("slash"),
     notePromptDetected: () => reveal("prompt"),
+    noteBoot: () => reveal("boot"),
     manualToggle: () => (state.revealed ? hide() : reveal("manual")),
     manualHide: hide,
     dispose() {

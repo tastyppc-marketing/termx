@@ -154,6 +154,13 @@ const CONVERSATIONS_RESCAN_MS = 30_000;
  * minute covers a slow attach without leaving stale flags around forever.
  */
 const BOOT_REVEAL_TTL_MS = 60_000;
+/**
+ * How long after a resume its transcript handoff may still be adopted
+ * (auto-reveal spec §4). `claude --resume` writes the new file within seconds;
+ * past this window, a "newer transcript in the same folder" is far more likely
+ * to be an unrelated conversation than a late handoff.
+ */
+const HANDOFF_WINDOW_MS = 5 * 60_000;
 const NO_RECORDS: readonly LlmSessionRecord[] = [];
 const emptyRecords = () => NO_RECORDS;
 const NO_SAVED: readonly SavedSession[] = [];
@@ -463,19 +470,43 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       } else if (outcome.kind === "opened") {
         setConversationsFull(false);
         persistPaneLink(outcome.sessionId, record);
+        // `claude --resume` writes its NEW transcript within seconds, but the
+        // regular rescan is 30s — long enough for a reply sent from the chat
+        // to look like it vanished. Two early forced scans catch the handoff
+        // quickly without turning the scanner into a hot loop.
+        for (const delayMs of [4_000, 15_000]) {
+          window.setTimeout(() => {
+            void conversationsStore?.refresh(true);
+          }, delayMs);
+        }
       }
     });
   };
 
   // Transcript handoff (auto-reveal spec §4): `claude --resume` writes a NEW
   // transcript file, so a resumed pane tailing the ORIGINAL looks dead. On
-  // every rescan, look for the successor of each resumed conversation; when
-  // one appears, rebind the resume and repoint the pane's link at it.
+  // each rescan, look for the successor of each resumed conversation; when one
+  // appears, rebind the resume and repoint the pane's link at it.
+  //
+  // Adoption is deliberately narrow, because a shared folder can hold OTHER
+  // live conversations that also update after the resume: each resumed tab
+  // adopts at most ONCE, only within a short window of the resume itself, and
+  // never a conversation another resumed tab already owns — without these, two
+  // transcripts updating in one folder make the link ping-pong every scan.
+  const adoptedTabsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (conversationsRecords.length === 0) {
       return;
     }
-    for (const entry of controller.resumedEntries()) {
+    const entries = controller.resumedEntries();
+    const claimed = new Set(entries.map((entry) => entry.key));
+    for (const entry of entries) {
+      if (adoptedTabsRef.current.has(entry.tabId)) {
+        continue; // this resume already found its successor
+      }
+      if (Date.now() - entry.resumedAtMs > HANDOFF_WINDOW_MS) {
+        continue; // too old: anything "newer" now is another conversation
+      }
       const original = conversationsRecords.find(
         (record) => sessionKey(record) === entry.key,
       );
@@ -490,7 +521,13 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       if (!successor) {
         continue;
       }
-      controller.rebindResumedTab(entry.key, sessionKey(successor));
+      const newKey = sessionKey(successor);
+      if (claimed.has(newKey)) {
+        continue; // another resumed tab already owns that conversation
+      }
+      claimed.add(newKey);
+      adoptedTabsRef.current.add(entry.tabId);
+      controller.rebindResumedTab(entry.key, newKey);
       const tab = snapshot.layout.tabs[entry.tabId];
       const sessionId = tab ? firstSessionId(tab.split) : null;
       if (sessionId !== null) {
@@ -501,6 +538,30 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     // falls back on; the records array is the real trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationsRecords, controller]);
+
+  // Recycled session ids must not resurrect a dead pane's chat: the daemon
+  // numbers sessions from 1 each run, and `chatPanes` is keyed by that number,
+  // so after a daemon restart a brand-new shell could inherit a stale entry —
+  // and, with sticky links, open in chat mode on a conversation it never ran.
+  // Sessions present at mount keep their state (the daemon outlives the
+  // window); an id that APPEARS later was created just now, so whatever is
+  // stored under it belongs to a dead predecessor.
+  const knownSessionsRef = useRef<ReadonlySet<number> | null>(null);
+  useEffect(() => {
+    const ids = new Set(Object.keys(snapshot.paneStates).map(Number));
+    const known = knownSessionsRef.current;
+    knownSessionsRef.current = ids;
+    if (known === null) {
+      return;
+    }
+    for (const id of ids) {
+      if (!known.has(id)) {
+        uiStateStore.update((current) =>
+          setChatPaneState(current, String(id), null),
+        );
+      }
+    }
+  }, [snapshot.paneStates, uiStateStore]);
 
   // The controller routes the ask-searcher policy through this handler.
   useEffect(() => {

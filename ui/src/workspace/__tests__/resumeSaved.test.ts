@@ -567,6 +567,31 @@ describe("WorkspaceController resume bindings (auto-reveal spec §4)", () => {
     expect(h.controller.resumedEntries()).toEqual(before);
   });
 
+  it("refuses a rebind onto a key another tab already owns", async () => {
+    // Two resumes in one folder can nominate the same successor; adopting it
+    // twice would clobber the first tab's binding.
+    const h = harness();
+    await resumeSessionAndSettle(h);
+    const other = h.controller.resumeSession(
+      conversation({ id: "11111111-2222-4333-8444-555566667777" }),
+    );
+    await settleMicrotasks();
+    const sessionId = h.createdSessionIds.at(-1);
+    if (sessionId !== undefined) {
+      h.controller.reportSessionCwd(sessionId, "C:\\Dev\\TermX", true);
+    }
+    await other;
+    const before = h.controller.resumedEntries();
+    expect(before).toHaveLength(2);
+
+    h.controller.rebindResumedTab(
+      `claude:${CLAUDE_ID}`,
+      "claude:11111111-2222-4333-8444-555566667777",
+    );
+
+    expect(h.controller.resumedEntries()).toEqual(before);
+  });
+
   it("announces the booting session to the resume boot listener", async () => {
     const h = harness();
     const booted: number[] = [];
