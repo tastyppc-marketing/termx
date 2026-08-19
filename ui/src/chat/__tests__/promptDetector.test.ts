@@ -147,6 +147,31 @@ describe("detectPrompt", () => {
     expect(prompt?.raw.at(-1)).toBe("Select an option to continue:");
     expect(prompt?.raw.at(0)).toBe("line 29");
   });
+
+  it("reads the live /model picker through its key-hint footer", () => {
+    // Transcribed from a live claude on 2026-08-19: the option run does NOT
+    // end the screen — an effort row and a keys row are drawn under it.
+    const prompt = detectPrompt([
+      "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+      "   Select model",
+      "   Switch between Claude models. Your pick becomes the default for new sessions. For",
+      "   other/previous model names, specify with --model.",
+      "     1. Default (recommended)  Opus 5 with 1M context · Best for everyday, complex tasks",
+      "   ❯ 2. Opus (1M context) ✔    Opus 5 with 1M context · Best for everyday, complex tasks",
+      "     3. Fable                  Fable 5 · Most capable for your hardest and longest-running tasks",
+      "     4. Sonnet                 Sonnet 5 · Efficient for routine tasks",
+      "     5. Haiku                  Haiku 4.5 · Fastest for quick answers",
+      "   ● High effort (default) ←/→ to adjust",
+      "   Enter to set as default · s to use this session only · Esc to cancel",
+    ]);
+    expect(prompt?.kind).toBe("menu");
+    if (prompt?.kind !== "menu") {
+      return;
+    }
+    expect(prompt.options).toHaveLength(5);
+    expect(prompt.selectedIndex).toBe(1);
+    expect(prompt.options[1]?.label).toContain("Opus (1M context)");
+  });
 });
 
 describe("keysForMenuAnswer", () => {

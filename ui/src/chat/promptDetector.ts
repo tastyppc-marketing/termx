@@ -52,6 +52,17 @@ const ASKS_FOR_INPUT = /\b(enter|type|choose|select|input|provide|name|path|pass
 /** A shell's own prompt is not a question, however much it looks like one. */
 const SHELL_PROMPT = /^(?:PS\s+)?(?:[A-Za-z]:[\\/].*|~.*|\/.*)?[$#>❯]\s*$/;
 
+/**
+ * Dialogs draw key-hint rows UNDER their options — the live /model picker
+ * ends in "● High effort (default) ←/→ to adjust" and "Enter to set as
+ * default · s to use this session only · Esc to cancel". At most this many
+ * are stepped over before the option run. Only rows that TALK ABOUT KEYS are
+ * skipped: an unnumbered menu's own trailing options (which are unselected
+ * and unmarked too) must not be eaten.
+ */
+const FOOTER_SKIP = 3;
+const FOOTER_HINT = /[·↑↓←→]|\b(esc|enter|tab|space|shift\+\w|ctrl\+\w)\b/i;
+
 /** Box-drawing chrome the dialogs are wrapped in. */
 const BOX_EDGE = /^[╭╰╞╡├┤┌└╔╚┏┗│┃║]+|[│┃║╮╯┐┘╗╝┓┛]+$/g;
 const BOX_ONLY = /^[\s─━═╌╍│┃║╭╮╰╯┌┐└┘╔╗╚╝┏┓┗┛├┤┬┴┼]*$/;
@@ -99,6 +110,20 @@ function readOptions(rows: Row[]): { options: PromptOption[]; selectedIndex: num
   }
   if (end < 0) {
     return null;
+  }
+
+  // Step over a dialog's key-hint footer to reach the options above it.
+  let skipped = 0;
+  while (end >= 0 && skipped < FOOTER_SKIP) {
+    const row = rows[end];
+    if (!row || row.text.length === 0) {
+      return null; // hints with nothing above them are not a menu
+    }
+    if (NUMBERED.test(row.text) || row.selected || !FOOTER_HINT.test(row.text)) {
+      break; // the run — or ordinary prose — starts here
+    }
+    end -= 1;
+    skipped += 1;
   }
 
   const labels: string[] = [];
