@@ -18,6 +18,7 @@ import {
   parseChatShowThinking,
   parseChatViewMode,
 } from "../chat/chatDefaults";
+import type { SlashCommand } from "../chat/slashCommands";
 import type { ChatDensity, ChatViewMode } from "../chat/types";
 import type { ViewerGeometry } from "../viewer/viewerState";
 import { EMPTY_SCOPE_PATHS, type ScopePathsState } from "./scopePaths";
@@ -97,6 +98,12 @@ export interface UiStateV1 {
    * that has never connected to one is in.
    */
   readonly sshPanes?: Readonly<Record<string, SshPaneState>>;
+  /**
+   * Slash commands learned from claude's own menu (chat v3 spec §2). Absent —
+   * or unparseable — means the palette opens on `SEED_COMMANDS`, which is also
+   * the state of a machine that has never opened it.
+   */
+  readonly slashCommands?: readonly SlashCommand[];
 }
 
 export const MIN_SIDEBAR_WIDTH = 200;
@@ -316,6 +323,72 @@ function parseSshPanes(
 }
 
 /**
+ * The cache is written from a screen scrape, so the parse trusts shape and
+ * nothing else: a name that is not a nonempty, slash-free string is dropped,
+ * because a stored name becomes `/name` in the palette and then a keystroke
+ * into a live session. The description is only ever drawn, so any string will
+ * do — including the empty one claude leaves on a thin menu row. Nothing
+ * usable left means no field, which is the same state as never having learned.
+ */
+function parseSlashCommands(value: unknown): readonly SlashCommand[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const result: SlashCommand[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) {
+      continue;
+    }
+    const { name, description } = entry as Record<string, unknown>;
+    if (
+      typeof name !== "string" ||
+      name.length === 0 ||
+      name.includes("/") ||
+      typeof description !== "string"
+    ) {
+      continue;
+    }
+    result.push({ name, description });
+  }
+  return result.length > 0 ? result : undefined;
+}
+
+/**
+ * Store the learned command cache. Compared FIELD-WISE: every learn rebuilds
+ * these objects from a fresh parse, so a reference check would schedule a disk
+ * write on every sample while the palette is open. An empty list drops the
+ * field — that is the "never learned" state, and it round-trips as an absent
+ * field. Growing the cache is `mergeCommands`' job; this only stores.
+ */
+export function setSlashCommands(
+  state: UiStateV1,
+  commands: readonly SlashCommand[],
+): UiStateV1 {
+  const current = state.slashCommands;
+  if (commands.length === 0) {
+    if (current === undefined) {
+      return state;
+    }
+    // Spread-then-delete keeps any unrelated fields this state may carry.
+    const next: { -readonly [K in keyof UiStateV1]: UiStateV1[K] } = { ...state };
+    delete next.slashCommands;
+    return next;
+  }
+  if (
+    current !== undefined &&
+    current.length === commands.length &&
+    current.every(
+      (entry, index) =>
+        entry.name === commands[index]?.name &&
+        entry.description === commands[index]?.description,
+    )
+  ) {
+    return state;
+  }
+  return { ...state, slashCommands: [...commands] };
+}
+
+/**
  * Store one ssh pane. `null` is the reset sentinel — the pane stopped being an
  * ssh pane (its session is gone) — and the whole field disappears once no pane
  * is tracked. Same-ref return when nothing changed: a capture is re-reported on
@@ -446,6 +519,7 @@ export function parseUiState(text: string | null): UiStateV1 {
   const sidebarWidth = parseSidebarWidth(record.sidebarWidth);
   const chatPanes = parseChatPanes(record.chatPanes);
   const sshPanes = parseSshPanes(record.sshPanes);
+  const slashCommands = parseSlashCommands(record.slashCommands);
   return {
     scopePaths: {
       seeds: parsePathRecord(scopePathsRaw.seeds),
@@ -457,6 +531,7 @@ export function parseUiState(text: string | null): UiStateV1 {
     ...(sidebarWidth !== undefined ? { sidebarWidth } : {}),
     ...(chatPanes ? { chatPanes } : {}),
     ...(sshPanes ? { sshPanes } : {}),
+    ...(slashCommands ? { slashCommands } : {}),
   };
 }
 
