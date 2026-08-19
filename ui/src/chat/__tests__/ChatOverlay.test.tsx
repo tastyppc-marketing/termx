@@ -6,7 +6,7 @@ import {
   BOOT_CARD_MAX_MS,
   ChatOverlay,
 } from "../ChatOverlay";
-import { SLASH } from "../ChatInput";
+import { ENTER_DELAY_MS, SLASH } from "../ChatInput";
 import type { ChatFeed } from "../feed";
 import { KEY_ENTER } from "../promptDetector";
 import { DETECT_INTERVAL_MS, type ScheduleFn } from "../promptWatcher";
@@ -195,7 +195,11 @@ describe("ChatOverlay slash choreography", () => {
     await type("/mod");
     await press("Enter");
     // claude's box already holds the "/": sending it again would type "//".
-    expect(harness.sent).toEqual([SLASH, `model${KEY_ENTER}`]);
+    // And the Enter is a SEPARATE write, a beat later — "model\r" in one
+    // chunk reads as a paste on the far side and never submits.
+    expect(harness.sent).toEqual([SLASH, "model"]);
+    await harness.advance(ENTER_DELAY_MS);
+    expect(harness.sent).toEqual([SLASH, "model", KEY_ENTER]);
     expect(query("chat-slash")).toBeNull();
   });
 
@@ -214,7 +218,9 @@ describe("ChatOverlay slash choreography", () => {
     await type("/");
     await type("/rename gate-renamed");
     await press("Enter");
-    expect(harness.sent).toEqual([SLASH, `rename gate-renamed${KEY_ENTER}`]);
+    expect(harness.sent).toEqual([SLASH, "rename gate-renamed"]);
+    await harness.advance(ENTER_DELAY_MS);
+    expect(harness.sent).toEqual([SLASH, "rename gate-renamed", KEY_ENTER]);
   });
 
   it("hides prompt cards while the palette is up, and keeps detecting underneath", async () => {

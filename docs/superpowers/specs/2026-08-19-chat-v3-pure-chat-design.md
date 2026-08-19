@@ -60,8 +60,10 @@ command. Deleting back to an empty box cancels (as Esc).
 executor and the teacher:
 - On palette OPEN: `sendKeys("/")` — claude draws its own full command menu
   (that unfiltered menu is the best learning sample) — and start the learner.
-- On PICK of `/name`: `sendKeys("name" + "\r")` — claude's box already holds
-  the `/`; the completed name runs the command. Stop the learner.
+- On PICK of `/name`: `sendKeys("name")`, then `\r` as its OWN write
+  `ENTER_DELAY_MS` later — claude's box already holds the `/`, and a
+  one-chunk `"name\r"` reads as a paste that never submits (live-gate
+  finding, 2026-08-19). Stop the learner.
 - On CANCEL: `sendKeys("\x7f")` — a backspace deletes exactly the one `/` we
   typed, which also closes claude's menu. NOT Escape: Escape interrupts a
   turn claude is mid-way through, and arms the rewind hint on an idle one.

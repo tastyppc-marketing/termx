@@ -13,7 +13,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { SLASH } from "./ChatInput";
+import { ENTER_DELAY_MS, SLASH } from "./ChatInput";
 import { ChatView, type ChatHeaderProps } from "./ChatView";
 import { openChatFeed, type ChatFeed } from "./feed";
 import { isIdleScreen } from "./idleDetector";
@@ -268,10 +268,24 @@ export function ChatOverlay({
     promptRef.current?.dismiss();
   };
 
-  /** claude's box already holds the "/" we sent — send only what follows it. */
+  /**
+   * claude's box already holds the "/" we sent — send only what follows it.
+   * The Enter is its own write, a beat later: a TUI that receives "body\r" in
+   * one chunk reads it as a PASTE, the \r becomes a newline in the box and
+   * nothing submits (see `ENTER_DELAY_MS`; confirmed against live claude).
+   */
   const completeCommand = (line: string) => {
     const body = line.startsWith(SLASH) ? line.slice(1) : line;
-    sendKeys(`${body}${KEY_ENTER}`);
+    if (body.length > 0) {
+      sendKeys(body);
+    }
+    const tick: ScheduleFn =
+      schedule ??
+      ((callback, delayMs) => {
+        const handle = setTimeout(callback, delayMs);
+        return () => clearTimeout(handle);
+      });
+    tick(() => sendRef.current(KEY_ENTER), ENTER_DELAY_MS);
   };
 
   if (failed) {
