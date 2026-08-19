@@ -7,10 +7,12 @@
  * the buffer, and this module reads that menu back out. One use behind at
  * worst, and no list in this repo ever needs hand-patching again.
  *
- * Two rules keep a bad screen from poisoning the cache. A parse of fewer than
- * `MIN_MENU_ROWS` rows is discarded outright — that is noise, not a menu — and
- * merging is upsert-only: claude's menu scrolls, so a row that is not on screen
- * proves nothing about whether the command exists.
+ * Three rules keep a bad screen from poisoning the cache. Rows only count
+ * BELOW the input box that is visibly holding our "/" (`MENU_ANCHOR`) — output
+ * that merely looks like a menu has no such box. A parse of fewer than
+ * `MIN_MENU_ROWS` rows is discarded outright — that is noise, not a menu. And
+ * merging is upsert-only: claude's menu scrolls, so a row that is not on
+ * screen proves nothing about whether the command exists.
  */
 
 import { DETECT_INTERVAL_MS, type ScheduleFn } from "./promptWatcher";
@@ -97,11 +99,29 @@ function strip(line: string): string {
   return bare.replace(BOX_EDGE, "").trim();
 }
 
+/**
+ * The input box holding exactly the "/" the overlay sent — the proof that the
+ * rows below it are claude drawing its menu. Without this anchor, three lines
+ * of ordinary OUTPUT that merely look like menu rows (an answer about slash
+ * commands, a file listing) would teach a cache that never deletes.
+ */
+const MENU_ANCHOR = /^[>❯›]\s*\/$/;
+
 /** Read claude's own command menu off the screen. `[]` = nothing trustworthy. */
 export function parseSlashMenu(visibleLines: string[]): SlashCommand[] {
+  // The LAST anchor is the live input box; anything above it is scrollback.
+  let anchorIndex = -1;
+  for (let index = 0; index < visibleLines.length; index += 1) {
+    if (MENU_ANCHOR.test(strip(visibleLines[index] ?? ""))) {
+      anchorIndex = index;
+    }
+  }
+  if (anchorIndex === -1) {
+    return [];
+  }
   const rows: SlashCommand[] = [];
   const seen = new Set<string>();
-  for (const line of visibleLines) {
+  for (const line of visibleLines.slice(anchorIndex + 1)) {
     const text = strip(line ?? "");
     if (text.length === 0) {
       continue;

@@ -168,6 +168,9 @@ export function ChatInput({
       return;
     }
     if (event.key === "Enter" && !event.shiftKey) {
+      if (event.nativeEvent.isComposing) {
+        return; // this Enter belongs to the IME, not to the message
+      }
       event.preventDefault();
       if (slashMode) {
         submitSlash();
@@ -207,9 +210,14 @@ export function ChatInput({
       return;
     }
     if (slashMode && (next.length === 0 || !next.startsWith(SLASH))) {
-      // Deleted back past the slash: claude is still holding one, so take it
-      // back rather than leaving a stray character in its box.
-      cancelSlash();
+      // Deleted back past the slash — or typed clean over the line: claude is
+      // still holding one, so take it back rather than leaving a stray
+      // character in its box. What the user just typed stays theirs.
+      setSlashMode(false);
+      setSelected(0);
+      cursor.current = -1;
+      setText(next);
+      onSlashCancel();
       return;
     }
     cursor.current = -1;

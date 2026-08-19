@@ -484,7 +484,14 @@ export function TerminalPane(props: TerminalPaneProps) {
         }
       }}
     >
-      <div className="terminal-pane__surface" ref={containerRef} />
+      {/* `inert` while the chat is up: the overlay covers every pixel, but
+          xterm's hidden textarea would still be one Tab away — and a focused
+          terminal under the chat turns keystrokes into invisible PTY input. */}
+      <div
+        className="terminal-pane__surface"
+        ref={containerRef}
+        inert={props.chat?.mode === "chat" || undefined}
+      />
 
       {/* The chat renders OVER the terminal — the surface above stays mounted
           and attached, which is what keeps the session running and gives the

@@ -62,8 +62,10 @@ executor and the teacher:
   (that unfiltered menu is the best learning sample) — and start the learner.
 - On PICK of `/name`: `sendKeys("name" + "\r")` — claude's box already holds
   the `/`; the completed name runs the command. Stop the learner.
-- On CANCEL: `sendKeys("\x1b")` (Escape clears claude's menu and box). Stop
-  the learner.
+- On CANCEL: `sendKeys("\x7f")` — a backspace deletes exactly the one `/` we
+  typed, which also closes claude's menu. NOT Escape: Escape interrupts a
+  turn claude is mid-way through, and arms the rewind hint on an idle one.
+  Stop the learner. (Adversarial-review fix, 2026-08-19.)
 - Passthrough send (line with args): the palette was open, so claude already
   has `/`; send `text.slice(1) + "\r"`.
 
@@ -192,7 +194,7 @@ Unit: `slashCommands` (parser fixtures from a real claude menu capture, merge
 upsert/no-delete/same-ref, filter ranking), `SlashPalette` render/pick,
 learner start/stop/discard-small-parses; ChatInput palette state machine
 (open/filter/pick/cancel/passthrough/backspace-to-empty); ChatOverlay
-choreography (open sends "/", pick sends completion, cancel sends Esc,
+choreography (open sends "/", pick sends completion, cancel sends backspace,
 palette suppresses prompt cards, boot card lifecycle); PromptCard fallback
 (key-row buttons send the right sequences; live screen refresh); removal
 regressions (no `--chat-dock`, no reveal chevron, `.chat-view` full-bleed).

@@ -17,7 +17,6 @@ import { SLASH } from "./ChatInput";
 import { ChatView, type ChatHeaderProps } from "./ChatView";
 import { openChatFeed, type ChatFeed } from "./feed";
 import { isIdleScreen } from "./idleDetector";
-import { KEY_ESC } from "./PromptCard";
 import { KEY_ENTER } from "./promptDetector";
 import {
   createPromptController,
@@ -39,6 +38,15 @@ export const BOOT_CARD_MAX_MS = 60_000;
 
 /** Nothing to answer. Also what the view is handed while a card is suppressed. */
 const NO_CARD: PromptCardState = { prompt: null, status: "asking", answeredLabel: "" };
+
+/**
+ * How a cancelled palette takes claude's "/" back. A backspace, NOT Escape:
+ * the overlay put exactly one character in claude's box, and deleting it is
+ * the whole undo. Escape would also work on an idle session — but on a BUSY
+ * one it interrupts the running turn, and on an idle one it arms the
+ * press-esc-again-to-rewind hint. Backspace does neither.
+ */
+export const KEY_BACKSPACE = "\x7f";
 
 export interface ChatOverlayProps {
   /** Absolute path of the linked transcript. */
@@ -249,11 +257,15 @@ export function ChatOverlay({
 
   /**
    * Every way the palette closes ends the same: claude is no longer holding a
-   * bare "/", so the learner has nothing left to read.
+   * bare "/", so the learner has nothing left to read. And whatever card the
+   * detector published while the palette was up described claude's own menu —
+   * a screen the close itself is changing — so it is dropped rather than
+   * un-suppressed; the next settled detection speaks for the new screen (§3).
    */
   const closePalette = () => {
     setPaletteOpen(false);
     learnerRef.current?.stop();
+    promptRef.current?.dismiss();
   };
 
   /** claude's box already holds the "/" we sent — send only what follows it. */
@@ -325,7 +337,7 @@ export function ChatOverlay({
       }}
       onSlashCancel={() => {
         closePalette();
-        sendKeys(KEY_ESC);
+        sendKeys(KEY_BACKSPACE);
       }}
       onSlashPassthrough={(line) => {
         closePalette();

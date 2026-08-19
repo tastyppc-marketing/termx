@@ -154,12 +154,14 @@ describe("parseSlashMenu", () => {
     // cache is never allowed to learn from that.
     expect(
       parseSlashMenu([
+        "> /",
         "  /model                 Set the AI model for this session",
         "  /clear                 Clear conversation history",
       ]),
     ).toEqual([]);
     expect(
       parseSlashMenu([
+        "> /",
         "  /model                 Set the AI model for this session",
         "  /clear                 Clear conversation history",
         "  /cost                  Show the cost of this session",
@@ -167,8 +169,31 @@ describe("parseSlashMenu", () => {
     ).toHaveLength(3);
   });
 
+  it("learns nothing without the input box visibly holding the slash", () => {
+    // These rows are perfect — but no box holds a bare "/", so they are
+    // OUTPUT that happens to look like a menu (an answer about slash
+    // commands, say). A cache that never deletes must not eat that.
+    expect(
+      parseSlashMenu([
+        "  /model                 Set the AI model for this session",
+        "  /clear                 Clear conversation history",
+        "  /cost                  Show the cost of this session",
+      ]),
+    ).toEqual([]);
+    // And rows ABOVE the box are scrollback, not the menu the box opened.
+    expect(
+      parseSlashMenu([
+        "  /model                 Set the AI model for this session",
+        "  /clear                 Clear conversation history",
+        "  /cost                  Show the cost of this session",
+        "> /",
+      ]),
+    ).toEqual([]);
+  });
+
   it("keeps the first row when a name is drawn twice", () => {
     const parsed = parseSlashMenu([
+      "> /",
       "  /model                 Set the AI model for this session",
       "  /clear                 Clear conversation history",
       "  /cost                  Show the cost of this session",

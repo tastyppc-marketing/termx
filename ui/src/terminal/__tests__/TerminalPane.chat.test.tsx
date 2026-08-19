@@ -180,7 +180,11 @@ describe("TerminalPane chat view", () => {
   it("keeps the terminal mounted and attached underneath the chat", async () => {
     const pane = await mountPane(chatProps({ mode: "chat" }));
     expect(pane.container.querySelector('[data-testid="chat-view"]')).not.toBeNull();
-    expect(pane.container.querySelector(".terminal-pane__surface")).not.toBeNull();
+    const surface = pane.container.querySelector(".terminal-pane__surface");
+    expect(surface).not.toBeNull();
+    // Mounted but inert: xterm's hidden textarea must not be one Tab away
+    // while the chat owns the keyboard (v3 §0/§6).
+    expect(surface?.hasAttribute("inert")).toBe(true);
     expect(pane.attachment.detach).not.toHaveBeenCalled();
     expect(pane.presentation.dispose).not.toHaveBeenCalled();
     // No switch while the chat is up: the header's own button flips back.

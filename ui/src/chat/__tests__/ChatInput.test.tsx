@@ -309,6 +309,19 @@ describe("ChatInput slash palette", () => {
     expect(palette()).toBeNull();
   });
 
+  it("keeps the replacement when the user types clean over the slash line", async () => {
+    // Select-all then a keystroke replaces the whole line in one change event.
+    // The slash mode ends — but the keystroke that ended it is a message being
+    // written, not something to throw away.
+    const { log } = await mountWithSlash();
+    await type("/");
+    await type("/mo");
+    await type("hello");
+    expect(log.cancels).toBe(1);
+    expect(palette()).toBeNull();
+    expect(box().value).toBe("hello");
+  });
+
   it("drops into passthrough once the line takes an argument", async () => {
     const { sent, log } = await mountWithSlash();
     await type("/");

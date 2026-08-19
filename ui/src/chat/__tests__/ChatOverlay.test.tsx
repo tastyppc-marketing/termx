@@ -199,11 +199,13 @@ describe("ChatOverlay slash choreography", () => {
     expect(query("chat-slash")).toBeNull();
   });
 
-  it("clears claude's menu with Escape when the palette is cancelled", async () => {
+  it("takes claude's slash back with a backspace when the palette is cancelled", async () => {
+    // A backspace, never Escape: Escape would interrupt a turn claude is
+    // mid-way through, and the only thing owed is the one "/" we typed.
     const harness = await mount();
     await type("/");
     await press("Escape");
-    expect(harness.sent).toEqual([SLASH, "\x1b"]);
+    expect(harness.sent).toEqual([SLASH, "\x7f"]);
     expect(query("chat-slash")).toBeNull();
   });
 
@@ -225,8 +227,14 @@ describe("ChatOverlay slash choreography", () => {
     await harness.advance(DETECT_INTERVAL_MS);
     expect(query("prompt-card")).toBeNull();
 
-    // Cancelling puts the card back without re-running the detector.
+    // Closing the palette DROPS the suppressed card rather than restoring it:
+    // what the detector read mid-palette may have been claude's own slash
+    // menu, and the close itself just changed that screen. A question that is
+    // genuinely still there is re-detected and comes back on its own.
     await press("Escape");
+    expect(query("prompt-card")).toBeNull();
+    await harness.advance(DETECT_INTERVAL_MS);
+    await harness.advance(DETECT_INTERVAL_MS);
     expect(query("prompt-card")).not.toBeNull();
   });
 });
