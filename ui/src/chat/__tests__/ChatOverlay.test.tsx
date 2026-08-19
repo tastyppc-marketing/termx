@@ -1,10 +1,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ChatOverlay } from "../ChatOverlay";
+import {
+  AUTO_HIDE_POLL_MS,
+  BOOT_CARD_MAX_MS,
+  ChatOverlay,
+} from "../ChatOverlay";
+import { SLASH } from "../ChatInput";
 import type { ChatFeed } from "../feed";
+import { KEY_ENTER } from "../promptDetector";
 import { DETECT_INTERVAL_MS, type ScheduleFn } from "../promptWatcher";
-import { AUTO_HIDE_POLL_MS, type RevealState } from "../revealController";
+import type { SlashCommand } from "../slashCommands";
 import permissionBash from "./fixtures/prompts/permission-bash.txt?raw";
 
 let container: HTMLDivElement;
@@ -60,7 +66,6 @@ const emptyFeed: ChatFeed = {
   dispose: () => undefined,
 };
 
-const PROMPT_SCREEN = permissionBash.split("\n");
 const QUIET_SCREEN = [
   "● Done.",
   "╭──────────────────────────────╮",
@@ -68,11 +73,21 @@ const QUIET_SCREEN = [
   "╰──────────────────────────────╯",
 ];
 
-async function mount(options: { bootReveal?: boolean } = {}) {
+const PROMPT_SCREEN = permissionBash.split("\n");
+
+/** A screen that is plainly still working: the boot card must not clear. */
+const BUSY_SCREEN = ["✻ Booting… (12s · esc to interrupt)"];
+
+const COMMANDS: readonly SlashCommand[] = [
+  { name: "model", description: "Choose the model" },
+  { name: "rename", description: "Rename this conversation" },
+];
+
+async function mount(options: { bootReveal?: boolean; screen?: string[] } = {}) {
   const clock = testScheduler();
-  const reveals: RevealState[] = [];
   const sent: string[] = [];
-  let screen = QUIET_SCREEN;
+  const learned: SlashCommand[][] = [];
+  let screen = options.screen ?? QUIET_SCREEN;
   await act(async () =>
     root.render(
       <ChatOverlay
@@ -85,7 +100,8 @@ async function mount(options: { bootReveal?: boolean } = {}) {
         sendKeys={(data) => sent.push(data)}
         terminalSnapshot={() => screen}
         openFeed={() => Promise.resolve(emptyFeed)}
-        onRevealChange={(state) => reveals.push(state)}
+        slashCommands={COMMANDS}
+        onCommandsLearned={(commands) => learned.push(commands)}
         schedule={clock.schedule}
         {...(options.bootReveal === undefined ? {} : { bootReveal: options.bootReveal })}
       />,
@@ -93,8 +109,8 @@ async function mount(options: { bootReveal?: boolean } = {}) {
   );
   return {
     clock,
-    reveals,
     sent,
+    learned,
     setScreen(lines: string[]) {
       screen = lines;
     },
@@ -108,26 +124,131 @@ function query(testid: string): Element | null {
   return container.querySelector(`[data-testid="${testid}"]`);
 }
 
+function box(): HTMLTextAreaElement {
+  const found = container.querySelector("textarea");
+  if (!found) {
+    throw new Error("no input box");
+  }
+  return found;
+}
+
+/** Drive the real box, so the palette state machine is the one under test. */
+async function type(value: string): Promise<void> {
+  const input = box();
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!;
+    setter.call(input, value);
+    input.selectionStart = value.length;
+    input.selectionEnd = value.length;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+async function press(key: string): Promise<void> {
+  await act(async () => {
+    box().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  });
+}
+
 describe("ChatOverlay", () => {
-  it("opens with the dock up for a resume boot, and says so", async () => {
+  it("shows the chat and nothing that could reveal the terminal", async () => {
+    await mount();
+    expect(query("chat-view")).not.toBeNull();
+    expect(query("chat-reveal")).toBeNull();
+    expect(query("chat-reveal-hide")).toBeNull();
+  });
+
+  it("stays terminal-free even when the pane booted from a resume", async () => {
+    // v3 §4 replaces the boot dock with a card; A3 adds it. What must never
+    // come back is the dock itself, initial value or later rising edge.
     const harness = await mount({ bootReveal: true });
-    expect(harness.reveals).toEqual([{ revealed: true, reason: "boot" }]);
-    expect(query("chat-reveal-hide")).not.toBeNull();
+    expect(query("chat-reveal-hide")).toBeNull();
+    await harness.advance(1_000);
+    expect(query("chat-reveal-hide")).toBeNull();
   });
 
-  it("opens hidden otherwise", async () => {
+  it("stops its controllers when the chat unmounts", async () => {
     const harness = await mount();
-    expect(harness.reveals).toEqual([]);
-    expect(query("chat-reveal")).not.toBeNull();
+    expect(harness.clock.pendingCount).toBeGreaterThan(0);
+    await act(async () => root.unmount());
+    expect(harness.clock.pendingCount).toBe(0);
+    root = createRoot(container);
+  });
+});
+
+// Spec §2: the hidden claude is both the executor and the teacher, so every
+// palette transition owes it a keystroke — and exactly one.
+describe("ChatOverlay slash choreography", () => {
+  it("sends the slash to claude when the palette opens", async () => {
+    const harness = await mount();
+    await type("/");
+    expect(harness.sent).toEqual([SLASH]);
+    expect(query("chat-slash")).not.toBeNull();
   });
 
-  it("raises the dock when the boot signal lands after mount (spec §4)", async () => {
-    // A real resume announces its boot only once the resume command is typed —
-    // seconds after the pane linked and this overlay mounted. The prop arrives
-    // as a change, not an initial value, and must still open the dock.
+  it("completes a picked command without repeating the slash", async () => {
+    const harness = await mount();
+    await type("/");
+    await type("/mod");
+    await press("Enter");
+    // claude's box already holds the "/": sending it again would type "//".
+    expect(harness.sent).toEqual([SLASH, `model${KEY_ENTER}`]);
+    expect(query("chat-slash")).toBeNull();
+  });
+
+  it("clears claude's menu with Escape when the palette is cancelled", async () => {
+    const harness = await mount();
+    await type("/");
+    await press("Escape");
+    expect(harness.sent).toEqual([SLASH, "\x1b"]);
+    expect(query("chat-slash")).toBeNull();
+  });
+
+  it("sends a command with arguments as one line, minus the leading slash", async () => {
+    const harness = await mount();
+    await type("/");
+    await type("/rename gate-renamed");
+    await press("Enter");
+    expect(harness.sent).toEqual([SLASH, `rename gate-renamed${KEY_ENTER}`]);
+  });
+
+  it("hides prompt cards while the palette is up, and keeps detecting underneath", async () => {
+    const harness = await mount();
+    await type("/");
+    // claude drew its own command menu in response — which reads exactly like
+    // a menu prompt. It must not surface as a card on top of our palette.
+    harness.setScreen(PROMPT_SCREEN);
+    await harness.advance(DETECT_INTERVAL_MS);
+    await harness.advance(DETECT_INTERVAL_MS);
+    expect(query("prompt-card")).toBeNull();
+
+    // Cancelling puts the card back without re-running the detector.
+    await press("Escape");
+    expect(query("prompt-card")).not.toBeNull();
+  });
+});
+
+// Spec §4: a resume boots behind a status card, never behind a dock.
+describe("ChatOverlay boot card", () => {
+  it("shows nothing for an ordinary open", async () => {
+    await mount();
+    expect(query("boot-card")).toBeNull();
+  });
+
+  it("pins the card while the session is starting", async () => {
+    const harness = await mount({ bootReveal: true, screen: BUSY_SCREEN });
+    expect(query("boot-card")?.textContent).toContain("Resuming session");
+    await harness.advance(AUTO_HIDE_POLL_MS * 3);
+    expect(query("boot-card")).not.toBeNull();
+  });
+
+  it("raises the card when the boot signal lands after mount", async () => {
+    // The pane links (and this mounts) when the tab opens; the boot is only
+    // announced once the resume command is typed, seconds later.
     const clock = testScheduler();
-    const reveals: RevealState[] = [];
-    const openFeed = () => Promise.resolve(emptyFeed);
     const render = async (bootReveal: boolean | undefined) =>
       act(async () =>
         root.render(
@@ -139,9 +260,10 @@ describe("ChatOverlay", () => {
             showThinking={false}
             onShowThinkingChange={() => undefined}
             sendKeys={() => undefined}
-            terminalSnapshot={() => QUIET_SCREEN}
-            openFeed={openFeed}
-            onRevealChange={(state) => reveals.push(state)}
+            terminalSnapshot={() => BUSY_SCREEN}
+            openFeed={() => Promise.resolve(emptyFeed)}
+            slashCommands={COMMANDS}
+            onCommandsLearned={() => undefined}
             schedule={clock.schedule}
             {...(bootReveal === undefined ? {} : { bootReveal })}
           />,
@@ -149,81 +271,41 @@ describe("ChatOverlay", () => {
       );
 
     await render(undefined);
-    expect(reveals).toEqual([]);
-
+    expect(query("boot-card")).toBeNull();
     await render(true);
-    expect(reveals).toEqual([{ revealed: true, reason: "boot" }]);
-    expect(query("chat-reveal-hide")).not.toBeNull();
+    expect(query("boot-card")).not.toBeNull();
   });
 
-  it("raises the dock when the detector sees claude asking", async () => {
-    const harness = await mount();
+  it("clears the card once the screen and the transcript are both quiet", async () => {
+    const harness = await mount({ bootReveal: true });
+    expect(query("boot-card")).not.toBeNull();
+    await harness.advance(AUTO_HIDE_POLL_MS);
+    expect(query("boot-card")).toBeNull();
+  });
+
+  it("clears the card when a prompt takes over the story", async () => {
+    const harness = await mount({ bootReveal: true, screen: BUSY_SCREEN });
     harness.setScreen(PROMPT_SCREEN);
-    // Two ticks: one to sample, one to confirm the screen settled.
     await harness.advance(DETECT_INTERVAL_MS);
     await harness.advance(DETECT_INTERVAL_MS);
-
-    expect(harness.reveals).toEqual([{ revealed: true, reason: "prompt" }]);
-    expect(query("chat-reveal-hide")).not.toBeNull();
-    // The detector answers nothing: claude's own UI is what the dock shows.
-    expect(harness.sent).toEqual([]);
+    expect(query("prompt-card")).not.toBeNull();
+    expect(query("boot-card")).toBeNull();
   });
 
-  it("puts the dock away once the transcript and the screen are both quiet", async () => {
+  it("gives up after a minute rather than wedging on a hung boot", async () => {
+    const harness = await mount({ bootReveal: true, screen: BUSY_SCREEN });
+    await harness.advance(BOOT_CARD_MAX_MS - 1);
+    expect(query("boot-card")).not.toBeNull();
+    await harness.advance(1);
+    expect(query("boot-card")).toBeNull();
+  });
+
+  it("does not raise the card again once it has been cleared", async () => {
     const harness = await mount({ bootReveal: true });
     await harness.advance(AUTO_HIDE_POLL_MS);
-    expect(harness.reveals).toEqual([
-      { revealed: true, reason: "boot" },
-      { revealed: false, reason: null },
-    ]);
-    expect(query("chat-reveal")).not.toBeNull();
-  });
-
-  it("forwards a typed slash to the session and raises the dock for it", async () => {
-    const harness = await mount();
-    const box = container.querySelector("textarea");
-    if (!box) {
-      throw new Error("no input box");
-    }
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        "value",
-      )!.set!;
-      setter.call(box, "/");
-      box.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-
-    expect(harness.sent).toEqual(["/"]);
-    expect(box.value).toBe("");
-    expect(harness.reveals).toEqual([{ revealed: true, reason: "slash" }]);
-  });
-
-  it("opens and closes the dock from the chevron, and never auto-closes that one", async () => {
-    const harness = await mount();
-    await act(async () => query("chat-reveal")?.dispatchEvent(
-      new MouseEvent("click", { bubbles: true }),
-    ));
-    expect(harness.reveals).toEqual([{ revealed: true, reason: "manual" }]);
-
-    // The screen is quiet, but a dock the user asked for stays up.
+    expect(query("boot-card")).toBeNull();
+    // A parent re-render re-asserting the same prop is not a new boot.
     await harness.advance(AUTO_HIDE_POLL_MS * 4);
-    expect(harness.reveals).toHaveLength(1);
-
-    await act(async () => query("chat-reveal-hide")?.dispatchEvent(
-      new MouseEvent("click", { bubbles: true }),
-    ));
-    expect(harness.reveals).toEqual([
-      { revealed: true, reason: "manual" },
-      { revealed: false, reason: null },
-    ]);
-  });
-
-  it("stops both controllers when the chat unmounts", async () => {
-    const harness = await mount();
-    expect(harness.clock.pendingCount).toBeGreaterThan(0);
-    await act(async () => root.unmount());
-    expect(harness.clock.pendingCount).toBe(0);
-    root = createRoot(container);
+    expect(query("boot-card")).toBeNull();
   });
 });

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -5,6 +7,15 @@ import { EntryErrorBoundary } from "../ChatBubble";
 import { ChatView, CTRL_C_KEY, ESC_KEY, RENDER_WINDOW } from "../ChatView";
 import type { ChatFeed } from "../feed";
 import type { ChatEntry } from "../types";
+
+// Read as a file: vitest stubs CSS imports to "", so only the bytes on disk
+// can prove the dock's styling is gone.
+// (vitest runs from the ui project root, so this resolves without a hardcoded
+// prefix — import.meta.url is not a file: URL under the vite transform.)
+const chatViewCss = readFileSync(
+  resolve(process.cwd(), "src/chat/ChatView.css"),
+  "utf8",
+);
 
 let container: HTMLDivElement;
 let root: Root;
@@ -78,10 +89,17 @@ function view(
       onShowThinkingChange={() => undefined}
       sendKeys={() => undefined}
       header={header()}
-      reveal={{ revealed: false, reason: null }}
-      onManualReveal={() => undefined}
-      onManualHide={() => undefined}
-      onSlash={() => undefined}
+      promptCard={{ prompt: null, status: "asking", answeredLabel: "" }}
+      onAnswerMenu={() => undefined}
+      onAnswerConfirm={() => undefined}
+      onSendText={() => undefined}
+      onSendKey={() => undefined}
+      booting={false}
+      slashCommands={[]}
+      onSlashOpen={() => undefined}
+      onSlashPick={() => undefined}
+      onSlashCancel={() => undefined}
+      onSlashPassthrough={() => undefined}
       {...props}
     />
   );
@@ -301,74 +319,22 @@ describe("ChatView", () => {
     expect(container.querySelector('[data-testid="chat-jump"]')).toBeNull();
   });
 
-  it("offers the live terminal behind a chevron while it is hidden", async () => {
-    let revealed = 0;
-    await render(view({ feed: fakeFeed(entries), onManualReveal: () => (revealed += 1) }));
-    expect(container.querySelector('[data-testid="chat-reveal-hide"]')).toBeNull();
-
-    const chevron = container.querySelector<HTMLButtonElement>(
-      '[data-testid="chat-reveal"]',
-    );
-    await act(async () => chevron?.click());
-    expect(revealed).toBe(1);
-  });
-
-  it("swaps the chevron for a hide strip while the live terminal is up", async () => {
-    let hidden = 0;
-    await render(
-      view({
-        feed: fakeFeed(entries),
-        reveal: { revealed: true, reason: "slash" },
-        onManualHide: () => (hidden += 1),
-      }),
-    );
+  // v3 §0/§1: no terminal pixels in chat mode, so nothing here may ask for
+  // them. The chevron, the hide strip and the muted box all died with the dock.
+  it("draws no control that would reveal the terminal", async () => {
+    await render(view({ feed: fakeFeed(entries) }));
     expect(container.querySelector('[data-testid="chat-reveal"]')).toBeNull();
-
-    const strip = container.querySelector<HTMLButtonElement>(
-      '[data-testid="chat-reveal-hide"]',
-    );
-    expect(strip?.textContent).toContain("hide");
-    await act(async () => strip?.click());
-    expect(hidden).toBe(1);
-  });
-
-  it("mutes the input while the live terminal has the keyboard", async () => {
-    const feed = fakeFeed(entries);
-    await render(view({ feed }));
+    expect(container.querySelector('[data-testid="chat-reveal-hide"]')).toBeNull();
     expect(container.querySelector(".chat-input--muted")).toBeNull();
-
-    await render(view({ feed, reveal: { revealed: true, reason: "prompt" } }));
-    expect(container.querySelector(".chat-input--muted")).not.toBeNull();
+    expect(container.querySelector('[aria-disabled="true"]')).toBeNull();
   });
 
-  it("reports a leading slash instead of typing it, and shows no prompt card", async () => {
-    let slashes = 0;
-    const sent: string[] = [];
-    await render(
-      view({
-        feed: fakeFeed(entries),
-        onSlash: () => (slashes += 1),
-        sendKeys: (data) => sent.push(data),
-      }),
-    );
-    const box = container.querySelector("textarea");
-    if (!box) {
-      throw new Error("no input box");
-    }
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        "value",
-      )!.set!;
-      setter.call(box, "/");
-      box.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(slashes).toBe(1);
-    expect(box.value).toBe("");
-    // The view sends nothing of its own; the overlay owns that write.
-    expect(sent).toEqual([]);
-    // Cards are retired: claude's real UI answers questions in the dock now.
-    expect(container.querySelector('[data-testid="prompt-card"]')).toBeNull();
+  it("keeps the chat full-bleed: no dock inset, no reveal styling", () => {
+    // The stylesheet is the only place the dock could still claim pixels.
+    expect(chatViewCss).not.toContain("--chat-dock");
+    expect(chatViewCss).not.toContain("chat-reveal");
+    expect(chatViewCss).not.toContain("chat-input--muted");
+    expect(chatViewCss).toContain("inset: 0;");
   });
 
   it("hides the link picker until one is offered", async () => {

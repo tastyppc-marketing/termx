@@ -6,32 +6,39 @@
  * is on screen — flipping views opens and closes a feed, and touches nothing
  * about the session itself.
  *
- * It also owns the two controllers that decide when that terminal SHOWS (chat
- * v2 spec §2): the prompt detector watches for claude asking something, and
- * the reveal controller turns that — plus a typed slash, a resume boot, or the
- * chevron — into the dock state the pane renders. They live here rather than
- * in the view because both need the transcript-idle signal this component
- * already tracks, and because the pane above needs the answer.
+ * It also owns everything that talks to the hidden claude on the chat's behalf
+ * (chat v3 spec §2/§3/§4): the prompt controller, the slash choreography, and
+ * the resume boot card. They live here rather than in the view because each
+ * one needs the transcript-idle signal this component already tracks.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { SLASH } from "./ChatInput";
 import { ChatView, type ChatHeaderProps } from "./ChatView";
 import { openChatFeed, type ChatFeed } from "./feed";
+import { isIdleScreen } from "./idleDetector";
+import { KEY_ESC } from "./PromptCard";
+import { KEY_ENTER } from "./promptDetector";
 import {
   createPromptController,
+  type PromptCardState,
   type PromptController,
   type ScheduleFn,
 } from "./promptWatcher";
-import {
-  createRevealController,
-  type RevealController,
-  type RevealState,
-} from "./revealController";
+import { createSlashLearner, type SlashCommand } from "./slashCommands";
 import type { ChatDensity } from "./types";
 
 /** Spec §5: the transcript counts as quiet after this long without an entry. */
 export const TRANSCRIPT_IDLE_MS = 2_000;
+
+/** How often the boot card re-checks whether claude has finished starting. */
+export const AUTO_HIDE_POLL_MS = 500;
+
+/** A boot card never outlives this, however wedged the boot is (spec §4). */
+export const BOOT_CARD_MAX_MS = 60_000;
+
+/** Nothing to answer. Also what the view is handed while a card is suppressed. */
+const NO_CARD: PromptCardState = { prompt: null, status: "asking", answeredLabel: "" };
 
 export interface ChatOverlayProps {
   /** Absolute path of the linked transcript. */
@@ -48,9 +55,11 @@ export interface ChatOverlayProps {
   openFeed?: typeof openChatFeed;
   /** The pane was opened by a resume: show the boot happening (spec §4). */
   bootReveal?: boolean;
-  /** Every dock transition, for the pane that draws the dock. */
-  onRevealChange?: (state: RevealState) => void;
-  /** Injected timer for both controllers (tests). */
+  /** The cached command list the palette draws from. */
+  slashCommands: readonly SlashCommand[];
+  /** A parse of claude's own menu; the caller merges it into the cache. */
+  onCommandsLearned(commands: SlashCommand[]): void;
+  /** Injected timer for every controller here (tests). */
   schedule?: ScheduleFn;
 }
 
@@ -65,29 +74,32 @@ export function ChatOverlay({
   terminalSnapshot,
   openFeed = openChatFeed,
   bootReveal,
-  onRevealChange,
+  slashCommands,
+  onCommandsLearned,
   schedule,
 }: ChatOverlayProps) {
   const [feed, setFeed] = useState<ChatFeed | null>(null);
   const [failed, setFailed] = useState(false);
   const [idle, setIdle] = useState(true);
-  const [reveal, setReveal] = useState<RevealState>(() =>
-    bootReveal === true
-      ? { revealed: true, reason: "boot" }
-      : { revealed: false, reason: null },
-  );
-  const revealRef = useRef<RevealController | null>(null);
+  const [card, setCard] = useState<PromptCardState>(NO_CARD);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [booting, setBooting] = useState(bootReveal === true);
+  const promptRef = useRef<PromptController | null>(null);
+  const learnerRef = useRef<ReturnType<typeof createSlashLearner> | null>(null);
 
   // Everything the controllers read goes through a ref: a parent re-render
-  // hands down new callback identities, and neither controller may restart.
+  // hands down new callback identities, and no controller may restart.
   const snapshotRef = useRef(terminalSnapshot);
   snapshotRef.current = terminalSnapshot;
   const idleRef = useRef(idle);
   idleRef.current = idle;
-  const revealChangeRef = useRef(onRevealChange);
-  revealChangeRef.current = onRevealChange;
-  // Read once: a pane boots exactly one time, whatever the prop does later.
-  const bootRef = useRef(bootReveal === true);
+  const sendRef = useRef(sendKeys);
+  sendRef.current = sendKeys;
+  const learnedRef = useRef(onCommandsLearned);
+  learnedRef.current = onCommandsLearned;
+  // A pane boots once. Latched, so re-asserting the prop cannot raise the card
+  // again after it has been cleared.
+  const bootedRef = useRef(bootReveal === true);
   const hasTerminal = terminalSnapshot !== undefined;
 
   useEffect(() => {
@@ -116,43 +128,10 @@ export function ChatOverlay({
     };
   }, [filePath, openFeed]);
 
-  // The dock's state machine. Built once, and it reports its own initial boot
-  // reveal through onChange during construction — which is why this lives in
-  // an effect rather than a render: the pane above is told from a safe place.
-  useEffect(() => {
-    const controller = createRevealController(
-      {
-        snapshot: () => snapshotRef.current?.() ?? [],
-        isTranscriptIdle: () => idleRef.current,
-        onChange: (state) => {
-          setReveal(state);
-          revealChangeRef.current?.(state);
-        },
-        ...(schedule ? { schedule } : {}),
-      },
-      { boot: bootRef.current },
-    );
-    revealRef.current = controller;
-    return () => {
-      controller.dispose();
-      revealRef.current = null;
-    };
-  }, [schedule]);
-
-  // A real resume announces its boot AFTER this overlay mounts: the controller
-  // only signals once the prompt arrived and the resume command was typed,
-  // while the pane linked (and the overlay mounted) the moment the tab opened.
-  // So the boot must also be honoured as a rising EDGE, not just an initial
-  // value. Reveals are sticky — a boot that already happened is a no-op.
-  useEffect(() => {
-    if (bootReveal === true) {
-      revealRef.current?.noteBoot();
-    }
-  }, [bootReveal]);
-
-  // The detector's only remaining job: notice claude asking something and open
-  // the dock so its REAL question is on screen. It never answers — the cards
-  // are retired (spec §6), so its write path is a no-op by construction.
+  // The detector, and the one place that answers what it finds. The card is
+  // the ONLY route back to the PTY for a prompt now — chat mode never shows
+  // claude's own dialog, so a question it cannot render is a question the user
+  // cannot answer (v3 §3).
   useEffect(() => {
     if (!hasTerminal) {
       return; // no live terminal to read
@@ -161,18 +140,92 @@ export function ChatOverlay({
     controller = createPromptController({
       snapshot: () => snapshotRef.current?.() ?? [],
       isIdle: () => idleRef.current,
-      sendKeys: () => undefined,
+      sendKeys: (data) => sendRef.current(data),
       onChange: () => {
-        if (controller?.state().prompt) {
-          revealRef.current?.notePromptDetected();
+        const next = controller?.state() ?? NO_CARD;
+        setCard(next);
+        if (next.prompt) {
+          // A real question takes over the story from the boot card (§4).
+          setBooting(false);
         }
       },
       ...(schedule ? { schedule } : {}),
     });
-    return () => controller?.dispose();
+    promptRef.current = controller;
+    return () => {
+      controller?.dispose();
+      promptRef.current = null;
+      setCard(NO_CARD);
+    };
   }, [hasTerminal, schedule]);
 
-  // "Idle" means the agent has stopped writing. The dock may only close then —
+  // The learner outlives any single palette open — start/stop bracket the
+  // sample window, and only unmount disposes it (spec §2).
+  useEffect(() => {
+    if (!hasTerminal) {
+      return;
+    }
+    const learner = createSlashLearner({
+      snapshot: () => snapshotRef.current?.() ?? [],
+      onLearned: (commands) => learnedRef.current(commands),
+      ...(schedule ? { schedule } : {}),
+    });
+    learnerRef.current = learner;
+    return () => {
+      learner.dispose();
+      learnerRef.current = null;
+    };
+  }, [hasTerminal, schedule]);
+
+  // A real resume announces its boot AFTER this overlay mounts: the pane links
+  // (and this mounts) when the tab opens, while the signal only arrives once
+  // the resume command is typed. So the boot is honoured as a rising EDGE too.
+  useEffect(() => {
+    if (bootReveal === true && !bootedRef.current) {
+      bootedRef.current = true;
+      setBooting(true);
+    }
+  }, [bootReveal]);
+
+  // The boot card's three exits (spec §4). Polling rather than a single timer
+  // because "claude has finished starting" is two signals, both of which can
+  // become true at any moment: a quiet screen AND a quiet transcript.
+  useEffect(() => {
+    if (!booting) {
+      return;
+    }
+    const tick: ScheduleFn = schedule ?? ((callback, delayMs) => {
+      const handle = setTimeout(callback, delayMs);
+      return () => clearTimeout(handle);
+    });
+    let stopped = false;
+    const cancels: (() => void)[] = [];
+    const settled = () => idleRef.current && isIdleScreen(snapshotRef.current?.() ?? []);
+    const poll = () => {
+      cancels.push(
+        tick(() => {
+          if (stopped) {
+            return;
+          }
+          if (settled()) {
+            setBooting(false);
+            return;
+          }
+          poll();
+        }, AUTO_HIDE_POLL_MS),
+      );
+    };
+    poll();
+    cancels.push(tick(() => setBooting(false), BOOT_CARD_MAX_MS));
+    return () => {
+      stopped = true;
+      for (const cancel of cancels) {
+        cancel();
+      }
+    };
+  }, [booting, schedule]);
+
+  // "Idle" means the agent has stopped writing. A card may only appear then —
   // mid-answer, the thing on screen is output, not a settled question.
   useEffect(() => {
     if (!feed) {
@@ -193,6 +246,21 @@ export function ChatOverlay({
       clearTimeout(timer);
     };
   }, [feed]);
+
+  /**
+   * Every way the palette closes ends the same: claude is no longer holding a
+   * bare "/", so the learner has nothing left to read.
+   */
+  const closePalette = () => {
+    setPaletteOpen(false);
+    learnerRef.current?.stop();
+  };
+
+  /** claude's box already holds the "/" we sent — send only what follows it. */
+  const completeCommand = (line: string) => {
+    const body = line.startsWith(SLASH) ? line.slice(1) : line;
+    sendKeys(`${body}${KEY_ENTER}`);
+  };
 
   if (failed) {
     return (
@@ -230,14 +298,38 @@ export function ChatOverlay({
       onShowThinkingChange={onShowThinkingChange}
       sendKeys={sendKeys}
       header={header}
-      reveal={reveal}
-      onManualReveal={() => revealRef.current?.manualToggle()}
-      onManualHide={() => revealRef.current?.manualHide()}
-      onSlash={() => {
-        // The character itself belongs to claude: it opens the real command
-        // menu in the dock, and every keystroke after it lands there too.
+      booting={booting}
+      // claude's own slash menu is on the screen the detector reads, and it
+      // looks exactly like a prompt. Suppressing the card — rather than the
+      // controller — keeps the detection running underneath (§3).
+      promptCard={paletteOpen ? NO_CARD : card}
+      onAnswerMenu={(targetIndex) =>
+        paletteOpen ? undefined : promptRef.current?.answerMenu(targetIndex)
+      }
+      onAnswerConfirm={(affirmative) =>
+        paletteOpen ? undefined : promptRef.current?.answerConfirm(affirmative)
+      }
+      onSendText={(text) => (paletteOpen ? undefined : promptRef.current?.sendText(text))}
+      onSendKey={(data) => (paletteOpen ? undefined : sendKeys(data))}
+      slashCommands={slashCommands}
+      onSlashOpen={() => {
+        setPaletteOpen(true);
+        // The unfiltered menu claude draws for a bare "/" is the best learning
+        // sample there is, and it costs one keystroke nobody sees (§2).
         sendKeys(SLASH);
-        revealRef.current?.userTypedSlash();
+        learnerRef.current?.start();
+      }}
+      onSlashPick={(name) => {
+        closePalette();
+        completeCommand(name);
+      }}
+      onSlashCancel={() => {
+        closePalette();
+        sendKeys(KEY_ESC);
+      }}
+      onSlashPassthrough={(line) => {
+        closePalette();
+        completeCommand(line);
       }}
     />
   );
