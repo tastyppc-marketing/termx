@@ -290,6 +290,16 @@
   min-width: 0;
 }
 
+/* Where the slash palette sits: above the input row, which is the positioned
+   anchor. The list styles itself; this only places it (v3 §2). */
+.chat-slash {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 100%;
+  z-index: 3;
+}
+
 .chat-input__box {
   display: block;
   width: 100%;
@@ -319,6 +329,13 @@
   background: var(--surface-1);
   padding: 8px 10px;
   font-size: 12px;
+}
+
+/* The resume boot card (v3 §4): a status line, not a question. Hairline
+   border so it never competes with a real prompt. */
+.chat-card--boot {
+  border-color: var(--border);
+  color: var(--text-sub);
 }
 
 .chat-card--answered {

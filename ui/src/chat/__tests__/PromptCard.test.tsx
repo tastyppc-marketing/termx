@@ -127,6 +127,8 @@ async function mount(): Promise<{
         sendKeys={(data) => sent.push(data)}
         terminalSnapshot={() => screen}
         openFeed={() => Promise.resolve(feed)}
+        slashCommands={[]}
+        onCommandsLearned={() => undefined}
         schedule={clock.schedule}
       />,
     ),

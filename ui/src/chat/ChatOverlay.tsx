@@ -6,24 +6,36 @@
  * is on screen — flipping views opens and closes a feed, and touches nothing
  * about the session itself.
  *
- * It also owns the prompt controller (chat v3 spec §3): the detector needs the
- * transcript-idle signal this component already tracks, and the cards it feeds
- * are drawn by the view below.
+ * It also owns everything that talks to the hidden claude on the chat's behalf
+ * (chat v3 spec §2/§3/§4): the prompt controller, the slash choreography, and
+ * the resume boot card. They live here rather than in the view because each
+ * one needs the transcript-idle signal this component already tracks.
  */
 
 import { useEffect, useRef, useState } from "react";
+import { SLASH } from "./ChatInput";
 import { ChatView, type ChatHeaderProps } from "./ChatView";
 import { openChatFeed, type ChatFeed } from "./feed";
+import { isIdleScreen } from "./idleDetector";
+import { KEY_ESC } from "./PromptCard";
+import { KEY_ENTER } from "./promptDetector";
 import {
   createPromptController,
   type PromptCardState,
   type PromptController,
   type ScheduleFn,
 } from "./promptWatcher";
+import { createSlashLearner, type SlashCommand } from "./slashCommands";
 import type { ChatDensity } from "./types";
 
 /** Spec §5: the transcript counts as quiet after this long without an entry. */
 export const TRANSCRIPT_IDLE_MS = 2_000;
+
+/** How often the boot card re-checks whether claude has finished starting. */
+export const AUTO_HIDE_POLL_MS = 500;
+
+/** A boot card never outlives this, however wedged the boot is (spec §4). */
+export const BOOT_CARD_MAX_MS = 60_000;
 
 /** Nothing to answer. Also what the view is handed while a card is suppressed. */
 const NO_CARD: PromptCardState = { prompt: null, status: "asking", answeredLabel: "" };
@@ -43,7 +55,11 @@ export interface ChatOverlayProps {
   openFeed?: typeof openChatFeed;
   /** The pane was opened by a resume: show the boot happening (spec §4). */
   bootReveal?: boolean;
-  /** Injected timer for both controllers (tests). */
+  /** The cached command list the palette draws from. */
+  slashCommands: readonly SlashCommand[];
+  /** A parse of claude's own menu; the caller merges it into the cache. */
+  onCommandsLearned(commands: SlashCommand[]): void;
+  /** Injected timer for every controller here (tests). */
   schedule?: ScheduleFn;
 }
 
@@ -58,13 +74,18 @@ export function ChatOverlay({
   terminalSnapshot,
   openFeed = openChatFeed,
   bootReveal,
+  slashCommands,
+  onCommandsLearned,
   schedule,
 }: ChatOverlayProps) {
   const [feed, setFeed] = useState<ChatFeed | null>(null);
   const [failed, setFailed] = useState(false);
   const [idle, setIdle] = useState(true);
   const [card, setCard] = useState<PromptCardState>(NO_CARD);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [booting, setBooting] = useState(bootReveal === true);
   const promptRef = useRef<PromptController | null>(null);
+  const learnerRef = useRef<ReturnType<typeof createSlashLearner> | null>(null);
 
   // Everything the controllers read goes through a ref: a parent re-render
   // hands down new callback identities, and no controller may restart.
@@ -74,8 +95,12 @@ export function ChatOverlay({
   idleRef.current = idle;
   const sendRef = useRef(sendKeys);
   sendRef.current = sendKeys;
+  const learnedRef = useRef(onCommandsLearned);
+  learnedRef.current = onCommandsLearned;
+  // A pane boots once. Latched, so re-asserting the prop cannot raise the card
+  // again after it has been cleared.
+  const bootedRef = useRef(bootReveal === true);
   const hasTerminal = terminalSnapshot !== undefined;
-  void bootReveal; // A3 turns this into the boot status card (spec §4).
 
   useEffect(() => {
     let cancelled = false;
@@ -116,7 +141,14 @@ export function ChatOverlay({
       snapshot: () => snapshotRef.current?.() ?? [],
       isIdle: () => idleRef.current,
       sendKeys: (data) => sendRef.current(data),
-      onChange: () => setCard(controller?.state() ?? NO_CARD),
+      onChange: () => {
+        const next = controller?.state() ?? NO_CARD;
+        setCard(next);
+        if (next.prompt) {
+          // A real question takes over the story from the boot card (§4).
+          setBooting(false);
+        }
+      },
       ...(schedule ? { schedule } : {}),
     });
     promptRef.current = controller;
@@ -126,6 +158,72 @@ export function ChatOverlay({
       setCard(NO_CARD);
     };
   }, [hasTerminal, schedule]);
+
+  // The learner outlives any single palette open — start/stop bracket the
+  // sample window, and only unmount disposes it (spec §2).
+  useEffect(() => {
+    if (!hasTerminal) {
+      return;
+    }
+    const learner = createSlashLearner({
+      snapshot: () => snapshotRef.current?.() ?? [],
+      onLearned: (commands) => learnedRef.current(commands),
+      ...(schedule ? { schedule } : {}),
+    });
+    learnerRef.current = learner;
+    return () => {
+      learner.dispose();
+      learnerRef.current = null;
+    };
+  }, [hasTerminal, schedule]);
+
+  // A real resume announces its boot AFTER this overlay mounts: the pane links
+  // (and this mounts) when the tab opens, while the signal only arrives once
+  // the resume command is typed. So the boot is honoured as a rising EDGE too.
+  useEffect(() => {
+    if (bootReveal === true && !bootedRef.current) {
+      bootedRef.current = true;
+      setBooting(true);
+    }
+  }, [bootReveal]);
+
+  // The boot card's three exits (spec §4). Polling rather than a single timer
+  // because "claude has finished starting" is two signals, both of which can
+  // become true at any moment: a quiet screen AND a quiet transcript.
+  useEffect(() => {
+    if (!booting) {
+      return;
+    }
+    const tick: ScheduleFn = schedule ?? ((callback, delayMs) => {
+      const handle = setTimeout(callback, delayMs);
+      return () => clearTimeout(handle);
+    });
+    let stopped = false;
+    const cancels: (() => void)[] = [];
+    const settled = () => idleRef.current && isIdleScreen(snapshotRef.current?.() ?? []);
+    const poll = () => {
+      cancels.push(
+        tick(() => {
+          if (stopped) {
+            return;
+          }
+          if (settled()) {
+            setBooting(false);
+            return;
+          }
+          poll();
+        }, AUTO_HIDE_POLL_MS),
+      );
+    };
+    poll();
+    cancels.push(tick(() => setBooting(false), BOOT_CARD_MAX_MS));
+    return () => {
+      stopped = true;
+      for (const cancel of cancels) {
+        cancel();
+      }
+    };
+  }, [booting, schedule]);
 
   // "Idle" means the agent has stopped writing. A card may only appear then —
   // mid-answer, the thing on screen is output, not a settled question.
@@ -148,6 +246,21 @@ export function ChatOverlay({
       clearTimeout(timer);
     };
   }, [feed]);
+
+  /**
+   * Every way the palette closes ends the same: claude is no longer holding a
+   * bare "/", so the learner has nothing left to read.
+   */
+  const closePalette = () => {
+    setPaletteOpen(false);
+    learnerRef.current?.stop();
+  };
+
+  /** claude's box already holds the "/" we sent — send only what follows it. */
+  const completeCommand = (line: string) => {
+    const body = line.startsWith(SLASH) ? line.slice(1) : line;
+    sendKeys(`${body}${KEY_ENTER}`);
+  };
 
   if (failed) {
     return (
@@ -185,11 +298,39 @@ export function ChatOverlay({
       onShowThinkingChange={onShowThinkingChange}
       sendKeys={sendKeys}
       header={header}
-      promptCard={card}
-      onAnswerMenu={(targetIndex) => promptRef.current?.answerMenu(targetIndex)}
-      onAnswerConfirm={(affirmative) => promptRef.current?.answerConfirm(affirmative)}
-      onSendText={(text) => promptRef.current?.sendText(text)}
-      onSendKey={sendKeys}
+      booting={booting}
+      // claude's own slash menu is on the screen the detector reads, and it
+      // looks exactly like a prompt. Suppressing the card — rather than the
+      // controller — keeps the detection running underneath (§3).
+      promptCard={paletteOpen ? NO_CARD : card}
+      onAnswerMenu={(targetIndex) =>
+        paletteOpen ? undefined : promptRef.current?.answerMenu(targetIndex)
+      }
+      onAnswerConfirm={(affirmative) =>
+        paletteOpen ? undefined : promptRef.current?.answerConfirm(affirmative)
+      }
+      onSendText={(text) => (paletteOpen ? undefined : promptRef.current?.sendText(text))}
+      onSendKey={(data) => (paletteOpen ? undefined : sendKeys(data))}
+      slashCommands={slashCommands}
+      onSlashOpen={() => {
+        setPaletteOpen(true);
+        // The unfiltered menu claude draws for a bare "/" is the best learning
+        // sample there is, and it costs one keystroke nobody sees (§2).
+        sendKeys(SLASH);
+        learnerRef.current?.start();
+      }}
+      onSlashPick={(name) => {
+        closePalette();
+        completeCommand(name);
+      }}
+      onSlashCancel={() => {
+        closePalette();
+        sendKeys(KEY_ESC);
+      }}
+      onSlashPassthrough={(line) => {
+        closePalette();
+        completeCommand(line);
+      }}
     />
   );
 }

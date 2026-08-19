@@ -19,6 +19,7 @@ import { isExpandedByDefault } from "./density";
 import type { ChatFeed } from "./feed";
 import { PromptCard } from "./PromptCard";
 import type { PromptCardState } from "./promptWatcher";
+import type { SlashCommand } from "./slashCommands";
 import type { ChatDensity, ChatEntry } from "./types";
 import "./ChatView.css";
 
@@ -64,6 +65,14 @@ export interface ChatViewProps {
   onSendText(text: string): void;
   /** One raw keypress from the fallback card's key row. */
   onSendKey(data: string): void;
+  /** The pane is resuming and claude is not up yet (v3 §4). */
+  booting: boolean;
+  /** The cached command list the palette draws from. */
+  slashCommands: readonly SlashCommand[];
+  onSlashOpen(): void;
+  onSlashPick(name: string): void;
+  onSlashCancel(): void;
+  onSlashPassthrough(line: string): void;
   /** Extra rows between the feed and the bottom (the input box). */
   children?: React.ReactNode;
 }
@@ -81,6 +90,12 @@ export function ChatView({
   onAnswerConfirm,
   onSendText,
   onSendKey,
+  booting,
+  slashCommands,
+  onSlashOpen,
+  onSlashPick,
+  onSlashCancel,
+  onSlashPassthrough,
   children,
 }: ChatViewProps) {
   const [, setVersion] = useState(0);
@@ -274,6 +289,16 @@ export function ChatView({
         </button>
       ) : null}
 
+      {booting ? (
+        <div
+          className="chat-card chat-card--boot"
+          data-testid="boot-card"
+          role="status"
+        >
+          Resuming session — claude is starting…
+        </div>
+      ) : null}
+
       <PromptCard
         state={promptCard}
         onAnswerMenu={onAnswerMenu}
@@ -284,7 +309,14 @@ export function ChatView({
       />
 
       <div className="chat-input-row">
-        <ChatInput sendKeys={sendKeys} />
+        <ChatInput
+          sendKeys={sendKeys}
+          slashCommands={slashCommands}
+          onSlashOpen={onSlashOpen}
+          onSlashPick={onSlashPick}
+          onSlashCancel={onSlashCancel}
+          onSlashPassthrough={onSlashPassthrough}
+        />
       </div>
 
       {children}

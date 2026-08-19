@@ -94,6 +94,12 @@ function view(
       onAnswerConfirm={() => undefined}
       onSendText={() => undefined}
       onSendKey={() => undefined}
+      booting={false}
+      slashCommands={[]}
+      onSlashOpen={() => undefined}
+      onSlashPick={() => undefined}
+      onSlashCancel={() => undefined}
+      onSlashPassthrough={() => undefined}
       {...props}
     />
   );

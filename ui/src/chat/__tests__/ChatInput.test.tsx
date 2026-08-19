@@ -8,6 +8,7 @@ import {
   PASTE_END,
   PASTE_START,
 } from "../ChatInput";
+import type { SlashCommand } from "../slashCommands";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -76,14 +77,59 @@ async function press(
   });
 }
 
+/**
+ * Three commands that all prefix-match "m", so the palette's order is fixed by
+ * the contract (name-prefix matches first, alphabetical) rather than by the
+ * list handed in — which is what keeps these assertions true after lane B's
+ * real filterCommands replaces the stub.
+ */
+const COMMANDS: readonly SlashCommand[] = [
+  { name: "model", description: "Choose the model" },
+  { name: "mcp", description: "Manage MCP servers" },
+  { name: "memory", description: "Edit memory files" },
+];
+
+interface SlashLog {
+  opens: number;
+  picks: string[];
+  cancels: number;
+  passthrough: string[];
+}
+
 async function mount(
   props: Partial<React.ComponentProps<typeof ChatInput>> = {},
 ) {
   const sent: string[] = [];
   await act(async () =>
-    root.render(<ChatInput sendKeys={(data) => sent.push(data)} {...props} />),
+    root.render(
+      <ChatInput
+        sendKeys={(data) => sent.push(data)}
+        slashCommands={COMMANDS}
+        onSlashOpen={() => undefined}
+        onSlashPick={() => undefined}
+        onSlashCancel={() => undefined}
+        onSlashPassthrough={() => undefined}
+        {...props}
+      />,
+    ),
   );
   return sent;
+}
+
+/** Mounts with every slash callback recorded. */
+async function mountWithSlash(): Promise<{ sent: string[]; log: SlashLog }> {
+  const log: SlashLog = { opens: 0, picks: [], cancels: 0, passthrough: [] };
+  const sent = await mount({
+    onSlashOpen: () => (log.opens += 1),
+    onSlashPick: (name) => log.picks.push(name),
+    onSlashCancel: () => (log.cancels += 1),
+    onSlashPassthrough: (line) => log.passthrough.push(line),
+  });
+  return { sent, log };
+}
+
+function palette(): Element | null {
+  return container.querySelector('[data-testid="chat-slash"]');
 }
 
 describe("ChatInput", () => {
@@ -168,53 +214,145 @@ describe("ChatInput", () => {
     expect(box().value).toBe("message 1");
   });
 
-  it("reroutes a leading slash to the live terminal without ever showing it", async () => {
-    let slashes = 0;
-    const sent = await mount({ onSlash: () => (slashes += 1) });
+  it("only reacts to a slash that starts an empty box", async () => {
+    const { log } = await mountWithSlash();
+    await type("cd ui/src");
+    expect(log.opens).toBe(0);
+    expect(palette()).toBeNull();
+    expect(box().value).toBe("cd ui/src");
+  });
+
+  it("keeps a PASTED command as ordinary text — claude never got our slash", async () => {
+    const { sent, log } = await mountWithSlash();
+    await type("/model opus");
+    expect(log.opens).toBe(0);
+    expect(log.passthrough).toEqual([]);
+    await press("Enter");
+    await pressLands();
+    expect(sent).toEqual(["/model opus", "\r"]);
+  });
+});
+
+describe("ChatInput slash palette", () => {
+  it("opens the palette on a slash and keeps the character in the box", async () => {
+    const { sent, log } = await mountWithSlash();
     await type("/");
-    expect(slashes).toBe(1);
-    // The box never holds the character: claude's own menu owns it from here.
+    expect(log.opens).toBe(1);
+    expect(palette()).not.toBeNull();
+    // The overlay sends the "/" to the PTY; the box itself writes nothing.
+    expect(sent).toEqual([]);
+    expect(box().value).toBe("/");
+  });
+
+  it("filters as the user types and picks the highlighted row on Enter", async () => {
+    const { sent, log } = await mountWithSlash();
+    await type("/");
+    await type("/mod");
+    await press("Enter");
+    expect(log.picks).toEqual(["/model"]);
+    expect(log.passthrough).toEqual([]);
+    // The pick is the overlay's write, not the box's.
+    expect(sent).toEqual([]);
+    expect(palette()).toBeNull();
+    expect(box().value).toBe("");
+  });
+
+  it("moves the selection with the arrows instead of walking history", async () => {
+    const { log } = await mountWithSlash();
+    await type("hello");
+    await press("Enter");
+    await pressLands();
+
+    await type("/");
+    await type("/m");
+    // Contract order for a prefix query: mcp, memory, model.
+    await press("ArrowDown");
+    await press("ArrowDown");
+    // Past the end holds at the last row rather than wrapping into history.
+    await press("ArrowDown");
+    await press("Enter");
+    expect(log.picks).toEqual(["/model"]);
+    expect(box().value).toBe("");
+  });
+
+  it("holds the selection at the top when the user arrows up past it", async () => {
+    const { log } = await mountWithSlash();
+    await type("/");
+    await type("/m");
+    await press("ArrowDown");
+    await press("ArrowUp");
+    await press("ArrowUp");
+    await press("Enter");
+    expect(log.picks).toEqual(["/mcp"]);
+  });
+
+  it("cancels on Escape and clears the box", async () => {
+    const { sent, log } = await mountWithSlash();
+    await type("/");
+    await type("/mo");
+    await press("Escape");
+    expect(log.cancels).toBe(1);
+    expect(log.picks).toEqual([]);
+    expect(palette()).toBeNull();
     expect(box().value).toBe("");
     expect(sent).toEqual([]);
   });
 
-  it("only reroutes the FIRST character, never a slash inside a message", async () => {
-    let slashes = 0;
-    await mount({ onSlash: () => (slashes += 1) });
-    await type("cd ui/src");
-    expect(slashes).toBe(0);
-    expect(box().value).toBe("cd ui/src");
-  });
-
-  it("keeps a pasted command as text — only the bare slash reroutes", async () => {
-    let slashes = 0;
-    await mount({ onSlash: () => (slashes += 1) });
-    await type("/model opus");
-    expect(slashes).toBe(0);
-    expect(box().value).toBe("/model opus");
-  });
-
-  it("types a slash normally when no live terminal is offered", async () => {
-    await mount();
+  it("cancels when the user deletes back to an empty box", async () => {
+    const { log } = await mountWithSlash();
     await type("/");
-    expect(box().value).toBe("/");
+    await type("/mo");
+    await type("/");
+    expect(log.cancels).toBe(0);
+    await type("");
+    expect(log.cancels).toBe(1);
+    expect(palette()).toBeNull();
   });
 
-  it("mutes the box while the live terminal has the keyboard, without disabling it", async () => {
-    const sent = await mount({ muted: true });
-    expect(container.querySelector(".chat-input--muted")).not.toBeNull();
-    expect(box().getAttribute("aria-disabled")).toBe("true");
-    // Still the escape hatch: a user who wants to type here always can.
-    expect(box().disabled).toBe(false);
-    await type("say something anyway");
+  it("drops into passthrough once the line takes an argument", async () => {
+    const { sent, log } = await mountWithSlash();
+    await type("/");
+    await type("/rename");
+    expect(palette()).not.toBeNull();
+
+    await type("/rename gate");
+    // The palette closes: this is a command line now, not a name being chosen.
+    expect(palette()).toBeNull();
+    expect(log.cancels).toBe(0);
+
     await press("Enter");
-    await pressLands();
-    expect(sent).toEqual(["say something anyway", "\r"]);
+    expect(log.passthrough).toEqual(["/rename gate"]);
+    expect(log.picks).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(box().value).toBe("");
   });
 
-  it("is not muted by default", async () => {
+  it("re-opens the palette when the argument is deleted again, without a second open", async () => {
+    const { log } = await mountWithSlash();
+    await type("/");
+    await type("/rename gate");
+    expect(palette()).toBeNull();
+
+    await type("/rename");
+    expect(palette()).not.toBeNull();
+    // claude's box still holds the one "/" we sent: opening again would type a
+    // second one into it.
+    expect(log.opens).toBe(1);
+  });
+
+  it("sends an unmatched command as passthrough rather than picking nothing", async () => {
+    const { log } = await mountWithSlash();
+    await type("/");
+    await type("/zzz");
+    await press("Enter");
+    expect(log.picks).toEqual([]);
+    expect(log.passthrough).toEqual(["/zzz"]);
+  });
+
+  it("never disables or mutes the box: chat mode always owns the keyboard", async () => {
     await mount();
     expect(container.querySelector(".chat-input--muted")).toBeNull();
     expect(box().getAttribute("aria-disabled")).toBeNull();
+    expect(box().disabled).toBe(false);
   });
 });
