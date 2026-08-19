@@ -16,14 +16,18 @@
 /** How far back the tail is read. Claude's box + footer never exceed this. */
 const TAIL_LINES = 15;
 
-/** Status rows claude draws under the box; at most this many are skipped. */
-const FOOTER_LINES = 3;
+/**
+ * Rows claude draws under the box; at most this many are skipped. The strip is
+ * NOT matched by shape: its main line is the user's own configurable
+ * statusline (model · folder · meters · anything), so any pattern written here
+ * would be wrong on somebody's machine. Bounding the walk is what keeps the
+ * skip honest — a screen whose empty box sits further from the bottom than a
+ * footer ever could is not claude waiting.
+ */
+const FOOTER_LINES = 4;
 
 /** The prompt glyphs claude draws in its input box. */
 const EMPTY_PROMPT = /^[❯›>]$/;
-
-/** Claude's status strip: the mode line, the shortcut hint, the context meter. */
-const FOOTER = /^[⏵?⧉]|for shortcuts|auto-?compact/i;
 
 /**
  * Screens that are the opposite of quiet, wherever in the tail they appear:
@@ -67,15 +71,15 @@ export function isIdleScreen(lines: string[]): boolean {
     return false;
   }
 
-  // Walk up past the status strip; whatever it sits on must be the empty box.
-  let index = rows.length - 1;
-  for (let skipped = 0; skipped < FOOTER_LINES; skipped += 1) {
-    const row = rows[index];
-    if (row === undefined || !FOOTER.test(row)) {
-      break;
+  // Walk up past the status strip: the empty box must sit within a footer's
+  // height of the bottom. No BUSY row exists anywhere in the tail (checked
+  // above), so whatever is skipped here is status chrome, not a question.
+  const bottom = rows.length - 1;
+  for (let offset = 0; offset <= FOOTER_LINES; offset += 1) {
+    const row = rows[bottom - offset];
+    if (row !== undefined && EMPTY_PROMPT.test(row)) {
+      return true;
     }
-    index -= 1;
   }
-  const last = rows[index];
-  return last !== undefined && EMPTY_PROMPT.test(last);
+  return false;
 }

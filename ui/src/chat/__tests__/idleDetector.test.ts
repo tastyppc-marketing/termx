@@ -73,10 +73,38 @@ const TYPED_INTO_BOX = [
   "  ⏵⏵ auto-accept edits on (shift+tab to cycle)",
 ];
 
+/**
+ * Captured verbatim from a live TermX pane (2026-08-19 CDP gate): claude
+ * v2.1.235 idle after a resume, with a USER-CONFIGURED statusline under the
+ * box. The statusline can say anything, so idle detection must not depend on
+ * recognising it — this exact screen once read as "not idle" and pinned the
+ * dock open forever.
+ */
+const IDLE_LIVE_STATUSLINE = [
+  "                                                                    71834 tokens",
+  "─────────────────────────────────────────────────────────────────────────────────",
+  "❯  ",
+  "─────────────────────────────────────────────────────────────────────────────────",
+  "  Opus 5 (1M context) · 1M · high | chatv2-gate | 🧠 7.2% (72k) | ⏳ 5h 14% · 7d 33% | $0.72 | ⏱️ -… ───",
+  "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+  "                                                                              /rc",
+];
+
 describe("isIdleScreen", () => {
   it("reads an empty prompt box as idle, footer or not", () => {
     expect(isIdleScreen(IDLE_WITH_FOOTER)).toBe(true);
     expect(isIdleScreen(IDLE_BARE)).toBe(true);
+  });
+
+  it("reads the live claude chrome — custom statusline included — as idle", () => {
+    expect(isIdleScreen(IDLE_LIVE_STATUSLINE)).toBe(true);
+  });
+
+  it("is still not idle when text sits in the box above that same statusline", () => {
+    const typed = IDLE_LIVE_STATUSLINE.map((row) =>
+      row === "❯  " ? "❯ fix the reveal controller" : row,
+    );
+    expect(isIdleScreen(typed)).toBe(false);
   });
 
   it("treats box-drawing separators as chrome, not content", () => {
