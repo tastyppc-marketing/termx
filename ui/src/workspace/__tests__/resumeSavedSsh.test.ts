@@ -464,6 +464,22 @@ describe("WorkspaceController.resumeSaved over ssh refusals", () => {
     expect(h.notice()).toBe("The terminal session could not be created.");
   });
 
+  it("announces the remote boot only once the resume command is really typed", async () => {
+    const h = harness();
+    const booted: number[] = [];
+    h.controller.setResumeBootListener((sessionId) => booted.push(sessionId));
+
+    const { done } = await restoreToRemotePrompt(h, savedSsh());
+    // Connected, but the remote prompt has not reported: nothing has been
+    // resumed yet, so there is no boot to announce.
+    expect(booted).toEqual([]);
+
+    h.controller.reportSessionCwd(50, REMOTE_CWD, true);
+    await done;
+
+    expect(booted).toEqual([50]);
+  });
+
   it("waits for the local prompt only as long as a local resume would", async () => {
     const h = harness();
 

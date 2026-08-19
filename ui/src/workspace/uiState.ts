@@ -29,11 +29,30 @@ export const RECENT_FOLDERS_CAP = 50;
  * Machine-written like the rest of this file, and deliberately NOT part of
  * `layout_v2` — flipping a pane into chat is not a layout change.
  */
+/**
+ * The conversation a pane was last known to be running (auto-reveal spec §5).
+ *
+ * Persisted so the Chat button cannot vanish: live linkage re-derives itself
+ * from a directory scan on every store update, and one failed derivation used
+ * to leave the pane looking like it had never had a conversation at all. A
+ * remembered link is the fallback. A stored `filePath` that no longer exists
+ * surfaces as the chat's ordinary "transcript could not be read" state — a
+ * visible dead end beats a button that disappeared.
+ */
+export interface ChatPaneLink {
+  readonly provider: "claude" | "codex";
+  readonly id: string;
+  readonly filePath: string;
+  readonly title: string;
+}
+
 export interface ChatPaneState {
   mode: ChatViewMode;
   density: ChatDensity;
   /** Reasoning rows start open. Independent of `density`, which is tools-only. */
   showThinking: boolean;
+  /** Absent for every pane that has never resolved a conversation. */
+  link?: ChatPaneLink;
 }
 
 /**
@@ -172,10 +191,46 @@ function parseSidebarWidth(value: unknown): number | undefined {
   return clampSidebarWidth(value);
 }
 
+/** Providers a stored chat link may name (spec §5). */
+const CHAT_LINK_PROVIDERS = ["claude", "codex"] as const;
+
+/**
+ * A link is all-or-nothing: every field names something the chat will act on
+ * (a provider it dispatches by, a file it opens, a title it shows), so a
+ * half-written one is dropped rather than half-trusted. Dropping it costs the
+ * sticky button on one pane; keeping it would point the feed at nothing.
+ */
+function parseChatPaneLink(value: unknown): ChatPaneLink | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const provider = CHAT_LINK_PROVIDERS.find(
+    (known) => known === record.provider,
+  );
+  if (provider === undefined) {
+    return undefined;
+  }
+  const { id, filePath, title } = record;
+  if (
+    typeof id !== "string" ||
+    id.length === 0 ||
+    typeof filePath !== "string" ||
+    filePath.length === 0 ||
+    typeof title !== "string" ||
+    title.length === 0
+  ) {
+    return undefined;
+  }
+  return { provider, id, filePath, title };
+}
+
 /**
  * Chat state is optional per pane and per field: a record whose mode or
- * density is junk keeps whichever half parsed, and a pane with neither
- * disappears entirely rather than persisting an empty object.
+ * density is junk keeps whichever half parsed, and a pane with nothing at all
+ * disappears entirely rather than persisting an empty object. A link counts as
+ * something — it is the whole reason a pane keeps its chat button (spec §5) —
+ * so a pane carrying only a link survives on the defaults.
  */
 function parseChatPanes(
   value: unknown,
@@ -192,13 +247,20 @@ function parseChatPanes(
     const mode = parseChatViewMode(record.mode);
     const density = parseChatDensity(record.density);
     const showThinking = parseChatShowThinking(record.showThinking);
-    if (mode === undefined && density === undefined && showThinking === undefined) {
+    const link = parseChatPaneLink(record.link);
+    if (
+      mode === undefined &&
+      density === undefined &&
+      showThinking === undefined &&
+      link === undefined
+    ) {
       continue;
     }
     result[key] = {
       mode: mode ?? DEFAULT_CHAT_VIEW_MODE,
       density: density ?? DEFAULT_CHAT_DENSITY,
       showThinking: showThinking ?? DEFAULT_CHAT_SHOW_THINKING,
+      ...(link !== undefined ? { link } : {}),
     };
   }
   return Object.keys(result).length > 0 ? result : undefined;
@@ -326,11 +388,33 @@ export function setChatPaneState(
   if (
     current?.mode === chat.mode &&
     current.density === chat.density &&
-    current.showThinking === chat.showThinking
+    current.showThinking === chat.showThinking &&
+    sameChatPaneLink(current.link, chat.link)
   ) {
     return state;
   }
   return { ...state, chatPanes: { ...state.chatPanes, [sessionId]: chat } };
+}
+
+/**
+ * Links are compared FIELD-WISE, never by reference: they are rebuilt from the
+ * conversations store on every scan, so a reference check would report a
+ * change on every tick — and, worse, a same-ref check on the pane state as a
+ * whole would swallow a real handoff to a new transcript (spec §4/§5).
+ */
+function sameChatPaneLink(
+  left: ChatPaneLink | undefined,
+  right: ChatPaneLink | undefined,
+): boolean {
+  if (left === undefined || right === undefined) {
+    return left === right;
+  }
+  return (
+    left.provider === right.provider &&
+    left.id === right.id &&
+    left.filePath === right.filePath &&
+    left.title === right.title
+  );
 }
 
 /** Parse ui-state text (null = missing file). Never throws. */

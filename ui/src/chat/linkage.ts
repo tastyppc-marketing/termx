@@ -74,3 +74,45 @@ export function resolveLinkage(options: {
   }
   return { record: newest, reason: "cwd" };
 }
+
+/**
+ * The transcript a resume HANDED OFF to (auto-reveal spec §4).
+ *
+ * `claude --resume <id>` does not append to the transcript it was pointed at:
+ * it opens a NEW one in the same project folder. The pane is still showing the
+ * old file, so the resumed conversation looks dead. This finds the file that
+ * took over.
+ *
+ * The rules are deliberately narrow, because adopting the wrong file puts a
+ * different conversation in the pane: same folder as the record that was
+ * resumed, a different id, something to read, and touched AFTER the moment of
+ * the resume. Newest wins among several — a second `claude` in that folder is
+ * the more recent one either way, and the caller only ever asks about panes it
+ * resumed itself.
+ */
+export function successorRecord(options: {
+  /** The record the pane resumed. */
+  original: LlmSessionRecord;
+  resumedAtMs: number;
+  candidates: readonly LlmSessionRecord[];
+}): LlmSessionRecord | null {
+  const { original, resumedAtMs } = options;
+  if (original.cwd === null || original.cwd.trim().length === 0) {
+    return null; // no folder to match against: nothing can be proven a successor
+  }
+  const cwd = normalizeDir(original.cwd);
+  const qualified = options.candidates.filter(
+    (candidate) =>
+      hasTranscript(candidate) &&
+      candidate.id !== original.id &&
+      candidate.cwd !== null &&
+      normalizeDir(candidate.cwd) === cwd &&
+      candidate.updatedAtMs > resumedAtMs,
+  );
+  if (qualified.length === 0) {
+    return null;
+  }
+  return qualified.reduce((newest, candidate) =>
+    candidate.updatedAtMs > newest.updatedAtMs ? candidate : newest,
+  );
+}
