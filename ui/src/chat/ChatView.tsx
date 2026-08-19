@@ -3,23 +3,22 @@
  *
  * It renders OVER a pane's terminal, which keeps running underneath: the chat
  * reads a transcript and writes keystrokes, and it never touches the PTY's
- * output path. Everything it can send — the header's Esc and Ctrl+C, a prompt
- * card's answer, the input box — goes through the one `sendKeys` prop, so
- * there is exactly one place where this view can produce input.
+ * output path. Everything it can send — the header's Esc and Ctrl+C, the input
+ * box — goes through the one `sendKeys` prop, so there is exactly one place
+ * where this view can produce input.
+ *
+ * It is presentation-only where the live-terminal dock is concerned: the
+ * overlay above owns the reveal state machine and hands the answer down, and
+ * this view offers the two controls that ask for a change (chat v2 spec §2).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatBubble } from "./ChatBubble";
 import { ChatInput } from "./ChatInput";
 import { CHAT_DENSITIES } from "./chatDefaults";
 import { isExpandedByDefault } from "./density";
 import type { ChatFeed } from "./feed";
-import { PromptCard } from "./PromptCard";
-import {
-  createPromptController,
-  type PromptCardState,
-  type ScheduleFn,
-} from "./promptWatcher";
+import type { RevealState } from "./revealController";
 import type { ChatDensity, ChatEntry } from "./types";
 import "./ChatView.css";
 
@@ -55,64 +54,16 @@ export interface ChatViewProps {
   /** Raw PTY write. The ONLY way this view produces input. */
   sendKeys(data: string): void;
   header: ChatHeaderProps;
-  /**
-   * The pane's visible terminal lines. Absent (a pane with no live terminal)
-   * means no prompt detection at all — there is nothing to read.
-   */
-  terminalSnapshot?: () => string[];
-  /** False while the transcript is still producing entries (spec §5). */
-  transcriptIdle?: boolean;
-  /** Injected timer for the detector's watch and retry (tests). */
-  schedule?: ScheduleFn;
-  /** Extra rows between the card and the bottom (the input box). */
+  /** Whether the live terminal is showing, and what opened it. */
+  reveal: RevealState;
+  /** The chevron: the user wants the live terminal. */
+  onManualReveal(): void;
+  /** The hide strip: the user is done with it. */
+  onManualHide(): void;
+  /** "/" typed into the empty box — claude's own menu answers it. */
+  onSlash(): void;
+  /** Extra rows between the feed and the bottom (the input box). */
   children?: React.ReactNode;
-}
-
-/**
- * Drive the prompt controller from React. The controller owns the timers and
- * the state machine; this only mirrors its state into a render.
- */
-function usePromptCard(
-  terminalSnapshot: (() => string[]) | undefined,
-  transcriptIdle: boolean,
-  sendKeys: (data: string) => void,
-  schedule: ScheduleFn | undefined,
-) {
-  const [version, setVersion] = useState(0);
-  // Read through refs so a new callback identity never restarts the watcher.
-  const snapshotRef = useRef(terminalSnapshot);
-  snapshotRef.current = terminalSnapshot;
-  const idleRef = useRef(transcriptIdle);
-  idleRef.current = transcriptIdle;
-  const sendRef = useRef(sendKeys);
-  sendRef.current = sendKeys;
-
-  const controller = useMemo(
-    () =>
-      terminalSnapshot
-        ? createPromptController({
-            snapshot: () => snapshotRef.current?.() ?? [],
-            isIdle: () => idleRef.current,
-            sendKeys: (data) => sendRef.current(data),
-            onChange: () => setVersion((current) => current + 1),
-            ...(schedule ? { schedule } : {}),
-          })
-        : null,
-    // Built once per mounted chat: the controller is the thing that must not
-    // be torn down every time a parent re-renders.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [terminalSnapshot === undefined, schedule],
-  );
-
-  useEffect(() => () => controller?.dispose(), [controller]);
-
-  const state: PromptCardState = controller?.state() ?? {
-    prompt: null,
-    status: "asking",
-    answeredLabel: "",
-  };
-  void version;
-  return { controller, state };
 }
 
 export function ChatView({
@@ -123,9 +74,10 @@ export function ChatView({
   onShowThinkingChange,
   sendKeys,
   header,
-  terminalSnapshot,
-  transcriptIdle = false,
-  schedule,
+  reveal,
+  onManualReveal,
+  onManualHide,
+  onSlash,
   children,
 }: ChatViewProps) {
   const [, setVersion] = useState(0);
@@ -134,12 +86,6 @@ export function ChatView({
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
   const [pinned, setPinned] = useState(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const { controller, state: cardState } = usePromptCard(
-    terminalSnapshot,
-    transcriptIdle,
-    sendKeys,
-    schedule,
-  );
 
   useEffect(() => {
     setVersion((current) => current + 1);
@@ -325,17 +271,30 @@ export function ChatView({
         </button>
       ) : null}
 
-      {controller ? (
-        <PromptCard
-          state={cardState}
-          onAnswerMenu={controller.answerMenu}
-          onAnswerConfirm={controller.answerConfirm}
-          onSendText={controller.sendText}
-          onOpenTerminal={header.onFlipToTerminal}
-        />
-      ) : null}
-
-      <ChatInput sendKeys={sendKeys} />
+      <div className="chat-input-row">
+        <ChatInput sendKeys={sendKeys} onSlash={onSlash} muted={reveal.revealed} />
+        {reveal.revealed ? (
+          <button
+            type="button"
+            className="chat-reveal chat-reveal--hide"
+            data-testid="chat-reveal-hide"
+            title="Put the live terminal away"
+            onClick={onManualHide}
+          >
+            live terminal is active — ▾ hide
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="chat-reveal"
+            data-testid="chat-reveal"
+            title="Open the live terminal"
+            onClick={onManualReveal}
+          >
+            ▴
+          </button>
+        )}
+      </div>
 
       {children}
     </section>

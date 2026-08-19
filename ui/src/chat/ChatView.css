@@ -268,12 +268,45 @@
   flex: 0 0 auto;
 }
 
-/* The input box (spec §6). Enter sends; the box never disables. */
-.chat-input {
+/* The input row: the box, and the one control that opens the live terminal
+   under it or puts it away again (chat v2 spec §2). */
+.chat-input-row {
   flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
   border-top: 1px solid var(--border);
   background: var(--surface-1);
   padding: 6px 8px;
+}
+
+.chat-reveal {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-sub);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chat-reveal:hover {
+  color: var(--text-main);
+  background: var(--surface-3);
+}
+
+/* Reads as a caption on the dock below it, not as another button to press. */
+.chat-reveal--hide {
+  color: var(--ok);
+}
+
+/* The input box (spec §6). Enter sends; the box never disables. */
+.chat-input {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* Muted: the live terminal has the keyboard. Dimmed, never disabled — the box
