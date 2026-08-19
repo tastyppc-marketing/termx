@@ -31,11 +31,16 @@ const EMPTY_PROMPT = /^[❯›>]$/;
 
 /**
  * Screens that are the opposite of quiet, wherever in the tail they appear:
- * a numbered selector row and a confirm hint are a question; the spinner and
- * the interrupt hint are work in flight. The input box can look empty under
- * ALL of these, which is exactly why they are checked separately.
+ * a numbered selector row and a confirm hint are a question; the interrupt
+ * hint is work in flight. The input box can look empty under ALL of these,
+ * which is exactly why they are checked separately.
+ *
+ * The ✻ glyph is deliberately NOT here: claude leaves a finished
+ * "✻ Brewed for 2s"-style line on screen after every answer (the verb is
+ * random), so a bare ✻ is evidence of PAST work. The live spinner always
+ * carries "esc to interrupt", and that is the discriminator.
  */
-const BUSY = [/^[❯›>]\s*\d+[.)]/, /Enter to confirm/i, /esc to interrupt/i, /^✻\s*\S/];
+const BUSY = [/^[❯›>]\s*\d+[.)]/, /Enter to confirm/i, /esc to interrupt/i];
 
 /** Box-drawing chrome, matching the prompt detector's framing rules. */
 const BOX_EDGE = /^[╭╰╞╡├┤┌└╔╚┏┗│┃║]+|[│┃║╮╯┐┘╗╝┓┛]+$/g;

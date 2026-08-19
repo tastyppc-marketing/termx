@@ -81,6 +81,11 @@ const TYPED_INTO_BOX = [
  * dock open forever.
  */
 const IDLE_LIVE_STATUSLINE = [
+  "❯ Reply with exactly TERMX-CHATV2-GATE-9K1 and nothing else.",
+  "● TERMX-CHATV2-GATE-9K1",
+  // A FINISHED spinner line: claude leaves this on screen after every answer
+  // (the verb is random — Brewed, Crunched, …). It must not read as busy.
+  "✻ Brewed for 2s",
   "                                                                    71834 tokens",
   "─────────────────────────────────────────────────────────────────────────────────",
   "❯  ",
