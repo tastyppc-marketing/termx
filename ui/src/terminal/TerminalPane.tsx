@@ -6,6 +6,7 @@ import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import { ChatOverlay } from "../chat/ChatOverlay";
 import type { openChatFeed } from "../chat/feed";
+import type { SlashCommand } from "../chat/slashCommands";
 import type { ChatDensity, ChatViewMode } from "../chat/types";
 import { HostClient } from "../host/client";
 import {
@@ -98,8 +99,12 @@ export interface PaneChatProps {
   onDensityChange(density: ChatDensity): void;
   onShowThinkingChange(showThinking: boolean): void;
   onOpenLinkPicker?: () => void;
-  /** The pane was opened by a resume: the dock starts revealed (chat v2 §4). */
+  /** The pane was opened by a resume: the chat shows the boot card (v3 §4). */
   bootReveal?: boolean;
+  /** The cached slash-command list the palette draws from (v3 §2). */
+  slashCommands: readonly SlashCommand[];
+  /** A parse of claude's own menu; the owner merges it into the cache. */
+  onCommandsLearned(commands: SlashCommand[]): void;
   /** Injected feed opener (tests). */
   openFeed?: typeof openChatFeed;
 }
@@ -203,10 +208,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [linkNotice, setLinkNotice] = useState<string | null>(null);
   const [atTopOfScrollback, setAtTopOfScrollback] = useState(false);
-  // The live-terminal dock (chat v2 §1): true while the chat has unveiled the
-  // bottom slice of this pane's real terminal. Owned here because the pane is
-  // what shrinks the overlay and frames the slice.
-  const [dockRevealed, setDockRevealed] = useState(false);
   const dependencies = props.dependencies ?? defaultDependencies;
   // Ref-isolated so a new callback identity never re-runs the bootstrap
   // effect (which would tear down and remount the whole terminal).
@@ -219,44 +220,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Read at attach time only: a dims change must not remount the terminal.
   const recordedDimsRef = useRef(props.recordedDims);
   recordedDimsRef.current = props.recordedDims;
-
-  // Leaving chat mode retires the dock: flipping back must start clean, not
-  // resurrect a slice the reveal controller no longer knows about.
-  const chatMode = props.chat?.mode;
-  useEffect(() => {
-    if (chatMode !== "chat") {
-      setDockRevealed(false);
-    }
-  }, [chatMode]);
-
-  // The dock swaps who owns the keyboard (chat v2 §3): revealed, the real
-  // terminal takes every keystroke; hidden, the chat's box takes them back.
-  // The xterm is also pinned to its bottom — that is where claude draws its
-  // input box and menus, and the whole point of the slice. The swap only
-  // happens INSIDE the pane that already holds focus: every mounted pane runs
-  // this effect (hidden tabs included), and a dock opening in one pane must
-  // never yank the keyboard away from wherever the user is actually typing.
-  useEffect(() => {
-    const element = containerRef.current;
-    const pane = element?.closest(".terminal-pane");
-    if (chatMode !== "chat" || !element || !pane) {
-      return;
-    }
-    if (dockRevealed) {
-      const viewport = element.querySelector(".xterm-viewport");
-      if (viewport instanceof HTMLElement) {
-        viewport.scrollTop = viewport.scrollHeight;
-      }
-    }
-    if (!pane.contains(document.activeElement)) {
-      return;
-    }
-    if (dockRevealed) {
-      element.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea")?.focus();
-    } else {
-      pane.querySelector<HTMLTextAreaElement>(".chat-input__box")?.focus();
-    }
-  }, [dockRevealed, chatMode]);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -508,17 +471,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     presentationRef.current?.focus();
   };
 
-  // How much of the pane the dock claims while revealed. A percentage keeps it
-  // proportional across pane sizes without any resize listener.
-  const dockHeight =
-    props.chat?.mode === "chat" && dockRevealed ? "42%" : "0px";
-
   return (
     <section
       className="terminal-pane"
       data-testid="terminal-pane"
       aria-label="Terminal session"
-      style={{ "--chat-dock": dockHeight } as React.CSSProperties}
       onKeyDownCapture={(event) => {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
           event.preventDefault();
@@ -531,10 +488,8 @@ export function TerminalPane(props: TerminalPaneProps) {
 
       {/* The chat renders OVER the terminal — the surface above stays mounted
           and attached, which is what keeps the session running and gives the
-          prompt detector something to read. When the dock reveals, the overlay
-          lifts its bottom edge (--chat-dock, set on the pane root) and the
-          terminal's own bottom rows show through — claude's REAL input box and
-          menus, framed below (chat v2 §1). */}
+          prompt detector and the slash learner something to read. The overlay
+          is full-bleed: chat mode never shows a terminal pixel (v3 §0). */}
       {props.chat && props.chat.mode === "chat" ? (
         <ChatOverlay
           filePath={props.chat.filePath}
@@ -545,7 +500,8 @@ export function TerminalPane(props: TerminalPaneProps) {
           sendKeys={(data) => bindingRef.current?.sendInput(data)}
           terminalSnapshot={() => presentationRef.current?.visibleLines?.() ?? []}
           {...(props.chat.bootReveal ? { bootReveal: true } : {})}
-          onRevealChange={(state) => setDockRevealed(state.revealed)}
+          slashCommands={props.chat.slashCommands}
+          onCommandsLearned={props.chat.onCommandsLearned}
           header={{
             title: props.chat.title,
             onFlipToTerminal: () => props.chat?.onModeChange("terminal"),
@@ -556,12 +512,6 @@ export function TerminalPane(props: TerminalPaneProps) {
           }}
           {...(props.chat.openFeed ? { openFeed: props.chat.openFeed } : {})}
         />
-      ) : null}
-
-      {props.chat && props.chat.mode === "chat" && dockRevealed ? (
-        <div className="terminal-pane__dock" data-testid="chat-dock" aria-hidden="true">
-          <span className="terminal-pane__dock-caption">live · claude</span>
-        </div>
       ) : null}
 
       {props.chat && props.chat.mode === "terminal" ? (

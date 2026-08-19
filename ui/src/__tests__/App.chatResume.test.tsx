@@ -50,7 +50,13 @@ vi.mock("../terminal/TerminalPane", () => ({
     chat,
   }: {
     sessionId: number;
-    chat?: { filePath: string; title: string; mode: string; bootReveal?: boolean };
+    chat?: {
+      filePath: string;
+      title: string;
+      mode: string;
+      bootReveal?: boolean;
+      slashCommands?: readonly unknown[];
+    };
   }) => (
     <div
       data-testid="workspace-terminal"
@@ -59,6 +65,7 @@ vi.mock("../terminal/TerminalPane", () => ({
       data-chat-title={chat?.title ?? ""}
       data-chat-boot={chat?.bootReveal === true ? "true" : "false"}
       data-chat-present={chat ? "true" : "false"}
+      data-chat-commands={String(chat?.slashCommands?.length ?? 0)}
     />
   ),
 }));
@@ -360,6 +367,9 @@ describe("sticky links (spec §5)", () => {
     expect(element.getAttribute("data-chat-title")).toBe(
       "Original conversation",
     );
+    // The palette is never without a list: with nothing learned yet, the
+    // shipped seed commands ride along (v3 §2).
+    expect(Number(element.getAttribute("data-chat-commands"))).toBeGreaterThan(0);
 
     await act(async () => root.unmount());
   });

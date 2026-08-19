@@ -152,6 +152,8 @@ function chatProps(overrides: Partial<PaneChatProps> = {}): PaneChatProps {
     onModeChange: vi.fn(),
     onDensityChange: vi.fn(),
     onShowThinkingChange: vi.fn(),
+    slashCommands: [],
+    onCommandsLearned: vi.fn(),
     openFeed: opener.open as PaneChatProps["openFeed"],
     ...overrides,
   };

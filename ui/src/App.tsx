@@ -19,6 +19,11 @@ import {
   defaultChatViewMode,
 } from "./chat/chatDefaults";
 import { resolveLinkage, successorRecord } from "./chat/linkage";
+import {
+  SEED_COMMANDS,
+  mergeCommands,
+  type SlashCommand,
+} from "./chat/slashCommands";
 import type { ChatViewMode } from "./chat/types";
 import { CloseGuard } from "./close/CloseGuard";
 import { decideOnClose, type CloseDecision } from "./close/closeBehavior";
@@ -95,6 +100,7 @@ import {
   applyTrayConfigure,
   setChatPaneState,
   setSidebarWidth,
+  setSlashCommands,
   setViewerGeometry,
   type ChatPaneLink,
 } from "./workspace/uiState";
@@ -1139,6 +1145,16 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       mode,
       density,
       showThinking,
+      // The palette draws from the learned cache; first ever run gets the
+      // shipped seed. Every parse of claude's real menu merges back in (v3 §2).
+      slashCommands: uiSnapshot.slashCommands ?? SEED_COMMANDS,
+      onCommandsLearned: (learned: SlashCommand[]) =>
+        uiStateStore.update((current) =>
+          setSlashCommands(
+            current,
+            mergeCommands(current.slashCommands ?? SEED_COMMANDS, learned),
+          ),
+        ),
       ...(bootSessions.has(sessionId) ? { bootReveal: true } : {}),
       onModeChange: (nextMode: ChatViewMode) =>
         write({ mode: nextMode, density, showThinking }),
