@@ -150,13 +150,13 @@ describe("parseSlashMenu", () => {
   });
 
   it("discards a parse too small to be evidence", () => {
-    // Two rows is what a half-drawn frame or a stray line looks like; the
-    // cache is never allowed to learn from that.
+    // One row is what a stray line looks like; the cache never learns from
+    // that. Two is a real menu — a live claude on a busy screen draws as few
+    // as two most-recently-used rows.
     expect(
       parseSlashMenu([
         "> /",
         "  /model                 Set the AI model for this session",
-        "  /clear                 Clear conversation history",
       ]),
     ).toEqual([]);
     expect(
@@ -164,9 +164,8 @@ describe("parseSlashMenu", () => {
         "> /",
         "  /model                 Set the AI model for this session",
         "  /clear                 Clear conversation history",
-        "  /cost                  Show the cost of this session",
       ]),
-    ).toHaveLength(3);
+    ).toHaveLength(2);
   });
 
   it("learns nothing without the input box visibly holding the slash", () => {

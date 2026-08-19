@@ -72,8 +72,13 @@ export const SEED_COMMANDS: readonly SlashCommand[] = [
   { name: "vim", description: "Toggle between Vim and Normal editing modes" },
 ];
 
-/** Below this a "menu" is a coincidence: two matching rows is not evidence. */
-export const MIN_MENU_ROWS = 3;
+/**
+ * Below this a "menu" is a coincidence. Two, not three: a live claude on a
+ * busy screen draws as few as two (most-recently-used) rows, and the anchor
+ * plus the contiguity walk — not the row count — are what keep lookalike
+ * output out of the cache now.
+ */
+export const MIN_MENU_ROWS = 2;
 
 /**
  * Box-drawing chrome, copied from `idleDetector.ts` rather than imported: that
