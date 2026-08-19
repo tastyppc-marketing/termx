@@ -538,7 +538,7 @@ describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
     const h = harness();
 
     const first = await resumeAndSettle(h);
-    expect(first).toEqual({ kind: "opened" });
+    expect(first).toEqual({ kind: "opened", tabId: "resumed-tab-1", sessionId: 50 });
     expect(h.tabCount()).toBe(1);
     const openTabId = h.tabIds()[0]!;
 
@@ -552,14 +552,14 @@ describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
     const h = harness();
 
     const first = await resumeAndSettle(h);
-    expect(first).toEqual({ kind: "opened" });
+    expect(first).toEqual({ kind: "opened", tabId: "resumed-tab-1", sessionId: 50 });
     const openTabId = h.tabIds()[0]!;
 
     await h.controller.closeLiveTab(openTabId);
     expect(h.tabCount()).toBe(0);
 
     const second = await resumeAndSettle(h);
-    expect(second).toEqual({ kind: "opened" });
+    expect(second).toEqual({ kind: "opened", tabId: "resumed-tab-2", sessionId: 51 });
     expect(h.tabCount()).toBe(1);
     expect(h.tabIds()[0]).not.toBe(openTabId);
     expect(h.createSession).toHaveBeenCalledTimes(2);
@@ -569,7 +569,7 @@ describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
     const h = harness();
 
     const first = await resumeAndSettle(h);
-    expect(first).toEqual({ kind: "opened" });
+    expect(first).toEqual({ kind: "opened", tabId: "resumed-tab-1", sessionId: 50 });
     const openTabId = h.tabIds()[0]!;
     const openSessionId = h.createdSessionIds[0]!;
 
@@ -580,7 +580,7 @@ describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
     expect(h.tabIds()[0]).toBe(openTabId);
 
     const second = await resumeAndSettle(h);
-    expect(second).toEqual({ kind: "opened" });
+    expect(second).toEqual({ kind: "opened", tabId: "resumed-tab-2", sessionId: 51 });
     expect(h.tabCount()).toBe(2);
     expect(h.createSession).toHaveBeenCalledTimes(2);
   });
@@ -589,13 +589,13 @@ describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
     const h = harness();
 
     const first = await resumeAndSettle(h);
-    expect(first).toEqual({ kind: "opened" });
+    expect(first).toEqual({ kind: "opened", tabId: "resumed-tab-1", sessionId: 50 });
     const openSessionId = h.createdSessionIds[0]!;
 
     h.emitClosed(openSessionId);
 
     const second = await resumeAndSettle(h);
-    expect(second).toEqual({ kind: "opened" });
+    expect(second).toEqual({ kind: "opened", tabId: "resumed-tab-2", sessionId: 51 });
     expect(h.createSession).toHaveBeenCalledTimes(2);
   });
 
@@ -603,11 +603,11 @@ describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
     const h = harness();
 
     const first = await resumeAndSettle(h);
-    expect(first).toEqual({ kind: "opened" });
+    expect(first).toEqual({ kind: "opened", tabId: "resumed-tab-1", sessionId: 50 });
     const firstTabId = h.tabIds()[0]!;
 
     const forced = await resumeAndSettle(h, {}, { force: true });
-    expect(forced).toEqual({ kind: "opened" });
+    expect(forced).toEqual({ kind: "opened", tabId: "resumed-tab-2", sessionId: 51 });
     expect(h.tabCount()).toBe(2);
     expect(h.createSession).toHaveBeenCalledTimes(2);
     const secondTabId = h.tabIds().find((id) => id !== firstTabId)!;
@@ -628,7 +628,7 @@ describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
     // Refusal never created anything to dedupe against — the next call
     // resumes normally.
     const opened = await resumeAndSettle(h);
-    expect(opened).toEqual({ kind: "opened" });
+    expect(opened).toEqual({ kind: "opened", tabId: "resumed-tab-1", sessionId: 50 });
     expect(h.tabCount()).toBe(1);
   });
 
@@ -643,7 +643,7 @@ describe("WorkspaceController.resumeSession dedupe (spec P6)", () => {
     // The dead tab is still in the layout (nothing dismissed it), but it is
     // not live, so a fresh resume must open a new tab rather than dedupe.
     const opened = await resumeAndSettle(h);
-    expect(opened).toEqual({ kind: "opened" });
+    expect(opened).toEqual({ kind: "opened", tabId: "resumed-tab-2", sessionId: 51 });
     expect(h.createSession).toHaveBeenCalledTimes(2);
   });
 });
