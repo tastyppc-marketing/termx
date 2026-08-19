@@ -1,0 +1,73 @@
+/**
+ * Slash palette styling (chat v3 spec §2). Tokens only — no raw palette, 1 px
+ * hairlines, radius var, and the one shared overlay shadow (hardening rules).
+ *
+ * Placement is the PARENT's job to enable: the palette pins itself to the top
+ * edge of `.chat-input-row`, which the chat view makes the positioned ancestor
+ * (`position: relative`). It floats OVER the conversation rather than pushing
+ * it, so opening the palette never moves the message being read.
+ */
+
+.slash-palette {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 100%;
+  z-index: 3;
+  max-height: 40vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-overlay);
+}
+
+.slash-palette__row {
+  appearance: none;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.slash-palette__row:last-child {
+  border-bottom: 0;
+}
+
+/* Selection is keyboard-driven, so it has to read at a glance from the far
+   side of the screen: a filled row, not a tinted border. */
+.slash-palette__row[aria-current="true"] {
+  background: var(--accent-25);
+}
+
+.slash-palette__name {
+  flex: 0 0 auto;
+  min-width: 14ch;
+}
+
+.slash-palette__description {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-sub);
+}
+
+.slash-palette__empty {
+  margin: 0;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-hint);
+}
