@@ -219,6 +219,9 @@ function harness(options: HarnessOptions = {}) {
     sessionDims: vi.fn(() => ({})),
     sessionCwd: vi.fn(() => PANE_CWD),
     resumedSessionKeyForTab: vi.fn(() => null),
+    resumedEntries: vi.fn(() => []),
+    rebindResumedTab: vi.fn(),
+    setResumeBootListener: vi.fn(),
     sshPaneInfo: vi.fn(() =>
       options.paneHost ? { host: options.paneHost } : null,
     ),

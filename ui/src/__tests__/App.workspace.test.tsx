@@ -150,6 +150,11 @@ function controllerHarness(initial = snapshot()): ControllerHarness {
     popOutPane: vi.fn(),
     resumeSession: vi.fn(async () => undefined),
     sessionDims: vi.fn(() => ({})),
+    sessionCwd: vi.fn(() => null),
+    resumedSessionKeyForTab: vi.fn(() => null),
+    resumedEntries: vi.fn(() => []),
+    rebindResumedTab: vi.fn(),
+    setResumeBootListener: vi.fn(),
   };
   const client = {
     close: vi.fn(() => order.push("client.close")),

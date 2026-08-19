@@ -5,7 +5,9 @@
 
 .chat-view {
   position: absolute;
-  inset: 0;
+  /* The bottom edge lifts while the terminal dock is revealed (chat v2 §1):
+     the pane sets --chat-dock and the live xterm shows through underneath. */
+  inset: 0 0 var(--chat-dock, 0px) 0;
   display: flex;
   flex-direction: column;
   min-height: 0;

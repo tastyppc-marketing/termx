@@ -18,7 +18,7 @@ import {
   defaultChatDensity,
   defaultChatViewMode,
 } from "./chat/chatDefaults";
-import { resolveLinkage } from "./chat/linkage";
+import { resolveLinkage, successorRecord } from "./chat/linkage";
 import type { ChatViewMode } from "./chat/types";
 import { CloseGuard } from "./close/CloseGuard";
 import { decideOnClose, type CloseDecision } from "./close/closeBehavior";
@@ -29,7 +29,11 @@ import { ConversationsFullscreen } from "./conversations/ConversationsFullscreen
 import { ConversationsRail } from "./conversations/ConversationsRail";
 import { NoteScheduler } from "./conversations/noteScheduler";
 import { SessionPalette } from "./conversations/palette/SessionPalette";
-import type { LlmSessionRecord } from "./conversations/types";
+import {
+  hasTranscript,
+  sessionKey,
+  type LlmSessionRecord,
+} from "./conversations/types";
 import { FolderSearch } from "./folders/FolderSearch";
 import { isEditableElement } from "./keyboard";
 import { tauriListDirs } from "./native/folders";
@@ -92,6 +96,7 @@ import {
   setChatPaneState,
   setSidebarWidth,
   setViewerGeometry,
+  type ChatPaneLink,
 } from "./workspace/uiState";
 import { useWorkspace } from "./workspace/useWorkspace";
 
@@ -142,6 +147,13 @@ const NO_LIVE_OUTPUTS: readonly LiveOutputRow[] = [];
 
 /** How often the workspace rescans agent sessions for pane↔chat linkage. */
 const CONVERSATIONS_RESCAN_MS = 30_000;
+/**
+ * How long a pane counts as "booting" after a resume (auto-reveal spec §4).
+ * The flag only decides the dock's INITIAL state, so it merely has to outlive
+ * the gap between the resume outcome and the pane's first chat render; a
+ * minute covers a slow attach without leaving stale flags around forever.
+ */
+const BOOT_REVEAL_TTL_MS = 60_000;
 const NO_RECORDS: readonly LlmSessionRecord[] = [];
 const emptyRecords = () => NO_RECORDS;
 const NO_SAVED: readonly SavedSession[] = [];
@@ -377,18 +389,118 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     setOutputsOpen(true);
   };
 
+  // Panes currently booting an agent (auto-reveal spec §4): the chat opens
+  // with the terminal dock revealed so the resume's `cd`, trust prompt and
+  // startup happen in plain sight. Entries expire — the flag only seeds the
+  // dock's initial state, it never re-reveals a settled pane.
+  const [bootSessions, setBootSessions] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    const timers: number[] = [];
+    controller.setResumeBootListener((sessionId) => {
+      setBootSessions((prev) => {
+        if (prev.has(sessionId)) {
+          return prev;
+        }
+        const next = new Set(prev);
+        next.add(sessionId);
+        return next;
+      });
+      timers.push(
+        window.setTimeout(() => {
+          setBootSessions((prev) => {
+            if (!prev.has(sessionId)) {
+              return prev;
+            }
+            const next = new Set(prev);
+            next.delete(sessionId);
+            return next;
+          });
+        }, BOOT_REVEAL_TTL_MS),
+      );
+    });
+    return () => {
+      controller.setResumeBootListener(null);
+      for (const timer of timers) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [controller]);
+
+  // Remember the conversation a pane is running (auto-reveal spec §5), so the
+  // Chat switch survives a scan hiccup that drops the live derivation.
+  const persistPaneLink = (sessionId: number, record: LlmSessionRecord) => {
+    if (!hasTranscript(record)) {
+      return; // nothing the chat could open — no link worth remembering
+    }
+    const key = String(sessionId);
+    const link: ChatPaneLink = {
+      provider: record.provider,
+      id: record.id,
+      filePath: record.filePath,
+      title: record.title,
+    };
+    uiStateStore.update((current) => {
+      const stored = current.chatPanes?.[key];
+      return setChatPaneState(current, key, {
+        mode: stored?.mode ?? defaultChatViewMode(settings),
+        density: stored?.density ?? defaultChatDensity(settings),
+        showThinking: stored?.showThinking ?? DEFAULT_CHAT_SHOW_THINKING,
+        link,
+      });
+    });
+  };
+
   // Resume with dedupe (polish P6): "already-open" raises the dialog; a
   // resume that actually opened a tab drops the full-screen overlay so the
-  // new terminal is visible.
+  // new terminal is visible. An opened resume also stamps the pane's link
+  // immediately — no waiting for the next directory scan to derive it.
   const handleResume = (record: LlmSessionRecord) => {
     void controller.resumeSession(record).then((outcome) => {
       if (outcome.kind === "already-open") {
         setAlreadyOpen({ record, tabId: outcome.tabId });
       } else if (outcome.kind === "opened") {
         setConversationsFull(false);
+        persistPaneLink(outcome.sessionId, record);
       }
     });
   };
+
+  // Transcript handoff (auto-reveal spec §4): `claude --resume` writes a NEW
+  // transcript file, so a resumed pane tailing the ORIGINAL looks dead. On
+  // every rescan, look for the successor of each resumed conversation; when
+  // one appears, rebind the resume and repoint the pane's link at it.
+  useEffect(() => {
+    if (conversationsRecords.length === 0) {
+      return;
+    }
+    for (const entry of controller.resumedEntries()) {
+      const original = conversationsRecords.find(
+        (record) => sessionKey(record) === entry.key,
+      );
+      if (!original) {
+        continue; // vanished from the scan: nothing to judge a successor by
+      }
+      const successor = successorRecord({
+        original,
+        resumedAtMs: entry.resumedAtMs,
+        candidates: conversationsRecords,
+      });
+      if (!successor) {
+        continue;
+      }
+      controller.rebindResumedTab(entry.key, sessionKey(successor));
+      const tab = snapshot.layout.tabs[entry.tabId];
+      const sessionId = tab ? firstSessionId(tab.split) : null;
+      if (sessionId !== null) {
+        persistPaneLink(sessionId, successor);
+      }
+    }
+    // persistPaneLink is stable in everything but the settings defaults it
+    // falls back on; the records array is the real trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationsRecords, controller]);
 
   // The controller routes the ask-searcher policy through this handler.
   useEffect(() => {
@@ -919,39 +1031,54 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     setSavePrompt(null);
   };
 
-  // Chat view (chat-view spec §1/§2). A pane is offered the switch only when
-  // it can be tied to a transcript: the session key a resume recorded, else
-  // the pane's own directory, else nothing at all.
+  // Chat view (chat-view spec §1/§2). A pane is offered the switch when it
+  // can be tied to a transcript: the session key a resume recorded, else the
+  // pane's own directory, else the link it was LAST known to have (auto-reveal
+  // spec §5) — a scan hiccup must not make the Chat button vanish.
   const chatForSession = (sessionId: number, tabId: string) => {
-    const records = conversationsRecords;
-    if (records.length === 0) {
-      return null;
-    }
-    const link = resolveLinkage({
-      explicitKey: controller.resumedSessionKeyForTab(tabId),
-      paneCwd: controller.sessionCwd(sessionId),
-      candidates: records,
-    });
+    const key = String(sessionId);
+    const stored = uiSnapshot.chatPanes?.[key];
+    const live =
+      conversationsRecords.length > 0
+        ? resolveLinkage({
+            explicitKey: controller.resumedSessionKeyForTab(tabId),
+            paneCwd: controller.sessionCwd(sessionId),
+            candidates: conversationsRecords,
+          })
+        : null;
+    const link: ChatPaneLink | undefined =
+      live && hasTranscript(live.record)
+        ? {
+            provider: live.record.provider,
+            id: live.record.id,
+            filePath: live.record.filePath,
+            title: live.record.title,
+          }
+        : stored?.link;
     if (!link) {
       return null;
     }
-    const key = String(sessionId);
     // The stored pane state wins; otherwise the user's settings decide.
-    const stored = uiSnapshot.chatPanes?.[key];
     const mode = stored?.mode ?? defaultChatViewMode(settings);
     const density = stored?.density ?? defaultChatDensity(settings);
     const showThinking = stored?.showThinking ?? DEFAULT_CHAT_SHOW_THINKING;
+    // Every write re-stamps the current link, so the first interaction with a
+    // directory-derived pane is what makes its link stick (spec §5).
     const write = (next: {
       mode: ChatViewMode;
       density: typeof density;
       showThinking: boolean;
-    }) => uiStateStore.update((current) => setChatPaneState(current, key, next));
+    }) =>
+      uiStateStore.update((current) =>
+        setChatPaneState(current, key, { ...next, link }),
+      );
     return {
-      filePath: link.record.filePath,
-      title: link.record.title,
+      filePath: link.filePath,
+      title: link.title,
       mode,
       density,
       showThinking,
+      ...(bootSessions.has(sessionId) ? { bootReveal: true } : {}),
       onModeChange: (nextMode: ChatViewMode) =>
         write({ mode: nextMode, density, showThinking }),
       onDensityChange: (nextDensity: typeof density) =>
