@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LlmSessionRecord } from "../../conversations/types";
-import { resolveLinkage } from "../linkage";
+import { resolveLinkage, successorRecord } from "../linkage";
 
 function record(overrides: Partial<LlmSessionRecord> = {}): LlmSessionRecord {
   return {
@@ -87,5 +87,100 @@ describe("resolveLinkage", () => {
     });
     expect(link?.record.id).toBe("still-here");
     expect(link?.reason).toBe("cwd");
+  });
+});
+
+describe("successorRecord", () => {
+  const original = record({ id: "original", updatedAtMs: 5000 });
+
+  it("adopts a newer record from the same folder", () => {
+    const successor = record({ id: "successor", updatedAtMs: 6000 });
+    expect(
+      successorRecord({
+        original,
+        resumedAtMs: 5500,
+        candidates: [original, successor],
+      })?.id,
+    ).toBe("successor");
+  });
+
+  it("never adopts the record the pane resumed", () => {
+    expect(
+      successorRecord({
+        original,
+        resumedAtMs: 5500,
+        // The resumed transcript itself keeps growing; it is not a successor.
+        candidates: [record({ id: "original", updatedAtMs: 9000 })],
+      }),
+    ).toBeNull();
+  });
+
+  it("ignores records from another folder, case- and slash-blind", () => {
+    expect(
+      successorRecord({
+        original,
+        resumedAtMs: 5500,
+        candidates: [record({ id: "elsewhere", cwd: "C:\\Other", updatedAtMs: 6000 })],
+      }),
+    ).toBeNull();
+    expect(
+      successorRecord({
+        original,
+        resumedAtMs: 5500,
+        candidates: [record({ id: "same", cwd: "c:/dev/termx/", updatedAtMs: 6000 })],
+      })?.id,
+    ).toBe("same");
+  });
+
+  it("ignores records that have not moved since the resume", () => {
+    expect(
+      successorRecord({
+        original,
+        resumedAtMs: 5500,
+        candidates: [
+          record({ id: "older", updatedAtMs: 5000 }),
+          record({ id: "exactly-then", updatedAtMs: 5500 }),
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("ignores a record with no transcript to tail", () => {
+    expect(
+      successorRecord({
+        original,
+        resumedAtMs: 5500,
+        candidates: [record({ id: "no-file", filePath: "", updatedAtMs: 6000 })],
+      }),
+    ).toBeNull();
+  });
+
+  it("takes the newest when several qualify", () => {
+    expect(
+      successorRecord({
+        original,
+        resumedAtMs: 5500,
+        candidates: [
+          record({ id: "newer", updatedAtMs: 6000 }),
+          record({ id: "newest", updatedAtMs: 7000 }),
+        ],
+      })?.id,
+    ).toBe("newest");
+  });
+
+  it("adopts nothing for a record with no folder of its own", () => {
+    expect(
+      successorRecord({
+        original: record({ id: "rootless", cwd: null }),
+        resumedAtMs: 5500,
+        candidates: [record({ id: "any", updatedAtMs: 6000 })],
+      }),
+    ).toBeNull();
+  });
+
+  it("adopts nothing when nothing qualifies", () => {
+    expect(
+      successorRecord({ original, resumedAtMs: 5500, candidates: [] }),
+    ).toBeNull();
   });
 });
