@@ -6,9 +6,12 @@
  * block rather than a burst of lines it would each treat as a submit — the
  * same thing a real paste does.
  *
- * The box stays enabled while a prompt card is waiting: a card the detector
- * misread is answered by typing, and disabling the only escape hatch is how a
- * user gets stuck. It just says where to look.
+ * A "/" typed into an EMPTY box is not text: it is a request for claude's own
+ * command menu, so it goes straight to the PTY and the live terminal opens
+ * under the chat. The box never shows the character (spec §3).
+ *
+ * The box stays enabled while the live terminal has the keyboard — it only
+ * mutes. Disabling the one escape hatch is how a user gets stuck.
  */
 
 import { useRef, useState } from "react";
@@ -29,11 +32,16 @@ export const PASTE_END = "\x1b[201~";
 export const ENTER_KEY = "\r";
 export const ENTER_DELAY_MS = 40;
 
+/** The one character that means "open claude's menu" rather than "type this". */
+export const SLASH = "/";
+
 export interface ChatInputProps {
   /** Raw PTY write. */
   sendKeys(data: string): void;
-  /** A prompt card is on screen waiting for an answer. */
-  promptActive?: boolean;
+  /** The user opened the command menu; absent leaves "/" as ordinary text. */
+  onSlash?: () => void;
+  /** The live terminal has the keyboard: the box dims but stays usable. */
+  muted?: boolean;
 }
 
 /** What goes down the wire for `text` — the Enter follows as its own write. */
@@ -41,7 +49,7 @@ export function payloadForMessage(text: string): string {
   return text.includes("\n") ? `${PASTE_START}${text}${PASTE_END}` : text;
 }
 
-export function ChatInput({ sendKeys, promptActive = false }: ChatInputProps) {
+export function ChatInput({ sendKeys, onSlash, muted = false }: ChatInputProps) {
   const [text, setText] = useState("");
   const [history, setHistory] = useState<string[]>([]);
   // -1 means "editing, not walking history".
@@ -99,14 +107,29 @@ export function ChatInput({ sendKeys, promptActive = false }: ChatInputProps) {
     }
   };
 
+  /**
+   * A lone "/" on an empty box belongs to claude, not to this box. It is
+   * caught in the CHANGE handler so a pasted or IME-composed slash behaves the
+   * same as a typed one — and the DOM value is cleared by hand, because the
+   * controlled value is already "" and React would therefore not re-render to
+   * take the character back off the screen.
+   */
+  const onChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const next = event.currentTarget.value;
+    if (onSlash && text.length === 0 && next === SLASH) {
+      event.currentTarget.value = "";
+      onSlash();
+      return;
+    }
+    cursor.current = -1;
+    setText(next);
+  };
+
   return (
-    <div className="chat-input" data-testid="chat-input">
-      {promptActive ? (
-        <p className="chat-input__hint" role="note">
-          The session is waiting on the card above — answer it there, or type
-          here if it read the screen wrong.
-        </p>
-      ) : null}
+    <div
+      className={`chat-input${muted ? " chat-input--muted" : ""}`}
+      data-testid="chat-input"
+    >
       <textarea
         ref={boxRef}
         className="chat-input__box"
@@ -114,10 +137,8 @@ export function ChatInput({ sendKeys, promptActive = false }: ChatInputProps) {
         placeholder="Message the session — Enter to send, Shift+Enter for a new line"
         rows={2}
         value={text}
-        onChange={(event) => {
-          cursor.current = -1;
-          setText(event.currentTarget.value);
-        }}
+        {...(muted ? { "aria-disabled": true } : {})}
+        onChange={onChange}
         onKeyDown={onKeyDown}
       />
     </div>

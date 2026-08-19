@@ -78,6 +78,10 @@ function view(
       onShowThinkingChange={() => undefined}
       sendKeys={() => undefined}
       header={header()}
+      reveal={{ revealed: false, reason: null }}
+      onManualReveal={() => undefined}
+      onManualHide={() => undefined}
+      onSlash={() => undefined}
       {...props}
     />
   );
@@ -295,6 +299,76 @@ describe("ChatView", () => {
     await act(async () => button("Jump to latest").click());
     expect(scroll.scrollTop).toBe(1000);
     expect(container.querySelector('[data-testid="chat-jump"]')).toBeNull();
+  });
+
+  it("offers the live terminal behind a chevron while it is hidden", async () => {
+    let revealed = 0;
+    await render(view({ feed: fakeFeed(entries), onManualReveal: () => (revealed += 1) }));
+    expect(container.querySelector('[data-testid="chat-reveal-hide"]')).toBeNull();
+
+    const chevron = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-reveal"]',
+    );
+    await act(async () => chevron?.click());
+    expect(revealed).toBe(1);
+  });
+
+  it("swaps the chevron for a hide strip while the live terminal is up", async () => {
+    let hidden = 0;
+    await render(
+      view({
+        feed: fakeFeed(entries),
+        reveal: { revealed: true, reason: "slash" },
+        onManualHide: () => (hidden += 1),
+      }),
+    );
+    expect(container.querySelector('[data-testid="chat-reveal"]')).toBeNull();
+
+    const strip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-reveal-hide"]',
+    );
+    expect(strip?.textContent).toContain("hide");
+    await act(async () => strip?.click());
+    expect(hidden).toBe(1);
+  });
+
+  it("mutes the input while the live terminal has the keyboard", async () => {
+    const feed = fakeFeed(entries);
+    await render(view({ feed }));
+    expect(container.querySelector(".chat-input--muted")).toBeNull();
+
+    await render(view({ feed, reveal: { revealed: true, reason: "prompt" } }));
+    expect(container.querySelector(".chat-input--muted")).not.toBeNull();
+  });
+
+  it("reports a leading slash instead of typing it, and shows no prompt card", async () => {
+    let slashes = 0;
+    const sent: string[] = [];
+    await render(
+      view({
+        feed: fakeFeed(entries),
+        onSlash: () => (slashes += 1),
+        sendKeys: (data) => sent.push(data),
+      }),
+    );
+    const box = container.querySelector("textarea");
+    if (!box) {
+      throw new Error("no input box");
+    }
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(box, "/");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(slashes).toBe(1);
+    expect(box.value).toBe("");
+    // The view sends nothing of its own; the overlay owns that write.
+    expect(sent).toEqual([]);
+    // Cards are retired: claude's real UI answers questions in the dock now.
+    expect(container.querySelector('[data-testid="prompt-card"]')).toBeNull();
   });
 
   it("hides the link picker until one is offered", async () => {
