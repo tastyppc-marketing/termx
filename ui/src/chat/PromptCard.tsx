@@ -1,20 +1,35 @@
 /**
- * An interactive TUI prompt, rendered inside the chat (chat-view spec §5).
+ * An interactive TUI prompt, rendered inside the chat (chat v3 spec §3).
  *
  * Every button here corresponds to one deliberate click. Nothing on this card
- * sends anything on its own, and the fallback form — the last dozen lines of
- * the screen plus a free-text box — exists so that even a prompt nobody
- * recognized stays answerable without flipping to the terminal.
+ * sends anything on its own, and the fallback form combines all three escape
+ * hatches in one place — the last dozen lines of the screen, a free-text box
+ * AND a row of raw keys — so that even a prompt nobody recognized stays
+ * answerable without ever showing the terminal.
  */
 
 import { useState } from "react";
+import { KEY_DOWN, KEY_ENTER, KEY_UP } from "./promptDetector";
 import type { PromptCardState } from "./promptWatcher";
+
+/** Cancel, as the TUI on the far side reads it. */
+export const KEY_ESC = "\x1b";
+
+/** The raw keys the fallback card offers, in the order they are drawn. */
+const KEY_ROW: readonly { label: string; data: string }[] = [
+  { label: "↑", data: KEY_UP },
+  { label: "↓", data: KEY_DOWN },
+  { label: "Enter", data: KEY_ENTER },
+  { label: "Esc", data: KEY_ESC },
+];
 
 export interface PromptCardProps {
   state: PromptCardState;
   onAnswerMenu(targetIndex: number): void;
   onAnswerConfirm(affirmative: boolean): void;
   onSendText(text: string): void;
+  /** One raw keypress, exactly as clicked. */
+  onSendKey(data: string): void;
   onOpenTerminal(): void;
 }
 
@@ -43,6 +58,7 @@ export function PromptCard({
   onAnswerMenu,
   onAnswerConfirm,
   onSendText,
+  onSendKey,
   onOpenTerminal,
 }: PromptCardProps) {
   if (state.status === "answered") {
@@ -113,6 +129,19 @@ export function PromptCard({
             {prompt.raw.join("\n")}
           </pre>
           <FreeText onSend={onSendText} />
+          <div className="chat-card__keys" role="group" aria-label="Send a keypress">
+            {KEY_ROW.map(({ label, data }) => (
+              <button
+                key={label}
+                type="button"
+                className="chat-card__option"
+                title={`Send ${label} to the session`}
+                onClick={() => onSendKey(data)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </>
       ) : null}
 

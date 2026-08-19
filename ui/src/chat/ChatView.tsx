@@ -17,6 +17,8 @@ import { ChatInput } from "./ChatInput";
 import { CHAT_DENSITIES } from "./chatDefaults";
 import { isExpandedByDefault } from "./density";
 import type { ChatFeed } from "./feed";
+import { PromptCard } from "./PromptCard";
+import type { PromptCardState } from "./promptWatcher";
 import type { ChatDensity, ChatEntry } from "./types";
 import "./ChatView.css";
 
@@ -52,6 +54,16 @@ export interface ChatViewProps {
   /** Raw PTY write. The ONLY way this view produces input. */
   sendKeys(data: string): void;
   header: ChatHeaderProps;
+  /**
+   * What claude is waiting on (v3 §3). An idle state draws nothing, which is
+   * also how the overlay suppresses the card while the slash palette is open.
+   */
+  promptCard: PromptCardState;
+  onAnswerMenu(targetIndex: number): void;
+  onAnswerConfirm(affirmative: boolean): void;
+  onSendText(text: string): void;
+  /** One raw keypress from the fallback card's key row. */
+  onSendKey(data: string): void;
   /** Extra rows between the feed and the bottom (the input box). */
   children?: React.ReactNode;
 }
@@ -64,6 +76,11 @@ export function ChatView({
   onShowThinkingChange,
   sendKeys,
   header,
+  promptCard,
+  onAnswerMenu,
+  onAnswerConfirm,
+  onSendText,
+  onSendKey,
   children,
 }: ChatViewProps) {
   const [, setVersion] = useState(0);
@@ -256,6 +273,15 @@ export function ChatView({
           Jump to latest
         </button>
       ) : null}
+
+      <PromptCard
+        state={promptCard}
+        onAnswerMenu={onAnswerMenu}
+        onAnswerConfirm={onAnswerConfirm}
+        onSendText={onSendText}
+        onSendKey={onSendKey}
+        onOpenTerminal={header.onFlipToTerminal}
+      />
 
       <div className="chat-input-row">
         <ChatInput sendKeys={sendKeys} />

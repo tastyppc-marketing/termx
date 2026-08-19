@@ -374,6 +374,14 @@
   color: var(--text-sub);
 }
 
+/* The fallback card's raw keys (v3 §3). One click, one keypress — an
+   arrow-key menu nobody could parse is still answerable from here. */
+.chat-card__keys {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 .chat-card__input {
   width: 100%;
   border: 1px solid var(--border);

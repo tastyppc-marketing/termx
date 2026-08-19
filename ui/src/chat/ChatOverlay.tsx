@@ -16,6 +16,7 @@ import { ChatView, type ChatHeaderProps } from "./ChatView";
 import { openChatFeed, type ChatFeed } from "./feed";
 import {
   createPromptController,
+  type PromptCardState,
   type PromptController,
   type ScheduleFn,
 } from "./promptWatcher";
@@ -23,6 +24,9 @@ import type { ChatDensity } from "./types";
 
 /** Spec §5: the transcript counts as quiet after this long without an entry. */
 export const TRANSCRIPT_IDLE_MS = 2_000;
+
+/** Nothing to answer. Also what the view is handed while a card is suppressed. */
+const NO_CARD: PromptCardState = { prompt: null, status: "asking", answeredLabel: "" };
 
 export interface ChatOverlayProps {
   /** Absolute path of the linked transcript. */
@@ -59,6 +63,8 @@ export function ChatOverlay({
   const [feed, setFeed] = useState<ChatFeed | null>(null);
   const [failed, setFailed] = useState(false);
   const [idle, setIdle] = useState(true);
+  const [card, setCard] = useState<PromptCardState>(NO_CARD);
+  const promptRef = useRef<PromptController | null>(null);
 
   // Everything the controllers read goes through a ref: a parent re-render
   // hands down new callback identities, and no controller may restart.
@@ -66,6 +72,8 @@ export function ChatOverlay({
   snapshotRef.current = terminalSnapshot;
   const idleRef = useRef(idle);
   idleRef.current = idle;
+  const sendRef = useRef(sendKeys);
+  sendRef.current = sendKeys;
   const hasTerminal = terminalSnapshot !== undefined;
   void bootReveal; // A3 turns this into the boot status card (spec §4).
 
@@ -95,7 +103,10 @@ export function ChatOverlay({
     };
   }, [filePath, openFeed]);
 
-  // Notice claude asking something. A2 wires its state to the cards.
+  // The detector, and the one place that answers what it finds. The card is
+  // the ONLY route back to the PTY for a prompt now — chat mode never shows
+  // claude's own dialog, so a question it cannot render is a question the user
+  // cannot answer (v3 §3).
   useEffect(() => {
     if (!hasTerminal) {
       return; // no live terminal to read
@@ -104,11 +115,16 @@ export function ChatOverlay({
     controller = createPromptController({
       snapshot: () => snapshotRef.current?.() ?? [],
       isIdle: () => idleRef.current,
-      sendKeys: () => undefined,
-      onChange: () => undefined,
+      sendKeys: (data) => sendRef.current(data),
+      onChange: () => setCard(controller?.state() ?? NO_CARD),
       ...(schedule ? { schedule } : {}),
     });
-    return () => controller?.dispose();
+    promptRef.current = controller;
+    return () => {
+      controller?.dispose();
+      promptRef.current = null;
+      setCard(NO_CARD);
+    };
   }, [hasTerminal, schedule]);
 
   // "Idle" means the agent has stopped writing. A card may only appear then —
@@ -169,6 +185,11 @@ export function ChatOverlay({
       onShowThinkingChange={onShowThinkingChange}
       sendKeys={sendKeys}
       header={header}
+      promptCard={card}
+      onAnswerMenu={(targetIndex) => promptRef.current?.answerMenu(targetIndex)}
+      onAnswerConfirm={(affirmative) => promptRef.current?.answerConfirm(affirmative)}
+      onSendText={(text) => promptRef.current?.sendText(text)}
+      onSendKey={sendKeys}
     />
   );
 }

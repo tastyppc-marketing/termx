@@ -89,6 +89,11 @@ function view(
       onShowThinkingChange={() => undefined}
       sendKeys={() => undefined}
       header={header()}
+      promptCard={{ prompt: null, status: "asking", answeredLabel: "" }}
+      onAnswerMenu={() => undefined}
+      onAnswerConfirm={() => undefined}
+      onSendText={() => undefined}
+      onSendKey={() => undefined}
       {...props}
     />
   );
