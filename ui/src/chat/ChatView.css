@@ -290,14 +290,12 @@
   min-width: 0;
 }
 
-/* Where the slash palette sits: above the input row, which is the positioned
-   anchor. The list styles itself; this only places it (v3 §2). */
+/* A handle for the palette, not a box. The palette pins ITSELF to the top edge
+   of `.chat-input-row` (v3 §2), so this wrapper must not become its containing
+   block — `display: contents` keeps the element addressable while leaving the
+   list anchored to the row, which is the positioned ancestor above. */
 .chat-slash {
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 100%;
-  z-index: 3;
+  display: contents;
 }
 
 .chat-input__box {
