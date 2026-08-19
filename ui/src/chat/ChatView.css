@@ -276,10 +276,11 @@
   padding: 6px 8px;
 }
 
-.chat-input__hint {
-  margin: 0 0 4px;
-  font-size: 11px;
+/* Muted: the live terminal has the keyboard. Dimmed, never disabled — the box
+   stays the escape hatch for a user who would rather type here. */
+.chat-input--muted .chat-input__box {
   color: var(--text-hint);
+  background: var(--surface-1);
 }
 
 .chat-input__box {

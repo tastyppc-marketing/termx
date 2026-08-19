@@ -76,7 +76,9 @@ async function press(
   });
 }
 
-async function mount(props: { promptActive?: boolean } = {}) {
+async function mount(
+  props: Partial<React.ComponentProps<typeof ChatInput>> = {},
+) {
   const sent: string[] = [];
   await act(async () =>
     root.render(<ChatInput sendKeys={(data) => sent.push(data)} {...props} />),
@@ -166,18 +168,53 @@ describe("ChatInput", () => {
     expect(box().value).toBe("message 1");
   });
 
-  it("stays usable while a prompt card is waiting, and says where to look", async () => {
-    const sent = await mount({ promptActive: true });
-    expect(box().disabled).toBe(false);
-    expect(container.textContent).toContain("waiting on the card above");
-    await type("something else");
-    await press("Enter");
-    await pressLands();
-    expect(sent).toEqual(["something else", "\r"]);
+  it("reroutes a leading slash to the live terminal without ever showing it", async () => {
+    let slashes = 0;
+    const sent = await mount({ onSlash: () => (slashes += 1) });
+    await type("/");
+    expect(slashes).toBe(1);
+    // The box never holds the character: claude's own menu owns it from here.
+    expect(box().value).toBe("");
+    expect(sent).toEqual([]);
   });
 
-  it("shows no hint when nothing is waiting", async () => {
+  it("only reroutes the FIRST character, never a slash inside a message", async () => {
+    let slashes = 0;
+    await mount({ onSlash: () => (slashes += 1) });
+    await type("cd ui/src");
+    expect(slashes).toBe(0);
+    expect(box().value).toBe("cd ui/src");
+  });
+
+  it("keeps a pasted command as text — only the bare slash reroutes", async () => {
+    let slashes = 0;
+    await mount({ onSlash: () => (slashes += 1) });
+    await type("/model opus");
+    expect(slashes).toBe(0);
+    expect(box().value).toBe("/model opus");
+  });
+
+  it("types a slash normally when no live terminal is offered", async () => {
     await mount();
-    expect(container.textContent).not.toContain("waiting on the card above");
+    await type("/");
+    expect(box().value).toBe("/");
+  });
+
+  it("mutes the box while the live terminal has the keyboard, without disabling it", async () => {
+    const sent = await mount({ muted: true });
+    expect(container.querySelector(".chat-input--muted")).not.toBeNull();
+    expect(box().getAttribute("aria-disabled")).toBe("true");
+    // Still the escape hatch: a user who wants to type here always can.
+    expect(box().disabled).toBe(false);
+    await type("say something anyway");
+    await press("Enter");
+    await pressLands();
+    expect(sent).toEqual(["say something anyway", "\r"]);
+  });
+
+  it("is not muted by default", async () => {
+    await mount();
+    expect(container.querySelector(".chat-input--muted")).toBeNull();
+    expect(box().getAttribute("aria-disabled")).toBeNull();
   });
 });

@@ -335,7 +335,7 @@ export function ChatView({
         />
       ) : null}
 
-      <ChatInput sendKeys={sendKeys} promptActive={cardState.prompt !== null} />
+      <ChatInput sendKeys={sendKeys} />
 
       {children}
     </section>
