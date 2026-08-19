@@ -7,12 +7,13 @@
  * the buffer, and this module reads that menu back out. One use behind at
  * worst, and no list in this repo ever needs hand-patching again.
  *
- * Three rules keep a bad screen from poisoning the cache. Rows only count
- * BELOW the input box that is visibly holding our "/" (`MENU_ANCHOR`) — output
- * that merely looks like a menu has no such box. A parse of fewer than
- * `MIN_MENU_ROWS` rows is discarded outright — that is noise, not a menu. And
- * merging is upsert-only: claude's menu scrolls, so a row that is not on
- * screen proves nothing about whether the command exists.
+ * Three rules keep a bad screen from poisoning the cache. Rows only count in
+ * the block HUGGING the input box that is visibly holding our "/"
+ * (`MENU_ANCHOR`) — output that merely looks like a menu is separated from
+ * the box by its own prose. A parse of fewer than `MIN_MENU_ROWS` rows is
+ * discarded outright — that is noise, not a menu. And merging is upsert-only:
+ * claude's menu scrolls, so a row that is not on screen proves nothing about
+ * whether the command exists.
  */
 
 import { DETECT_INTERVAL_MS, type ScheduleFn } from "./promptWatcher";
@@ -83,12 +84,20 @@ const BOX_EDGE = /^[╭╰╞╡├┤┌└╔╚┏┗│┃║]+|[│┃║�
 const BOX_ONLY = /^[\s─━═╌╍│┃║╭╮╰╯┌┐└┘╔╗╚╝┏┓┗┛├┤┬┴┼]*$/;
 
 /**
- * One menu row: `/name`, an optional argument hint or scope tag, then two or
- * more spaces and the description. The hint group is LAZY (`??`) so a
- * description that happens to contain a double space is still read whole — the
- * hint is only considered when the plain shape cannot match at all.
+ * One menu row: an optional selector glyph, `/name`, an optional argument
+ * hint or scope tag, then two or more spaces and the description. The hint
+ * group is LAZY (`??`) so a description that happens to contain a double
+ * space is still read whole — the hint is only considered when the plain
+ * shape cannot match at all.
  */
-const MENU_ROW = /^\s*\/([A-Za-z][\w:-]*)(?:\s+\S[^\s].*?)??\s{2,}(\S.*)$/;
+const MENU_ROW = /^\s*(?:[❯›▸>]\s+)?\/([A-Za-z][\w:-]*)(?:\s+\S[^\s].*?)??\s{2,}(\S.*)$/;
+
+/**
+ * Wrapped descriptions put a plain continuation line between rows, and one
+ * separator sits between the menu and the box. A run of non-row lines longer
+ * than this means the menu has ended and everything further is output.
+ */
+const MAX_ROW_GAP = 2;
 
 /** A line with its frame removed; a line that is ONLY frame reads as blank. */
 function strip(line: string): string {
@@ -109,7 +118,7 @@ const MENU_ANCHOR = /^[>❯›]\s*\/$/;
 
 /** Read claude's own command menu off the screen. `[]` = nothing trustworthy. */
 export function parseSlashMenu(visibleLines: string[]): SlashCommand[] {
-  // The LAST anchor is the live input box; anything above it is scrollback.
+  // The LAST anchor is the live input box; earlier ones are scrollback.
   let anchorIndex = -1;
   for (let index = 0; index < visibleLines.length; index += 1) {
     if (MENU_ANCHOR.test(strip(visibleLines[index] ?? ""))) {
@@ -119,13 +128,42 @@ export function parseSlashMenu(visibleLines: string[]): SlashCommand[] {
   if (anchorIndex === -1) {
     return [];
   }
+
+  // The menu HUGS the box: live capture (2026-08-19) shows claude drawing it
+  // ABOVE the box when the box sits at the bottom of a full screen, and below
+  // it when there is room. Walk both ways from the anchor, tolerating the
+  // short runs of plain lines that wrapped descriptions and separators make,
+  // and stopping once the run says the menu has ended.
+  const menuTexts: string[] = [];
+  const walkTexts = (step: number): string[] => {
+    const collected: string[] = [];
+    let gap = 0;
+    for (
+      let index = anchorIndex + step;
+      index >= 0 && index < visibleLines.length;
+      index += step
+    ) {
+      const text = strip(visibleLines[index] ?? "");
+      if (text.length === 0) {
+        continue; // frames and separators say nothing either way
+      }
+      if (MENU_ROW.test(text)) {
+        collected.push(text);
+        gap = 0;
+        continue;
+      }
+      gap += 1;
+      if (gap > MAX_ROW_GAP) {
+        break;
+      }
+    }
+    return collected;
+  };
+  menuTexts.push(...walkTexts(-1).reverse(), ...walkTexts(1));
+
   const rows: SlashCommand[] = [];
   const seen = new Set<string>();
-  for (const line of visibleLines.slice(anchorIndex + 1)) {
-    const text = strip(line ?? "");
-    if (text.length === 0) {
-      continue;
-    }
+  for (const text of menuTexts) {
     const match = MENU_ROW.exec(text);
     if (match === null) {
       continue;

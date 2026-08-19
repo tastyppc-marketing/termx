@@ -180,15 +180,49 @@ describe("parseSlashMenu", () => {
         "  /cost                  Show the cost of this session",
       ]),
     ).toEqual([]);
-    // And rows ABOVE the box are scrollback, not the menu the box opened.
-    expect(
-      parseSlashMenu([
-        "  /model                 Set the AI model for this session",
-        "  /clear                 Clear conversation history",
-        "  /cost                  Show the cost of this session",
-        "> /",
-      ]),
-    ).toEqual([]);
+  });
+
+  it("reads the menu claude draws ABOVE a bottom-of-screen box (live capture)", () => {
+    // Transcribed from a live claude on 2026-08-19: no frame, plain indented
+    // rows, wrapped descriptions, plugin scope tags, statusline below.
+    const parsed = parseSlashMenu([
+      "  To start Phase 1, give me:",
+      "  1. The symptom — exact error text / stack trace.",
+      "  /superpowers:systematic-debugging       (superpowers) Use when encountering any bug, test",
+      "                                          failure, or unexpected behavior, before proposing fixes",
+      "  /superpowers:brainstorming              (superpowers) You MUST use this before any creative work",
+      "                                          - creating features, building components, adding functio…",
+      "  /model                                  Set the AI model for this session",
+      "─────────────────────────────────────────────────────────────────────────────────────────────",
+      "❯ /",
+      "─────────────────────────────────────────────────────────────────────────────────────────────",
+      "  Opus 5 · 1M · high | chatv2-gate | 🧠 7.37 (737) | ⏳ 5h 10% · 7d 41%",
+      "  ⏵⏵ auto mode on (shift+tab to cycle)",
+    ]);
+    expect(parsed.map((command) => command.name)).toEqual([
+      "superpowers:systematic-debugging",
+      "superpowers:brainstorming",
+      "model",
+    ]);
+    expect(parsed[0]?.description).toBe(
+      "(superpowers) Use when encountering any bug, test",
+    );
+  });
+
+  it("stops collecting above the box once the menu gives way to prose", () => {
+    // Three lookalike rows in old OUTPUT, separated from the real (too-short)
+    // menu by a paragraph: the gap ends the walk before they are reached.
+    const parsed = parseSlashMenu([
+      "  /fake-one               From an answer about slash commands",
+      "  /fake-two               Also from that answer",
+      "  /fake-three             Still just output",
+      "  Those are the commands I know about — ask if you want details",
+      "  on any of them, or run one directly from the composer below.",
+      "  It is also fine to just keep chatting instead.",
+      "  /model                  Set the AI model for this session",
+      "❯ /",
+    ]);
+    expect(parsed).toEqual([]);
   });
 
   it("keeps the first row when a name is drawn twice", () => {
