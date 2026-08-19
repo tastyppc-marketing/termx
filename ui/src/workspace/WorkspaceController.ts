@@ -288,12 +288,25 @@ type ResumeWaitOutcome = "ready" | "elapsed" | "gone";
  * earlier resume of the same session was found and nothing new was created;
  * "opened" means a fresh tab now holds this resume (whether or not the
  * resume command itself was successfully typed into it — a `notice` still
- * reports that failure separately).
+ * reports that failure separately). "opened" carries the ids it created so the
+ * caller can open that pane on the boot itself (auto-reveal spec §4).
  */
 export type ResumeOutcome =
-  | { kind: "opened" }
+  | { kind: "opened"; tabId: string; sessionId: number }
   | { kind: "already-open"; tabId: string }
   | { kind: "refused" };
+
+/**
+ * One tab a resume is bound to (auto-reveal spec §4): the conversation it was
+ * resumed FROM, the tab holding it, and when the resume happened. The stamp is
+ * what makes transcript handoff safe — only a transcript written after this
+ * moment can be the file `claude --resume` continued into.
+ */
+export interface ResumedEntry {
+  readonly key: SessionKey;
+  readonly tabId: string;
+  readonly resumedAtMs: number;
+}
 
 interface ResumeWaiter {
   settle: (outcome: ResumeWaitOutcome) => void;
@@ -345,13 +358,21 @@ export class WorkspaceController {
   private folderSearchHandler: ((target: FolderSearchTarget) => void) | null = null;
   /// One-shot resume waiters keyed by the session the resume just created.
   private readonly resumeWaiters = new Map<number, ResumeWaiter>();
-  /// spec P6 dedupe: session key → the tab a successful resume opened for it.
+  /// spec P6 dedupe: session key → the tab a successful resume opened for it,
+  /// plus WHEN it opened (auto-reveal spec §4 — the stamp a transcript handoff
+  /// is judged against).
   /// An entry is only ever trusted after re-checking the tab is still live
   /// (`isTabLive`); it is also proactively dropped the moment that stops
   /// being true — see `purgeResumedTabsNotIn` (every structural mutation)
   /// and `purgeResumedTabForSession` (the exited/closed session listeners) —
   /// so a stale mapping never outlives the tab it names.
-  private readonly resumedTabs = new Map<SessionKey, string>();
+  private readonly resumedTabs = new Map<
+    SessionKey,
+    { tabId: string; resumedAtMs: number }
+  >();
+  /// The chat registers here to learn that a pane is BOOTING an agent, so it
+  /// can open on the boot rather than hiding it behind bubbles (spec §4).
+  private resumeBootListener: ((sessionId: number) => void) | null = null;
   private readonly sessions = new Map<number, SessionInfo>();
   private readonly listeners = new Set<() => void>();
   private readonly cleanups: Array<() => void> = [];
@@ -780,10 +801,10 @@ export class WorkspaceController {
     this.setNotice(null);
     const key = sessionKey(record);
     if (!options?.force) {
-      const existingTabId = this.resumedTabs.get(key);
-      if (existingTabId !== undefined) {
-        if (this.isTabLive(existingTabId)) {
-          return { kind: "already-open", tabId: existingTabId };
+      const existing = this.resumedTabs.get(key);
+      if (existing !== undefined) {
+        if (this.isTabLive(existing.tabId)) {
+          return { kind: "already-open", tabId: existing.tabId };
         }
         // Stale: the tab closed or its pane died without this map entry
         // having been proactively purged yet (e.g. a mutation this instance
@@ -827,9 +848,18 @@ export class WorkspaceController {
     // wait — so a session death mid-wait purges itself through the normal
     // onSessionExited/onSessionClosed path instead of needing a special case.
     const opened = await this.openResumedTab(created, command, (tabId) => {
-      this.resumedTabs.set(key, tabId);
+      this.rememberResumedTab(key, tabId);
     });
-    return opened ? { kind: "opened" } : { kind: "refused" };
+    // The binding written above IS the tab that opened — read it back rather
+    // than smuggling the id out of the callback.
+    const openedTabId = this.resumedTabs.get(key)?.tabId;
+    if (!opened || openedTabId === undefined) {
+      return { kind: "refused" };
+    }
+    // Only a boot that actually happened is announced: a pane whose resume was
+    // refused has nothing to reveal.
+    this.announceResumeBoot(created.id);
+    return { kind: "opened", tabId: openedTabId, sessionId: created.id };
   };
 
   /// Resume a saved session (saved-sessions spec §"Resume flow"). Two shapes:
@@ -909,12 +939,16 @@ export class WorkspaceController {
       return;
     }
 
-    await this.openResumedTab(created, command, (tabId) => {
+    const opened = await this.openResumedTab(created, command, (tabId) => {
       if (conversation) {
-        this.resumedTabs.set(sessionKey(conversation), tabId);
+        this.rememberResumedTab(sessionKey(conversation), tabId);
       }
       this.recordDaemonSession(entry, created.id);
     });
+    // A bare-shell restore types nothing, so no agent is booting in it.
+    if (opened && command !== null) {
+      this.announceResumeBoot(created.id);
+    }
   };
 
   /// One-click connect to an ssh host (ssh-sessions spec §2). Deliberately the
@@ -1024,12 +1058,49 @@ export class WorkspaceController {
   /// started or resumed through TermX. This is the strongest chat linkage
   /// there is — no directory guessing involved.
   resumedSessionKeyForTab = (tabId: string): SessionKey | null => {
-    for (const [key, boundTabId] of this.resumedTabs) {
-      if (boundTabId === tabId) {
+    for (const [key, entry] of this.resumedTabs) {
+      if (entry.tabId === tabId) {
         return key;
       }
     }
     return null;
+  };
+
+  /// Every tab a resume is currently bound to (auto-reveal spec §4). The chat
+  /// walks these against the conversations store to spot the transcript
+  /// `claude --resume` handed off to — only tabs THIS controller resumed are
+  /// ever considered, so no pane is ever handed a conversation by guesswork.
+  resumedEntries = (): readonly ResumedEntry[] =>
+    [...this.resumedTabs].map(([key, entry]) => ({
+      key,
+      tabId: entry.tabId,
+      resumedAtMs: entry.resumedAtMs,
+    }));
+
+  /// Point a resumed tab at the transcript that succeeded the one it was
+  /// resumed from. The tab and the moment of the resume are unchanged — it is
+  /// the same resume, still reading its own successor — so a second handoff in
+  /// the same pane is judged against the original resume, not against the
+  /// adoption. Unknown or unchanged keys are no-ops.
+  rebindResumedTab = (oldKey: SessionKey, newKey: SessionKey): void => {
+    if (oldKey === newKey) {
+      return;
+    }
+    const entry = this.resumedTabs.get(oldKey);
+    if (entry === undefined) {
+      return;
+    }
+    this.resumedTabs.delete(oldKey);
+    this.resumedTabs.set(newKey, entry);
+  };
+
+  /// The chat registers here to be told a pane is booting an agent (spec §4),
+  /// so the resume's `cd`, trust prompt and startup are visible instead of
+  /// hidden behind the bubbles. Null unregisters.
+  setResumeBootListener = (
+    listener: ((sessionId: number) => void) | null,
+  ): void => {
+    this.resumeBootListener = listener;
   };
 
   sessionDims = (
@@ -1556,7 +1627,7 @@ export class WorkspaceController {
     const opened = await this.openResumedTab(created, connect, (tabId) => {
       this.recordSshPane(created.id, alias);
       if (conversation) {
-        this.resumedTabs.set(sessionKey(conversation), tabId);
+        this.rememberResumedTab(sessionKey(conversation), tabId);
       }
       this.recordDaemonSession(entry, created.id);
       if (password !== null) {
@@ -1593,7 +1664,11 @@ export class WorkspaceController {
       this.attachments.sendInput?.(created.id, `${remoteCommand}\r`) ?? false;
     if (!sent) {
       this.setNotice("The resume command could not be sent to the terminal.");
+      return;
     }
+    // The remote agent is booting now. Chat is local-only for the moment, so
+    // this is inert today — but the signal belongs where the boot is.
+    this.announceResumeBoot(created.id);
   }
 
   /// Remember a pane as an ssh pane and mirror it to disk (spec §2).
@@ -1965,11 +2040,23 @@ export class WorkspaceController {
     if (this.resumedTabs.size === 0) {
       return;
     }
-    for (const [key, tabId] of this.resumedTabs) {
-      if (!layout.tabs[tabId]) {
+    for (const [key, entry] of this.resumedTabs) {
+      if (!layout.tabs[entry.tabId]) {
         this.resumedTabs.delete(key);
       }
     }
+  }
+
+  /// Bind a resumed conversation to the tab now holding it, stamped with the
+  /// moment of the resume (spec §4). Every resume path goes through here so
+  /// the stamp can never be forgotten by one of them.
+  private rememberResumedTab(key: SessionKey, tabId: string): void {
+    this.resumedTabs.set(key, { tabId, resumedAtMs: Date.now() });
+  }
+
+  /// Tell whoever is listening that `sessionId` is booting an agent.
+  private announceResumeBoot(sessionId: number): void {
+    this.resumeBootListener?.(sessionId);
   }
 
   /// Pane death (spec P6): `sessionId` just went dead or was forgotten by the
@@ -1982,12 +2069,12 @@ export class WorkspaceController {
       return;
     }
     const layout = this.store.getState();
-    for (const [key, tabId] of this.resumedTabs) {
-      const tab = layout.tabs[tabId];
+    for (const [key, entry] of this.resumedTabs) {
+      const tab = layout.tabs[entry.tabId];
       if (!tab || !sessionIdsInTab(tab).includes(sessionId)) {
         continue;
       }
-      if (!this.isTabLive(tabId)) {
+      if (!this.isTabLive(entry.tabId)) {
         this.resumedTabs.delete(key);
       }
     }

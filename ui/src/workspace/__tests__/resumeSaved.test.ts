@@ -16,6 +16,7 @@ import { createLayoutStore } from "../../state/store";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../../settings/settings";
 import type { DirExists } from "../../conversations/resume";
 import { RESUME_PROMPT_TIMEOUT_MS } from "../../conversations/resume";
+import type { LlmSessionRecord } from "../../conversations/types";
 import type { SavedProvider, SavedSession } from "../../saved/types";
 import {
   WorkspaceController,
@@ -453,5 +454,161 @@ describe("WorkspaceController.resumeSaved refusals", () => {
 
     expect(h.createSession).not.toHaveBeenCalled();
     expect(h.notice()).toBe("That session cannot be resumed: its id is not valid.");
+  });
+});
+
+/**
+ * What a resume hands the chat (auto-reveal spec §4): which tab and session it
+ * created, WHEN it happened (so a transcript written afterwards can be
+ * recognised as the successor), and a boot signal the pane can open its dock
+ * on. Same map that already deduped resumes — it just carries more now.
+ */
+const RESUMED_AT = 1_700_000_000_000;
+
+function conversation(overrides: Partial<LlmSessionRecord> = {}): LlmSessionRecord {
+  return {
+    provider: "claude",
+    id: CLAUDE_ID,
+    title: "Daemon work",
+    cwd: "C:\\Dev\\TermX",
+    filePath: `C:\\Users\\me\\.claude\\projects\\C--Dev-TermX\\${CLAUDE_ID}.jsonl`,
+    updatedAtMs: 1000,
+    summary: null,
+    recap: null,
+    ...overrides,
+  };
+}
+
+/** Drive `resumeSession` through its prompt-ready report. */
+async function resumeSessionAndSettle(h: ReturnType<typeof harness>) {
+  const done = h.controller.resumeSession(conversation());
+  await settleMicrotasks();
+  const sessionId = h.createdSessionIds.at(-1);
+  if (sessionId !== undefined) {
+    h.controller.reportSessionCwd(sessionId, "C:\\Dev\\TermX", true);
+  }
+  return done;
+}
+
+describe("WorkspaceController resume bindings (auto-reveal spec §4)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(RESUMED_AT);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reports the tab and session it created in the outcome", async () => {
+    const h = harness();
+
+    const outcome = await resumeSessionAndSettle(h);
+
+    expect(outcome).toEqual({
+      kind: "opened",
+      tabId: h.tabIds()[0],
+      sessionId: 50,
+    });
+  });
+
+  it("stamps every resumed tab with the moment of the resume", async () => {
+    const h = harness();
+
+    await resumeSessionAndSettle(h);
+
+    expect(h.controller.resumedEntries()).toEqual([
+      { key: `claude:${CLAUDE_ID}`, tabId: h.tabIds()[0], resumedAtMs: RESUMED_AT },
+    ]);
+  });
+
+  it("stamps a fresh restore of a saved session too", async () => {
+    const h = harness();
+
+    await resumeAndSettle(h, saved());
+
+    expect(h.controller.resumedEntries()).toEqual([
+      { key: `claude:${CLAUDE_ID}`, tabId: h.tabIds()[0], resumedAtMs: RESUMED_AT },
+    ]);
+  });
+
+  it("forgets a resumed tab once its pane dies", async () => {
+    const h = harness();
+    await resumeSessionAndSettle(h);
+
+    h.emitExit(50);
+
+    expect(h.controller.resumedEntries()).toEqual([]);
+    expect(h.controller.resumedSessionKeyForTab(h.tabIds()[0]!)).toBeNull();
+  });
+
+  it("rebinds a tab to the transcript the resume handed off to", async () => {
+    const h = harness();
+    await resumeSessionAndSettle(h);
+    const tabId = h.tabIds()[0]!;
+
+    h.controller.rebindResumedTab(`claude:${CLAUDE_ID}`, "claude:successor");
+
+    expect(h.controller.resumedEntries()).toEqual([
+      { key: "claude:successor", tabId, resumedAtMs: RESUMED_AT },
+    ]);
+    // The pane now answers with the successor, so the feed tails the new file.
+    expect(h.controller.resumedSessionKeyForTab(tabId)).toBe("claude:successor");
+  });
+
+  it("ignores a rebind of a key it never resumed, and a rebind onto itself", async () => {
+    const h = harness();
+    await resumeSessionAndSettle(h);
+    const before = h.controller.resumedEntries();
+
+    h.controller.rebindResumedTab("claude:never-resumed", "claude:successor");
+    h.controller.rebindResumedTab(`claude:${CLAUDE_ID}`, `claude:${CLAUDE_ID}`);
+
+    expect(h.controller.resumedEntries()).toEqual(before);
+  });
+
+  it("announces the booting session to the resume boot listener", async () => {
+    const h = harness();
+    const booted: number[] = [];
+    h.controller.setResumeBootListener((sessionId) => booted.push(sessionId));
+
+    await resumeSessionAndSettle(h);
+
+    expect(booted).toEqual([50]);
+  });
+
+  it("announces a saved fresh restore that carries a conversation", async () => {
+    const h = harness();
+    const booted: number[] = [];
+    h.controller.setResumeBootListener((sessionId) => booted.push(sessionId));
+
+    await resumeAndSettle(h, saved());
+
+    expect(booted).toEqual([50]);
+  });
+
+  it("stays silent for a bare-shell restore and for a refused resume", async () => {
+    const h = harness({ dirExists: async () => false });
+    const booted: number[] = [];
+    h.controller.setResumeBootListener((sessionId) => booted.push(sessionId));
+
+    // A vanished folder never opens a tab, so there is no boot to watch.
+    await h.controller.resumeSession(conversation());
+    expect(booted).toEqual([]);
+
+    const bare = harness();
+    bare.controller.setResumeBootListener((sessionId) => booted.push(sessionId));
+    await bare.controller.resumeSaved(saved({ conversation: undefined }));
+    // Nothing was typed into that shell: there is no agent booting in it.
+    expect(booted).toEqual([]);
+  });
+
+  it("survives having no boot listener at all", async () => {
+    const h = harness();
+    h.controller.setResumeBootListener(null);
+
+    await expect(resumeSessionAndSettle(h)).resolves.toMatchObject({
+      kind: "opened",
+    });
   });
 });
