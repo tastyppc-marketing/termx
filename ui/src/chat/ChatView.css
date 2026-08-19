@@ -5,9 +5,9 @@
 
 .chat-view {
   position: absolute;
-  /* The bottom edge lifts while the terminal dock is revealed (chat v2 §1):
-     the pane sets --chat-dock and the live xterm shows through underneath. */
-  inset: 0 0 var(--chat-dock, 0px) 0;
+  /* Full-bleed, always: chat mode draws no terminal pixels (v3 §0), so the
+     bottom edge has nothing to lift for. */
+  inset: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -270,9 +270,10 @@
   flex: 0 0 auto;
 }
 
-/* The input row: the box, and the one control that opens the live terminal
-   under it or puts it away again (chat v2 spec §2). */
+/* The input row. Also the anchor the slash palette hangs off (v3 §2), which
+   is why it is positioned even though nothing in it is absolute. */
 .chat-input-row {
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
@@ -282,40 +283,11 @@
   padding: 6px 8px;
 }
 
-.chat-reveal {
-  appearance: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  color: var(--text-sub);
-  font: inherit;
-  font-size: 11px;
-  padding: 2px 8px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.chat-reveal:hover {
-  color: var(--text-main);
-  background: var(--surface-3);
-}
-
-/* Reads as a caption on the dock below it, not as another button to press. */
-.chat-reveal--hide {
-  color: var(--ok);
-}
-
-/* The input box (spec §6). Enter sends; the box never disables. */
+/* The input box (spec §6). Enter sends; the box never disables, and in chat
+   mode it always owns the keyboard (v3 §6). */
 .chat-input {
   flex: 1 1 auto;
   min-width: 0;
-}
-
-/* Muted: the live terminal has the keyboard. Dimmed, never disabled — the box
-   stays the escape hatch for a user who would rather type here. */
-.chat-input--muted .chat-input__box {
-  color: var(--text-hint);
-  background: var(--surface-1);
 }
 
 .chat-input__box {

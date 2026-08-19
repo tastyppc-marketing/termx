@@ -6,16 +6,12 @@
  * is on screen — flipping views opens and closes a feed, and touches nothing
  * about the session itself.
  *
- * It also owns the two controllers that decide when that terminal SHOWS (chat
- * v2 spec §2): the prompt detector watches for claude asking something, and
- * the reveal controller turns that — plus a typed slash, a resume boot, or the
- * chevron — into the dock state the pane renders. They live here rather than
- * in the view because both need the transcript-idle signal this component
- * already tracks, and because the pane above needs the answer.
+ * It also owns the prompt controller (chat v3 spec §3): the detector needs the
+ * transcript-idle signal this component already tracks, and the cards it feeds
+ * are drawn by the view below.
  */
 
 import { useEffect, useRef, useState } from "react";
-import { SLASH } from "./ChatInput";
 import { ChatView, type ChatHeaderProps } from "./ChatView";
 import { openChatFeed, type ChatFeed } from "./feed";
 import {
@@ -23,11 +19,6 @@ import {
   type PromptController,
   type ScheduleFn,
 } from "./promptWatcher";
-import {
-  createRevealController,
-  type RevealController,
-  type RevealState,
-} from "./revealController";
 import type { ChatDensity } from "./types";
 
 /** Spec §5: the transcript counts as quiet after this long without an entry. */
@@ -48,8 +39,6 @@ export interface ChatOverlayProps {
   openFeed?: typeof openChatFeed;
   /** The pane was opened by a resume: show the boot happening (spec §4). */
   bootReveal?: boolean;
-  /** Every dock transition, for the pane that draws the dock. */
-  onRevealChange?: (state: RevealState) => void;
   /** Injected timer for both controllers (tests). */
   schedule?: ScheduleFn;
 }
@@ -65,30 +54,20 @@ export function ChatOverlay({
   terminalSnapshot,
   openFeed = openChatFeed,
   bootReveal,
-  onRevealChange,
   schedule,
 }: ChatOverlayProps) {
   const [feed, setFeed] = useState<ChatFeed | null>(null);
   const [failed, setFailed] = useState(false);
   const [idle, setIdle] = useState(true);
-  const [reveal, setReveal] = useState<RevealState>(() =>
-    bootReveal === true
-      ? { revealed: true, reason: "boot" }
-      : { revealed: false, reason: null },
-  );
-  const revealRef = useRef<RevealController | null>(null);
 
   // Everything the controllers read goes through a ref: a parent re-render
-  // hands down new callback identities, and neither controller may restart.
+  // hands down new callback identities, and no controller may restart.
   const snapshotRef = useRef(terminalSnapshot);
   snapshotRef.current = terminalSnapshot;
   const idleRef = useRef(idle);
   idleRef.current = idle;
-  const revealChangeRef = useRef(onRevealChange);
-  revealChangeRef.current = onRevealChange;
-  // Read once: a pane boots exactly one time, whatever the prop does later.
-  const bootRef = useRef(bootReveal === true);
   const hasTerminal = terminalSnapshot !== undefined;
+  void bootReveal; // A3 turns this into the boot status card (spec §4).
 
   useEffect(() => {
     let cancelled = false;
@@ -116,43 +95,7 @@ export function ChatOverlay({
     };
   }, [filePath, openFeed]);
 
-  // The dock's state machine. Built once, and it reports its own initial boot
-  // reveal through onChange during construction — which is why this lives in
-  // an effect rather than a render: the pane above is told from a safe place.
-  useEffect(() => {
-    const controller = createRevealController(
-      {
-        snapshot: () => snapshotRef.current?.() ?? [],
-        isTranscriptIdle: () => idleRef.current,
-        onChange: (state) => {
-          setReveal(state);
-          revealChangeRef.current?.(state);
-        },
-        ...(schedule ? { schedule } : {}),
-      },
-      { boot: bootRef.current },
-    );
-    revealRef.current = controller;
-    return () => {
-      controller.dispose();
-      revealRef.current = null;
-    };
-  }, [schedule]);
-
-  // A real resume announces its boot AFTER this overlay mounts: the controller
-  // only signals once the prompt arrived and the resume command was typed,
-  // while the pane linked (and the overlay mounted) the moment the tab opened.
-  // So the boot must also be honoured as a rising EDGE, not just an initial
-  // value. Reveals are sticky — a boot that already happened is a no-op.
-  useEffect(() => {
-    if (bootReveal === true) {
-      revealRef.current?.noteBoot();
-    }
-  }, [bootReveal]);
-
-  // The detector's only remaining job: notice claude asking something and open
-  // the dock so its REAL question is on screen. It never answers — the cards
-  // are retired (spec §6), so its write path is a no-op by construction.
+  // Notice claude asking something. A2 wires its state to the cards.
   useEffect(() => {
     if (!hasTerminal) {
       return; // no live terminal to read
@@ -162,17 +105,13 @@ export function ChatOverlay({
       snapshot: () => snapshotRef.current?.() ?? [],
       isIdle: () => idleRef.current,
       sendKeys: () => undefined,
-      onChange: () => {
-        if (controller?.state().prompt) {
-          revealRef.current?.notePromptDetected();
-        }
-      },
+      onChange: () => undefined,
       ...(schedule ? { schedule } : {}),
     });
     return () => controller?.dispose();
   }, [hasTerminal, schedule]);
 
-  // "Idle" means the agent has stopped writing. The dock may only close then —
+  // "Idle" means the agent has stopped writing. A card may only appear then —
   // mid-answer, the thing on screen is output, not a settled question.
   useEffect(() => {
     if (!feed) {
@@ -230,15 +169,6 @@ export function ChatOverlay({
       onShowThinkingChange={onShowThinkingChange}
       sendKeys={sendKeys}
       header={header}
-      reveal={reveal}
-      onManualReveal={() => revealRef.current?.manualToggle()}
-      onManualHide={() => revealRef.current?.manualHide()}
-      onSlash={() => {
-        // The character itself belongs to claude: it opens the real command
-        // menu in the dock, and every keystroke after it lands there too.
-        sendKeys(SLASH);
-        revealRef.current?.userTypedSlash();
-      }}
     />
   );
 }

@@ -7,9 +7,8 @@
  * box — goes through the one `sendKeys` prop, so there is exactly one place
  * where this view can produce input.
  *
- * It is presentation-only where the live-terminal dock is concerned: the
- * overlay above owns the reveal state machine and hands the answer down, and
- * this view offers the two controls that ask for a change (chat v2 spec §2).
+ * It draws no terminal pixels and offers no way to (chat v3 spec §0): the
+ * full terminal is reachable only through the header's Terminal button.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -18,7 +17,6 @@ import { ChatInput } from "./ChatInput";
 import { CHAT_DENSITIES } from "./chatDefaults";
 import { isExpandedByDefault } from "./density";
 import type { ChatFeed } from "./feed";
-import type { RevealState } from "./revealController";
 import type { ChatDensity, ChatEntry } from "./types";
 import "./ChatView.css";
 
@@ -54,14 +52,6 @@ export interface ChatViewProps {
   /** Raw PTY write. The ONLY way this view produces input. */
   sendKeys(data: string): void;
   header: ChatHeaderProps;
-  /** Whether the live terminal is showing, and what opened it. */
-  reveal: RevealState;
-  /** The chevron: the user wants the live terminal. */
-  onManualReveal(): void;
-  /** The hide strip: the user is done with it. */
-  onManualHide(): void;
-  /** "/" typed into the empty box — claude's own menu answers it. */
-  onSlash(): void;
   /** Extra rows between the feed and the bottom (the input box). */
   children?: React.ReactNode;
 }
@@ -74,10 +64,6 @@ export function ChatView({
   onShowThinkingChange,
   sendKeys,
   header,
-  reveal,
-  onManualReveal,
-  onManualHide,
-  onSlash,
   children,
 }: ChatViewProps) {
   const [, setVersion] = useState(0);
@@ -272,28 +258,7 @@ export function ChatView({
       ) : null}
 
       <div className="chat-input-row">
-        <ChatInput sendKeys={sendKeys} onSlash={onSlash} muted={reveal.revealed} />
-        {reveal.revealed ? (
-          <button
-            type="button"
-            className="chat-reveal chat-reveal--hide"
-            data-testid="chat-reveal-hide"
-            title="Put the live terminal away"
-            onClick={onManualHide}
-          >
-            live terminal is active — ▾ hide
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="chat-reveal"
-            data-testid="chat-reveal"
-            title="Open the live terminal"
-            onClick={onManualReveal}
-          >
-            ▴
-          </button>
-        )}
+        <ChatInput sendKeys={sendKeys} />
       </div>
 
       {children}
