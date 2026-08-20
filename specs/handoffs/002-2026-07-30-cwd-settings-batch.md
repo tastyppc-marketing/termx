@@ -1065,3 +1065,105 @@ Artifacts: spec `docs/superpowers/specs/2026-08-19-chat-v2-auto-reveal-design.md
 RUNNING: lane A (chat internals: revealController, idleDetector, ChatInput slash-interception, ChatView de-PromptCard, ChatOverlay owns both controllers; owns src/chat/** EXCEPT linkage.ts) and lane B (successorRecord in linkage.ts, resumedTabs→{tabId,resumedAtMs} + resumedEntries/rebindResumedTab/setResumeBootListener + outcome ids, uiState ChatPaneLink + equality-trap fix; owns linkage.ts/WorkspaceController.ts/uiState.ts) in parallel worktrees `.claude/worktrees/lane-a-chat` + `lane-b-linkage` (junctioned node_modules — sever with `cmd //c rmdir` before worktree remove!). Then lane C = MY integration (TerminalPane dock chrome/overlay sizing/focus + chat-switch to bottom-right + App wiring + App.chatResume.test.tsx) → Fable adversarial fork → build → stage → live CDP gate per spec §7.
 
 Gates baseline on main (831ea2b): vitest 1263/1263 (106 files), cargo 194, tsc clean. Michael is LIVE on the staged build (pid 77444 at last check) — do NOT spawn shared-daemon debug instances while he's working; live gate needs coordination or his restart anyway.
+
+## Delta 2026-08-19 (later) — BATCH 3 LANES ALL MERGED + LANE C INTEGRATED; adversarial fork running
+
+Lanes A+B landed and merged to main: **d5990b7** (lane B: successorRecord linkage.ts:93; resumedTabs→{tabId,resumedAtMs}; resumedEntries/rebindResumedTab/setResumeBootListener; ResumeOutcome opened gains {tabId,sessionId}; ChatPaneLink + setChatPaneState field-wise link equality) and **9c58f0f** (lane A: revealController, idleDetector/isIdleScreen, ChatInput SLASH interception + muted, ChatView/ChatOverlay rework, PromptCard retired). Worktrees removed (lane-a needed --force + rm -rf leftover; junctions severed first; main node_modules verified intact).
+
+**Lane C (mine) committed: 950ed50** —
+- TerminalPane.tsx: PaneChatProps.bootReveal; dockRevealed state ← ChatOverlay onRevealChange; mode-reset effect; focus/scroll effect (dock revealed → scroll xterm-viewport to bottom + focus helper-textarea; hidden → focus .chat-input__box); `--chat-dock` var on section root ("42%" when chat+revealed else "0px"); dock chrome element (data-testid chat-dock, caption "live · claude").
+- ChatView.css: .chat-view inset → `0 0 var(--chat-dock, 0px) 0`.
+- TerminalPane.css: .terminal-pane__dock green frame (--ok, pointer-events:none, caption tab above top edge); .terminal-pane__chat-switch moved to BOTTOM-right.
+- App.tsx: BOOT_REVEAL_TTL_MS=60s; bootSessions set fed by controller.setResumeBootListener (effect, timers cleaned); persistPaneLink(sessionId, record) stamps chatPanes[key].link (guarded hasTranscript); handleResume "opened" → persistPaneLink immediately; handoff effect on conversationsRecords: for each resumedEntries() find original by sessionKey, successorRecord(), rebindResumedTab, persist successor link under firstSessionId(tab.split); chatForSession rewritten — live resolveLinkage else stored chatPanes[key].link (STICKY: chat survives empty scans), write() re-stamps link, returns bootReveal when bootSessions.has(sessionId).
+- New tests ui/src/__tests__/App.chatResume.test.tsx (3: boot reveal + link stamp; successor rebind + repoint; sticky link on empty scan). Other 3 App harnesses gained the new controller members (setResumeBootListener etc. — App calls it unconditionally on mount).
+
+Gates on main @950ed50: tsc clean; vitest **1329/1329 (110 files)** solo. Rust untouched this batch (cargo 194 baseline stands). Test-harness gotcha hit & fixed: a fake controller getSnapshot must return a CACHED snapshot object (fresh object per call → useSyncExternalStore infinite loop).
+
+RUNNING: adversarial review fork over 8d52547..950ed50 (reveal flapping, focus stealing across display:none panes, dock/notice/chat-switch overlaps, handoff same-cwd multi-pane + re-rebind chains, StrictMode double effects, bootReveal timing vs late chat-prop mount, session-id reuse staleness, isIdleScreen vs trust prompt). NEXT: fix findings → build (foreground `npx tauri build --no-bundle` from ui/) → verify no rustc-cfg=dev → rotate dist-portable to .prev8 + restage → live CDP gate per spec §7 (Michael may be live on staged build — coordinate/his restart) → tell Michael to restart.
+
+## Delta 2026-08-19 (later 2) — PIVOT: dock REJECTED on sight; chat must be PURE chat UI
+
+Adversarial fork found 5 real defects (boot signal arriving after overlay mount so the dock never opened on a real resume; shared-cwd successor mis-adoption/ping-pong/clobber; focus stealing across panes; recycled session-id link resurrection; 30s handoff lag) — all fixed in 9c8dc56. Live CDP gate then found two more idle-detector bugs on the REAL claude chrome: the user-configurable statusline defeated the FOOTER shape-match (fixed 1b4ab57 — bounded skip, no shape matching), and claude's leftover "✻ Brewed for 2s" finished-spinner line matched the bare-✻ BUSY pattern so the dock never auto-hid (fixed ab1c8ad — "esc to interrupt" is the busy discriminator). Suite 1334/1334 (110), tsc clean. Staged pair = ab1c8ad build (Aug 19 07:14, 6149120 B; .prev8 = batch-2 pair).
+
+**Then Michael saw the running dock live and REJECTED the whole direction**: "completely unacceptable… Everything needs to live inside of the chat UI. I don't want it to be displaying the terminal… closer to Plan C than A or B." Layouts A/B/C are ALL dead — no terminal pixels in chat mode, ever. New direction: pure chat UI — own slash palette in chat, prompts/menus as interactive chat cards (PromptCard direction returns, hardened), terminal only via the explicit toggle. The batch's PLUMBING (boot signal, successor handoff, sticky links, id purge, focus guard, forced rescans) is UI-agnostic, correct, and stays. Memory `termx-blocks-ui-vision.md` updated with the hard NO.
+
+Debug instance/daemon killed, test panes dismissed, state clean. Gate conversation "Token echo test" (chatv2-gate scratch dir) still exists in his conversations list — harmless, can be ignored/deleted. AWAITING Michael's answers on slash-palette source + unparseable-TUI fallback before speccing the pure-chat rebuild.
+
+## Delta 2026-08-19 (later 3) — CHAT V3 approved and building (lanes A+B running)
+
+Michael answered the design questions: slash = MIRROR claude's list but self-healing + native-fast → hybrid (instant TermX palette from a cache that every palette-open re-learns by parsing the real claude menu; upsert-never-delete; seed list for first run). Unknown TUI screens → ONE combined card: live screen text + reply box + ↑↓ Enter Esc buttons + Open Terminal button. Then explicit approval: "Yes, build it."
+
+Artifacts: spec `docs/superpowers/specs/2026-08-19-chat-v3-pure-chat-design.md`, plan `docs/superpowers/plans/2026-08-19-chat-v3-pure-chat.md` (frozen contracts §5: slashCommands.ts API, SlashPalette props, uiState.slashCommands + setSlashCommands, new ChatInputProps with onSlashOpen/Pick/Cancel/Passthrough, ChatOverlay ± props). Main at b5e68bb.
+
+RUNNING: lane A (cards return + fallback card w/ key row + boot card + palette mount + reveal-UI removal; owns chat/* except slash files; commits lane-B contract STUBS as a separate final commit to drop at merge) in `.claude/worktrees/lane-a-cards`; lane B (slashCommands.ts + SlashPalette.tsx/css + uiState slashCommands field) in `.claude/worktrees/lane-b-palette`. Both Opus, junctioned node_modules (sever with cmd //c rmdir before worktree remove). Lane C = me after merge: TerminalPane dock removal, App wiring (slashCommands ?? SEED_COMMANDS, onCommandsLearned merge+set), integration tests, gates, adversarial review, build+stage+live CDP gate per spec §7.
+
+Note: staged dist-portable pair currently = ab1c8ad (dock build). Michael should NOT bother restarting into it; v3 replaces the chat UI wholesale.
+
+## Delta 2026-08-19 (later 4) — V3 LANES MERGED + INTEGRATED; adversarial fork running
+
+Lane B (report received): 1d19e0c slashCommands.ts, 8e24c1f SlashPalette, c80b9fa uiState field; 35 new tests. Its "pre-existing failure" exposed MY unstaged clobber-guard hunk (WorkspaceController.ts) from 9c8dc56 — committed on main as its own fix commit. Lane B frictions honored: .chat-input-row position:relative (lane A applied, 00861fc), learner reads DETECT_INTERVAL_MS inside the timer (import-cycle TDZ), parser args-hint group made lazy, uiState test file named uiStateSlashCommands.test.ts per convention.
+Lane A (idled twice without reporting — verified directly): 8f056a7 A1 reveal strip + revealController deleted, 8f46985 A2 cards return + fallback key row, 0e22c10 A3 palette mount/choreography/boot card, 7a4cd6d lane-B stubs (dropped at merge), 00861fc anchor fix. Its worktree suite: only failure = the known base guard issue; tsc errors only in TerminalPane (lane C's).
+Merges: b2959f5 (lane B), 53939c3 (lane A; add/add conflicts on slashCommands.ts/SlashPalette.tsx resolved by taking lane B's real modules). Lane C (9f37491): TerminalPane dock/state/effects/chrome fully removed, PaneChatProps + slashCommands/onCommandsLearned, App supplies cache (uiSnapshot.slashCommands ?? SEED_COMMANDS) + mergeCommands learn-writeback; TerminalPane.chat.test + App.chatResume extended.
+Gates on main: tsc clean, vitest **1379/1379 (113 files)** solo. Worktrees removed cleanly (junctions severed first), branches deleted, main node_modules verified.
+RUNNING: chat-v3 adversarial fork (double-slash paths, Escape-cancels-claude's-turn hazard, learner mis-parse pollution, palette gate stuck after pick, uiState field survival across setters, keyboard collisions). NEXT: fix findings → build → stage (.prev9) → live CDP gate per spec §7 → tell Michael to restart.
+
+## Delta 2026-08-19 (later 5) — compaction checkpoint (v3 integrated, adversary in flight)
+
+STATE AT WRAP: main = 9f37491 (v3 fully merged+integrated), tsc clean, vitest 1379/1379 (113 files) solo, cargo 194 baseline (Rust untouched all of v2+v3). Working tree has only the usual never-commit eol churn (Cargo.toml, autogenerated tomls, deriveTokens snap) + handoff edits.
+
+IN FLIGHT: **chat-v3 adversarial review fork** (a Fable fork, launched ~22:50Z) over b5e68bb^..9f37491. Its report arrives as a task notification. WHEN IT LANDS: fix confirmed findings on main (TDD, one commit; rerun tsc + full vitest SOLO from C:\Dev\TermX\ui), then:
+1. `npx tauri build --no-bundle` from C:\Dev\TermX\ui (foreground, ~4min).
+2. Verify newest fingerprint output has no rustc-cfg=dev (build/termx-ui-*/output under target/release).
+3. Stage: rotate C:\Dev\TermX\dist-portable\TermX\{TermX.exe,termx-ui.exe} to .prev9, copy new termx-ui.exe as BOTH names. (Current staged pair = ab1c8ad dock build; .prev8 = batch-2/SSH pair.)
+4. Live CDP gate per spec §7 (docs/superpowers/specs/2026-08-19-chat-v3-pure-chat-design.md): launch staged exe with env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_CODE_SSE_PORT -u CLAUDE_CODE_ENTRYPOINT (else claude disables transcript saving — cost 2 relaunches last time), WEBVIEW2_USER_DATA_FOLDER=<scratchpad>/wv2-9, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9245. CDP helpers in scratchpad: cdp-45.mjs (eval), cdp-type-45.mjs <pane-testid> "text", cdp-key-45.mjs <pane> <key> [ctrl], cdp-insert-45.mjs. Gate conversation exists: "Token echo test" in …scratchpad\chatv2-gate (marker TERMX-CHATV2-GATE-9K1). Resume flow: sidebar Conversations header → .conversation-row click → button aria-label startsWith "Resume". Gate script: boot card visible → (trust card if any) → boot card clears → chat message → bubbles → "/" → palette instant → pick /model → menu AS CARD, answer via card → uiState slashCommands grew → "/rename gate-renamed" passthrough → verify → Terminal↔Chat. ZERO terminal pixels in chat mode. CLEANUP after: kill my TermX+termx-host (Michael's aren't running unless he restarted — CHECK Get-Process TermX,termx-host paths first), dismiss my dead panes, no orphan tabs in state.
+5. Handoff delta + tell Michael to restart from C:\Dev\TermX\dist-portable\TermX\TermX.exe.
+
+STANDING v3 CONTEXT if the fork's report is lost: spec + plan in docs/superpowers/{specs,plans}/2026-08-19-chat-v3-pure-chat*. Michael's hard NO: no terminal pixels in chat, ever (memory termx-blocks-ui-vision.md). Deferred batches: window chrome (File/Edit/Options, Save all, active-pane frame, hover declutter); layout-A is DEAD (do not revive); codex/SSH chat later.
+
+## Delta 2026-08-19 (later 6) — adversarial pass DONE (6 defects fixed, 3f6e750); next = build+stage+gate
+
+The v3 adversarial review ran inline post-compaction (the fork's notification never landed; reviewed b5e68bb^..9f37491 directly). Six confirmed defects, all fixed in **3f6e750**, each with a regression test:
+1. **Palette cancel sent Esc** → now backspace `\x7f` (new `KEY_BACKSPACE` in ChatOverlay.tsx): Esc INTERRUPTS a running claude turn and arms the rewind hint idle; we only ever typed one "/", so deleting it is the whole undo. Spec §2 updated.
+2. **Stale prompt card on palette close**: while the palette is up the controller keeps publishing (claude's own slash menu reads as a menu card); pick/cancel lifted the suppression and rendered that stale card with live buttons. `closePalette()` now calls `promptRef.current?.dismiss()`; a genuine question re-detects in ~600ms. (The old ChatOverlay test at :228 PINNED the buggy instant-restore — rewritten.)
+3. **Select-all-replace during slash mode wiped the typed text** (ChatInput onChange cancel path cleared the box) → replacement text preserved.
+4. **Cache poisoning**: parseSlashMenu now requires the input-box anchor row (`> /`, regex `/^[>❯›]\s*\/$/` after frame-strip) and reads only rows BELOW the LAST anchor. Output that merely looks like a menu (claude talking about slash commands!) can no longer teach the upsert-never-delete cache. If claude ever redraws its box differently the learner degrades to seeds-only (safe) — check this if the live-gate "cache grew" step fails.
+5. **Enter during IME composition submitted** → `event.nativeEvent.isComposing` guard.
+6. **xterm's hidden textarea was Tab-reachable under the chat** (invisible raw PTY input) → surface div gets `inert` while mode==="chat"; asserted in TerminalPane.chat.test.
+
+Gates: tsc clean; vitest **1381/1381 (113 files)** solo (one ReplayHazard phantom when overlapped with the hook's run — passed solo and in the clean full run; known overlap flake).
+Accepted risks (documented, not fixed): typing/sending anything while a REAL TUI dialog is pending goes to that dialog (inherent to write-through design; the card is the visible answer route); paste of a full "/cmd args" into an empty box stays ordinary text by design.
+NEXT (unchanged from later-5, step 1 onward): build → verify no dev-cfg → stage .prev9 → live CDP gate per spec §7 → cleanup → tell Michael to restart. Staged pair is still ab1c8ad (dock) until then.
+
+## Delta 2026-08-19 (later 7) — MICHAEL LIVE-TESTED (pre-fix build); coordination state
+
+Michael restarted into the **16:06 staged pair (3f6e750 build, missing aba689e)** and reported: (1) picking /model "doesn't bring up anything at all"; (2) palette has "no access to any of the plugins, skills, agents… just all of the stock commands"; (3) general doubt stock commands execute.
+
+Diagnosis so far:
+- (1) = the paste-never-submits bug: one-chunk "model\r" reads as a paste in claude's box. FIXED in **aba689e** (Enter as its own write, ENTER_DELAY_MS later) — his build predates it (16:06 stage vs 16:18 commit).
+- (2) = learner learned NOTHING → seeds-only palette. Prime suspect is the later-6 pre-flagged risk: `MENU_ANCHOR /^[>❯›]\s*\/$/` (slashCommands.ts) may not match claude's REAL input-box row after frame-strip (ghost text / different prompt char / autocomplete inline-fill would all defeat the `$`). Secondary suspects: MENU_ROW vs real row chrome (selected-row `❯` prefix is expected-skipped; custom rows may carry "(user)"/"(plugin)" tags — hint group should fold them, unverified vs real chrome). ONLY a live CDP capture settles it — transcribed fixtures burned us twice (statusline, ✻).
+- (3) verify one stock command end-to-end at the gate.
+
+IN FLIGHT: background agent a8e2ecd70e6e4832e ("Adversarial review of chat v3", session 117ffb2e…) — it authored 3f6e750+aba689e, staged 16:06, ran the live gate that found the paste bug, and is now REBUILDING/RESTAGING the aba689e build. I sent it Michael's three findings with instructions: capture claude's real slash-menu screen over CDP, run parseSlashMenu on the exact lines, fixture + fix the parser if it fails; verify /model surfaces as a card after pick; verify one stock command end-to-end; report which commit is staged. Do NOT spawn a duplicate gate.
+
+Main state: HEAD=aba689e, tsc clean (ghost worktree diagnostics persist — ignore), last full solo vitest 1381/1381 at 3f6e750 (aba689e carried its own test updates — re-verify solo before next stage if the agent hasn't).
+
+## Delta 2026-08-19 (later 7) — V3 SHIPPED: 4 more live-gate fixes, gate PASSED end-to-end, staged 5d17f1a
+
+**Michael: restart TermX from `C:\Dev\TermX\dist-portable\TermX\TermX.exe` (staged 16:5x, commit 5d17f1a).**
+
+Michael live-tested mid-gate (via coordinator) with 3 findings; all root-caused and fixed. Live CDP gate then went through six build-fix-restage passes; full spec §7 sequence PASSED on the final binary. Commits after 3f6e750:
+- **aba689e** — pick sent "model\r" as ONE chunk → far side reads it as a PASTE, never submits (Michael's "/model does nothing"). completeCommand now splits the Enter behind ENTER_DELAY_MS like every other send path.
+- **786579a** — the learner never learned (Michael's "only stock commands"): live claude draws the menu with NO frame, plain wrapped rows, ABOVE the box on a full screen; the parser was written to lane B's framed below-the-box fixture. parseSlashMenu now walks BOTH ways from the `❯ /` anchor with a bounded gap tolerance (MAX_ROW_GAP=2, wraps + separators).
+- **3efe3ce** — MIN_MENU_ROWS 3→2: live claude on a busy screen draws as few as two MRU rows.
+- **9d22a8a + 5d17f1a** — /model picker never surfaced as a card: dialogs draw key-hint FOOTER rows below the options ("● High effort … ←/→ to adjust", "Enter to set as default · s … · Esc to cancel") WITH blank spacing rows; readOptions assumed options end the screen. Bounded, hint-shaped-only footer skip (FOOTER_SKIP=3 hints in a FOOTER_WINDOW=6 walk, blanks say nothing); verbatim 42-row live viewport capture shipped as fixtures/prompts/live-model-picker-raw.json + livePrompts.test.ts.
+
+Final gate pass (5d17f1a binary), all live-verified: resume → boot card raised+cleared → chat send → marker bubbles → "/" instant palette (39 seeds) → learner grew cache to 41 (superpowers plugin commands) → cache PERSISTED across relaunch → pick /model executes → picker surfaces as kind=menu CARD with all 5 options → answered via card click → "Answered:" chip + statusline confirms → "/rename gate-renamed" passthrough executed (banner renamed) → chat covers pane minus its 1px border, surface inert (§0, zero terminal pixels). Backspace-cancel also live-verified (box cleared, no interrupt). Gates: tsc clean, vitest **1385/1385 (114 files)** solo.
+
+**INCIDENTS to tell Michael:**
+1. **Saved default model churn**: pass-1 (my manual Enter) set default to "Opus 5 (1M context)"; Michael's own mid-gate fiddling then set it to "Fable 5"; the final gate's card answer RESTORED it to **Opus 5 (1M context)** ("saved as your default for new sessions"). If his pre-gate default was something else, one /model in any claude fixes it; the `claude` wrapper pins the model per-launch regardless.
+2. We were driving the same debug instance simultaneously ~16:14–16:26 (his /model + /superpowers:systematic-debugging tests are in the gate transcript). Nothing broke, but that's why the gate conversation ("Token echo test", now renamed **gate-renamed**) has odd turns. It's scratch — deletable.
+3. My six gate passes left ~5 more dead "powershell · chatv2-gate" tabs in workspace state (couldn't safely identify mine vs his 13 pre-existing in the DOM) — Dismiss at will.
+
+KNOWN LIMITS (by design, documented): learner is incremental (learns only rows claude actually draws — MRU menus mean plugins appear as they're used; seeds cover stock); palette during a RUNNING turn is best-effort (keys go to claude's box mid-stream); typing in chat while a real TUI dialog is pending reaches that dialog (the card is the intended answer route).
+
+NEXT: window-chrome batch (promised); codex/SSH chat; batch-2 leftovers (Link conversation picker unwired; dist-portable .prev* cleanup now through .prev9).
