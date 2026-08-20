@@ -53,14 +53,16 @@ const ASKS_FOR_INPUT = /\b(enter|type|choose|select|input|provide|name|path|pass
 const SHELL_PROMPT = /^(?:PS\s+)?(?:[A-Za-z]:[\\/].*|~.*|\/.*)?[$#>❯]\s*$/;
 
 /**
- * Dialogs draw key-hint rows UNDER their options — the live /model picker
- * ends in "● High effort (default) ←/→ to adjust" and "Enter to set as
- * default · s to use this session only · Esc to cancel". At most this many
- * are stepped over before the option run. Only rows that TALK ABOUT KEYS are
- * skipped: an unnumbered menu's own trailing options (which are unselected
- * and unmarked too) must not be eaten.
+ * Dialogs draw key-hint rows UNDER their options, with blank spacing rows
+ * between them — the live /model picker ends in "● High effort (default)
+ * ←/→ to adjust" and "Enter to set as default · s … · Esc to cancel", each
+ * on its own island. At most `FOOTER_SKIP` hint rows are stepped over inside
+ * a `FOOTER_WINDOW`-row walk before the option run. Only rows that TALK
+ * ABOUT KEYS are skipped: an unnumbered menu's own trailing options (which
+ * are unselected and unmarked too) must not be eaten.
  */
 const FOOTER_SKIP = 3;
+const FOOTER_WINDOW = 6;
 const FOOTER_HINT = /[·↑↓←→]|\b(esc|enter|tab|space|shift\+\w|ctrl\+\w)\b/i;
 
 /** Box-drawing chrome the dialogs are wrapped in. */
@@ -112,18 +114,26 @@ function readOptions(rows: Row[]): { options: PromptOption[]; selectedIndex: num
     return null;
   }
 
-  // Step over a dialog's key-hint footer to reach the options above it.
+  // Step over a dialog's key-hint footer — hints and their blank spacing
+  // rows — to reach the options above it.
   let skipped = 0;
-  while (end >= 0 && skipped < FOOTER_SKIP) {
+  for (let walked = 0; end >= 0 && walked < FOOTER_WINDOW; walked += 1) {
     const row = rows[end];
-    if (!row || row.text.length === 0) {
-      return null; // hints with nothing above them are not a menu
+    if (!row) {
+      return null;
+    }
+    if (row.text.length === 0) {
+      end -= 1;
+      continue; // spacing says nothing either way
     }
     if (NUMBERED.test(row.text) || row.selected || !FOOTER_HINT.test(row.text)) {
       break; // the run — or ordinary prose — starts here
     }
-    end -= 1;
     skipped += 1;
+    if (skipped > FOOTER_SKIP) {
+      return null; // that much chrome with no run in sight is not a menu
+    }
+    end -= 1;
   }
 
   const labels: string[] = [];
