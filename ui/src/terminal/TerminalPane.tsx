@@ -4,10 +4,6 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
-import { ChatOverlay } from "../chat/ChatOverlay";
-import type { openChatFeed } from "../chat/feed";
-import type { SlashCommand } from "../chat/slashCommands";
-import type { ChatDensity, ChatViewMode } from "../chat/types";
 import { HostClient } from "../host/client";
 import {
   xtermSearchDecorations,
@@ -66,10 +62,9 @@ export interface TerminalPresentation {
   /** Top buffer line of the current viewport. */
   viewportY(): number;
   /**
-   * The rows currently on screen, as text. This is what the chat view's prompt
-   * detector reads: a TUI prompt is never written to the transcript, but it IS
-   * on the screen. Optional so existing presentations and fakes stay valid; a
-   * presentation without it simply offers no prompt cards.
+   * The rows currently on screen, as text — a TUI prompt is never written to
+   * the transcript, but it IS on the screen. Optional so existing
+   * presentations and fakes stay valid.
    */
   visibleLines?(): string[];
   /**
@@ -78,35 +73,6 @@ export interface TerminalPresentation {
    * earlier-output bar, which is the right default for one that cannot say.
    */
   onScroll?(listener: (atTop: boolean) => void): () => void;
-}
-
-/**
- * The chat view's binding to this pane (chat-view spec §1/§2). Present ONLY
- * when the pane is linked to a recognized agent session — an unlinked pane is
- * offered no switch at all, because a switch that opens the wrong
- * conversation is worse than no switch.
- */
-export interface PaneChatProps {
-  /** Absolute path of the linked transcript. */
-  filePath: string;
-  title: string;
-  model?: string;
-  mode: ChatViewMode;
-  density: ChatDensity;
-  /** Whether reasoning rows start open (independent of `density`). */
-  showThinking: boolean;
-  onModeChange(mode: ChatViewMode): void;
-  onDensityChange(density: ChatDensity): void;
-  onShowThinkingChange(showThinking: boolean): void;
-  onOpenLinkPicker?: () => void;
-  /** The pane was opened by a resume: the chat shows the boot card (v3 §4). */
-  bootReveal?: boolean;
-  /** The cached slash-command list the palette draws from (v3 §2). */
-  slashCommands: readonly SlashCommand[];
-  /** A parse of claude's own menu; the owner merges it into the cache. */
-  onCommandsLearned(commands: SlashCommand[]): void;
-  /** Injected feed opener (tests). */
-  openFeed?: typeof openChatFeed;
 }
 
 export interface TerminalPaneDependencies {
@@ -131,7 +97,6 @@ type TerminalPaneProps =
       onOutput?: (path: string) => void;
       onConversationCaptured?: ConversationCaptureReporter;
       recordedDims?: TerminalDimensions | null;
-      chat?: PaneChatProps;
       suspended?: undefined;
       attachGeneration?: undefined;
       historyBefore?: undefined;
@@ -177,8 +142,6 @@ type TerminalPaneProps =
       historyBefore?: bigint | null;
       /** Open the spilled scrollback below `historyBefore`. */
       onLoadEarlier?: (beforeOffset: bigint) => void;
-      /** Chat view binding; absent means this pane offers no chat (spec §2). */
-      chat?: PaneChatProps;
     };
 
 type PaneState =
@@ -199,9 +162,6 @@ const defaultDependencies: TerminalPaneDependencies = {
 export function TerminalPane(props: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const presentationRef = useRef<TerminalPresentation | null>(null);
-  // The chat view writes through this; the terminal underneath never changes
-  // hands, which is what "the terminal stays mounted" actually means.
-  const bindingRef = useRef<TerminalSessionBinding | null>(null);
   const [paneState, setPaneState] = useState<PaneState>({ type: "loading" });
   const [lostScrollback, setLostScrollback] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -382,7 +342,6 @@ export function TerminalPane(props: TerminalPaneProps) {
         stopJumpListener = () =>
           window.removeEventListener("termx:jump-last-input", onJumpToLastInput);
         const activeBinding = binding;
-        bindingRef.current = activeBinding;
         stopObserving = dependencies.observeResize(element, () => {
           if (sizedToRecord && !replayFinished) {
             // Never retarget the grid mid-replay; the post-replay fit reads
@@ -428,9 +387,6 @@ export function TerminalPane(props: TerminalPaneProps) {
       attemptCleanup("resize_observer", stopObserving);
       attemptCleanup("host_error_subscription", stopHostErrors);
       attemptCleanup("terminal_attachment", () => binding?.dispose());
-      if (bindingRef.current === binding) {
-        bindingRef.current = null;
-      }
       attemptCleanup("host_client", () => ownedClient?.close());
       attemptCleanup("terminal_presentation", () => presentation.dispose());
       if (presentationRef.current === presentation) {
@@ -484,54 +440,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         }
       }}
     >
-      {/* `inert` while the chat is up: the overlay covers every pixel, but
-          xterm's hidden textarea would still be one Tab away — and a focused
-          terminal under the chat turns keystrokes into invisible PTY input. */}
-      <div
-        className="terminal-pane__surface"
-        ref={containerRef}
-        inert={props.chat?.mode === "chat" || undefined}
-      />
-
-      {/* The chat renders OVER the terminal — the surface above stays mounted
-          and attached, which is what keeps the session running and gives the
-          prompt detector and the slash learner something to read. The overlay
-          is full-bleed: chat mode never shows a terminal pixel (v3 §0). */}
-      {props.chat && props.chat.mode === "chat" ? (
-        <ChatOverlay
-          filePath={props.chat.filePath}
-          density={props.chat.density}
-          onDensityChange={props.chat.onDensityChange}
-          showThinking={props.chat.showThinking}
-          onShowThinkingChange={props.chat.onShowThinkingChange}
-          sendKeys={(data) => bindingRef.current?.sendInput(data)}
-          terminalSnapshot={() => presentationRef.current?.visibleLines?.() ?? []}
-          {...(props.chat.bootReveal ? { bootReveal: true } : {})}
-          slashCommands={props.chat.slashCommands}
-          onCommandsLearned={props.chat.onCommandsLearned}
-          header={{
-            title: props.chat.title,
-            onFlipToTerminal: () => props.chat?.onModeChange("terminal"),
-            ...(props.chat.model ? { model: props.chat.model } : {}),
-            ...(props.chat.onOpenLinkPicker
-              ? { onOpenLinkPicker: props.chat.onOpenLinkPicker }
-              : {}),
-          }}
-          {...(props.chat.openFeed ? { openFeed: props.chat.openFeed } : {})}
-        />
-      ) : null}
-
-      {props.chat && props.chat.mode === "terminal" ? (
-        <button
-          type="button"
-          className="terminal-pane__chat-switch"
-          data-testid="chat-switch"
-          title="Show this session as a chat (Ctrl+Shift+A)"
-          onClick={() => props.chat?.onModeChange("chat")}
-        >
-          Chat
-        </button>
-      ) : null}
+      <div className="terminal-pane__surface" ref={containerRef} />
 
       {/* Only at the top of the scrollback, and only when the ring has actually
           evicted something: an always-visible bar in every pane would be noise

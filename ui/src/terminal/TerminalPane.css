@@ -160,33 +160,6 @@
   pointer-events: none;
 }
 
-/* The flip into the chat view (chat-view spec §1). Only drawn when the pane is
-   linked to a recognized session, and only while the terminal is showing.
-   Bottom-right so the hover controls (close / save / split) in the top-right
-   can never cover it (chat v2 §5). */
-.terminal-pane__chat-switch {
-  position: absolute;
-  bottom: 4px;
-  right: 4px;
-  z-index: 3;
-  appearance: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  color: var(--text-sub);
-  font: inherit;
-  font-size: 11px;
-  padding: 1px 8px;
-  cursor: pointer;
-  opacity: 0.7;
-}
-
-.terminal-pane__chat-switch:hover {
-  opacity: 1;
-  color: var(--text-main);
-  background: var(--surface-3);
-}
-
 @media (prefers-reduced-motion: no-preference) {
   .terminal-search,
   .terminal-pane__loading,
