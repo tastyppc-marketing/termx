@@ -204,9 +204,20 @@ function SaveSessionForm({
           </p>
         ) : null}
 
-        <p className="save-session__conversation" data-testid="save-session-conversation">
+        {/* The two saves this button can make are not variations of each other:
+            one comes back as the conversation, the other as a terminal in a
+            folder. A pane whose chat could not be identified takes the second
+            one silently, so the line that says so is a warning, not a caption. */}
+        <p
+          className={
+            prefill.conversationLabel === null
+              ? "save-session__conversation save-session__conversation--warn"
+              : "save-session__conversation"
+          }
+          data-testid="save-session-conversation"
+        >
           {prefill.conversationLabel === null
-            ? "No conversation — restores the folder only"
+            ? "No chat detected here — this saves the folder only, and resuming it opens a terminal, not a conversation."
             : `Resumes: ${prefill.conversationLabel}`}
         </p>
 
