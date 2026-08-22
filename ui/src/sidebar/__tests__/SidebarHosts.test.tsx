@@ -293,6 +293,76 @@ describe("Sidebar hosts section", () => {
     expect(row("buildbox").querySelector("[data-testid='host-password-badge']")).toBeNull();
   });
 
+  it("leaves the header a plain label when the caller stores no collapse state", async () => {
+    const { hosts } = hostsProps();
+    await renderSidebar(hosts);
+
+    expect(container.querySelector("[data-testid='hosts-toggle']")).toBeNull();
+    expect(container.querySelector(".sidebar-hosts__label")?.textContent).toBe("Hosts");
+    expect(rows()).toHaveLength(3);
+  });
+
+  it("folds the rows away from the header button, reporting each flip", async () => {
+    const onToggleCollapsed = vi.fn();
+    const { hosts } = hostsProps({ collapsed: false, onToggleCollapsed });
+    await renderSidebar(hosts);
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      "[data-testid='hosts-toggle']",
+    )!;
+    expect(toggle.tagName).toBe("BUTTON");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.getAttribute("aria-label")).toBe("Collapse hosts");
+    expect(rows()).toHaveLength(3);
+
+    await click(toggle);
+
+    expect(onToggleCollapsed).toHaveBeenCalledTimes(1);
+    expect(onToggleCollapsed).toHaveBeenCalledWith(true);
+  });
+
+  it("hides every row while collapsed but keeps the header and its count", async () => {
+    const onToggleCollapsed = vi.fn();
+    const { hosts } = hostsProps({ collapsed: true, onToggleCollapsed });
+    await renderSidebar(hosts);
+
+    expect(container.querySelector("[data-testid='hosts-section']")).not.toBeNull();
+    expect(rows()).toHaveLength(0);
+    expect(container.querySelector(".sidebar-hosts__count")?.textContent).toBe("3");
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      "[data-testid='hosts-toggle']",
+    )!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-label")).toBe("Expand hosts");
+
+    await click(toggle);
+
+    expect(onToggleCollapsed).toHaveBeenCalledWith(false);
+  });
+
+  it("hides the empty hint too, and keeps the menu targets while collapsed", async () => {
+    const { hosts, onConnect } = hostsProps({
+      collapsed: true,
+      onToggleCollapsed: vi.fn(),
+    });
+    await renderSidebar(hosts);
+
+    expect(container.querySelector(".sidebar-hosts__empty")).toBeNull();
+
+    await openCreateMenu();
+    await click(menuItem("create-menu-host-myvps")!);
+
+    expect(onConnect).toHaveBeenCalledWith("myvps");
+  });
+
+  it("stays expanded when a collapse is stored but nothing can flip it back", async () => {
+    const { hosts } = hostsProps({ collapsed: true });
+    await renderSidebar(hosts);
+
+    expect(rows()).toHaveLength(3);
+  });
+
   it("never renders a password value anywhere in the section", async () => {
     const { hosts } = hostsProps({ withPassword: new Set(["myvps"]) });
     await renderSidebar(hosts);

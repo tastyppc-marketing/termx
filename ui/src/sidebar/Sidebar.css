@@ -266,6 +266,45 @@
   color: var(--sidebar-muted);
 }
 
+/* The fold. Button chrome is stripped back to the label row it replaces, so
+   the header reads the same collapsed or open — only the chevron turns. */
+.sidebar-hosts__header--toggle {
+  width: 100%;
+  padding-left: 0;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.sidebar-hosts__header--toggle:hover {
+  color: var(--sidebar-text);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+.sidebar-hosts__chevron {
+  display: grid;
+  width: var(--icon-button);
+  flex: 0 0 auto;
+  place-items: center;
+  transform: rotate(90deg);
+  transition: transform 130ms ease;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.sidebar-hosts__header--toggle[aria-expanded="false"] .sidebar-hosts__chevron {
+  transform: rotate(0deg);
+}
+
+/* Folded, the header is the whole section — drop the rule that would draw a
+   divider under nothing. */
+.sidebar-hosts:has(.sidebar-hosts__header--toggle[aria-expanded="false"]) {
+  padding-bottom: 0;
+}
+
 .sidebar-hosts__label {
   flex: 1 1 auto;
   font-size: 10px;
