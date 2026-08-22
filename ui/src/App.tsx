@@ -13,18 +13,7 @@ import {
 } from "./actions/registry";
 import { FeaturesDock } from "./actions/FeaturesDock";
 import { Tray } from "./actions/Tray";
-import {
-  DEFAULT_CHAT_SHOW_THINKING,
-  defaultChatDensity,
-  defaultChatViewMode,
-} from "./chat/chatDefaults";
-import { resolveLinkage, successorRecord } from "./chat/linkage";
-import {
-  SEED_COMMANDS,
-  mergeCommands,
-  type SlashCommand,
-} from "./chat/slashCommands";
-import type { ChatViewMode } from "./chat/types";
+import { resolveLinkage } from "./chat/linkage";
 import { CloseGuard } from "./close/CloseGuard";
 import { decideOnClose, type CloseDecision } from "./close/closeBehavior";
 import { ConnectionBanner } from "./connection/ConnectionBanner";
@@ -34,11 +23,7 @@ import { ConversationsFullscreen } from "./conversations/ConversationsFullscreen
 import { ConversationsRail } from "./conversations/ConversationsRail";
 import { NoteScheduler } from "./conversations/noteScheduler";
 import { SessionPalette } from "./conversations/palette/SessionPalette";
-import {
-  hasTranscript,
-  sessionKey,
-  type LlmSessionRecord,
-} from "./conversations/types";
+import type { LlmSessionRecord } from "./conversations/types";
 import { FolderSearch } from "./folders/FolderSearch";
 import { isEditableElement } from "./keyboard";
 import { tauriListDirs } from "./native/folders";
@@ -98,11 +83,8 @@ import {
   DEFAULT_SIDEBAR_WIDTH,
   UiStateStore,
   applyTrayConfigure,
-  setChatPaneState,
   setSidebarWidth,
-  setSlashCommands,
   setViewerGeometry,
-  type ChatPaneLink,
 } from "./workspace/uiState";
 import { useWorkspace } from "./workspace/useWorkspace";
 
@@ -151,22 +133,8 @@ registerAction({
 
 const NO_LIVE_OUTPUTS: readonly LiveOutputRow[] = [];
 
-/** How often the workspace rescans agent sessions for pane↔chat linkage. */
+/** How often the workspace rescans agent sessions for the conversation list. */
 const CONVERSATIONS_RESCAN_MS = 30_000;
-/**
- * How long a pane counts as "booting" after a resume (auto-reveal spec §4).
- * The flag only decides the dock's INITIAL state, so it merely has to outlive
- * the gap between the resume outcome and the pane's first chat render; a
- * minute covers a slow attach without leaving stale flags around forever.
- */
-const BOOT_REVEAL_TTL_MS = 60_000;
-/**
- * How long after a resume its transcript handoff may still be adopted
- * (auto-reveal spec §4). `claude --resume` writes the new file within seconds;
- * past this window, a "newer transcript in the same folder" is far more likely
- * to be an unrelated conversation than a late handoff.
- */
-const HANDOFF_WINDOW_MS = 5 * 60_000;
 const NO_RECORDS: readonly LlmSessionRecord[] = [];
 const emptyRecords = () => NO_RECORDS;
 const NO_SAVED: readonly SavedSession[] = [];
@@ -358,11 +326,10 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   }, [conversationsStore, settingsStore]);
   useEffect(() => () => noteScheduler?.dispose(), [noteScheduler]);
 
-  // Chat linkage needs a live session list. The rail refreshes when opened,
-  // but a pane running a freshly started agent session must gain its chat
-  // switch without the rail ever opening — so scan on mount and keep the list
-  // current while the workspace lives. Unforced scans are cheap: the Rust
-  // side skips unchanged transcripts via its mtime index.
+  // The save dialog resolves a pane's conversation from this list, so it must
+  // be current even when the rail was never opened — scan on mount and keep it
+  // fresh while the workspace lives. Unforced scans are cheap: the Rust side
+  // skips unchanged transcripts via its mtime index.
   const conversationsRecords = useSyncExternalStore(
     conversationsStore?.subscribe ?? noopSubscribe,
     conversationsStore
@@ -402,84 +369,19 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     setOutputsOpen(true);
   };
 
-  // Panes currently booting an agent (auto-reveal spec §4): the chat opens
-  // with the terminal dock revealed so the resume's `cd`, trust prompt and
-  // startup happen in plain sight. Entries expire — the flag only seeds the
-  // dock's initial state, it never re-reveals a settled pane.
-  const [bootSessions, setBootSessions] = useState<ReadonlySet<number>>(
-    () => new Set(),
-  );
-  useEffect(() => {
-    const timers: number[] = [];
-    controller.setResumeBootListener((sessionId) => {
-      setBootSessions((prev) => {
-        if (prev.has(sessionId)) {
-          return prev;
-        }
-        const next = new Set(prev);
-        next.add(sessionId);
-        return next;
-      });
-      timers.push(
-        window.setTimeout(() => {
-          setBootSessions((prev) => {
-            if (!prev.has(sessionId)) {
-              return prev;
-            }
-            const next = new Set(prev);
-            next.delete(sessionId);
-            return next;
-          });
-        }, BOOT_REVEAL_TTL_MS),
-      );
-    });
-    return () => {
-      controller.setResumeBootListener(null);
-      for (const timer of timers) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [controller]);
-
-  // Remember the conversation a pane is running (auto-reveal spec §5), so the
-  // Chat switch survives a scan hiccup that drops the live derivation.
-  const persistPaneLink = (sessionId: number, record: LlmSessionRecord) => {
-    if (!hasTranscript(record)) {
-      return; // nothing the chat could open — no link worth remembering
-    }
-    const key = String(sessionId);
-    const link: ChatPaneLink = {
-      provider: record.provider,
-      id: record.id,
-      filePath: record.filePath,
-      title: record.title,
-    };
-    uiStateStore.update((current) => {
-      const stored = current.chatPanes?.[key];
-      return setChatPaneState(current, key, {
-        mode: stored?.mode ?? defaultChatViewMode(settings),
-        density: stored?.density ?? defaultChatDensity(settings),
-        showThinking: stored?.showThinking ?? DEFAULT_CHAT_SHOW_THINKING,
-        link,
-      });
-    });
-  };
-
   // Resume with dedupe (polish P6): "already-open" raises the dialog; a
   // resume that actually opened a tab drops the full-screen overlay so the
-  // new terminal is visible. An opened resume also stamps the pane's link
-  // immediately — no waiting for the next directory scan to derive it.
+  // new terminal is visible.
   const handleResume = (record: LlmSessionRecord) => {
     void controller.resumeSession(record).then((outcome) => {
       if (outcome.kind === "already-open") {
         setAlreadyOpen({ record, tabId: outcome.tabId });
       } else if (outcome.kind === "opened") {
         setConversationsFull(false);
-        persistPaneLink(outcome.sessionId, record);
         // `claude --resume` writes its NEW transcript within seconds, but the
-        // regular rescan is 30s — long enough for a reply sent from the chat
-        // to look like it vanished. Two early forced scans catch the handoff
-        // quickly without turning the scanner into a hot loop.
+        // regular rescan is 30s — long enough for the list to still show only
+        // the conversation that was just superseded. Two early forced scans
+        // catch it without turning the scanner into a hot loop.
         for (const delayMs of [4_000, 15_000]) {
           window.setTimeout(() => {
             void conversationsStore?.refresh(true);
@@ -488,86 +390,6 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       }
     });
   };
-
-  // Transcript handoff (auto-reveal spec §4): `claude --resume` writes a NEW
-  // transcript file, so a resumed pane tailing the ORIGINAL looks dead. On
-  // each rescan, look for the successor of each resumed conversation; when one
-  // appears, rebind the resume and repoint the pane's link at it.
-  //
-  // Adoption is deliberately narrow, because a shared folder can hold OTHER
-  // live conversations that also update after the resume: each resumed tab
-  // adopts at most ONCE, only within a short window of the resume itself, and
-  // never a conversation another resumed tab already owns — without these, two
-  // transcripts updating in one folder make the link ping-pong every scan.
-  const adoptedTabsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (conversationsRecords.length === 0) {
-      return;
-    }
-    const entries = controller.resumedEntries();
-    const claimed = new Set(entries.map((entry) => entry.key));
-    for (const entry of entries) {
-      if (adoptedTabsRef.current.has(entry.tabId)) {
-        continue; // this resume already found its successor
-      }
-      if (Date.now() - entry.resumedAtMs > HANDOFF_WINDOW_MS) {
-        continue; // too old: anything "newer" now is another conversation
-      }
-      const original = conversationsRecords.find(
-        (record) => sessionKey(record) === entry.key,
-      );
-      if (!original) {
-        continue; // vanished from the scan: nothing to judge a successor by
-      }
-      const successor = successorRecord({
-        original,
-        resumedAtMs: entry.resumedAtMs,
-        candidates: conversationsRecords,
-      });
-      if (!successor) {
-        continue;
-      }
-      const newKey = sessionKey(successor);
-      if (claimed.has(newKey)) {
-        continue; // another resumed tab already owns that conversation
-      }
-      claimed.add(newKey);
-      adoptedTabsRef.current.add(entry.tabId);
-      controller.rebindResumedTab(entry.key, newKey);
-      const tab = snapshot.layout.tabs[entry.tabId];
-      const sessionId = tab ? firstSessionId(tab.split) : null;
-      if (sessionId !== null) {
-        persistPaneLink(sessionId, successor);
-      }
-    }
-    // persistPaneLink is stable in everything but the settings defaults it
-    // falls back on; the records array is the real trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationsRecords, controller]);
-
-  // Recycled session ids must not resurrect a dead pane's chat: the daemon
-  // numbers sessions from 1 each run, and `chatPanes` is keyed by that number,
-  // so after a daemon restart a brand-new shell could inherit a stale entry —
-  // and, with sticky links, open in chat mode on a conversation it never ran.
-  // Sessions present at mount keep their state (the daemon outlives the
-  // window); an id that APPEARS later was created just now, so whatever is
-  // stored under it belongs to a dead predecessor.
-  const knownSessionsRef = useRef<ReadonlySet<number> | null>(null);
-  useEffect(() => {
-    const ids = new Set(Object.keys(snapshot.paneStates).map(Number));
-    const known = knownSessionsRef.current;
-    knownSessionsRef.current = ids;
-    if (known === null) {
-      return;
-    }
-    for (const id of ids) {
-      if (!known.has(id)) {
-        uiStateStore.update((current) =>
-          setChatPaneState(current, String(id), null),
-        );
-      }
-    }
-  }, [snapshot.paneStates, uiStateStore]);
 
   // The controller routes the ask-searcher policy through this handler.
   useEffect(() => {
@@ -945,7 +767,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     }
     const cwd = controller.sessionCwd(sessionId) ?? "";
     // An SSH pane knows its host + captured conversation directly; a local
-    // pane resolves the conversation the way the chat view does.
+    // pane resolves it from its resume key, else its own directory.
     const sshInfo = controller.sshPaneInfo(sessionId);
     const conversation = sshInfo
       ? sshConversationForPane(sessionId)
@@ -1098,106 +920,6 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     setSavePrompt(null);
   };
 
-  // Chat view (chat-view spec §1/§2). A pane is offered the switch when it
-  // can be tied to a transcript: the session key a resume recorded, else the
-  // pane's own directory, else the link it was LAST known to have (auto-reveal
-  // spec §5) — a scan hiccup must not make the Chat button vanish.
-  const chatForSession = (sessionId: number, tabId: string) => {
-    const key = String(sessionId);
-    const stored = uiSnapshot.chatPanes?.[key];
-    const live =
-      conversationsRecords.length > 0
-        ? resolveLinkage({
-            explicitKey: controller.resumedSessionKeyForTab(tabId),
-            paneCwd: controller.sessionCwd(sessionId),
-            candidates: conversationsRecords,
-          })
-        : null;
-    const link: ChatPaneLink | undefined =
-      live && hasTranscript(live.record)
-        ? {
-            provider: live.record.provider,
-            id: live.record.id,
-            filePath: live.record.filePath,
-            title: live.record.title,
-          }
-        : stored?.link;
-    if (!link) {
-      return null;
-    }
-    // The stored pane state wins; otherwise the user's settings decide.
-    const mode = stored?.mode ?? defaultChatViewMode(settings);
-    const density = stored?.density ?? defaultChatDensity(settings);
-    const showThinking = stored?.showThinking ?? DEFAULT_CHAT_SHOW_THINKING;
-    // Every write re-stamps the current link, so the first interaction with a
-    // directory-derived pane is what makes its link stick (spec §5).
-    const write = (next: {
-      mode: ChatViewMode;
-      density: typeof density;
-      showThinking: boolean;
-    }) =>
-      uiStateStore.update((current) =>
-        setChatPaneState(current, key, { ...next, link }),
-      );
-    return {
-      filePath: link.filePath,
-      title: link.title,
-      mode,
-      density,
-      showThinking,
-      // The palette draws from the learned cache; first ever run gets the
-      // shipped seed. Every parse of claude's real menu merges back in (v3 §2).
-      slashCommands: uiSnapshot.slashCommands ?? SEED_COMMANDS,
-      onCommandsLearned: (learned: SlashCommand[]) =>
-        uiStateStore.update((current) =>
-          setSlashCommands(
-            current,
-            mergeCommands(current.slashCommands ?? SEED_COMMANDS, learned),
-          ),
-        ),
-      ...(bootSessions.has(sessionId) ? { bootReveal: true } : {}),
-      onModeChange: (nextMode: ChatViewMode) =>
-        write({ mode: nextMode, density, showThinking }),
-      onDensityChange: (nextDensity: typeof density) =>
-        write({ mode, density: nextDensity, showThinking }),
-      onShowThinkingChange: (nextShowThinking: boolean) =>
-        write({ mode, density, showThinking: nextShowThinking }),
-    };
-  };
-
-  // Ctrl+Shift+A flips the focused pane between the terminal and the chat.
-  // It was Ctrl+Shift+C, but that chord is COPY in every terminal (Warp,
-  // Windows Terminal, VS Code) and now belongs to the selection.
-  useEffect(() => {
-    const handleKey = (event: KeyboardEvent) => {
-      if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
-        return;
-      }
-      if (event.key.toLowerCase() !== "a") {
-        return;
-      }
-      if (isEditableElement(document.activeElement)) {
-        return;
-      }
-      const sessionId = focusedSessionId;
-      const tabId = activeTabId;
-      if (sessionId === null || tabId === null) {
-        return;
-      }
-      const chat = chatForSession(sessionId, tabId);
-      if (!chat) {
-        return; // an unlinked pane has no chat to flip to
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      chat.onModeChange(chat.mode === "chat" ? "terminal" : "chat");
-    };
-    window.addEventListener("keydown", handleKey, true);
-    return () => window.removeEventListener("keydown", handleKey, true);
-    // chatForSession closes over the current stores and ui snapshot.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusedSessionId, activeTabId, uiSnapshot, conversationsRecords, controller]);
-
   return (
     <>
       <ConnectionBanner
@@ -1277,8 +999,6 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     sleep={sleepController}
                     sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
                     {...(openHistory ? { onLoadEarlier: openHistory } : {})}
-                    chatForSession={(sessionId) =>
-                      chatForSession(sessionId, tab.id)}
                   />
                 </div>
               ))

@@ -4,7 +4,6 @@ import type { SplitDir, SplitNode } from "../state/layout";
 import { SleepingPane } from "../terminal/SleepingPane";
 import { useSleepingSessions, type SleepController } from "../terminal/sleep";
 import type {
-  PaneChatProps,
   ConversationCaptureReporter,
   PaneHostClient,
   TerminalDimensions,
@@ -80,12 +79,6 @@ export interface SplitLayoutProps {
    * backward. Absent hides the earlier-output bar entirely.
    */
   onLoadEarlier?: (sessionId: number, beforeOffset: bigint) => void;
-  /**
-   * The chat view binding for one pane (chat-view spec §1/§2). Returning null
-   * — the default — means that pane is not linked to an agent session and is
-   * offered no chat switch at all.
-   */
-  chatForSession?: (sessionId: number) => PaneChatProps | null;
 }
 
 interface DividerDrag {
@@ -127,7 +120,6 @@ export function SplitLayout({
   sleep,
   sessionDims,
   onLoadEarlier,
-  chatForSession,
 }: SplitLayoutProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [drag, setDrag] = useState<DividerDrag | null>(null);
@@ -375,10 +367,6 @@ export function SplitLayout({
                     {...(onConversationCaptured
                       ? { onConversationCaptured }
                       : {})}
-                    {...(() => {
-                      const chat = chatForSession?.(sessionId) ?? null;
-                      return chat ? { chat } : {};
-                    })()}
                   />
                 )}
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
