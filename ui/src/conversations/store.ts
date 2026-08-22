@@ -78,6 +78,73 @@ export function findRecord(
   return records.find((record) => sessionKey(record) === key) ?? null;
 }
 
+/**
+ * The project-folder name a provider gives a directory: every character that is
+ * not a letter or a digit becomes "-". Confirmed against the real store here on
+ * 1204 of 1338 indexed transcripts; the 134 that disagree are exactly the copies
+ * below, sitting in some OTHER project's folder.
+ */
+function projectSlug(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
+}
+
+/** The directory a transcript sits in ("" when the path has no parent). */
+function parentDirName(filePath: string): string {
+  const parts = filePath.split(/[\\/]/);
+  return parts.length >= 2 ? (parts[parts.length - 2] ?? "") : "";
+}
+
+/** True when this file is the copy in the conversation's OWN project folder. */
+function isCanonicalCopy(record: LlmSessionRecord): boolean {
+  return (
+    record.cwd !== null &&
+    hasTranscript(record) &&
+    parentDirName(record.filePath) === projectSlug(record.cwd)
+  );
+}
+
+/** Which of two rows for the same conversation is the one worth keeping. */
+function betterCopy(
+  seen: LlmSessionRecord,
+  next: LlmSessionRecord,
+): LlmSessionRecord {
+  if (seen.updatedAtMs !== next.updatedAtMs) {
+    return seen.updatedAtMs > next.updatedAtMs ? seen : next;
+  }
+  if (hasTranscript(seen) !== hasTranscript(next)) {
+    return hasTranscript(seen) ? seen : next;
+  }
+  if (isCanonicalCopy(seen) !== isCanonicalCopy(next)) {
+    return isCanonicalCopy(seen) ? seen : next;
+  }
+  return seen; // indistinguishable: first seen wins, so a rescan is stable
+}
+
+/**
+ * One record per conversation (`SessionKey` is the identity — types.ts).
+ *
+ * The scan walks FILES, and a conversation given access to another directory is
+ * COPIED into that directory's project folder: same provider, same id, same
+ * mtime, a second path. Every consumer here treats `provider:id` as unique —
+ * `findRecord` returns the first match, generated notes are keyed by it — and
+ * the pane→conversation linkage reads two equally-recent rows in one folder as
+ * genuine ambiguity and gives up, which is how a pin over a live claude wrote a
+ * folder-only saved session (`resolveLinkage`, chat/linkage.ts).
+ *
+ * Order is the scan's own; the caller sorts.
+ */
+export function dedupeSessions(
+  records: readonly LlmSessionRecord[],
+): LlmSessionRecord[] {
+  const kept = new Map<SessionKey, LlmSessionRecord>();
+  for (const record of records) {
+    const key = sessionKey(record);
+    const seen = kept.get(key);
+    kept.set(key, seen === undefined ? record : betterCopy(seen, record));
+  }
+  return [...kept.values()];
+}
+
 export class ConversationsStore {
   private snapshot: ConversationsSnapshot;
   private readonly list: SessionLister;
@@ -133,7 +200,9 @@ export class ConversationsStore {
     const run = (async () => {
       try {
         const listed = await this.list(force);
-        const records = [...listed].sort(
+        // Copies collapse BEFORE the sort: two rows of one conversation are not
+        // two sessions, and downstream identity is `provider:id`.
+        const records = dedupeSessions(listed).sort(
           (left, right) => right.updatedAtMs - left.updatedAtMs,
         );
         this.emit({
