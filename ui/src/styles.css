@@ -138,9 +138,10 @@ input {
   min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
-  padding: 10px;
+  /* No frame: the sidebar's right hairline and the header's bottom hairline
+     are the only chrome. Content bleeds to the window's right/bottom edge. */
+  padding: 0;
   overflow: hidden;
-  /* Glow gradient removed: separation is by hairline, not by atmosphere. */
   background: var(--bg);
 }
 
@@ -152,6 +153,17 @@ input {
   border: 1px solid var(--border);
   /* Terminal panes are square — the single biggest "less soft" lever. */
   border-radius: 0;
+}
+
+/* A lone pane wears no box at all: with the frame gone, the left and top
+   rails' own hairlines are the only chrome around the terminal. The border
+   stays on multi-pane splits, where it is the divider between panes. */
+.split-layout[data-pane-count="1"] .terminal-host {
+  border: none;
+}
+
+.split-layout[data-pane-count="1"] .split-pane {
+  padding: 0;
 }
 
 .terminal-host .xterm {
