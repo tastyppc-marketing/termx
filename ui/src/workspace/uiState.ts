@@ -104,6 +104,13 @@ export interface UiStateV1 {
    * the state of a machine that has never opened it.
    */
   readonly slashCommands?: readonly SlashCommand[];
+  /**
+   * Sidebar "Hosts" section folded away. Only `true` is ever stored: expanded
+   * is the default AND the shape of a machine that has never touched the
+   * header, so "expanded" round-trips as an absent field rather than a stored
+   * `false`.
+   */
+  readonly hostsCollapsed?: boolean;
 }
 
 export const MIN_SIDEBAR_WIDTH = 200;
@@ -354,6 +361,41 @@ function parseSlashCommands(value: unknown): readonly SlashCommand[] | undefined
 }
 
 /**
+ * Only a literal `true` is a collapse. `false` — from an older file or a hand
+ * edit — is the default state written out longhand, so it degrades to the
+ * absent field that means the same thing.
+ */
+function parseHostsCollapsed(value: unknown): boolean | undefined {
+  return value === true ? true : undefined;
+}
+
+/**
+ * Fold the Hosts section away, or open it again. Expanding DELETES the field
+ * rather than storing `false`: both mean the same thing, and the shorter one
+ * is the state a fresh machine is in. Same-ref return when nothing changed —
+ * the header is a toggle, and re-reporting what is already stored must not
+ * schedule a disk write.
+ */
+export function setHostsCollapsed(
+  state: UiStateV1,
+  collapsed: boolean,
+): UiStateV1 {
+  if (!collapsed) {
+    if (state.hostsCollapsed === undefined) {
+      return state;
+    }
+    // Spread-then-delete keeps any unrelated fields this state may carry.
+    const next: { -readonly [K in keyof UiStateV1]: UiStateV1[K] } = { ...state };
+    delete next.hostsCollapsed;
+    return next;
+  }
+  if (state.hostsCollapsed === true) {
+    return state;
+  }
+  return { ...state, hostsCollapsed: true };
+}
+
+/**
  * Store the learned command cache. Compared FIELD-WISE: every learn rebuilds
  * these objects from a fresh parse, so a reference check would schedule a disk
  * write on every sample while the palette is open. An empty list drops the
@@ -520,6 +562,7 @@ export function parseUiState(text: string | null): UiStateV1 {
   const chatPanes = parseChatPanes(record.chatPanes);
   const sshPanes = parseSshPanes(record.sshPanes);
   const slashCommands = parseSlashCommands(record.slashCommands);
+  const hostsCollapsed = parseHostsCollapsed(record.hostsCollapsed);
   return {
     scopePaths: {
       seeds: parsePathRecord(scopePathsRaw.seeds),
@@ -532,6 +575,7 @@ export function parseUiState(text: string | null): UiStateV1 {
     ...(chatPanes ? { chatPanes } : {}),
     ...(sshPanes ? { sshPanes } : {}),
     ...(slashCommands ? { slashCommands } : {}),
+    ...(hostsCollapsed ? { hostsCollapsed } : {}),
   };
 }
 

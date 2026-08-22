@@ -83,6 +83,7 @@ import {
   DEFAULT_SIDEBAR_WIDTH,
   UiStateStore,
   applyTrayConfigure,
+  setHostsCollapsed,
   setSidebarWidth,
   setViewerGeometry,
 } from "./workspace/uiState";
@@ -725,6 +726,9 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         ? { onSetPassword: (alias: string) => setPasswordAlias(alias) }
         : {}),
       withPassword,
+      collapsed: uiSnapshot.hostsCollapsed === true,
+      onToggleCollapsed: (collapsed: boolean) =>
+        uiStateStore.update((current) => setHostsCollapsed(current, collapsed)),
     };
   }, [
     sshHosts,
@@ -734,6 +738,8 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     settings.sshHostsMenu,
     settings.sshPasswordPolicy,
     controller,
+    uiSnapshot.hostsCollapsed,
+    uiStateStore,
   ]);
 
   // Flipping the "encrypt stored passwords" setting rewrites every stored

@@ -273,6 +273,59 @@ describe("WorkspaceController.connectSshHost", () => {
     expect(h.sshPanes()).toEqual({ "50": { host: "myvps" } });
   });
 
+  it("names the tab after the host that was clicked", async () => {
+    const h = harness();
+
+    await connectAndSettle(h);
+
+    // One title feeds both rails — the top tab strip and the sidebar list read
+    // the same projected tab model.
+    expect(h.controller.getSnapshot().ungroupedTabs.map((tab) => tab.title))
+      .toEqual(["ssh · myvps"]);
+    expect(h.controller.getSnapshot().layout.tabs["ssh-tab-1"]?.title)
+      .toBe("ssh · myvps");
+  });
+
+  it("keeps the host name through the launcher shell's own cwd reports", async () => {
+    const h = harness();
+
+    await connectAndSettle(h);
+    // The LOCAL launcher shell is what reports here, and its folder is
+    // meaningless to a remote session — it must not rename the tab.
+    h.controller.reportSessionCwd(50, "C:\\Users\\mjfos", true);
+
+    expect(h.controller.getSnapshot().ungroupedTabs[0]?.title).toBe("ssh · myvps");
+  });
+
+  it("lets a manual rename stand — nothing re-stamps the alias", async () => {
+    const h = harness();
+    await connectAndSettle(h);
+
+    h.controller.renameTab("ssh-tab-1", "prod box");
+    h.controller.reportSessionCwd(50, "/root", true);
+    h.controller.reportCapturedConversation(50, { provider: "claude", id: CLAUDE_ID });
+
+    expect(h.controller.getSnapshot().ungroupedTabs[0]?.title).toBe("prod box");
+  });
+
+  it("names a tab opened into a group the same way", async () => {
+    const layout = emptyLayout();
+    layout.groups["vpses"] = {
+      id: "vpses",
+      name: "VPSes",
+      collapsed: false,
+      color: null,
+      items: [],
+    };
+    layout.rootItems = [{ kind: "group", id: "vpses" }];
+    const h = harness({ layout });
+
+    await connectAndSettle(h, host({ alias: "buildbox" }), { groupId: "vpses" });
+
+    const group = h.controller.getSnapshot().groups.find((entry) => entry.id === "vpses");
+    expect(group?.tabs.map((tab) => tab.title)).toEqual(["ssh · buildbox"]);
+  });
+
   it("connects into a group when one is named", async () => {
     const layout = emptyLayout();
     layout.groups["vpses"] = {

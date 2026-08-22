@@ -997,7 +997,14 @@ export class WorkspaceController {
     await this.openResumedTab(
       created,
       command,
-      () => {
+      (tabId) => {
+        // Stamped the instant the tab exists, so the rail says which host was
+        // clicked before the connection has even been answered. This is a real
+        // rename, which is exactly why it sticks: a stamped title outranks the
+        // profile/cwd title derivation, so the local launcher shell reporting
+        // `C:\Dev` a second later cannot rewrite it — and a later rename by
+        // Michael simply replaces it, since nothing re-stamps.
+        this.renameTab(tabId, sshTabTitle(host.alias));
         this.recordSshPane(created.id, host.alias);
         if (password !== null) {
           this.watchForSshPasswordPrompt(created.id, password);
@@ -2129,6 +2136,16 @@ function subtreeGroupIdsOf(layout: LayoutV2, groupId: string): string[] {
   };
   walk(groupId);
   return out;
+}
+
+/**
+ * What a one-click ssh tab is called. Same `<what> · <which>` shape as the
+ * derived local title (`powershell · TermX`), with the alias in the slot the
+ * eye already reads as "the specific one" — the tab rail and the left rail
+ * render the same string, so naming it here names it in both.
+ */
+export function sshTabTitle(alias: string): string {
+  return `ssh · ${alias}`;
 }
 
 function derivedTitle(session: SessionInfo | undefined): string {

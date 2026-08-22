@@ -126,6 +126,17 @@ export interface SidebarHosts {
   onSetPassword?(alias: string): void;
   /** Aliases that currently have a stored password (badge + "Change password…"). */
   withPassword?: ReadonlySet<string>;
+  /**
+   * Section folded away, header only. Absent = expanded, which is also what a
+   * caller that does not persist the state gets.
+   */
+  collapsed?: boolean;
+  /**
+   * Reports the header's new state. Absent leaves the header a plain label —
+   * the same bargain `onResize` strikes for the width handle: a state nobody
+   * stores is not a state the sidebar offers to change.
+   */
+  onToggleCollapsed?(collapsed: boolean): void;
 }
 
 export interface SidebarProps {
@@ -1094,21 +1105,49 @@ export function Sidebar({
   /// Like Saved: the section stays while the setting is on even with nothing in
   /// it, because the hint is how a user with no parseable ssh config finds out
   /// where hosts would have come from.
-  const hostsSection = hosts?.enabled ? (
-    <section className="sidebar-hosts" data-testid="hosts-section" aria-label="SSH hosts">
+  const hostsSection = hosts?.enabled ? (() => {
+    const toggle = hosts.onToggleCollapsed;
+    /// Collapsed only counts when the caller can actually store the flip —
+    /// otherwise a section could fold with no way back on the next render.
+    const collapsed = toggle !== undefined && hosts.collapsed === true;
+    const header = toggle === undefined ? (
       <div className="sidebar-hosts__header">
         <span className="sidebar-hosts__label">Hosts</span>
         <span className="sidebar-hosts__count">{hosts.hosts.length}</span>
       </div>
-      {hosts.hosts.length === 0 ? (
-        <p className="sidebar-hosts__empty">
-          Hosts from your SSH config appear here.
-        </p>
-      ) : (
-        <div className="sidebar-hosts__rows">{hosts.hosts.map(renderHostRow)}</div>
-      )}
-    </section>
-  ) : null;
+    ) : (
+      /// A long inventory is most of the sidebar, so the header is the fold —
+      /// a real button, chevron and all, exactly like a tab group's toggle.
+      /// The count stays visible while folded: it is what the closed section
+      /// still has to say.
+      <button
+        type="button"
+        className="sidebar-hosts__header sidebar-hosts__header--toggle"
+        data-testid="hosts-toggle"
+        aria-expanded={!collapsed}
+        aria-label={`${collapsed ? "Expand" : "Collapse"} hosts`}
+        onClick={() => toggle(!collapsed)}
+      >
+        <span className="sidebar-hosts__chevron" aria-hidden="true">›</span>
+        <span className="sidebar-hosts__label">Hosts</span>
+        <span className="sidebar-hosts__count">{hosts.hosts.length}</span>
+      </button>
+    );
+    return (
+      <section className="sidebar-hosts" data-testid="hosts-section" aria-label="SSH hosts">
+        {header}
+        {collapsed ? null : (
+          hosts.hosts.length === 0 ? (
+            <p className="sidebar-hosts__empty">
+              Hosts from your SSH config appear here.
+            </p>
+          ) : (
+            <div className="sidebar-hosts__rows">{hosts.hosts.map(renderHostRow)}</div>
+          )
+        )}
+      </section>
+    );
+  })() : null;
 
   /// Containers the item may move into, minus the one it already sits in —
   /// the menu twin of the drag eligibility set, each with the append index for
