@@ -1219,3 +1219,21 @@ Shipped in **f93378e** (staged, prior pair → .prev11, production fingerprint v
    OPEN: title bars render on EVERY pane including a lone one (he said "each pane"). If he finds it wasteful on a single pane, gate it on `rects.panes.length > 1` — one line in SplitLayout.
 
 STILL OPEN from the triage (docs/superpowers/specs/2026-08-22-adversarial-sweep-triage.md), now higher stakes because he is full-time: P0s 1-5 — saved-resume reattach never verifies the agent (his saved row is still broken; he must delete + re-pin), ssh "never" policy doesn't stop stored passwords, daemon-restart zombie panes (the dead-pane pileup), cmd-profile connect broken, password watcher armed over the local shell after a failed connect.
+
+## Delta 2026-08-23 (later 5) — PASTE + VOICE-TO-TEXT FIXED, confirmed live by Michael
+
+**e42e493** (`ui/src/terminal/clipboardBindings.ts` new, `TerminalPane.tsx` slimmed, `__tests__/clipboardBindings.test.ts` new). tsc clean; vitest **1422/1422 / 117 files** (run solo).
+
+**Root cause, two independent holes:**
+1. **Paste.** WebView2 never delivers the paste command to the page. Verified live over CDP: helper textarea focused, `readOnly:false`, `disabled:false`, IS `document.activeElement` — and a native Ctrl+V fires **NO `paste` event and NO `input` event**. xterm registers `handlePasteEvent` on both `this.textarea` and `this.element`, but neither ever fires, so xterm's paste handler could not run. `navigator.clipboard.readText()` DOES work (permission `"granted"`, `isSecureContext:true`, origin `http://tauri.localhost`) — only the keystroke was missing. Fix: answer the chords ourselves (Ctrl+V / Ctrl+Shift+V / Shift+Insert, plus right-click) via `attachCustomKeyEventHandler`, reading the clipboard directly.
+2. **Voice typing / dictation.** xterm's `_inputEvent(e)` forwards ONLY when `e.data && "insertText"===e.inputType && ...` — every other inputType is dropped silently. Windows Voice Typing delivers `insertReplacementText`. Fix: forward exactly the four injected kinds (`insertReplacementText`, `insertFromPaste`, `insertFromDrop`, `insertFromYank`) off the helper textarea's `input` event, never `insertText` (xterm handles that one — forwarding it would double-send).
+
+**`terminal.paste()`, NEVER a raw PTY write.** It honours bracketed-paste mode; a raw write would make a multi-line paste EXECUTE every line in a shell. Do not "simplify" this later.
+
+**VERIFICATION LESSON — cost an hour, do not repeat.** My CDP probe reported `PASTE REACHED TERMINAL: NO ❌` on a build that was in fact correct. Cause: `navigator.clipboard.readText()` **requires the document to be focused**, and a probe window launched in the background has `document.hasFocus() === false`, so readText rejects with `NotAllowedError: Document is not focused`. **A background CDP window can never verify a clipboard path.** Also: CDP synthetic keys cannot trigger native editor commands, so a negative from `Input.dispatchKeyEvent` proves nothing either. Michael confirmed both paste and V2T work in the real window.
+
+**Running instance:** only ONE TermX.exe is alive (PID 4060, webview 43308) — it is the instance I launched from the staged 05:22 build with `--remote-debugging-port=9246` and a scratchpad `WEBVIEW2_USER_DATA_FOLDER`, and Michael is now working in it. **Left running deliberately.** It costs him nothing: `grep -rn localStorage ui/src` returns NOTHING — all state (layout, settings, sessions, saved rows) persists through termx-host to `%APPDATA%\TermX`, not the webview profile. The only artifacts are a loopback debug port and a temp profile dir, both gone on his next normal relaunch of `C:\Dev\TermX\dist-portable\TermX\TermX.exe`.
+
+**Staged pair is at .prev12; the staged exe (05:22) predates e42e493 but is behaviourally identical** — e42e493 is a pure extraction of the same wiring plus tests. Next build can restage whenever the design batch lands; no urgency.
+
+STILL OPEN, unchanged: the five P0s in docs/superpowers/specs/2026-08-22-adversarial-sweep-triage.md, the Direction B implementation batch, and the collab synthesis agent (Michael's "pile everything together" pass over the 8 product studies — plan-only, brainstorm→spec first).
