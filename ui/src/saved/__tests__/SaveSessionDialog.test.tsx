@@ -148,11 +148,31 @@ describe("SaveSessionDialog", () => {
     ).toBe("Resumes: Parser work (claude)");
   });
 
-  it("says a bare-shell save restores the folder only", async () => {
+  // The one place a save can silently become something else than the user
+  // thinks: no conversation was detected, so the pin stores a FOLDER, and the
+  // resume opens a terminal instead of the chat. That has to read as a warning,
+  // not as a caption — it is the difference between the two things the button
+  // can do.
+  it("warns, in the dialog's warning voice, that a bare-shell save resumes no chat", async () => {
     await render({ prefill: prefill({ conversationLabel: null }) });
-    expect(
-      container.querySelector("[data-testid='save-session-conversation']")?.textContent,
-    ).toBe("No conversation — restores the folder only");
+
+    const line = container.querySelector<HTMLElement>(
+      "[data-testid='save-session-conversation']",
+    );
+    expect(line?.textContent).toBe(
+      "No chat detected here — this saves the folder only, and resuming it opens a terminal, not a conversation.",
+    );
+    expect(line?.className).toContain("save-session__conversation--warn");
+  });
+
+  it("keeps the conversation line plain when there is a chat to resume", async () => {
+    await render({ prefill: prefill({ conversationLabel: "Parser work (claude)" }) });
+
+    const line = container.querySelector<HTMLElement>(
+      "[data-testid='save-session-conversation']",
+    );
+    expect(line?.textContent).toBe("Resumes: Parser work (claude)");
+    expect(line?.className).not.toContain("--warn");
   });
 
   it("autofocuses the name field with its text selected", async () => {

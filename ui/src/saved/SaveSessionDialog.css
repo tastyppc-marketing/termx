@@ -83,6 +83,14 @@
   overflow-wrap: anywhere;
 }
 
+/* A save that will NOT bring a conversation back reads in the warning colour,
+   with a rule beside it so it separates from the quiet lines around it. */
+.save-session__conversation--warn {
+  color: var(--warn);
+  padding-left: 8px;
+  border-left: 2px solid var(--warn);
+}
+
 .save-session__note {
   margin: 0 0 4px;
   color: var(--text-sub);
