@@ -15,6 +15,7 @@ const REQUEST_CONTEXTS = new Set([
   "set_layout",
   "get_state",
   "read_history",
+  "probe_session",
 ]);
 
 /** One backward page of spilled scrollback. */
@@ -27,7 +28,8 @@ type ReplyType =
   | "sessions"
   | "layout_saved"
   | "state"
-  | "history";
+  | "history"
+  | "session_probe";
 
 export interface HostClientConnectOptions {
   port: number;
@@ -43,6 +45,12 @@ export interface CreateSessionOptions {
   /** Inject the shell's OSC 9;9 cwd-reporting prompt hook. Omitted means ON,
    * matching the host's wire default. */
   shellIntegration?: boolean;
+}
+
+/** Answer to probeSession: is the session alive, and is its shell occupied? */
+export interface SessionProbe {
+  alive: boolean;
+  busy: boolean;
 }
 
 export interface HostState {
@@ -296,6 +304,26 @@ export class HostClient {
           throw new Error("unreachable reply type");
         }
         return { layout: message.layout, sessions: message.sessions };
+      },
+    );
+  }
+
+  /**
+   * Is this session alive, and is anything running inside its shell? A daemon
+   * that predates the message answers Error{context:"parse"}, which rejects
+   * this promise — callers treat that exactly like "busy" and reattach.
+   */
+  probeSession(sessionId: number): Promise<SessionProbe> {
+    assertSessionId(sessionId);
+    return this.request(
+      { type: "probe_session", session_id: sessionId },
+      "probe_session",
+      "session_probe",
+      (message) => {
+        if (message.type !== "session_probe") {
+          throw new Error("unreachable reply type");
+        }
+        return { alive: message.alive, busy: message.busy };
       },
     );
   }
@@ -632,6 +660,7 @@ export class HostClient {
       case "layout_saved":
       case "state":
       case "history":
+      case "session_probe":
         this.receiveReply(message);
         return;
       case "session_closed":
@@ -678,6 +707,18 @@ export class HostClient {
         this.activeAttach,
         new Error(`Host request failed (attach): ${this.redact(message)}`),
       );
+      return;
+    }
+
+    // A parse error is the daemon saying "I could not read what you just
+    // sent" — and the only unsolicited text frames are queued requests, so an
+    // active request is what it could not read. An OLDER daemon answers every
+    // message it postdates this way; without this branch that request would
+    // hang the sequential queue forever.
+    if (active && context === "parse") {
+      this.activeRequest = null;
+      active.reject(new Error(`Host request failed (${active.context}): ${this.redact(message)}`));
+      this.pumpRequests();
       return;
     }
 
@@ -927,6 +968,13 @@ function parseHostMessage(text: string): HostMsg {
         start_offset: safeUnsignedField(value, "start_offset"),
         data_b64: stringField(value, "data_b64"),
         at_start: booleanField(value, "at_start"),
+      };
+    case "session_probe":
+      return {
+        type: value.type,
+        session_id: u32Field(value, "session_id"),
+        alive: booleanField(value, "alive"),
+        busy: booleanField(value, "busy"),
       };
     case "error":
       return {

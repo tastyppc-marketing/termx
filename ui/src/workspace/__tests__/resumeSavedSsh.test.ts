@@ -97,6 +97,9 @@ function harness(options: {
   layout?: LayoutV2;
   hosts?: readonly SshHost[] | null;
   passwords?: Record<string, string>;
+  /** The daemon's busy-probe answer. Omitted = a client without the method
+   * (an older daemon), whose verdict must fall back to reattach. */
+  probe?: { alive: boolean; busy: boolean };
 } = {}) {
   const exitListeners = new Set<
     (event: { sessionId: number; exitCode: number | null }) => void
@@ -135,6 +138,9 @@ function harness(options: {
     },
     onSessionClosed: () => () => undefined,
     onError: () => () => undefined,
+    ...(options.probe
+      ? { probeSession: vi.fn(async () => options.probe!) }
+      : {}),
   };
 
   const persistence: WorkspacePersistence = {
@@ -439,6 +445,8 @@ describe("WorkspaceController.resumeSaved over ssh refusals", () => {
     expect(h.notice()).toBe("That session cannot be resumed: its id is not valid.");
   });
 
+  // No `probe` option: an older daemon's client has no probeSession, and the
+  // verdict falls back to reattach-and-type-nothing.
   it("reattaches to a live daemon session without connecting again", async () => {
     const h = harness({
       sessions: [session(7, { cwd: REMOTE_CWD })],
@@ -452,6 +460,48 @@ describe("WorkspaceController.resumeSaved over ssh refusals", () => {
     expect(h.byAlias).not.toHaveBeenCalled();
     expect(h.writes).toEqual([]);
     expect(h.notice()).toBeNull();
+  });
+
+  it("reattaches when the probe says the pane is busy — ssh is still running", async () => {
+    const h = harness({
+      sessions: [session(7, { cwd: REMOTE_CWD })],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: { alive: true, busy: true },
+    });
+
+    await h.controller.resumeSaved(savedSsh({ lastDaemonSessionId: 7 }));
+
+    expect(h.activeTabId()).toBe("existing-tab");
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.writes).toEqual([]);
+  });
+
+  it("reconnects fresh when the probe says the pane is idle — ssh has exited", async () => {
+    // The recorded session is alive but nothing runs inside it: the ssh that
+    // made it remote is gone, and what is left is a LOCAL shell. Typing the
+    // remote resume there would run `claude --resume` on the wrong machine
+    // (triage P0 #1) — the verdict must route through the ssh restore instead.
+    const h = harness({
+      sessions: [session(7, { cwd: REMOTE_CWD })],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: { alive: true, busy: false },
+    });
+
+    const done = h.controller.resumeSaved(savedSsh({ lastDaemonSessionId: 7 }));
+    await settleMicrotasks();
+    // Drive the fresh launcher shell (session 50) through its local prompt,
+    // then the remote one, exactly as the plain restore tests do.
+    h.controller.reportSessionCwd(50, "C:\\Users\\mjfos", true);
+    await settleMicrotasks();
+    h.controller.reportSessionCwd(50, REMOTE_CWD, true);
+    await done;
+
+    // A fresh LOCAL launcher shell was created for the reconnect, and nothing
+    // was typed into the idle pane (session 7).
+    expect(h.createSession).toHaveBeenCalledTimes(1);
+    expect(h.byAlias).toHaveBeenCalledWith("myvps");
+    expect(h.writes.length).toBeGreaterThan(0);
+    expect(h.writes.every(([sessionId]) => sessionId !== 7)).toBe(true);
   });
 
   it("reports a local shell that could not be created", async () => {

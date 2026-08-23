@@ -151,6 +151,48 @@ impl Drop for ProcessIdentity {
     }
 }
 
+/// Does this process have any live descendants? The saved-resume flow asks
+/// this to tell "the agent is still sitting in that shell" apart from "the
+/// shell is idle at its prompt" (adversarial triage P0 #1): a shell with a
+/// child — claude, ssh, an editor — must be reattached untouched, while an
+/// idle one can safely be typed into.
+///
+/// Toolhelp parent links are pids, and pids recycle, so a stale link can name
+/// a dead parent. That only ever inflates the answer — and every failure path
+/// here answers `true` on purpose: "busy" makes the caller reattach and type
+/// nothing, which is exactly today's behavior. The probe must never claim an
+/// occupied shell is idle.
+fn pid_has_descendants(root: u32) -> bool {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return true;
+    }
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while ok {
+        children
+            .entry(entry.th32ParentProcessID)
+            .or_default()
+            .push(entry.th32ProcessID);
+        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe {
+        windows_sys::Win32::Foundation::CloseHandle(snapshot);
+    }
+    // The shell's DIRECT children answer the question — one level is enough,
+    // because a descendant implies a child. (Pid 0 is the idle process, whose
+    // "children" row would otherwise make everything look busy.)
+    root != 0 && !children.get(&root).map(Vec::is_empty).unwrap_or(true)
+}
+
 fn evaluate_kill_results(
     tree_kill: Option<std::result::Result<bool, String>>,
     direct_kill: std::result::Result<(), String>,
@@ -584,6 +626,16 @@ impl Session {
     /// OS pid of the shell process (None if the platform didn't report one).
     pub fn pid(&self) -> Option<u32> {
         self.child_pid
+    }
+
+    /// True when something is running INSIDE the shell — an agent, an ssh, an
+    /// editor. Unknown always answers busy: the caller's safe move is to
+    /// reattach and type nothing.
+    pub fn has_child_processes(&self) -> bool {
+        match self.child_pid {
+            Some(pid) => pid_has_descendants(pid),
+            None => true,
+        }
     }
 
     pub fn exited(&self) -> ExitState {
@@ -1020,6 +1072,39 @@ mod tests {
             .output()
             .expect("tasklist");
         String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    /// The property the saved-resume probe stands on: an idle shell reports
+    /// no children, and a shell with something running inside it reports busy.
+    /// If a bare cmd under ConPTY ever carries a permanent child, the probe
+    /// silently degrades to always-busy (= always reattach), and this test is
+    /// the tripwire that says so.
+    #[test]
+    fn busy_probe_tells_an_idle_shell_from_an_occupied_one() {
+        let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
+        let profile = profiles::resolve("cmd", false).unwrap();
+        let s = Session::spawn(&profile, None, 80, 25, 1024 * 1024).unwrap();
+        // Idle: wait out shell startup, which may hold transient children.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while s.has_child_processes() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "an idle shell never reported zero children — the probe design is void"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        // Occupied: a long-running child must flip the answer.
+        s.write_input(b"ping -n 60 127.0.0.1 >nul\r\n").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !s.has_child_processes() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a shell running ping never reported busy"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        s.kill();
+        assert!(s.wait_exit_blocking(Duration::from_secs(15)));
     }
 
     #[test]

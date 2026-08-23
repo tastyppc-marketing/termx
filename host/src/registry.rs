@@ -289,6 +289,25 @@ impl Registry {
         infos
     }
 
+    /// Point-in-time answer for ClientMsg::ProbeSession: is this session
+    /// alive, and is anything running inside its shell? Unknown ids are
+    /// `(false, false)` — a vanished session is a normal answer, not an error.
+    pub fn probe(&self, id: SessionId) -> (bool, bool) {
+        let session = {
+            let entries = self.entries.lock().unwrap();
+            match entries.get(&id) {
+                Some(entry) => Arc::clone(&entry.session),
+                None => return (false, false),
+            }
+        };
+        // The busy check walks the OS process snapshot — do it OUTSIDE the
+        // entries lock so a slow snapshot never stalls create/close/list.
+        let alive =
+            !self.shutting_down.load(Ordering::SeqCst) && session.exited().is_none();
+        let busy = alive && session.has_child_processes();
+        (alive, busy)
+    }
+
     /// Returns the persist result so callers can tell the client whether the
     /// layout is actually durable (a silent persist failure here would lose
     /// the user's tab/group arrangement on the next restart).

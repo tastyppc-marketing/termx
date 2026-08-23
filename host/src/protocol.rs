@@ -66,6 +66,12 @@ pub enum ClientMsg {
         max_bytes: u32,
     },
     ListSessions,
+    /// Ask whether a live session's shell has anything running inside it.
+    /// The saved-resume flow uses the answer to choose between reattaching
+    /// untouched and typing a resume command into the idle shell.
+    ProbeSession {
+        session_id: SessionId,
+    },
     SetLayout {
         layout: serde_json::Value,
     },
@@ -109,6 +115,15 @@ pub enum HostMsg {
     },
     Sessions {
         sessions: Vec<SessionInfo>,
+    },
+    /// Reply to ProbeSession. An unknown or dead session is `alive: false`,
+    /// never an error. `busy` errs toward true: a probe that cannot see the
+    /// process tree reports an occupied shell, because the caller's safe move
+    /// is to reattach and type nothing.
+    SessionProbe {
+        session_id: SessionId,
+        alive: bool,
+        busy: bool,
     },
     /// Ack that SetLayout was applied AND durably persisted; persist failures
     /// come back as Error{context:"set_layout"} instead of silence.

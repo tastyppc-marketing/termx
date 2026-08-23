@@ -655,6 +655,18 @@ async fn handle_conn(
                         };
                         send_ctl(&out_tx, &reply).await;
                     }
+                    ClientMsg::ProbeSession { session_id } => {
+                        let (alive, busy) = registry.probe(session_id);
+                        send_ctl(
+                            &out_tx,
+                            &HostMsg::SessionProbe {
+                                session_id,
+                                alive,
+                                busy,
+                            },
+                        )
+                        .await;
+                    }
                     ClientMsg::ListSessions => {
                         send_ctl(
                             &out_tx,

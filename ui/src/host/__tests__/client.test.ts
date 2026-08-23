@@ -973,3 +973,50 @@ describe("HostClient scrollback history", () => {
     await expect(reading).resolves.toMatchObject({ startOffset: 0n, atStart: true });
   });
 });
+
+describe("HostClient session probe", () => {
+  it("asks the host and decodes its answer", async () => {
+    const { client, socket } = await connect();
+
+    const probing = client.probeSession(7);
+    await flushPromises();
+    expect(sentJson(socket).at(-1)).toEqual({
+      type: "probe_session",
+      session_id: 7,
+    });
+
+    socket.receiveJson({
+      type: "session_probe",
+      session_id: 7,
+      alive: true,
+      busy: false,
+    });
+
+    await expect(probing).resolves.toEqual({ alive: true, busy: false });
+  });
+
+  it("turns an old daemon's parse error into a rejection, not a hung queue", async () => {
+    // A daemon that predates probe_session answers Error{context:"parse"}.
+    // Without the parse branch that error matched nothing, the active request
+    // never settled, and every later request queued behind it forever.
+    const { client, socket } = await connect();
+
+    const probing = client.probeSession(7);
+    await flushPromises();
+    socket.receiveJson({
+      type: "error",
+      context: "parse",
+      message: "unknown variant `probe_session`",
+    });
+
+    await expect(probing).rejects.toThrow(/probe_session/);
+
+    // The queue must keep flowing: the NEXT request still gets sent and
+    // answered normally.
+    const sessions = client.listSessions();
+    await flushPromises();
+    expect(sentJson(socket).at(-1)?.type).toBe("list_sessions");
+    socket.receiveJson({ type: "sessions", sessions: [SESSION] });
+    await expect(sessions).resolves.toEqual([SESSION]);
+  });
+});

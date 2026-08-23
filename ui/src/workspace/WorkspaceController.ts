@@ -78,7 +78,15 @@ export type WorkspaceHostClient = Pick<
   | "onSessionExited"
   | "onSessionClosed"
   | "onError"
->;
+> & {
+  /**
+   * Is anything running inside the session's shell? Optional so existing
+   * fakes keep type-checking; absent — or rejected, which is what an older
+   * daemon's parse error becomes — reads as "busy", and busy means reattach
+   * and type nothing, the pre-probe behavior.
+   */
+  probeSession?(sessionId: number): Promise<{ alive: boolean; busy: boolean }>;
+};
 
 export interface WorkspaceAttachmentHub {
   getSnapshot(): AttachmentHubSnapshot;
@@ -322,6 +330,15 @@ interface ResumeWaiter {
 }
 
 /** True for a rooted Unix path — i.e. a report from the REMOTE shell (§2). */
+/** Compare directories the way the chat linkage does: case- and slash-blind,
+ * trailing separators ignored. The saved-resume verdict uses this to decide
+ * whether an idle shell is still standing in the saved folder. */
+function sameFolder(a: string, b: string): boolean {
+  const normalize = (path: string): string =>
+    path.trim().replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  return normalize(a) === normalize(b);
+}
+
 function isRemoteCwd(path: string): boolean {
   return path.startsWith("/");
 }
@@ -401,6 +418,12 @@ export class WorkspaceController {
       onSessionExited: (listener) => rawClient.onSessionExited(listener),
       onSessionClosed: (listener) => rawClient.onSessionClosed(listener),
       onError: (listener) => rawClient.onError(listener),
+      // Optional members must be forwarded as optional: a wrapper that grew a
+      // probeSession the raw client lacks would claim a capability the daemon
+      // does not have.
+      ...(rawClient.probeSession
+        ? { probeSession: (sessionId: number) => rawClient.probeSession!(sessionId) }
+        : {}),
     };
     this.store = options.store;
     this.persistence = options.persistence;
@@ -862,15 +885,66 @@ export class WorkspaceController {
     return { kind: "opened", tabId: openedTabId, sessionId: created.id };
   };
 
-  /// Resume a saved session (saved-sessions spec §"Resume flow"). Two shapes:
+  /// What should clicking an alive saved row do? Decided by the daemon's
+  /// busy probe (triage P0 #1):
+  ///   - a bare-shell save, a busy shell, or an unanswerable probe (old
+  ///     daemon, error) -> "reattach": type NOTHING into a shell that may
+  ///     have an agent in it;
+  ///   - idle in the saved folder -> "resume_in_place";
+  ///   - idle anywhere else -> "restore_fresh" (a saved session IS its
+  ///     folder). An ssh save's cwd is remote, so an idle local shell can
+  ///     never match it — idle ssh saves always restore fresh, through the
+  ///     ssh path.
+  private async aliveSaveVerdict(
+    entry: SavedSession,
+    sessionId: number,
+  ): Promise<"reattach" | "resume_in_place" | "restore_fresh"> {
+    if (!entry.conversation && !entry.ssh) {
+      return "reattach"; // a bare shell IS the thing that was saved
+    }
+    const probe = this.client.probeSession;
+    if (!probe) {
+      return "reattach";
+    }
+    let busy: boolean;
+    try {
+      const result = await probe.call(this.client, sessionId);
+      if (!result.alive) {
+        return "restore_fresh"; // died between the snapshot and the probe
+      }
+      busy = result.busy;
+    } catch {
+      return "reattach"; // an unanswerable probe must never type
+    }
+    if (busy) {
+      return "reattach";
+    }
+    if (entry.ssh) {
+      return "restore_fresh";
+    }
+    const shellCwd = this.sessionCwd(sessionId);
+    return shellCwd !== null && sameFolder(shellCwd, entry.cwd)
+      ? "resume_in_place"
+      : "restore_fresh";
+  }
+
+  /// Resume a saved session (saved-sessions spec §"Resume flow"). Three shapes:
   ///
-  /// 1. REATTACH. The daemon still runs the terminal the save came from, so
-  ///    the saved session is already alive: focus the tab that holds it, or
-  ///    open a tab onto it when the layout has none. Nothing is created and
-  ///    NOTHING is typed — the agent is still sitting in that shell.
-  /// 2. FRESH RESTORE. A new shell in the saved folder, then the provider's
+  /// 1. REATTACH. The daemon still runs the terminal the save came from AND
+  ///    something is still running inside that shell (the probe says busy, or
+  ///    cannot say — an old daemon, a failed probe — or the save is a bare
+  ///    shell): focus the tab that holds it, or open a tab onto it when the
+  ///    layout has none. Nothing is created and NOTHING is typed.
+  /// 2. RESUME IN PLACE. The saved shell is alive but IDLE at its prompt, in
+  ///    the saved folder, and the save carries a conversation: the resume
+  ///    command is typed into that same shell. This is the everyday case the
+  ///    old reattach got wrong — quit claude, come back later, click the row,
+  ///    and "reattach" used to deliver a silent empty shell (triage P0 #1).
+  /// 3. FRESH RESTORE. A new shell in the saved folder, then the provider's
   ///    resume command once the prompt reports (a bare-shell save types
   ///    nothing at all, and does not wait for a prompt it has no use for).
+  ///    Also where an idle-but-wandered shell lands: a saved session IS its
+  ///    folder, so a shell that has cd'd elsewhere no longer counts as it.
   ///
   /// A saved session IS its folder — claude conversations are keyed to their
   /// project directory and the user pinned this one deliberately — so a
@@ -884,22 +958,55 @@ export class WorkspaceController {
       recordedSessionId !== undefined &&
       this.sessions.get(recordedSessionId)?.alive === true
     ) {
-      const existingTabId = this.tabHoldingSession(recordedSessionId);
-      if (existingTabId !== null) {
-        this.activateTab(existingTabId);
-      } else {
-        // Alive but tabless: the session outlived its tab (a merge, a
-        // dismissed layout, a restore that dropped it). Give it a tab back
-        // rather than starting a second shell beside it.
-        try {
-          await this.addSessionTab(this.sessions.get(recordedSessionId)!, null);
-        } catch {
-          this.setNotice("The saved session could not be reopened.");
-          return;
+      const verdict = await this.aliveSaveVerdict(entry, recordedSessionId);
+      if (verdict !== "restore_fresh") {
+        const existingTabId = this.tabHoldingSession(recordedSessionId);
+        if (existingTabId !== null) {
+          this.activateTab(existingTabId);
+        } else {
+          // Alive but tabless: the session outlived its tab (a merge, a
+          // dismissed layout, a restore that dropped it). Give it a tab back
+          // rather than starting a second shell beside it.
+          try {
+            await this.addSessionTab(
+              this.sessions.get(recordedSessionId)!,
+              null,
+            );
+          } catch {
+            this.setNotice("The saved session could not be reopened.");
+            return;
+          }
         }
+        if (verdict === "resume_in_place") {
+          // The shell is idle at its prompt in the saved folder — no prompt
+          // wait is needed or possible (its report already happened).
+          const command = resumeCommand(entry.conversation!);
+          if (command === null) {
+            this.setNotice(
+              "That session cannot be resumed: its id is not valid.",
+            );
+            return;
+          }
+          const sent =
+            this.attachments.sendInput?.(recordedSessionId, command + "\r") ??
+            false;
+          if (!sent) {
+            this.setNotice(
+              "The resume command could not be sent to the terminal.",
+            );
+            return;
+          }
+          const tabId = this.tabHoldingSession(recordedSessionId);
+          if (tabId !== null) {
+            this.rememberResumedTab(sessionKey(entry.conversation!), tabId);
+          }
+          this.announceResumeBoot(recordedSessionId);
+        }
+        this.recordDaemonSession(entry, recordedSessionId);
+        return;
       }
-      this.recordDaemonSession(entry, recordedSessionId);
-      return;
+      // restore_fresh falls through: the saved shell is idle but standing in
+      // the wrong folder, so it no longer counts as the saved session.
     }
 
     // The command is built from the provider and id ALONE, and only after

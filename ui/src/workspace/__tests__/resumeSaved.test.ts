@@ -80,6 +80,9 @@ function harness(options: {
   sessions?: readonly SessionInfo[];
   layout?: LayoutV2;
   createSession?: (cwd: string | null) => Promise<SessionInfo>;
+  /** The daemon's busy-probe answer. Omitted = a client without the method
+   * (an older daemon), "reject" = the probe call fails. */
+  probe?: { alive: boolean; busy: boolean } | "reject";
 } = {}) {
   const exitListeners = new Set<
     (event: { sessionId: number; exitCode: number | null }) => void
@@ -110,6 +113,15 @@ function harness(options: {
     },
   );
 
+  const probeSession =
+    options.probe === undefined
+      ? undefined
+      : vi.fn(async (_sessionId: number) => {
+          if (options.probe === "reject") {
+            throw new Error("Host request failed (probe_session): parse");
+          }
+          return options.probe!;
+        });
   const client: WorkspaceHostClient = {
     createSession,
     closeSession: vi.fn(async () => undefined),
@@ -119,6 +131,7 @@ function harness(options: {
     },
     onSessionClosed: () => () => undefined,
     onError: () => () => undefined,
+    ...(probeSession ? { probeSession } : {}),
   };
 
   const persistence: WorkspacePersistence = {
@@ -171,6 +184,7 @@ function harness(options: {
     createdCwds,
     createdSessionIds,
     dirExists,
+    probeSession,
     touchDaemonSession,
     writes,
     notice: () => controller.getSnapshot().notice,
@@ -199,6 +213,132 @@ async function resumeAndSettle(
   return done;
 }
 
+/**
+ * The probe verdicts (adversarial triage P0 #1). The old reattach treated
+ * "shell still alive" as "conversation still there" and delivered a silent
+ * empty pane whenever claude had exited. With the daemon's busy probe the
+ * controller now tells the two apart — and every path that cannot KNOW the
+ * shell is idle must reattach and type nothing.
+ */
+describe("WorkspaceController.resumeSaved probe verdicts", () => {
+  it("reattaches untouched when the probe says the shell is busy", async () => {
+    const h = harness({
+      sessions: [session(7)],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: { alive: true, busy: true },
+    });
+
+    await h.controller.resumeSaved(saved({ lastDaemonSessionId: 7 }));
+
+    expect(h.activeTabId()).toBe("existing-tab");
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.writes).toEqual([]);
+    expect(h.notice()).toBeNull();
+  });
+
+  it("types the resume command into an idle shell standing in the saved folder", async () => {
+    const h = harness({
+      sessions: [session(7)],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: { alive: true, busy: false },
+    });
+
+    await h.controller.resumeSaved(saved({ lastDaemonSessionId: 7 }));
+
+    expect(h.activeTabId()).toBe("existing-tab");
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.writes).toEqual([[7, `claude --resume ${CLAUDE_ID}\r`]]);
+    expect(h.notice()).toBeNull();
+  });
+
+  it("compares folders case- and slash-blind before typing in place", async () => {
+    const h = harness({
+      sessions: [session(7, { cwd: "c:/dev/termx/" })],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: { alive: true, busy: false },
+    });
+
+    await h.controller.resumeSaved(saved({ lastDaemonSessionId: 7 }));
+
+    expect(h.writes).toEqual([[7, `claude --resume ${CLAUDE_ID}\r`]]);
+    expect(h.createSession).not.toHaveBeenCalled();
+  });
+
+  it("restores fresh when the idle shell has wandered out of the saved folder", async () => {
+    const h = harness({
+      sessions: [session(7, { cwd: "C:\\Users\\mjfos" })],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: { alive: true, busy: false },
+    });
+    const entry = saved({ lastDaemonSessionId: 7 });
+
+    await resumeAndSettle(h, entry);
+
+    // A NEW shell in the saved folder gets the command; the wandered shell is
+    // left exactly as it stands.
+    expect(h.createdCwds).toEqual(["C:\\Dev\\TermX"]);
+    expect(h.writes).toEqual([[50, `claude --resume ${CLAUDE_ID}\r`]]);
+    expect(h.touchDaemonSession).toHaveBeenCalledWith("saved-1", 50);
+  });
+
+  it("restores fresh when the shell's folder was never reported", async () => {
+    const h = harness({
+      sessions: [session(7, { cwd: null })],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: { alive: true, busy: false },
+    });
+    const entry = saved({ lastDaemonSessionId: 7 });
+
+    await resumeAndSettle(h, entry);
+
+    expect(h.createdCwds).toEqual(["C:\\Dev\\TermX"]);
+    expect(h.writes).toEqual([[50, `claude --resume ${CLAUDE_ID}\r`]]);
+  });
+
+  it("reattaches untouched when the probe itself fails", async () => {
+    const h = harness({
+      sessions: [session(7)],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: "reject",
+    });
+
+    await h.controller.resumeSaved(saved({ lastDaemonSessionId: 7 }));
+
+    expect(h.activeTabId()).toBe("existing-tab");
+    expect(h.createSession).not.toHaveBeenCalled();
+    expect(h.writes).toEqual([]);
+  });
+
+  it("restores fresh when the probe reports the session died mid-click", async () => {
+    const h = harness({
+      sessions: [session(7)],
+      probe: { alive: false, busy: false },
+    });
+    const entry = saved({ lastDaemonSessionId: 7 });
+
+    await resumeAndSettle(h, entry);
+
+    expect(h.createdCwds).toEqual(["C:\\Dev\\TermX"]);
+    expect(h.writes).toEqual([[50, `claude --resume ${CLAUDE_ID}\r`]]);
+  });
+
+  it("never probes a bare-shell save — the shell IS the thing that was saved", async () => {
+    const h = harness({
+      sessions: [session(7)],
+      layout: layoutWithTab("existing-tab", 7),
+      probe: { alive: true, busy: false },
+    });
+
+    await h.controller.resumeSaved(
+      saved({ lastDaemonSessionId: 7, conversation: undefined }),
+    );
+
+    expect(h.probeSession).not.toHaveBeenCalled();
+    expect(h.writes).toEqual([]);
+    expect(h.activeTabId()).toBe("existing-tab");
+  });
+});
+
 describe("WorkspaceController.resumeSaved reattach", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -208,6 +348,8 @@ describe("WorkspaceController.resumeSaved reattach", () => {
     vi.useRealTimers();
   });
 
+  // No `probe` option: this harness models an OLDER daemon, whose client has
+  // no probeSession — the verdict must fall back to reattach-and-type-nothing.
   it("activates the tab that already holds the live daemon session, creating nothing", async () => {
     const h = harness({
       sessions: [session(7)],

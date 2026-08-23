@@ -32,6 +32,10 @@ export type ClientMsg =
   | { type: "resize"; session_id: number; cols: number; rows: number }
   | { type: "close_session"; session_id: number }
   | { type: "list_sessions" }
+  /** Is this session alive, and is anything running inside its shell? The
+   * saved-resume flow chooses between reattach and type-in-place on the
+   * answer. */
+  | { type: "probe_session"; session_id: number }
   | { type: "set_layout"; layout: JsonValue }
   | { type: "get_state" }
   /** Page backward through the spilled scrollback: the newest `max_bytes` that
@@ -61,6 +65,10 @@ export type HostMsg =
   }
   | { type: "session_closed"; session_id: number }
   | { type: "sessions"; sessions: SessionInfo[] }
+  /** `busy` errs toward true: a probe that cannot see the process tree
+   * reports an occupied shell, because the caller's safe move is to reattach
+   * and type nothing. */
+  | { type: "session_probe"; session_id: number; alive: boolean; busy: boolean }
   | { type: "layout_saved" }
   | { type: "state"; layout: JsonValue; sessions: SessionInfo[] }
   /** `at_start` means this slice reaches the oldest byte the host still has —
