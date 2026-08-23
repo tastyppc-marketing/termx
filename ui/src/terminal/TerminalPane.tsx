@@ -159,6 +159,14 @@ const defaultDependencies: TerminalPaneDependencies = {
   activateLink: activateTerminalLink,
 };
 
+/**
+ * How long the lost-scrollback notice stays up. It reports an EVENT — output
+ * older than the ring buffer was dropped — so it must clear itself: a
+ * permanent overlay in the pane's bottom-left corner sits exactly where a
+ * full-screen TUI draws its status line (Michael, 2026-08-22).
+ */
+export const NOTICE_TTL_MS = 6_000;
+
 export function TerminalPane(props: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const presentationRef = useRef<TerminalPresentation | null>(null);
@@ -173,6 +181,16 @@ export function TerminalPane(props: TerminalPaneProps) {
   // effect (which would tear down and remount the whole terminal).
   const onCwdRef = useRef(props.onCwd);
   onCwdRef.current = props.onCwd;
+
+  // The notice is a moment, not a mode: it retires on its own so the terminal
+  // underneath — status line included — is never permanently covered.
+  useEffect(() => {
+    if (!lostScrollback) {
+      return;
+    }
+    const handle = setTimeout(() => setLostScrollback(false), NOTICE_TTL_MS);
+    return () => clearTimeout(handle);
+  }, [lostScrollback]);
   const onOutputRef = useRef(props.onOutput);
   onOutputRef.current = props.onOutput;
   const onCaptureRef = useRef(props.onConversationCaptured);

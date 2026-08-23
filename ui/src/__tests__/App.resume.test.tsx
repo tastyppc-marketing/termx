@@ -162,6 +162,7 @@ function harness(options: { outcome: ResumeOutcome }): Harness {
     mergeTabs: vi.fn(),
     popOutPane: vi.fn(),
     sessionDims: vi.fn(() => ({})),
+    paneTitles: vi.fn(() => ({})),
     sessionCwd: vi.fn(() => CWD),
     resumeSession,
     resumedSessionKeyForTab: vi.fn(() => null),

@@ -1004,6 +1004,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     visible={tab.id === activeTabId}
                     sleep={sleepController}
                     sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
+                    paneTitles={controller.paneTitles(sessionIdsInSplit(tab.split))}
                     {...(openHistory ? { onLoadEarlier: openHistory } : {})}
                   />
                 </div>

@@ -98,6 +98,21 @@
   border-color: var(--accent-40);
 }
 
+/* The scrollback notice belongs at the TOP, where the buffer actually ran out
+   — the same logic that anchors the load-earlier bar there. It must never sit
+   bottom-left: that is where a full-screen TUI draws its status line, and a
+   notice parked there hides the one row the user needs (Michael, 2026-08-22). */
+.terminal-pane__notice {
+  top: 8px;
+  bottom: auto;
+}
+
+/* When the load-earlier bar is up it owns the top edge; the notice steps below
+   it rather than stacking on top of it. */
+.terminal-pane__load-earlier ~ .terminal-pane__notice {
+  top: 33px;
+}
+
 .terminal-pane__notice {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 32%, var(--bg));

@@ -9,10 +9,49 @@
 
 .split-pane {
   position: absolute;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   padding: 2px;
   overflow: hidden;
+}
+
+/* Panes in a split all sit under one tab title, so the tab cannot say which
+   is which. Each pane names itself instead — profile plus the folder it is
+   standing in (Michael, 2026-08-22). Thin by design: this is chrome bought
+   with terminal rows. */
+.split-pane__title {
+  flex: 0 0 auto;
+  overflow: hidden;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-sub);
+  background: var(--bg);
+  font-size: 11px;
+  line-height: 23px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+/* The focused pane says so in its own title bar — one signal, in the place
+   the eye is already reading, instead of a ring around the content. */
+.split-pane--focused > .split-pane__title {
+  color: var(--text-main);
+  border-top: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  line-height: 21px;
+}
+
+/* The terminal takes the rest. `height: 100%` would measure the whole pane
+   and push the title bar off the top. */
+.split-pane > .terminal-pane,
+.split-pane > .sleeping-pane,
+.split-pane > .dead-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
 }
 
 .split-pane--focused::after {

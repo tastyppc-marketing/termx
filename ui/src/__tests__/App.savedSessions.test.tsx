@@ -169,6 +169,7 @@ function harness(options: HarnessOptions = {}) {
     resumeSession: vi.fn(async () => undefined),
     resumeSaved: vi.fn(async () => undefined),
     sessionDims: vi.fn(() => ({})),
+    paneTitles: vi.fn(() => ({})),
     sessionCwd: vi.fn(() => PANE_CWD),
     resumedSessionKeyForTab: vi.fn(() => null),
     resumedEntries: vi.fn(() => []),

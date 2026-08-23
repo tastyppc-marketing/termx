@@ -79,6 +79,12 @@ export interface SplitLayoutProps {
    * backward. Absent hides the earlier-output bar entirely.
    */
   onLoadEarlier?: (sessionId: number, beforeOffset: bigint) => void;
+  /**
+   * Display name per pane for the pane title bars. Panes in a split share one
+   * tab title, so the tab cannot tell them apart; absent titles simply render
+   * no bar.
+   */
+  paneTitles?: Readonly<Record<number, string>>;
 }
 
 interface DividerDrag {
@@ -120,6 +126,7 @@ export function SplitLayout({
   sleep,
   sessionDims,
   onLoadEarlier,
+  paneTitles,
 }: SplitLayoutProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [drag, setDrag] = useState<DividerDrag | null>(null);
@@ -341,6 +348,15 @@ export function SplitLayout({
           >
             {state.status === "live" ? (
               <>
+                {paneTitles?.[sessionId] ? (
+                  <div
+                    className="split-pane__title"
+                    data-testid={`split-pane-title-${sessionId}`}
+                    title={paneTitles[sessionId]}
+                  >
+                    {paneTitles[sessionId]}
+                  </div>
+                ) : null}
                 {sleepingSessions.has(sessionId) ? (
                   // Presentation + attachment released by unmounting the pane;
                   // the host session itself keeps running untouched.

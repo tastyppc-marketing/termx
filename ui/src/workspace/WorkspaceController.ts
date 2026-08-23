@@ -1061,6 +1061,20 @@ export class WorkspaceController {
   sessionCwd = (sessionId: number): string | null =>
     this.sessions.get(sessionId)?.cwd ?? null;
 
+  /// A display name per pane, for the split view's own title bars. Panes in a
+  /// split all sit under one tab title, so the tab's name cannot tell them
+  /// apart — this names each by what it actually IS (profile plus the folder
+  /// it is standing in), which is the same derivation an unnamed tab uses.
+  paneTitles = (
+    sessionIds: readonly number[],
+  ): Readonly<Record<number, string>> => {
+    const titles: Record<number, string> = {};
+    for (const sessionId of sessionIds) {
+      titles[sessionId] = derivedTitle(this.sessions.get(sessionId));
+    }
+    return titles;
+  };
+
   /// The session key a resume tied to this pane's tab, when the session was
   /// started or resumed through TermX. This is the strongest chat linkage
   /// there is — no directory guessing involved.

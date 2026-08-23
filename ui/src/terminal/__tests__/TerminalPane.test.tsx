@@ -11,6 +11,7 @@ import type {
 import {
   activateTerminalLink,
   PATH_LINK_REGEX,
+  NOTICE_TTL_MS,
   TerminalPane,
   type TerminalPaneDependencies,
   type TerminalPresentation,
@@ -643,5 +644,46 @@ describe("TerminalPane reconnect", () => {
     expect(container.querySelector(".terminal-pane__status--disconnected")).toBeNull();
 
     await act(async () => root.unmount());
+  });
+});
+
+describe("the lost-scrollback notice", () => {
+  /**
+   * The notice reports an EVENT — the ring buffer dropped output older than
+   * what we hold — not a standing condition. It used to be rendered forever,
+   * pinned to the bottom-left corner, which is exactly where a full-screen TUI
+   * (Claude Code) draws its status line: the one line of the app underneath
+   * that the user most needs to read (Michael, 2026-08-22).
+   */
+  it("clears itself instead of homesteading the corner a TUI needs", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = paneFixture();
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(<TerminalPane dependencies={fixture.dependencies} />);
+        await flushPromises();
+      });
+
+      await act(async () => {
+        fixture.callbacks.onLostScrollback?.({
+          expectedOffset: 0n,
+          receivedOffset: 4096n,
+        });
+      });
+      expect(container.textContent).toContain("Earlier output is no longer available");
+
+      await act(async () => {
+        vi.advanceTimersByTime(NOTICE_TTL_MS + 1);
+      });
+      expect(container.textContent).not.toContain("Earlier output is no longer available");
+
+      await act(async () => root.unmount());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
