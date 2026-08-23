@@ -12,6 +12,7 @@ import {
 } from "../theme/deriveTokens";
 import { currentThemeId, onThemeChange } from "../theme/ThemeProvider";
 import { themeById } from "../theme/themes";
+import { attachClipboardBindings } from "./clipboardBindings";
 import { InputMarks, type InputMark } from "./inputMarks";
 import {
   TerminalSessionBinding,
@@ -613,44 +614,8 @@ function createPresentation(
     throw error;
   }
 
-  // Copy is a first-class terminal action (Warp / Windows Terminal manners):
-  // Ctrl+Shift+C always copies the selection, and plain Ctrl+C copies when a
-  // selection is active INSTEAD of interrupting — with nothing selected it
-  // stays the interrupt it has always been. xterm's selection is not DOM
-  // selection, so without this there is no way to copy at all.
-  const copySelection = (): boolean => {
-    const text = terminal.getSelection();
-    if (text.length === 0) {
-      return false;
-    }
-    void navigator.clipboard?.writeText?.(text).catch(() => undefined);
-    terminal.clearSelection();
-    return true;
-  };
-  terminal.attachCustomKeyEventHandler((event) => {
-    if (
-      event.type !== "keydown" ||
-      !event.ctrlKey ||
-      event.altKey ||
-      event.metaKey ||
-      event.key.toLowerCase() !== "c"
-    ) {
-      return true;
-    }
-    if (!copySelection()) {
-      return true;
-    }
-    event.preventDefault();
-    return false;
-  });
-  // Right-click with a selection copies it too; without one the native menu
-  // stays (it is how paste is reachable by mouse).
-  const onContextMenu = (event: MouseEvent) => {
-    if (terminal.hasSelection() && copySelection()) {
-      event.preventDefault();
-    }
-  };
-  element.addEventListener("contextmenu", onContextMenu);
+  // Copy and paste both have to be wired by hand — see clipboardBindings.
+  const detachClipboard = attachClipboardBindings(terminal, element);
 
   // Read per search, not captured once: a theme switch must reach the next
   // highlight too.
@@ -688,7 +653,7 @@ function createPresentation(
     findPrevious: (query) => search.findPrevious(query, searchOptions()),
     focus: () => terminal.focus(),
     dispose: () => {
-      element.removeEventListener("contextmenu", onContextMenu);
+      detachClipboard();
       terminal.dispose();
     },
     registerInputMarker: () => {
