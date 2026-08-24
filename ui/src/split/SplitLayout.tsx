@@ -30,7 +30,10 @@ export interface SplitLayoutActions {
    * Dead-pane relaunch: "restart" reuses the dead session's profile + cwd,
    * "fresh" launches workspace defaults, both in this pane's slot.
    */
-  restartPane(paneSessionId: number, mode: "restart" | "fresh"): void | Promise<void>;
+  restartPane(paneSessionId: number, mode: "restart" | "fresh" | "resume"): void | Promise<void>;
+  /** Title of the conversation a dead pane's Resume would bring back, or
+   * null/absent for none — gates the DeadPane's Resume button. */
+  deadPaneResumeTitle?(paneSessionId: number): string | null;
   resizePane(path: number[], sizes: [number, number]): void;
   /** Spec §16: extract this pane into its own tab. Absent hides the chip. */
   popOutPane?(paneSessionId: number): void;
@@ -431,8 +434,10 @@ export function SplitLayout({
                 known={state.status === "dead"}
                 dismissing={dismissingSessionIds.has(sessionId)}
                 restarting={restartingSessionIds?.has(sessionId) ?? false}
+                resumeTitle={actions.deadPaneResumeTitle?.(sessionId) ?? null}
                 onDismiss={() => void actions.dismissPane(sessionId)}
                 onRestart={() => void actions.restartPane(sessionId, "restart")}
+                onResume={() => void actions.restartPane(sessionId, "resume")}
                 onNewSession={() => void actions.restartPane(sessionId, "fresh")}
               />
             )}

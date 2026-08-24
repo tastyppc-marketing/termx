@@ -3,8 +3,12 @@ export interface DeadPaneProps {
   known: boolean;
   dismissing: boolean;
   restarting: boolean;
+  /** Title of the conversation "Resume conversation" would bring back; null
+   * hides the button (no directory, no conversation recorded there). */
+  resumeTitle?: string | null;
   onDismiss(): void;
   onRestart(): void;
+  onResume?(): void;
   onNewSession(): void;
 }
 
@@ -18,8 +22,10 @@ export function DeadPane({
   known,
   dismissing,
   restarting,
+  resumeTitle,
   onDismiss,
   onRestart,
+  onResume,
   onNewSession,
 }: DeadPaneProps) {
   const busy = dismissing || restarting;
@@ -33,9 +39,24 @@ export function DeadPane({
           : "This terminal is no longer running."}
       </div>
       <div className="dead-pane__actions">
+        {resumeTitle && onResume ? (
+          <button
+            type="button"
+            className="dead-pane__action dead-pane__action--primary dead-pane__resume"
+            disabled={busy}
+            title={resumeTitle}
+            onClick={onResume}
+          >
+            {restarting ? "Resuming…" : "Resume conversation"}
+          </button>
+        ) : null}
         <button
           type="button"
-          className="dead-pane__action dead-pane__action--primary dead-pane__restart"
+          className={
+            resumeTitle && onResume
+              ? "dead-pane__action dead-pane__restart"
+              : "dead-pane__action dead-pane__action--primary dead-pane__restart"
+          }
           disabled={busy}
           onClick={onRestart}
         >

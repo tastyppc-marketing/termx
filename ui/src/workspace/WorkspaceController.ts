@@ -247,6 +247,15 @@ export interface WorkspaceControllerOptions {
    * exactly as it should; only the "this entry now runs session N" write-back
    * is skipped.
    */
+  /**
+   * The conversations index, for restart-with-resume on a dead pane: given a
+   * directory, the newest resumable conversation that ran there. Optional so
+   * harnesses without a conversations store keep type-checking — absent means
+   * dead panes offer a plain shell restart only.
+   */
+  conversations?: {
+    latestForCwd(cwd: string): LlmSessionRecord | null;
+  };
   savedSessions?: SavedSessionsRecorder;
   /**
    * Stored ssh passwords (ssh-sessions spec §2). Absent — or a policy that
@@ -333,7 +342,7 @@ interface ResumeWaiter {
 /** Compare directories the way the chat linkage does: case- and slash-blind,
  * trailing separators ignored. The saved-resume verdict uses this to decide
  * whether an idle shell is still standing in the saved folder. */
-function sameFolder(a: string, b: string): boolean {
+export function sameFolder(a: string, b: string): boolean {
   const normalize = (path: string): string =>
     path.trim().replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
   return normalize(a) === normalize(b);
@@ -360,6 +369,9 @@ export class WorkspaceController {
   private readonly settings: SettingsReader;
   private readonly uiState: UiStateStore;
   private readonly dirExists: DirExists;
+  private readonly conversations?: {
+    latestForCwd(cwd: string): LlmSessionRecord | null;
+  };
   private readonly savedSessions: SavedSessionsRecorder | null;
   private readonly sshPasswords:
     | { passwordFor(alias: string): Promise<string | null> }
@@ -434,6 +446,7 @@ export class WorkspaceController {
     this.uiState = options.uiState ?? new UiStateStore();
     this.dirExists = options.dirExists ?? tauriDirExists;
     this.savedSessions = options.savedSessions ?? null;
+    this.conversations = options.conversations;
     this.sshPasswords = options.sshPasswords ?? null;
     this.sshHosts = options.sshHosts ?? null;
     for (const session of options.sessions) {
@@ -1404,16 +1417,42 @@ export class WorkspaceController {
     }
   };
 
-  /// Dead-pane "Restart session" / "New session": create a replacement
-  /// session — the dead pane's own profile + cwd for "restart" (falling back
-  /// to the host default dir if the cwd went stale), workspace defaults for
-  /// "fresh" — swap it into the dead pane's slot, then release the dead
-  /// session's scrollback on the host. Returns the new session id so the
-  /// caller can focus it, or null on refusal.
+  /// The conversation a dead pane's "Resume conversation" would bring back:
+  /// the newest resumable conversation recorded in the pane's directory, or
+  /// null when the pane has no directory, no conversations index is wired, or
+  /// nothing ever ran there. The title is for the button's tooltip.
+  deadPaneResumeTitle = (deadSessionId: number): string | null => {
+    return this.deadPaneConversation(deadSessionId)?.title ?? null;
+  };
+
+  private deadPaneConversation(deadSessionId: number): LlmSessionRecord | null {
+    const dead = this.sessions.get(deadSessionId);
+    if (!dead || dead.alive === true || !dead.cwd || !this.conversations) {
+      return null;
+    }
+    const record = this.conversations.latestForCwd(dead.cwd);
+    if (record === null || resumeCommand(record) === null) {
+      return null;
+    }
+    return record;
+  }
+
+  /// Dead-pane "Resume conversation" / "Restart session" / "New session":
+  /// create a replacement session — the dead pane's own profile + cwd for
+  /// "restart" and "resume" (falling back to the host default dir if the cwd
+  /// went stale), workspace defaults for "fresh" — swap it into the dead
+  /// pane's slot, then release the dead session's scrollback on the host.
+  /// "resume" additionally types the resume command for the newest
+  /// conversation recorded in that directory once the new shell's prompt
+  /// reports — the post-reboot "give me my workspace back" path. A resume
+  /// with no findable conversation degrades to a plain restart: the right
+  /// directory with no command is strictly better than a refusal.
+  /// Returns the new session id so the caller can focus it, or null on
+  /// refusal.
   restartPane = async (
     tabId: string,
     deadSessionId: number,
-    mode: "restart" | "fresh",
+    mode: "restart" | "fresh" | "resume",
   ): Promise<number | null> => {
     const tab = this.store.getState().tabs[tabId];
     if (!tab || pathToPaneNode(tab.split, deadSessionId) === null) {
@@ -1426,10 +1465,14 @@ export class WorkspaceController {
     }
     this.setNotice(null);
     const defaultProfile = this.settings.getSnapshot().defaultProfile;
-    const profile = mode === "restart"
-      ? (dead?.profile ?? defaultProfile)
-      : defaultProfile;
-    const cwd = mode === "restart" ? (dead?.cwd ?? null) : null;
+    const profile = mode === "fresh"
+      ? defaultProfile
+      : (dead?.profile ?? defaultProfile);
+    const cwd = mode === "fresh" ? null : (dead?.cwd ?? null);
+    // Resolved BEFORE the shell exists, so a resume that has nothing to
+    // resume degrades to a restart without ever arming a wait.
+    const record = mode === "resume" ? this.deadPaneConversation(deadSessionId) : null;
+    const command = record === null ? null : resumeCommand(record);
     let created: SessionInfo;
     try {
       created = await this.createSessionDownChain(
@@ -1441,6 +1484,16 @@ export class WorkspaceController {
       this.publish();
       return null;
     }
+    // Armed before the attach: the shell's first OSC 9;9 report can land
+    // inside any later await (openResumedTab's rule).
+    const awaitPrompt = this.settings.getSnapshot().shellIntegration;
+    const ready = command === null
+      ? null
+      : this.armResumeWait(
+        created.id,
+        awaitPrompt ? RESUME_PROMPT_TIMEOUT_MS : RESUME_FIXED_DELAY_MS,
+        awaitPrompt,
+      );
     this.sessions.set(created.id, created);
     this.sessionsRevision += 1;
     try {
@@ -1458,6 +1511,10 @@ export class WorkspaceController {
       // The layout moved underneath the createSession await: roll the new
       // session back the same way splitPane does, so no orphan outlives the
       // refusal (a failed close keeps it tracked for restore reconciliation).
+      this.settleResumeWait(created.id, "gone");
+      if (ready !== null) {
+        await ready;
+      }
       let rolledBack = true;
       try {
         await this.client.closeSession(created.id);
@@ -1474,6 +1531,19 @@ export class WorkspaceController {
       return null;
     }
     this.mutate("structural", () => this.store.replaceState(replaced));
+    if (ready !== null && command !== null && record !== null) {
+      if ((await ready) === "gone") {
+        this.setNotice("The terminal ended before the session could be resumed.");
+      } else {
+        const sent = this.attachments.sendInput?.(created.id, command + "\r") ?? false;
+        if (sent) {
+          this.rememberResumedTab(sessionKey(record), tabId);
+          this.announceResumeBoot(created.id);
+        } else {
+          this.setNotice("The resume command could not be sent to the terminal.");
+        }
+      }
+    }
     // Free the dead session's ring. It is already out of the layout, so a
     // close failure only leaves a host-side record that restore
     // reconciliation reaps later — not worth a notice on a successful swap.

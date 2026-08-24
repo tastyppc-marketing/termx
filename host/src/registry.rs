@@ -33,6 +33,12 @@ pub struct Registry {
     // under the same lock, so a session can never slip in after the drain and
     // outlive the daemon as an orphan conhost tree.
     shutting_down: AtomicBool,
+    // Sessions a PREVIOUS daemon ran, read back from state.json at startup.
+    // The daemon dies (a reboot, a crash) but the panes' cwd and profile are
+    // what makes "Restart" restart THE pane rather than a default shell — so
+    // the records outlive the processes. A corpse is a record only: it cannot
+    // be attached, written to, or resized; it can be listed and closed.
+    corpses: Mutex<HashMap<SessionId, SessionInfo>>,
     // Closed sessions whose ConPTY teardown may still be in flight. If the
     // process exits before a waiter thread drops the PTY master, the orphaned
     // OpenConsole can spin at 100% CPU forever (observed saturating this
@@ -87,6 +93,7 @@ impl Registry {
         // happened to have zero sessions open.
         let mut layout = serde_json::Value::Null;
         let mut max_seen_id: u32 = 0;
+        let mut corpses: HashMap<SessionId, SessionInfo> = HashMap::new();
         match std::fs::read_to_string(data_dir.join("state.json")) {
             Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(v) => {
@@ -98,6 +105,16 @@ impl Registry {
                         for s in sessions {
                             if let Some(id) = s.get("id").and_then(|i| i.as_u64()) {
                                 max_seen_id = max_seen_id.max(id as u32);
+                            }
+                            // The previous daemon's sessions become corpse
+                            // records: dead, but their cwd/profile survive so
+                            // a dead pane can be restarted where it stood.
+                            // A record that does not parse is dropped, never
+                            // an error — restore must not fail on one row.
+                            if let Ok(mut info) = serde_json::from_value::<SessionInfo>(s.clone()) {
+                                info.alive = false;
+                                info.pid = None;
+                                corpses.insert(info.id, info);
                             }
                         }
                     }
@@ -119,6 +136,7 @@ impl Registry {
             persist_lock: Mutex::new(()),
             spawn_lock: Mutex::new(()),
             shutting_down: AtomicBool::new(false),
+            corpses: Mutex::new(corpses),
             graveyard: Mutex::new(Vec::new()),
         }
     }
@@ -213,6 +231,15 @@ impl Registry {
         let entry = {
             let mut entries = self.entries.lock().unwrap();
             let Some(entry) = entries.remove(&id) else {
+                // Closing a corpse is how a dead pane is dismissed after the
+                // daemon that ran it died: drop the record, reap any spilled
+                // history, persist. There is no process to kill.
+                if self.corpses.lock().unwrap().remove(&id).is_some() {
+                    drop(entries);
+                    history::delete(&self.data_dir, id);
+                    self.persist_logged();
+                    return true;
+                }
                 return false;
             };
             let mut graveyard = self.graveyard.lock().unwrap();
@@ -285,6 +312,16 @@ impl Registry {
                 info
             })
             .collect();
+        // Corpse records ride along so clients can restore dead panes with
+        // their real cwd/profile. Ids never collide with live entries — the
+        // next_id watermark starts past every persisted id — but guard anyway:
+        // a live session is always the truth about its own id.
+        {
+            let live: std::collections::HashSet<SessionId> =
+                infos.iter().map(|i| i.id).collect();
+            let corpses = self.corpses.lock().unwrap();
+            infos.extend(corpses.values().filter(|c| !live.contains(&c.id)).cloned());
+        }
         infos.sort_by_key(|i| i.id);
         infos
     }
@@ -424,6 +461,58 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
         (tmp, reg)
+    }
+
+    /// The daemon dies (a reboot); its state.json still names the sessions
+    /// it ran. The NEXT daemon must serve those as corpse records — dead,
+    /// with their cwd and profile intact — so a client can restart a dead
+    /// pane where it stood instead of in the default directory. Closing a
+    /// corpse drops the record and persists.
+    #[test]
+    fn corpse_records_survive_a_daemon_death_until_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("state.json"),
+            serde_json::json!({
+                "layout": {"v": 2},
+                "next_id": 42,
+                "sessions": [
+                    {"id": 7, "profile": "powershell", "cwd": "C:\\Dev\\TermX",
+                     "cols": 120, "rows": 30, "alive": true, "pid": 4321},
+                    {"id": 9, "profile": "cmd", "cwd": null,
+                     "cols": 80, "rows": 24, "alive": false, "pid": null},
+                    {"not": "a session record"}
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let listed = reg.list();
+        assert_eq!(listed.len(), 2, "both parseable records survive, junk is dropped");
+        let corpse = listed.iter().find(|s| s.id == 7).unwrap();
+        assert!(!corpse.alive, "a corpse is never alive, whatever the file said");
+        assert_eq!(corpse.cwd.as_deref(), Some(r"C:\Dev\TermX"));
+        assert_eq!(corpse.profile, "powershell");
+        assert_eq!(corpse.pid, None, "a dead record must not point at a live pid");
+
+        // Corpses ride through persist, so a second restart still knows them.
+        reg.persist().unwrap();
+        let reg2 = Registry::new(tmp.path().to_path_buf(), Config::default());
+        assert_eq!(reg2.list().len(), 2);
+
+        // Closing a corpse dismisses it durably.
+        assert!(reg2.close_session(7), "a corpse can be closed");
+        assert!(reg2.list().iter().all(|s| s.id != 7));
+        let reg3 = Registry::new(tmp.path().to_path_buf(), Config::default());
+        assert!(reg3.list().iter().all(|s| s.id != 7), "the dismissal persisted");
+
+        // The id watermark still respects corpse ids: nothing recycles 41.
+        let (info, s) = reg3.create_session(Some("cmd"), None, 80, 25, false).unwrap();
+        assert!(info.id >= 42, "new ids start past the persisted watermark");
+        reg3.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
     #[test]

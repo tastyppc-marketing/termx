@@ -198,6 +198,33 @@ describe("SplitLayout rendering", () => {
     expect(layoutActions.restartPane).toHaveBeenCalledWith(2, "fresh");
   });
 
+  it("offers Resume conversation first when the pane's folder has one", async () => {
+    const base = actions();
+    const layoutActions = await renderLayout(
+      { ...base, deadPaneResumeTitle: (sessionId) => (sessionId === 2 ? "Daemon work" : null) },
+      { states: paneStates({ 2: { status: "dead", exitCode: 3 } }) },
+    );
+    const resume = container.querySelector<HTMLButtonElement>(".dead-pane__resume")!;
+    expect(resume.textContent).toBe("Resume conversation");
+    expect(resume.title).toBe("Daemon work");
+    // Resume takes the primary style; the shell restart steps down to secondary.
+    expect(resume.classList.contains("dead-pane__action--primary")).toBe(true);
+    const restart = container.querySelector<HTMLButtonElement>(".dead-pane__restart")!;
+    expect(restart.classList.contains("dead-pane__action--primary")).toBe(false);
+    await act(async () => resume.click());
+    expect(layoutActions.restartPane).toHaveBeenCalledWith(2, "resume");
+  });
+
+  it("draws no resume button when the folder has no conversation", async () => {
+    await renderLayout(
+      { ...actions(), deadPaneResumeTitle: () => null },
+      { states: paneStates({ 2: { status: "dead", exitCode: 3 } }) },
+    );
+    expect(container.querySelector(".dead-pane__resume")).toBeNull();
+    const restart = container.querySelector<HTMLButtonElement>(".dead-pane__restart")!;
+    expect(restart.classList.contains("dead-pane__action--primary")).toBe(true);
+  });
+
   it("disables every dead-pane action while a relaunch is in flight", async () => {
     await renderLayout(actions(), {
       states: paneStates({ 2: { status: "dead", exitCode: 3 } }),

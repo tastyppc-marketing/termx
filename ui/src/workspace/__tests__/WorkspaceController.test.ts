@@ -10,6 +10,7 @@ import {
   type WorkspacePersistence,
 } from "../WorkspaceController";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../../settings/settings";
+import type { LlmSessionRecord } from "../../conversations/types";
 import { UiStateStore } from "../uiState";
 
 function session(id: number, overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -79,6 +80,8 @@ function harness(options: {
     cols: number;
     rows: number;
   }) => Promise<SessionInfo>;
+  /** Dead-pane resume lookup: cwd -> newest conversation record. */
+  latestForCwd?: (cwd: string) => LlmSessionRecord | null;
 } = {}) {
   const exitListeners = new Set<(event: { sessionId: number; exitCode: number | null }) => void>();
   const closeListeners = new Set<(event: { sessionId: number }) => void>();
@@ -125,7 +128,12 @@ function harness(options: {
     dispose: vi.fn(),
   };
   let attachmentSnapshot = { sessions: {} };
+  const writes: Array<[number, string | Uint8Array]> = [];
   const attachments: WorkspaceAttachmentHub = {
+    sendInput: vi.fn((sessionId: number, data: string | Uint8Array) => {
+      writes.push([sessionId, data]);
+      return true;
+    }),
     getSnapshot: () => attachmentSnapshot,
     subscribe: () => () => undefined,
     attachSession: vi.fn(async () => undefined),
@@ -154,6 +162,9 @@ function harness(options: {
     pickFolder: options.pickFolder,
     settings: { getSnapshot: () => settingsValue },
     uiState,
+    ...(options.latestForCwd
+      ? { conversations: { latestForCwd: options.latestForCwd } }
+      : {}),
   });
   return {
     controller,
@@ -164,6 +175,7 @@ function harness(options: {
     persistenceCalls,
     attachments,
     uiState,
+    writes,
     setAttachmentSnapshot(value: typeof attachmentSnapshot) {
       attachmentSnapshot = value;
     },
@@ -755,6 +767,78 @@ describe("WorkspaceController split actions", () => {
 });
 
 describe("WorkspaceController dead-pane relaunch", () => {
+  const RESUME_ID = "7d9e2f10-3a4b-4c5d-8e6f-102938475650";
+  const record = (cwd: string): LlmSessionRecord => ({
+    provider: "claude",
+    id: RESUME_ID,
+    title: "Daemon work",
+    cwd,
+    filePath: "C:\\transcripts\\a.jsonl",
+    updatedAtMs: 100,
+    summary: null,
+    recap: null,
+  });
+
+  it("resume relaunches in the dead pane's folder and types the resume command", async () => {
+    const h = harness({
+      sessions: [session(1), session(2), session(3, { alive: false, pid: null })],
+      latestForCwd: (cwd) => record(cwd),
+    });
+
+    const pending = h.controller.restartPane("tab-2", 3, "resume");
+    // Let createSession/attach settle, then report the new shell's prompt.
+    for (let i = 0; i < 25; i += 1) {
+      await Promise.resolve();
+    }
+    h.controller.reportSessionCwd(50, "C:\\work\\project-3", true);
+    const created = await pending;
+
+    expect(created).toBe(50);
+    expect(h.createSession).toHaveBeenCalledWith({
+      profile: "powershell",
+      cwd: "C:\\work\\project-3",
+      cols: 120,
+      rows: 30,
+      shellIntegration: true,
+    });
+    expect(h.writes).toEqual([[50, "claude --resume " + RESUME_ID + "\r"]]);
+  });
+
+  it("resume with no conversation degrades to a plain restart", async () => {
+    const h = harness({
+      sessions: [session(1), session(2), session(3, { alive: false, pid: null })],
+      latestForCwd: () => null,
+    });
+
+    const created = await h.controller.restartPane("tab-2", 3, "resume");
+
+    expect(created).toBe(50);
+    expect(h.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "C:\\work\\project-3" }),
+    );
+    expect(h.writes).toEqual([]);
+  });
+
+  it("deadPaneResumeTitle names the conversation only for a dead pane with one", () => {
+    const h = harness({
+      sessions: [session(1), session(3, { alive: false, pid: null })],
+      latestForCwd: (cwd) => record(cwd),
+    });
+
+    expect(h.controller.deadPaneResumeTitle(3)).toBe("Daemon work");
+    expect(h.controller.deadPaneResumeTitle(1)).toBeNull(); // alive
+    expect(h.controller.deadPaneResumeTitle(999)).toBeNull(); // unknown
+  });
+
+  it("deadPaneResumeTitle is null when the record's id cannot be resumed", () => {
+    const h = harness({
+      sessions: [session(3, { alive: false, pid: null })],
+      latestForCwd: (cwd) => ({ ...record(cwd), id: "not a; valid id" }),
+    });
+
+    expect(h.controller.deadPaneResumeTitle(3)).toBeNull();
+  });
+
   it("restarts a dead pane in place with its own profile and cwd", async () => {
     const { controller, createSession, closeSession, attachments, persistenceCalls } =
       harness({

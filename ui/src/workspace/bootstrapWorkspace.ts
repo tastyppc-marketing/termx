@@ -3,6 +3,7 @@ import {
   ConversationsStore,
   loadConversationsStore,
 } from "../conversations/store";
+import { sameFolder } from "./WorkspaceController";
 import { conversationsFileIo, tauriSessionLister } from "../conversations/storage";
 import type { SessionLister } from "../conversations/types";
 import { HostClient, type HostClientConnectOptions } from "../host/client";
@@ -294,6 +295,23 @@ export async function bootstrapWorkspace(
       sessions: state.sessions as readonly SessionInfo[],
       settings,
       uiState,
+      // Dead-pane resume: the newest resumable conversation recorded in a
+      // directory. Read from the live snapshot at call time, so records that
+      // finish scanning after bootstrap still count.
+      conversations: {
+        latestForCwd: (cwd: string) => {
+          let best = null;
+          for (const record of conversations.getSnapshot().records) {
+            if (record.cwd === null || !sameFolder(record.cwd, cwd)) {
+              continue;
+            }
+            if (best === null || record.updatedAtMs > best.updatedAtMs) {
+              best = record;
+            }
+          }
+          return best;
+        },
+      },
       savedSessions: saved,
       sshPasswords: { passwordFor: (alias: string) => sshCredentials.passwordFor(alias) },
       sshHosts: { byAlias: (alias: string) => sshHosts.find((host) => host.aliases.includes(alias)) ?? null },
@@ -319,6 +337,15 @@ export async function bootstrapWorkspace(
     if (restored !== null && reconciled.orphanAdoptedIds.length > 0) {
       persistence.record(reconciled.layout, "structural");
       await persistence.flush();
+    }
+
+    // Corpse hygiene: dead host-side records no pane references (their tab
+    // was closed while the daemon was down) hold nothing anyone can reach —
+    // reap them so state.json does not accumulate a graveyard across
+    // reboots. Fire-and-forget: a failed close leaves a record the next
+    // bootstrap reaps again.
+    for (const deadId of reconciled.unreferencedDeadSessionIds) {
+      client.closeSession(deadId).catch(() => undefined);
     }
 
     // Losing the socket suspends attachments; it never destroys them. The

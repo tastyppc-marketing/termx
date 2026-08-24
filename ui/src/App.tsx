@@ -563,6 +563,9 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
               });
             }
           },
+          deadPaneResumeTitle(sessionId) {
+            return controller.deadPaneResumeTitle?.(sessionId) ?? null;
+          },
           async restartPane(sessionId, mode) {
             setRestarting((prev) => new Set(prev).add(sessionId));
             try {
