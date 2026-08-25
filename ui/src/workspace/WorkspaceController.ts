@@ -520,8 +520,9 @@ export class WorkspaceController {
         this.settleResumeWait(sessionId, "gone");
         this.stopSshPasswordWatch(sessionId);
         // The host has forgotten this session for good, so its ssh identity
-        // goes too — session ids are reused after a daemon restart, and a
-        // stale entry would make a fresh local pane look remote.
+        // goes too — a stale entry would make some later pane look remote.
+        // (Ids are never reused — registry.rs keeps a monotonic watermark
+        // across restarts — but hygiene here costs nothing.)
         this.forgetSshPane(sessionId);
         this.attachments.forgetSession(sessionId);
         this.purgeResumedTabForSession(sessionId);
@@ -1367,6 +1368,69 @@ export class WorkspaceController {
     );
   };
 
+  /// The daemon's CURRENT session inventory, applied mid-run (triage P0 #3).
+  ///
+  /// The session map is seeded once at bootstrap; before this existed nothing
+  /// ever resynced it, so a daemon restart while the app was open produced
+  /// panes that RENDERED live while their input was dead — and every way out
+  /// refused: Dismiss filters on `alive !== true`, Restart said "still
+  /// running", Close was rejected by the new daemon. The tab could not be
+  /// removed until relaunch.
+  ///
+  /// On reconnect the truth is re-read: sessions the daemon no longer reports
+  /// alive go down the same wind-down a daemon-reported exit runs (the new
+  /// daemon serves its state.json rows back as corpse records, so profile and
+  /// cwd survive for the dead pane's Restart/Resume buttons), and rows we
+  /// never met are adopted for lookups. Our own cwd is kept where we have
+  /// one — live OSC reports are fresher than the daemon's records.
+  resyncSessions = (truth: readonly SessionInfo[]): void => {
+    const byId = new Map(truth.map((info) => [info.id, info]));
+    const died: number[] = [];
+    let changed = false;
+    for (const [sessionId, existing] of [...this.sessions]) {
+      const now = byId.get(sessionId);
+      if (now === undefined) {
+        // Not even a corpse: the daemon has never heard of it. Dead, with
+        // everything we knew preserved for the dead-pane affordances.
+        if (existing.alive) {
+          this.sessions.set(sessionId, { ...existing, alive: false, pid: null });
+          died.push(sessionId);
+          changed = true;
+        }
+        continue;
+      }
+      if (existing.alive !== now.alive) {
+        this.sessions.set(sessionId, {
+          ...now,
+          cwd: existing.cwd ?? now.cwd,
+        });
+        if (!now.alive) {
+          died.push(sessionId);
+        }
+        changed = true;
+      }
+    }
+    for (const [sessionId, now] of byId) {
+      if (!this.sessions.has(sessionId)) {
+        this.sessions.set(sessionId, now);
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return;
+    }
+    this.sessionsRevision += 1;
+    for (const sessionId of died) {
+      // Mirror the onSessionExited listener: nothing may keep waiting on,
+      // watching, or typing into a session that is gone.
+      this.settleResumeWait(sessionId, "gone");
+      this.stopSshPasswordWatch(sessionId);
+      this.attachments.markExited(sessionId, null);
+      this.purgeResumedTabForSession(sessionId);
+    }
+    this.publish();
+  };
+
   duplicateTab = async (tabId: string): Promise<void> => {
     const source = this.sourceForTab(tabId);
     if (!source) {
@@ -1982,8 +2046,9 @@ export class WorkspaceController {
 
   /// Restore tracked ssh panes at construction, keeping only sessions the host
   /// still has. The rest are swept out of the file rather than merely ignored:
-  /// the daemon reuses session ids after a restart, and a stale entry would
-  /// eventually make a fresh LOCAL pane look like a remote one.
+  /// a stale entry would linger forever otherwise. (Ids are never reused —
+  /// registry.rs keeps a monotonic watermark across restarts — but a clean
+  /// file beats trusting that from over here.)
   private hydrateSshPanes(): void {
     const stored = this.uiState.getSnapshot().sshPanes;
     if (!stored) {

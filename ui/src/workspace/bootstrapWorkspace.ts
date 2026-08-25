@@ -357,11 +357,21 @@ export async function bootstrapWorkspace(
         attachments.suspendAll();
       }
     });
+    const readyController = controller;
     connection.onConnected((_replacement, isReconnect) => {
       if (isReconnect) {
         // The facade is stable across sockets, so the hub re-attaches through
         // it and never has to learn which socket it is on.
         void attachments.resync(hubClient);
+        // The controller's session map is seeded once at bootstrap; a NEW
+        // daemon behind this reconnect (crash, restart, upgrade) knows a
+        // different truth, and without this the old panes render live while
+        // dead and refuse every affordance (triage P0 #3). A state read that
+        // fails changes nothing — the next reconnect asks again.
+        hubClient
+          .getState()
+          .then((state) => readyController.resyncSessions(state.sessions))
+          .catch(() => undefined);
       }
     });
 

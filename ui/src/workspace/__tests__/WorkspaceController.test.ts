@@ -301,6 +301,68 @@ describe("WorkspaceController projection", () => {
   });
 });
 
+describe("WorkspaceController.resyncSessions (daemon-restart truth)", () => {
+  it("flips vanished and corpse sessions dead and runs the full wind-down", () => {
+    const { controller, attachments } = harness();
+
+    // A restarted daemon: session 1 comes back as a corpse record (its
+    // state.json row, alive=false), sessions 2 and 3 are simply unknown.
+    controller.resyncSessions([
+      session(1, { alive: false, pid: null, cwd: "C:\\daemon\\stale" }),
+    ]);
+
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.ungroupedTabs[0]?.status).toBe("dead");
+    expect(snapshot.groups[0]?.tabs[0]?.status).toBe("dead");
+    for (const sessionId of [1, 2, 3]) {
+      expect(attachments.markExited).toHaveBeenCalledWith(sessionId, null);
+    }
+    // The cwd the UI tracked live outranks the daemon's persisted one, so the
+    // dead pane's Restart lands where the user actually was.
+    expect(snapshot.ungroupedTabs[0]?.cwd).toBe("C:\\work\\project-1");
+  });
+
+  it("unlocks Restart and Dismiss on the zombie panes it kills", async () => {
+    const { controller, createSession, closeSession } = harness();
+
+    // Before the resync the pane is a zombie: restart refuses as alive.
+    expect(await controller.restartPane("tab-1", 1, "restart")).toBeNull();
+    expect(controller.getSnapshot().notice).toBe("This terminal is still running.");
+
+    controller.resyncSessions([]);
+
+    const created = await controller.restartPane("tab-1", 1, "restart");
+    expect(created).toBe(50);
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "C:\\work\\project-1" }),
+    );
+
+    await controller.dismissDeadTab("tab-2");
+    expect(closeSession).toHaveBeenCalledWith(2);
+    expect(closeSession).toHaveBeenCalledWith(3);
+  });
+
+  it("adopts unknown rows and is a silent no-op when nothing changed", () => {
+    const { controller, attachments } = harness();
+
+    const publishes = vi.fn();
+    controller.subscribe(publishes);
+    // The same truth the map was seeded with: nothing to do, no publish.
+    controller.resyncSessions([session(1), session(2), session(3)]);
+    expect(publishes).not.toHaveBeenCalled();
+
+    controller.resyncSessions([
+      session(1),
+      session(2),
+      session(3),
+      session(9, { alive: false, pid: null }),
+    ]);
+    expect(controller.sessionCwd(9)).toBe("C:\\work\\project-9");
+    // Adopted dead rows referenced by no pane wind nothing down.
+    expect(attachments.markExited).not.toHaveBeenCalled();
+  });
+});
+
 describe("WorkspaceController mutations", () => {
   it("uses active debounce only for activation and structural writes for edits", () => {
     const { controller, persistenceCalls } = harness();
