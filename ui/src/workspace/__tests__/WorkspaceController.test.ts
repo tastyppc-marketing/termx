@@ -146,6 +146,8 @@ function harness(options: {
       resize: vi.fn(),
       detach: vi.fn(),
     } satisfies SessionAttachment)),
+    noteBell: vi.fn(),
+    markSeen: vi.fn(),
     onError: () => () => undefined,
     close: vi.fn(),
   };
@@ -237,6 +239,42 @@ describe("WorkspaceController projection", () => {
     expect(snapshot.ungroupedTabs[0]?.activity).toBe("unread");
     expect(snapshot.groups[0]?.tabs[0]?.status).toBe("dead");
     expect(snapshot.groups[0]?.tabs[0]?.sessionIds).toEqual([2, 3]);
+  });
+
+  it("ranks a settled pane above unread and active — the tab needs a look", () => {
+    const { controller, setAttachmentSnapshot } = harness();
+    setAttachmentSnapshot({
+      sessions: {
+        1: {
+          sessionId: 1,
+          hostAttached: true,
+          terminalAttached: false,
+          active: true,
+          unread: true,
+          settled: true,
+          exited: false,
+          exitCode: null,
+          lostScrollback: false,
+          attachError: null,
+        },
+      },
+    });
+
+    expect(controller.getSnapshot().ungroupedTabs[0]?.activity).toBe("attention");
+  });
+
+  it("forwards noteBell per pane and markTabSeen to every pane in the tab", () => {
+    const { controller, attachments } = harness();
+
+    controller.noteBell(2);
+    expect(attachments.noteBell).toHaveBeenCalledWith(2);
+
+    controller.markTabSeen("tab-2");
+    expect(attachments.markSeen).toHaveBeenCalledWith(2);
+    expect(attachments.markSeen).toHaveBeenCalledWith(3);
+
+    controller.markTabSeen("no-such-tab");
+    expect(attachments.markSeen).toHaveBeenCalledTimes(2);
   });
 });
 

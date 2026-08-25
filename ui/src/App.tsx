@@ -295,6 +295,59 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     [snapshot.layout.tabs],
   );
 
+  // ---- Attention delivery (spec: "tell me when it's done") ----
+  // Looking at a tab (it is active AND the window has OS focus) delivers its
+  // attention mark. Runs on every snapshot too: a burst that settles while the
+  // user is already watching clears immediately (markSeen no-ops when nothing
+  // is settled, so this cannot publish-loop).
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
+  useEffect(() => {
+    const onFocus = () => setWindowFocused(true);
+    const onBlur = () => setWindowFocused(false);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+  useEffect(() => {
+    if (windowFocused && activeTabId) {
+      controller.markTabSeen?.(activeTabId);
+    }
+  }, [controller, windowFocused, activeTabId, snapshot]);
+
+  // While the window is in the background, a tab entering "attention" flashes
+  // the taskbar button — the "I'm in another app entirely" half of the ask.
+  const anyAttention = useMemo(
+    () =>
+      snapshot.ungroupedTabs.some((tab) => tab.activity === "attention") ||
+      snapshot.groups.some((group) =>
+        group.tabs.some((tab) => tab.activity === "attention"),
+      ),
+    [snapshot.ungroupedTabs, snapshot.groups],
+  );
+  const prevAttentionRef = useRef(false);
+  useEffect(() => {
+    const rising = anyAttention && !prevAttentionRef.current;
+    prevAttentionRef.current = anyAttention;
+    if (!rising || windowFocused) {
+      return;
+    }
+    void (async () => {
+      try {
+        const { getCurrentWindow, UserAttentionType } = await import(
+          "@tauri-apps/api/window"
+        );
+        await getCurrentWindow().requestUserAttention(
+          UserAttentionType.Informational,
+        );
+      } catch {
+        // Not running under Tauri; the sidebar mark still shows.
+      }
+    })();
+  }, [anyAttention, windowFocused]);
+
   // One window-wide sleep controller; SplitLayout is its only visibility
   // writer (observe), the App only reads the verdict for the zZ badges.
   const sleepController = useMemo(() => new SleepController(), []);
@@ -997,6 +1050,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     onSessionCwd={controller.reportSessionCwd}
                     onConversationCaptured={controller.reportCapturedConversation}
                     onSessionOutput={handleSessionOutput}
+                    onSessionBell={controller.noteBell}
                     onFocusPane={(sessionId) =>
                       setFocusByTab((prev) =>
                         prev[tab.id] === sessionId

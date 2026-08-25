@@ -8,6 +8,7 @@ import {
   ACTIVITY_PULSE_MS,
   ATTACHMENT_REPLAY_CAP_BYTES,
   ATTACHMENT_REPLAY_MAX_CHUNKS,
+  ATTENTION_MIN_BURST_MS,
   AttachmentHub,
   type AttachmentHostClient,
 } from "../AttachmentHub";
@@ -712,6 +713,99 @@ describe("AttachmentHub output taps", () => {
     // A tap on an unknown session is inert, never a throw: the watcher is
     // armed around a session that may already have died.
     expect(() => hub.tapOutput(999, () => undefined).dispose()).not.toThrow();
+    hub.close();
+  });
+});
+
+describe("AttachmentHub attention (settled bursts)", () => {
+  async function hubWithSession(id: number) {
+    const host = createFakeHost();
+    const hub = new AttachmentHub(host);
+    const attaching = hub.attachAll([id]);
+    resolvePhysical(host, id);
+    await attaching;
+    return { host, hub };
+  }
+
+  /** Emit live output every second for `totalMs`, then go quiet past the
+   * pulse window so the burst ends and the settle check runs. */
+  function burst(host: FakeHost, id: number, totalMs: number): void {
+    let offset = 0n;
+    const step = 1_000;
+    for (let elapsed = 0; ; elapsed += step) {
+      emitOutput(host, id, { offset, data: new Uint8Array([46]), source: "live" });
+      offset += 1n;
+      if (elapsed >= totalMs) {
+        break;
+      }
+      vi.advanceTimersByTime(step);
+    }
+    vi.advanceTimersByTime(ACTIVITY_PULSE_MS);
+  }
+
+  it("never marks a short burst — a dir listing is not an agent finishing", async () => {
+    vi.useFakeTimers();
+    const { host, hub } = await hubWithSession(7);
+    burst(host, 7, 1_000);
+    expect(hub.getSnapshot().sessions[7]).toMatchObject({ active: false, settled: false });
+  });
+
+  it("marks a long burst settled once it goes quiet, and the mark is sticky", async () => {
+    vi.useFakeTimers();
+    const { host, hub } = await hubWithSession(7);
+    burst(host, 7, ATTENTION_MIN_BURST_MS + 1_000);
+    expect(hub.getSnapshot().sessions[7]).toMatchObject({ active: false, settled: true });
+    vi.advanceTimersByTime(60_000);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(true);
+  });
+
+  it("a fresh burst supersedes the mark; only its own settle re-arms it", async () => {
+    vi.useFakeTimers();
+    const { host, hub } = await hubWithSession(7);
+    burst(host, 7, ATTENTION_MIN_BURST_MS + 1_000);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(true);
+    emitOutput(host, 7, { offset: 100n, data: new Uint8Array([46]), source: "live" });
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(false);
+    vi.advanceTimersByTime(ACTIVITY_PULSE_MS);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(false);
+  });
+
+  it("markSeen delivers the mark; markSeen on a clean session publishes nothing", async () => {
+    vi.useFakeTimers();
+    const { host, hub } = await hubWithSession(7);
+    burst(host, 7, ATTENTION_MIN_BURST_MS + 1_000);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(true);
+
+    hub.markSeen(7);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(false);
+
+    const before = hub.getSnapshot();
+    hub.markSeen(7);
+    hub.markSeen(999);
+    expect(hub.getSnapshot()).toBe(before);
+  });
+
+  it("noteBell marks instantly, without any burst at all", async () => {
+    vi.useFakeTimers();
+    const { hub } = await hubWithSession(7);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(false);
+    hub.noteBell(7);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(true);
+    hub.noteBell(999);
+    hub.markSeen(7);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(false);
+  });
+
+  it("replayed output never starts a burst clock toward attention", async () => {
+    vi.useFakeTimers();
+    const host = createFakeHost();
+    const hub = new AttachmentHub(host);
+    const attaching = hub.attachAll([9]);
+    emitOutput(host, 9, { offset: 0n, data: new Uint8Array([65]), source: "replay" });
+    resolvePhysical(host, 9);
+    await attaching;
+    vi.advanceTimersByTime(ATTENTION_MIN_BURST_MS + ACTIVITY_PULSE_MS + 1_000);
+    expect(hub.getSnapshot().sessions[9]?.settled ?? false).toBe(false);
     hub.close();
   });
 });

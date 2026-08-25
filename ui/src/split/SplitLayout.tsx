@@ -58,6 +58,8 @@ export interface SplitLayoutProps {
   onSessionCwd?: (sessionId: number, path: string, live: boolean) => void;
   /** OSC 9;77 deliverable report (polish P4); fires for live output only. */
   onSessionOutput?: (sessionId: number, path: string) => void;
+  /** A pane's terminal rang its bell (attention wiring). */
+  onSessionBell?: (sessionId: number) => void;
   /** Remote conversation-id capture from an SSH pane (ssh-sessions spec §2). */
   onConversationCaptured?: ConversationCaptureReporter;
   actions: SplitLayoutActions;
@@ -123,6 +125,7 @@ export function SplitLayout({
   onFocusPane,
   onSessionCwd,
   onSessionOutput,
+  onSessionBell,
   onConversationCaptured,
   actions,
   visible = true,
@@ -383,6 +386,7 @@ export function SplitLayout({
                     recordedDims={sessionDims?.[sessionId] ?? null}
                     onCwd={(path, live) => onSessionCwd?.(sessionId, path, live)}
                     onOutput={(path) => onSessionOutput?.(sessionId, path)}
+                    onBell={() => onSessionBell?.(sessionId)}
                     {...(onConversationCaptured
                       ? { onConversationCaptured }
                       : {})}

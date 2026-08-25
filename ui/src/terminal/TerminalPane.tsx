@@ -41,6 +41,12 @@ export interface TerminalPresentation {
   terminal: TerminalPort;
   fit(): void;
   /**
+   * Subscribe to the terminal's bell (a real BEL through xterm's parser, never
+   * an OSC terminator). Optional so existing fakes stay valid; a presentation
+   * without it simply never reports attention this way.
+   */
+  onBell?(listener: () => void): { dispose(): void };
+  /**
    * Size the terminal to exact cols/rows, bypassing fit-to-container. Used to
    * restore the host-recorded dims BEFORE replay (spec §13). Optional so
    * existing presentations/fakes stay valid; without it the pane keeps the
@@ -96,6 +102,9 @@ type TerminalPaneProps =
       dependencies?: TerminalPaneDependencies;
       onCwd?: (path: string, live: boolean) => void;
       onOutput?: (path: string) => void;
+      /** The pane's terminal rang its bell — attention wiring (App routes it
+       * to the attachment hub). */
+      onBell?: () => void;
       onConversationCaptured?: ConversationCaptureReporter;
       recordedDims?: TerminalDimensions | null;
       suspended?: undefined;
@@ -110,6 +119,9 @@ type TerminalPaneProps =
       onCwd?: (path: string, live: boolean) => void;
       /** OSC 9;77 deliverable report (polish P4); live registrations only. */
       onOutput?: (path: string) => void;
+      /** The pane's terminal rang its bell — attention wiring (App routes it
+       * to the attachment hub). */
+      onBell?: () => void;
       /**
        * OSC 9;78 conversation capture from a tracked ssh pane (ssh-sessions
        * spec §2); live captures only. The session id is stamped here because
@@ -194,6 +206,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   }, [lostScrollback]);
   const onOutputRef = useRef(props.onOutput);
   onOutputRef.current = props.onOutput;
+  const onBellRef = useRef(props.onBell);
+  onBellRef.current = props.onBell;
   const onCaptureRef = useRef(props.onConversationCaptured);
   onCaptureRef.current = props.onConversationCaptured;
   // Read at attach time only: a dims change must not remount the terminal.
@@ -216,6 +230,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     let linkActivationId = 0;
     const inputMarks = new InputMarks();
     let stopScrollListener: () => void = () => undefined;
+    let stopBell: () => void = () => undefined;
     setPaneState({ type: "loading" });
     setLostScrollback(false);
     setLinkNotice(null);
@@ -250,6 +265,12 @@ export function TerminalPane(props: TerminalPaneProps) {
         setAtTopOfScrollback(atTop);
       }
     }) ?? (() => undefined);
+    const bellSubscription = presentation.onBell?.(() => {
+      if (!cancelled) {
+        onBellRef.current?.();
+      }
+    });
+    stopBell = () => bellSubscription?.dispose();
 
     const reportStatus = (status: TerminalSessionStatus) => {
       if (cancelled) {
@@ -401,6 +422,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     return () => {
       cancelled = true;
       attemptCleanup("scroll_listener", stopScrollListener);
+      attemptCleanup("bell_listener", stopBell);
       attemptCleanup("jump_listener", stopJumpListener);
       attemptCleanup("input_marks", () => inputMarks.dispose());
       attemptCleanup("resize_observer", stopObserving);
@@ -652,6 +674,7 @@ function createPresentation(
     findNext: (query) => search.findNext(query, searchOptions()),
     findPrevious: (query) => search.findPrevious(query, searchOptions()),
     focus: () => terminal.focus(),
+    onBell: (listener) => terminal.onBell(listener),
     dispose: () => {
       detachClipboard();
       terminal.dispose();

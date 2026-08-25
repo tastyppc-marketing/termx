@@ -301,6 +301,19 @@ describe("Sidebar structure", () => {
     expect(dead.textContent).toContain("Exited");
     expect(group.querySelector("[data-color='slate']")).not.toBeNull();
   });
+
+  it("renders the attention mark with its finished-needs-a-look label", async () => {
+    const snapshot = workspace();
+    const first = snapshot.rootItems[0];
+    if (first?.kind !== "tab") throw new Error("fixture changed");
+    Object.assign(first.tab, { activity: "attention" });
+    await renderSidebar(snapshot);
+
+    const row = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+    const mark = row.querySelector("[data-activity='attention']");
+    expect(mark).not.toBeNull();
+    expect(mark!.getAttribute("aria-label")).toBe("Finished - needs a look");
+  });
 });
 
 /// Marketing > Clients > Acme, one tab at each level plus a root tab.

@@ -123,6 +123,10 @@ export interface WorkspaceAttachmentHub {
     sessionId: number,
     listener: (text: string) => void,
   ): { dispose(): void };
+  /** Mark a pane's terminal-bell attention (optional; hub implements it). */
+  noteBell?(sessionId: number): void;
+  /** Clear a pane's attention because the user is looking at it. */
+  markSeen?(sessionId: number): void;
   onError(listener: (error: Error) => void): () => void;
   close(): void;
 }
@@ -145,7 +149,7 @@ export interface SidebarTabModel {
   primarySessionId: number;
   sessionIds: readonly number[];
   status: "live" | "dead" | "missing" | "attach_error";
-  activity: "idle" | "active" | "unread";
+  activity: "idle" | "active" | "unread" | "attention";
   profile: string | null;
   cwd: string | null;
 }
@@ -557,6 +561,7 @@ export class WorkspaceController {
       const attachError = sessionIds.some((id) => attachments.sessions[id]?.attachError);
       const unread = sessionIds.some((id) => attachments.sessions[id]?.unread);
       const active = sessionIds.some((id) => attachments.sessions[id]?.active);
+      const attention = sessionIds.some((id) => attachments.sessions[id]?.settled);
       return {
         id: tab.id,
         groupId,
@@ -568,7 +573,12 @@ export class WorkspaceController {
         status: live
           ? (attachError ? "attach_error" : "live")
           : (knownDead ? "dead" : "missing"),
-        activity: unread ? "unread" : (active ? "active" : "idle"),
+        // Attention outranks everything: "finished, look at me" is the one
+        // state the user asked to be told about. Streaming shows as active;
+        // the settle mark only exists once streaming stopped.
+        activity: attention
+          ? "attention"
+          : (unread ? "unread" : (active ? "active" : "idle")),
         profile: primary?.profile ?? null,
         cwd: primary?.cwd ?? null,
       };
@@ -1180,6 +1190,24 @@ export class WorkspaceController {
   /// transcripts to work out which conversation a pane is running.
   sessionCwd = (sessionId: number): string | null =>
     this.sessions.get(sessionId)?.cwd ?? null;
+
+  /// A pane's terminal rang its bell (xterm's parser saw a real BEL, not an
+  /// OSC terminator). Routed to the attachment hub's attention mark.
+  noteBell = (sessionId: number): void => {
+    this.attachments.noteBell?.(sessionId);
+  };
+
+  /// The user is looking at this tab (it is active and the window has focus):
+  /// deliver every pane's attention mark.
+  markTabSeen = (tabId: string): void => {
+    const tab = this.store.getState().tabs[tabId];
+    if (!tab) {
+      return;
+    }
+    for (const sessionId of sessionIdsInTab(tab)) {
+      this.attachments.markSeen?.(sessionId);
+    }
+  };
 
   /// A display name per pane, for the split view's own title bars. Panes in a
   /// split all sit under one tab title, so the tab's name cannot tell them

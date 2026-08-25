@@ -10,12 +10,24 @@ export const ATTACHMENT_REPLAY_CAP_BYTES = 8 * 1024 * 1024;
 export const ATTACHMENT_REPLAY_MAX_CHUNKS = 512;
 export const ACTIVITY_PULSE_MS = 1_200;
 
+/**
+ * A burst of output at least this long, followed by quiet, means an agent
+ * finished (or stopped for input) — the pane deserves an attention mark.
+ * Short bursts (a `dir`, an echo of typing) never qualify: they were never
+ * something the user walked away from.
+ */
+export const ATTENTION_MIN_BURST_MS = 5_000;
+
 export interface HubSessionSnapshot {
   sessionId: number;
   hostAttached: boolean;
   terminalAttached: boolean;
   active: boolean;
   unread: boolean;
+  /** A long output burst ended (or the terminal rang its bell): the agent in
+   * this pane finished or is waiting — it needs a look. Sticky until
+   * `markSeen` or the next burst. Optional so older fixtures type-check. */
+  settled?: boolean;
   exited: boolean;
   exitCode: number | null;
   lostScrollback: boolean;
@@ -71,6 +83,9 @@ interface SessionRecord {
   nextOffset: bigint | null;
   active: boolean;
   unread: boolean;
+  settled: boolean;
+  /** When the current output burst began; null while quiet. */
+  burstStartedAt: number | null;
   exited: boolean;
   exitCode: number | null;
   lostRange: LostRange | null;
@@ -559,7 +574,16 @@ export class AttachmentHub implements AttachmentClient {
 
   private pulse(record: SessionRecord): void {
     this.clearActivityTimer(record);
-    const changed = !record.active || (!record.terminalCallbacks && !record.unread);
+    const changed =
+      !record.active ||
+      (!record.terminalCallbacks && !record.unread) ||
+      record.settled;
+    if (!record.active) {
+      // A new burst begins: whatever settled before is superseded by fresh
+      // work, and the burst clock starts now.
+      record.burstStartedAt = Date.now();
+      record.settled = false;
+    }
     record.active = true;
     if (!record.terminalCallbacks) {
       record.unread = true;
@@ -568,12 +592,45 @@ export class AttachmentHub implements AttachmentClient {
       record.activityTimer = null;
       if (!this.closed && this.records.get(record.sessionId) === record && record.active) {
         record.active = false;
+        // The burst ran from its start to the last output (one pulse ago).
+        // Long enough means an agent worked and stopped — mark it.
+        const lastOutputAt = Date.now() - ACTIVITY_PULSE_MS;
+        if (
+          record.burstStartedAt !== null &&
+          lastOutputAt - record.burstStartedAt >= ATTENTION_MIN_BURST_MS
+        ) {
+          record.settled = true;
+        }
+        record.burstStartedAt = null;
         this.publish();
       }
     }, ACTIVITY_PULSE_MS);
     if (changed) {
       this.publish();
     }
+  }
+
+  /** The pane's terminal rang its bell — an explicit "look at me" (Claude
+   * Code's terminal_bell notification, among others). Same mark as a settled
+   * burst, delivered instantly. */
+  noteBell(sessionId: number): void {
+    const record = this.records.get(sessionId);
+    if (!record || record.settled) {
+      return;
+    }
+    record.settled = true;
+    this.publish();
+  }
+
+  /** The user is looking at this pane (its tab active, window focused):
+   * whatever attention it held is delivered. */
+  markSeen(sessionId: number): void {
+    const record = this.records.get(sessionId);
+    if (!record || !record.settled) {
+      return;
+    }
+    record.settled = false;
+    this.publish();
   }
 
   private finishActivity(record: SessionRecord): void {
@@ -598,6 +655,8 @@ export class AttachmentHub implements AttachmentClient {
       replayBytes: 0,
       nextOffset: null,
       active: false,
+      settled: false,
+      burstStartedAt: null,
       unread: false,
       exited: false,
       exitCode: null,
@@ -642,6 +701,7 @@ export class AttachmentHub implements AttachmentClient {
         terminalAttached: record.terminalCallbacks !== null,
         active: record.active,
         unread: record.unread,
+        settled: record.settled,
         exited: record.exited,
         exitCode: record.exitCode,
         lostScrollback: record.lostRange !== null,

@@ -656,6 +656,24 @@
   background: var(--sidebar-accent);
 }
 
+/* "Finished - look at me": the one activity state loud on purpose. A halo
+   pulse rather than color alone, so it reads even peripherally. */
+.sidebar-tab__activity[data-activity="attention"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sidebar-tab__activity[data-activity="attention"] {
+    animation: sidebar-attention-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes sidebar-attention-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent); }
+}
+
 .sidebar-tab__close {
   display: grid;
   width: var(--icon-button);

@@ -1807,6 +1807,7 @@ function folderTail(cwd: string): string {
 }
 
 function activityLabel(activity: SidebarTabModel["activity"]): string {
+  if (activity === "attention") return "Finished - needs a look";
   if (activity === "unread") return "Unread output";
   if (activity === "active") return "Terminal active";
   return "No recent output";
