@@ -263,6 +263,29 @@ describe("WorkspaceController projection", () => {
     expect(controller.getSnapshot().ungroupedTabs[0]?.activity).toBe("attention");
   });
 
+  it("gives a lone pane its tab's rail title, split panes their own derivations", () => {
+    const { controller } = harness();
+
+    // tab-1 holds one pane and no custom name: rail derivation, same string.
+    expect(controller.paneTitles("tab-1")).toEqual({
+      1: "powershell · project-1",
+    });
+
+    // A rename must reach the pane's title bar too — the window may show
+    // nothing else (Michael: "it needs to be the actual title of whatever's
+    // in the side rail").
+    controller.renameTab("tab-1", "prod box");
+    expect(controller.paneTitles("tab-1")).toEqual({ 1: "prod box" });
+
+    // tab-2 is a split: the tab name cannot tell the panes apart, so each
+    // keeps its own profile · folder derivation even though the tab is named.
+    const split = controller.paneTitles("tab-2");
+    expect(Object.keys(split)).toEqual(["2", "3"]);
+    expect(split[2]).not.toBe("Split");
+
+    expect(controller.paneTitles("no-such-tab")).toEqual({});
+  });
+
   it("forwards noteBell per pane and markTabSeen to every pane in the tab", () => {
     const { controller, attachments } = harness();
 

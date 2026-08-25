@@ -1217,19 +1217,35 @@ export class WorkspaceController {
     }
   };
 
-  /// A display name per pane, for the split view's own title bars. Panes in a
-  /// split all sit under one tab title, so the tab's name cannot tell them
-  /// apart — this names each by what it actually IS (profile plus the folder
-  /// it is standing in), which is the same derivation an unnamed tab uses.
-  paneTitles = (
-    sessionIds: readonly number[],
-  ): Readonly<Record<number, string>> => {
+  /// A display name per pane, for the split view's own title bars.
+  ///
+  /// A LONE pane is its tab, so it wears the tab's own rail title — a custom
+  /// rename included — never a parallel derivation that would contradict the
+  /// sidebar. Panes in a split all sit under one tab title, so the tab's name
+  /// cannot tell them apart — each is named by what it actually IS (profile
+  /// plus the folder it is standing in), the same derivation an unnamed tab
+  /// uses.
+  paneTitles = (tabId: string): Readonly<Record<number, string>> => {
+    const tab = this.store.getState().tabs[tabId];
+    if (!tab) {
+      return {};
+    }
+    const sessionIds = sessionIdsInTab(tab);
     const titles: Record<number, string> = {};
+    const lone = sessionIds.length === 1 ? sessionIds[0] : undefined;
+    if (lone !== undefined) {
+      titles[lone] = tab.title ?? derivedTitle(this.sessions.get(lone));
+      return titles;
+    }
     for (const sessionId of sessionIds) {
       titles[sessionId] = derivedTitle(this.sessions.get(sessionId));
     }
     return titles;
   };
+
+  /// The profile a session was created with (status bar chrome).
+  sessionProfile = (sessionId: number): string | null =>
+    this.sessions.get(sessionId)?.profile ?? null;
 
   /// The session key a resume tied to this pane's tab, when the session was
   /// started or resumed through TermX. This is the strongest chat linkage

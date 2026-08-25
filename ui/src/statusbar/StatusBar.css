@@ -1,0 +1,45 @@
+/* Bottom status bar: one thin, squared strip (Direction B — drafting-table
+   chrome, no rounding, hairline separation). Colour comes only from tokens. */
+
+.status-bar {
+  display: flex;
+  min-height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* The full path is the point: let it take the room, ellipsize from the LEFT
+   so the deepest (most identifying) folders stay visible, and keep the text
+   selectable so it can be copied straight off the bar. */
+.status-bar__cwd {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text-main);
+  direction: rtl;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+  cursor: text;
+}
+
+.status-bar__chips {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  user-select: none;
+}
+
+.status-bar__chip {
+  color: var(--text-sub);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}

@@ -71,6 +71,7 @@ import {
   viewerLayoutDirection,
   type ViewerGeometry,
 } from "./viewer/viewerState";
+import { StatusBar } from "./statusbar/StatusBar";
 import { ViewerHost, type ViewerApi } from "./viewer/ViewerHost";
 import {
   bootstrapWorkspace,
@@ -1061,7 +1062,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     visible={tab.id === activeTabId}
                     sleep={sleepController}
                     sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
-                    paneTitles={controller.paneTitles(sessionIdsInSplit(tab.split))}
+                    paneTitles={controller.paneTitles(tab.id)}
                     {...(openHistory ? { onLoadEarlier: openHistory } : {})}
                   />
                 </div>
@@ -1222,6 +1223,23 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           />
         ) : null}
       </div>
+      <StatusBar
+        cwd={
+          focusedSessionId !== null
+            ? controller.sessionCwd?.(focusedSessionId) ?? null
+            : null
+        }
+        profile={
+          focusedSessionId !== null
+            ? controller.sessionProfile?.(focusedSessionId) ?? null
+            : null
+        }
+        sshHost={
+          focusedSessionId !== null
+            ? controller.sshPaneInfo?.(focusedSessionId)?.host ?? null
+            : null
+        }
+      />
     </>
   );
 }
