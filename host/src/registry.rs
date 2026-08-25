@@ -142,7 +142,7 @@ impl Registry {
     }
 
     pub fn create_session(
-        &self,
+        self: &Arc<Self>,
         profile: Option<&str>,
         cwd: Option<&Path>,
         cols: u16,
@@ -179,6 +179,17 @@ impl Registry {
                 }
             },
         };
+        // The reader thread reports the shell's own cwd (OSC 9;9) back here so
+        // the record FOLLOWS the shell. Weak: a session must never keep its
+        // registry alive.
+        let on_cwd: crate::session::CwdCallback = {
+            let weak = Arc::downgrade(self);
+            Box::new(move |reported: &str| {
+                if let Some(registry) = weak.upgrade() {
+                    registry.note_session_cwd(id, reported);
+                }
+            })
+        };
         let session = Arc::new(Session::spawn_with_history(
             &prof,
             cwd.as_deref(),
@@ -186,6 +197,7 @@ impl Registry {
             rows,
             self.config.scrollback_bytes,
             history,
+            Some(on_cwd),
         )?);
         let info = SessionInfo {
             id,
@@ -213,6 +225,30 @@ impl Registry {
         }
         self.persist_logged();
         Ok((info, session))
+    }
+
+    /// A cwd the session's shell reported for itself (OSC 9;9, parsed by the
+    /// reader thread). The recorded cwd follows the shell so a corpse record
+    /// restarts — and resumes its conversation — where the shell LAST stood,
+    /// not where it was created; before this, a pane created without a folder
+    /// persisted `cwd: null` forever and reboot recovery had nothing to work
+    /// with. Stored verbatim (an ssh launcher pane reports its REMOTE path —
+    /// still the most truthful answer to "where was this pane"); validation
+    /// happens where it matters, on the next create's cwd. Persisted only on
+    /// change: the reader thread dedupes same-cwd prompt reports, so this
+    /// fires on actual `cd`s.
+    fn note_session_cwd(&self, id: SessionId, reported: &str) {
+        {
+            let mut entries = self.entries.lock().unwrap();
+            let Some(entry) = entries.get_mut(&id) else {
+                return; // closed while the report was in flight
+            };
+            if entry.info.cwd.as_deref() == Some(reported) {
+                return;
+            }
+            entry.info.cwd = Some(reported.to_string());
+        }
+        self.persist_logged();
     }
 
     pub fn get(&self, id: SessionId) -> Option<Arc<Session>> {
@@ -457,9 +493,9 @@ impl Registry {
 mod tests {
     use super::*;
 
-    fn test_registry() -> (tempfile::TempDir, Registry) {
+    fn test_registry() -> (tempfile::TempDir, Arc<Registry>) {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         (tmp, reg)
     }
 
@@ -488,7 +524,7 @@ mod tests {
         )
         .unwrap();
 
-        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let listed = reg.list();
         assert_eq!(listed.len(), 2, "both parseable records survive, junk is dropped");
         let corpse = listed.iter().find(|s| s.id == 7).unwrap();
@@ -499,19 +535,88 @@ mod tests {
 
         // Corpses ride through persist, so a second restart still knows them.
         reg.persist().unwrap();
-        let reg2 = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg2 = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         assert_eq!(reg2.list().len(), 2);
 
         // Closing a corpse dismisses it durably.
         assert!(reg2.close_session(7), "a corpse can be closed");
         assert!(reg2.list().iter().all(|s| s.id != 7));
-        let reg3 = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg3 = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         assert!(reg3.list().iter().all(|s| s.id != 7), "the dismissal persisted");
 
         // The id watermark still respects corpse ids: nothing recycles 41.
         let (info, s) = reg3.create_session(Some("cmd"), None, 80, 25, false).unwrap();
         assert!(info.id >= 42, "new ids start past the persisted watermark");
         reg3.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    /// The defect behind "only one pane resumed after my reboot": the
+    /// recorded cwd was frozen at creation, so a pane opened without a folder
+    /// persisted `cwd: null` forever and its corpse had nothing to restart
+    /// into. The record must FOLLOW the shell: cd, and the registry — and
+    /// state.json, and the corpse the NEXT daemon serves — all know the new
+    /// folder.
+    #[test]
+    fn recorded_cwd_follows_the_shell_into_state_json_and_the_corpse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("termx_cd_target");
+        std::fs::create_dir(&target).unwrap();
+        let target_str = target.to_string_lossy().to_string();
+
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
+        // Created WITHOUT a cwd — exactly the pane shape that used to persist
+        // null forever. shell_integration on: the prompt hook is the channel.
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, true)
+            .unwrap();
+        assert_eq!(info.cwd, None, "creation records what was asked: nothing");
+
+        s.write_input(format!("cd /d \"{target_str}\"\r\n").as_bytes())
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let listed = reg.list();
+            let cwd = listed
+                .iter()
+                .find(|row| row.id == info.id)
+                .and_then(|row| row.cwd.clone());
+            if cwd.as_deref() == Some(target_str.as_str()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recorded cwd never followed the cd; last saw {cwd:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // The change persisted on its own — no lifecycle event in between.
+        let state: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("state.json")).unwrap(),
+        )
+        .unwrap();
+        let row = state["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == info.id)
+            .expect("session row persisted");
+        assert_eq!(row["cwd"], serde_json::json!(target_str));
+
+        // A daemon death (no shutdown, no close — the reboot case): the next
+        // daemon's corpse stands in the folder the shell LAST stood in.
+        drop(reg);
+        let reg2 = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
+        let corpse = reg2
+            .list()
+            .into_iter()
+            .find(|row| row.id == info.id)
+            .expect("corpse served");
+        assert!(!corpse.alive);
+        assert_eq!(corpse.cwd.as_deref(), Some(target_str.as_str()));
+
+        s.kill();
         assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }
 
@@ -584,7 +689,7 @@ mod tests {
             r#"{"layout": {"keep": true}, "sessions": [{"id": 41, "profile": "cmd", "cwd": null, "cols": 80, "rows": 25, "alive": false}]}"#,
         )
         .unwrap();
-        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let (info, s) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
             .unwrap();
@@ -608,13 +713,13 @@ mod tests {
     #[test]
     fn configured_default_profile_applies_when_profile_omitted() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Registry::new(
+        let reg = Arc::new(Registry::new(
             tmp.path().to_path_buf(),
             Config {
                 default_profile: "cmd".into(),
                 ..Config::default()
             },
-        );
+        ));
         let (info, s) = reg.create_session(None, None, 80, 25, false).unwrap();
         assert_eq!(info.profile, "cmd", "config.json default_profile must win");
         assert!(info.pid.is_some(), "spawned session must report its pid");
@@ -650,7 +755,7 @@ mod tests {
     #[test]
     fn failed_layout_persist_rolls_back_in_memory_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         reg.set_layout(serde_json::json!({"groups": ["durable"]}))
             .unwrap();
         std::fs::remove_file(tmp.path().join("state.json")).unwrap();
@@ -667,11 +772,11 @@ mod tests {
     fn layout_blob_persists_across_instances() {
         let tmp = tempfile::tempdir().unwrap();
         {
-            let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+            let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
             reg.set_layout(serde_json::json!({"groups": [{"name": "client work"}]}))
                 .unwrap();
         }
-        let reg2 = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg2 = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         assert_eq!(reg2.layout()["groups"][0]["name"], "client work");
     }
 
@@ -679,7 +784,7 @@ mod tests {
     fn corrupt_state_json_degrades_to_empty_layout() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("state.json"), "{ not json at all").unwrap();
-        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         assert_eq!(reg.layout(), serde_json::Value::Null);
     }
 
@@ -776,7 +881,7 @@ mod tests {
         // so the watermark must come from the explicit next_id field.
         let tmp = tempfile::tempdir().unwrap();
         let first_id = {
-            let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+            let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
             let (info, s) = reg
                 .create_session(Some("cmd"), None, 80, 25, false)
                 .unwrap();
@@ -784,7 +889,7 @@ mod tests {
             assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
             info.id
         };
-        let reg2 = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg2 = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let (info2, s2) = reg2
             .create_session(Some("cmd"), None, 80, 25, false)
             .unwrap();
@@ -813,7 +918,7 @@ mod tests {
     #[test]
     fn shutdown_persists_sessions_as_not_alive() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let (_info, session) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
             .unwrap();
@@ -837,7 +942,7 @@ mod tests {
     #[test]
     fn repeated_shutdown_preserves_final_session_metadata() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Registry::new(tmp.path().to_path_buf(), Config::default());
+        let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let (info, _session) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
             .unwrap();
@@ -869,13 +974,13 @@ mod tests {
     #[test]
     fn tiny_scrollback_config_bounds_the_ring() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Registry::new(
+        let reg = Arc::new(Registry::new(
             tmp.path().to_path_buf(),
             Config {
                 scrollback_bytes: 2048,
                 ..Config::default()
             },
-        );
+        ));
         let (_info, session) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
             .expect("spawn");
@@ -893,13 +998,13 @@ mod tests {
     #[test]
     fn ring_eviction_spills_to_the_history_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Registry::new(
+        let reg = Arc::new(Registry::new(
             tmp.path().to_path_buf(),
             Config {
                 scrollback_bytes: 2048,
                 ..Config::default()
             },
-        );
+        ));
         let (info, session) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
             .unwrap();
@@ -944,13 +1049,13 @@ mod tests {
     #[test]
     fn zero_history_bytes_creates_no_spill_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Registry::new(
+        let reg = Arc::new(Registry::new(
             tmp.path().to_path_buf(),
             Config {
                 history_bytes: 0,
                 ..Config::default()
             },
-        );
+        ));
         let (info, session) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
             .unwrap();

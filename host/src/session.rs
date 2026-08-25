@@ -62,6 +62,119 @@ fn strip_dsr(carry: &[u8], chunk: &[u8]) -> (Vec<u8>, usize, Vec<u8>) {
     (clean, count, scan[i..].to_vec())
 }
 
+/// Called from the reader thread with each NEW working directory the shell
+/// reports (OSC 9;9). Same-cwd reports are deduped before the call.
+pub type CwdCallback = Box<dyn Fn(&str) + Send + 'static>;
+
+/// Incremental OSC 9;9 (working-directory report) scanner for the reader
+/// thread. The daemon injects the prompt hook that emits these reports
+/// (profiles.rs) but used to stream them through to clients without reading
+/// its own channel — so a session's recorded cwd was frozen at creation, and
+/// a reboot restored panes into the folder they were CREATED in (often none)
+/// rather than the one the shell last stood in.
+///
+/// Chunk-boundary safe: a report split across reads is buffered from its
+/// intro to its terminator (BEL or ST). An unterminated "report" longer than
+/// `MAX_PENDING` is junk and is dropped rather than buffered forever.
+struct CwdScanner {
+    /// Unconsumed tail: a partial intro at a chunk edge, or an intro whose
+    /// terminator has not arrived yet. Empty when idle.
+    pending: Vec<u8>,
+}
+
+impl CwdScanner {
+    /// Exactly `ESC ] 9 ; 9 ;` — `9;78;` (the conversation-capture channel)
+    /// shares the `ESC ] 9 ;` prefix and must not match.
+    const INTRO: &'static [u8] = b"\x1b]9;9;";
+    const MAX_PENDING: usize = 4096;
+
+    fn new() -> Self {
+        Self { pending: Vec::new() }
+    }
+
+    /// Feed the next chunk of (DSR-stripped) pty output. Returns the LAST
+    /// complete report's payload, when the chunk completed at least one.
+    fn feed(&mut self, chunk: &[u8]) -> Option<String> {
+        self.pending.extend_from_slice(chunk);
+        let mut last: Option<String> = None;
+        loop {
+            let Some(start) = find_subslice(&self.pending, Self::INTRO) else {
+                // No intro: keep only a tail that could be one split mid-way.
+                let keep = partial_suffix_len(&self.pending, Self::INTRO);
+                self.pending.drain(..self.pending.len() - keep);
+                return last;
+            };
+            let body = start + Self::INTRO.len();
+            // Scan for the terminator: BEL, or ST (ESC \). Any other ESC in
+            // the payload means this was not a well-formed report — abandon
+            // the intro and rescan from the ESC that interrupted it.
+            let mut outcome: Option<Result<(usize, usize), usize>> = None;
+            let mut j = body;
+            while j < self.pending.len() {
+                match self.pending[j] {
+                    0x07 => {
+                        outcome = Some(Ok((j, j + 1)));
+                        break;
+                    }
+                    0x1b => {
+                        if j + 1 >= self.pending.len() {
+                            break; // ESC at the edge: could be ST, wait
+                        }
+                        outcome = Some(if self.pending[j + 1] == b'\\' {
+                            Ok((j, j + 2))
+                        } else {
+                            Err(j)
+                        });
+                        break;
+                    }
+                    _ => j += 1,
+                }
+            }
+            match outcome {
+                Some(Ok((payload_end, seq_end))) => {
+                    let payload = &self.pending[body..payload_end];
+                    if !payload.is_empty() {
+                        if let Ok(path) = std::str::from_utf8(payload) {
+                            last = Some(path.to_string());
+                        }
+                    }
+                    self.pending.drain(..seq_end);
+                }
+                Some(Err(resume_at)) => {
+                    // Malformed: drop the broken intro, keep the interrupting
+                    // ESC — it may begin a real report.
+                    self.pending.drain(..resume_at);
+                }
+                None => {
+                    // Unterminated. Wait for more — unless it can no longer be
+                    // a real report, in which case it is junk: drop it.
+                    if self.pending.len() - start > Self::MAX_PENDING {
+                        self.pending.drain(..body);
+                    } else {
+                        self.pending.drain(..start);
+                        return last;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Length of the longest PROPER prefix of `needle` that ends `buf` — the
+/// bytes worth carrying because the rest of the needle may be in the next
+/// chunk.
+fn partial_suffix_len(buf: &[u8], needle: &[u8]) -> usize {
+    let max = needle.len().saturating_sub(1).min(buf.len());
+    (1..=max)
+        .rev()
+        .find(|&keep| buf[buf.len() - keep..] == needle[..keep])
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Debug)]
 pub struct OutputChunk {
     pub offset: u64,
@@ -339,8 +452,9 @@ impl Session {
         Self::spawn_with_broadcast_cap(profile, cwd, cols, rows, ring_cap, 256)
     }
 
-    /// `spawn` plus a disk-spill sink for ring-evicted bytes. `None` keeps the
-    /// old behavior exactly: evicted bytes are gone and nothing is written.
+    /// `spawn` plus a disk-spill sink for ring-evicted bytes (`None` keeps the
+    /// old behavior exactly: evicted bytes are gone and nothing is written)
+    /// and an observer for the shell's own cwd reports (`None`: not watched).
     pub fn spawn_with_history(
         profile: &Profile,
         cwd: Option<&Path>,
@@ -348,8 +462,9 @@ impl Session {
         rows: u16,
         ring_cap: usize,
         history: Option<HistoryWriter>,
+        on_cwd: Option<CwdCallback>,
     ) -> Result<Session> {
-        Self::spawn_inner(profile, cwd, cols, rows, ring_cap, 256, history)
+        Self::spawn_inner(profile, cwd, cols, rows, ring_cap, 256, history, on_cwd)
     }
 
     /// `broadcast_cap` is the live-listener chunk buffer (chunks, not bytes);
@@ -363,7 +478,7 @@ impl Session {
         ring_cap: usize,
         broadcast_cap: usize,
     ) -> Result<Session> {
-        Self::spawn_inner(profile, cwd, cols, rows, ring_cap, broadcast_cap, None)
+        Self::spawn_inner(profile, cwd, cols, rows, ring_cap, broadcast_cap, None, None)
     }
 
     #[allow(clippy::too_many_arguments)] // spawn inputs are intentionally explicit
@@ -375,6 +490,7 @@ impl Session {
         ring_cap: usize,
         broadcast_cap: usize,
         history: Option<HistoryWriter>,
+        on_cwd: Option<CwdCallback>,
     ) -> Result<Session> {
         let pty = native_pty_system();
         let pair = pty
@@ -449,6 +565,11 @@ impl Session {
             let _reader_done = ReaderDone(reader_done_tx);
             let mut buf = [0u8; 8192];
             let mut carry: Vec<u8> = Vec::new();
+            // cwd watching is observation only: it reads the same cleaned
+            // bytes the ring gets, never alters them, and dedupes so the
+            // registry hears only actual directory CHANGES.
+            let mut cwd_scanner = on_cwd.as_ref().map(|_| CwdScanner::new());
+            let mut last_cwd: Option<String> = None;
             // RefCell, not a captured `mut`: `publish` is handed to
             // `answer_dsr_then_publish` by value on every read, which requires
             // it to stay Copy — so its spill state is borrowed, not owned.
@@ -497,6 +618,16 @@ impl Session {
                     Ok(n) => {
                         let (clean, queries, new_carry) = strip_dsr(&carry, &buf[..n]);
                         carry = new_carry;
+                        if let (Some(scanner), Some(report)) =
+                            (cwd_scanner.as_mut(), on_cwd.as_ref())
+                        {
+                            if let Some(path) = scanner.feed(&clean) {
+                                if last_cwd.as_deref() != Some(path.as_str()) {
+                                    report(&path);
+                                    last_cwd = Some(path);
+                                }
+                            }
+                        }
                         answer_dsr_then_publish(&writer_queues_r, queries, clean, publish);
                     }
                 }
@@ -779,6 +910,72 @@ mod tests {
         blocked.join().unwrap();
         assert!(matches!(queue.recv(), Some(WriterCmd::Dsr)));
         assert!(matches!(queue.recv(), Some(WriterCmd::Data(data)) if data == vec![b'x']));
+    }
+
+    #[test]
+    fn cwd_scanner_reads_bel_and_st_terminated_reports() {
+        let mut scanner = CwdScanner::new();
+        assert_eq!(
+            scanner.feed(b"junk\x1b]9;9;C:\\Dev\x07more"),
+            Some("C:\\Dev".to_string())
+        );
+        assert_eq!(
+            scanner.feed(b"\x1b]9;9;/root/app\x1b\\tail"),
+            Some("/root/app".to_string())
+        );
+    }
+
+    #[test]
+    fn cwd_scanner_survives_any_chunk_split() {
+        // A report can split ANYWHERE: mid-intro, mid-payload, mid-ST.
+        let full = b"prompt\x1b]9;9;C:\\Users\\mjfos\\code\x1b\\after";
+        for cut in 1..full.len() {
+            let mut scanner = CwdScanner::new();
+            let first = scanner.feed(&full[..cut]);
+            let second = scanner.feed(&full[cut..]);
+            assert_eq!(
+                first.or(second).as_deref(),
+                Some("C:\\Users\\mjfos\\code"),
+                "lost the report when split at byte {cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn cwd_scanner_takes_the_last_report_and_ignores_other_osc9_channels() {
+        let mut scanner = CwdScanner::new();
+        // 9;78 is the conversation-capture channel — same prefix, not a cwd.
+        let out = scanner.feed(
+            b"\x1b]9;9;C:\\one\x07\x1b]9;78;claude;abc\x07\x1b]9;9;C:\\two\x07",
+        );
+        assert_eq!(out, Some("C:\\two".to_string()));
+    }
+
+    #[test]
+    fn cwd_scanner_drops_malformed_and_oversized_reports() {
+        let mut scanner = CwdScanner::new();
+        // An ESC that is not ST inside the payload: not a real report — and
+        // the interrupting ESC may begin a real one, which must still parse.
+        assert_eq!(
+            scanner.feed(b"\x1b]9;9;bro\x1b[2Jken\x1b]9;9;C:\\ok\x07"),
+            Some("C:\\ok".to_string())
+        );
+        // A never-terminated "report" must not buffer forever.
+        let mut scanner = CwdScanner::new();
+        assert_eq!(scanner.feed(b"\x1b]9;9;"), None);
+        for _ in 0..10 {
+            assert_eq!(scanner.feed(&[b'x'; 1024]), None);
+        }
+        assert!(
+            scanner.pending.len() <= CwdScanner::MAX_PENDING + CwdScanner::INTRO.len(),
+            "pending grew unbounded: {}",
+            scanner.pending.len()
+        );
+        // And a real report after the junk still lands.
+        assert_eq!(
+            scanner.feed(b"\x07\x1b]9;9;C:\\after\x07"),
+            Some("C:\\after".to_string())
+        );
     }
 
     #[test]
