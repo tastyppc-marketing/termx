@@ -74,6 +74,7 @@ function harness(options: {
   passwords?: Record<string, string>;
   passwordsThrow?: boolean;
   withoutTap?: boolean;
+  refuseInput?: boolean;
 } = {}) {
   const exitListeners = new Set<
     (event: { sessionId: number; exitCode: number | null }) => void
@@ -141,6 +142,9 @@ function harness(options: {
       detach: vi.fn(),
     } satisfies SessionAttachment)),
     sendInput: vi.fn((sessionId: number, data: string | Uint8Array) => {
+      if (options.refuseInput) {
+        return false;
+      }
       writes.push([sessionId, data]);
       return true;
     }),
@@ -529,6 +533,71 @@ describe("WorkspaceController ssh password watcher", () => {
 
     expect(h.writes).toEqual([[50, `${sshConnectCommand("myvps")}\r`]]);
     expect(h.notice()).toBeNull();
+  });
+
+  it('under the "never" policy a stored password is not even read, let alone typed', async () => {
+    // The settings screen promises verbatim: "No password is ever stored or
+    // used; any already saved is ignored." (triage P0 #2)
+    const h = harness({
+      passwords: { myvps: "not-a-real-password" },
+      settings: { sshPasswordPolicy: "never" },
+    });
+
+    await connectAndSettle(h);
+
+    expect(h.passwordFor).not.toHaveBeenCalled();
+    expect(h.tapCount()).toBe(0);
+    h.emitOutput(50, PROMPT);
+    expect(h.writes).toEqual([[50, `${sshConnectCommand("myvps")}\r`]]);
+  });
+
+  it("arms the watcher only once the connect command is in the shell", async () => {
+    const h = harness({ passwords: { myvps: "not-a-real-password" } });
+
+    const done = h.controller.connectSshHost(host());
+    await settleMicrotasks();
+    // The local shell has not even prompted yet — ssh cannot be running, so
+    // nothing may be watching for a password prompt.
+    expect(h.tapCount()).toBe(0);
+
+    h.controller.reportSessionCwd(50, "C:\\Dev\\TermX", true);
+    await done;
+    expect(h.tapCount()).toBe(1);
+  });
+
+  it("retires the watcher when ssh fails and the local shell prompts again", async () => {
+    // triage P0 #5: DNS failure, auth failure, a remote without bash — ssh
+    // exits, the LOCAL echoing shell is back, and the watcher must go with it.
+    const h = harness({ passwords: { myvps: "not-a-real-password" } });
+    await connectAndSettle(h);
+    expect(h.tapCount()).toBe(1);
+
+    h.emitOutput(50, "ssh: Could not resolve hostname myvps\r\n");
+    h.controller.reportSessionCwd(50, "C:\\Dev\\TermX", true);
+    expect(h.tapCount()).toBe(0);
+    expect(h.disposedTaps()).toBe(1);
+
+    // The trap the sweep called out: a later password prompt in the same
+    // local shell (a manual ssh, a git push over HTTPS) — where every
+    // keystroke ECHOES and lands in the on-disk history — must stay silent.
+    h.emitOutput(50, "git@github.com's password: ");
+    expect(h.writes).toEqual([[50, `${sshConnectCommand("myvps")}\r`]]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("arms no watcher when the connect command could not be sent", async () => {
+    const h = harness({
+      passwords: { myvps: "not-a-real-password" },
+      refuseInput: true,
+    });
+
+    await connectAndSettle(h);
+
+    expect(h.tapCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(h.notice()).toBe(
+      "The resume command could not be sent to the terminal.",
+    );
   });
 });
 

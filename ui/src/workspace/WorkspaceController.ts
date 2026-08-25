@@ -1124,7 +1124,7 @@ export class WorkspaceController {
       return;
     }
 
-    await this.openResumedTab(
+    const opened = await this.openResumedTab(
       created,
       command,
       (tabId) => {
@@ -1136,12 +1136,18 @@ export class WorkspaceController {
         // Michael simply replaces it, since nothing re-stamps.
         this.renameTab(tabId, sshTabTitle(host.alias));
         this.recordSshPane(created.id, host.alias);
-        if (password !== null) {
-          this.watchForSshPasswordPrompt(created.id, password);
-        }
       },
       { groupId: options?.groupId ?? null },
     );
+    // Armed only AFTER the connect command went in — never before. A watcher
+    // armed at tab-open would sit over the LOCAL shell's first prompt, and
+    // it is the arm-after-send ordering that lets ANY later prompt report
+    // retire it: once armed, the next prompt — remote (logged in) or local
+    // (ssh failed and the launcher shell is back) — means the password phase
+    // is over. See reportSessionCwd.
+    if (opened && password !== null) {
+      this.watchForSshPasswordPrompt(created.id, password);
+    }
   };
 
   /// The ssh host a pane is connected to, when TermX opened the connection
@@ -1315,11 +1321,16 @@ export class WorkspaceController {
     if (!live) {
       return;
     }
-    // A remote prompt is proof the login succeeded, so no password will be
-    // asked again — retire the watcher before its 60 s window can catch an
-    // unrelated later prompt (a `sudo` password:) and type the ssh password
-    // into it.
-    if (this.sshPanes.has(sessionId) && isRemoteCwd(path)) {
+    // ANY prompt after the connect command went in means the password phase is
+    // over — remote (login succeeded, no password will be asked again) or
+    // LOCAL (ssh failed: DNS, auth, no bash on the far end — and the launcher
+    // shell is back, echoing). Retiring on both is what keeps the watcher's
+    // 60 s window from catching an unrelated later prompt (a `sudo`
+    // password:, a manual `ssh` to another box) and typing the stored
+    // password into it. Watchers are armed only AFTER the command is sent, so
+    // the local shell's FIRST prompt — the one the send waited for — can
+    // never retire a watcher early: it predates the watcher.
+    if (this.sshPanes.has(sessionId)) {
       this.stopSshPasswordWatch(sessionId);
     }
     // A LIVE report is the prompt-ready signal a pending resume waits for
@@ -1807,7 +1818,11 @@ export class WorkspaceController {
     if (command !== null) {
       const sent = this.attachments.sendInput?.(created.id, `${command}\r`) ?? false;
       if (!sent) {
+        // A resume whose command never went in was refused (the contract
+        // above): callers must not treat the empty shell as a booted agent —
+        // or arm a password watcher over it.
         this.setNotice("The resume command could not be sent to the terminal.");
+        return false;
       }
     }
     return true;
@@ -1862,10 +1877,13 @@ export class WorkspaceController {
         this.rememberResumedTab(sessionKey(conversation), tabId);
       }
       this.recordDaemonSession(entry, created.id);
-      if (password !== null) {
-        this.watchForSshPasswordPrompt(created.id, password);
-      }
     });
+    // Same ordering rule as connectSshHost: the watcher exists only from the
+    // moment the connect command is in the shell, so any prompt report after
+    // it — local or remote — can safely retire it.
+    if (opened && password !== null) {
+      this.watchForSshPasswordPrompt(created.id, password);
+    }
     // A bare-shell save is finished here: the remote shell in the saved folder
     // is the whole of what was pinned.
     const remoteCommand = remoteResumeCommand(conversation);
@@ -1976,6 +1994,12 @@ export class WorkspaceController {
   /// with. Every one of those means the same thing to the caller: nobody types
   /// anything, and the prompt is left on screen where the user can answer it.
   private async storedSshPassword(alias: string): Promise<string | null> {
+    // Spec §6: "never" means what the settings screen says verbatim — "any
+    // already saved is ignored". The store is not even consulted, so flipping
+    // the policy is enough; nothing needs deleting for the promise to hold.
+    if (this.settings.getSnapshot().sshPasswordPolicy !== "store") {
+      return null;
+    }
     if (!this.sshPasswords || !this.attachments.tapOutput) {
       return null;
     }
