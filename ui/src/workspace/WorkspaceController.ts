@@ -1097,9 +1097,13 @@ export class WorkspaceController {
     options?: { groupId?: string | null },
   ): Promise<void> => {
     this.setNotice(null);
+    // The launcher shell IS the default profile, and the connect command's
+    // quoting must match the shell it is typed into (cmd has no single
+    // quotes) — so the profile is read first and travels into the command.
+    const profile = this.settings.getSnapshot().defaultProfile;
     let command: string;
     try {
-      command = sshConnectCommand(host.alias);
+      command = sshConnectCommand(host.alias, { localShell: profile });
     } catch {
       // An alias reaches a command line verbatim, so a name that is not a name
       // is refused rather than escaped — before any terminal exists.
@@ -1109,11 +1113,9 @@ export class WorkspaceController {
       return;
     }
 
-    // Read BEFORE the shell exists so the watcher can be armed the instant the
-    // tab does. The plain value lives only in this local and in the watcher's
-    // closure, never on the controller.
+    // Read BEFORE the shell exists so the value lives only in this local and
+    // in the watcher's closure, never on the controller.
     const password = await this.storedSshPassword(host.alias);
-    const profile = this.settings.getSnapshot().defaultProfile;
     let created: SessionInfo;
     try {
       // No cwd chain: the local shell is a launcher, and where it starts is
@@ -1850,9 +1852,14 @@ export class WorkspaceController {
       this.setNotice(`Host ${alias} is no longer in your SSH config.`);
       return;
     }
+    // Quoting must match the LOCAL launcher shell the command is typed into.
+    const profile = this.settings.getSnapshot().defaultProfile;
     let connect: string;
     try {
-      connect = sshConnectCommand(alias, { remoteCwd: entry.cwd });
+      connect = sshConnectCommand(alias, {
+        remoteCwd: entry.cwd,
+        localShell: profile,
+      });
     } catch {
       this.setNotice(
         "That SSH host cannot be connected: its alias is not a plain name.",
@@ -1861,7 +1868,6 @@ export class WorkspaceController {
     }
 
     const password = await this.storedSshPassword(alias);
-    const profile = this.settings.getSnapshot().defaultProfile;
     let created: SessionInfo;
     try {
       created = await this.createSessionDownChain(profile, [null]);

@@ -269,6 +269,19 @@ describe("WorkspaceController.connectSshHost", () => {
     expect(h.notice()).toBeNull();
   });
 
+  it("types the cmd-quoted variant when the launcher profile is cmd", async () => {
+    // triage P0 #4: cmd.exe has no single quotes — the powershell variant
+    // executes | and > locally there instead of connecting.
+    const h = harness({ settings: { defaultProfile: "cmd" } });
+
+    await connectAndSettle(h);
+
+    expect(h.writes).toEqual([
+      [50, `${sshConnectCommand("myvps", { localShell: "cmd" })}\r`],
+    ]);
+    expect(h.controller.sshPaneInfo(50)).toEqual({ host: "myvps" });
+  });
+
   it("records the ssh pane in ui state so a restart still knows what it is", async () => {
     const h = harness();
 

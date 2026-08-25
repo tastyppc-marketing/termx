@@ -36,6 +36,13 @@ const WATCH_TICKS = 240;
 export interface SshBootstrapOptions {
   /** Absolute remote path to cd into after the shell is set up. */
   remoteCwd?: string;
+  /**
+   * The LOCAL shell the command will be typed into. cmd.exe has no
+   * single-quote syntax, so the one-liner needs a different wrapper there
+   * (see sshConnectCommand). Default: "powershell", which treats '…' as a
+   * literal string exactly like POSIX shells do.
+   */
+  localShell?: "powershell" | "cmd";
 }
 
 /** Wrap for bash single quotes: the only escape is close-escape-reopen. */
@@ -124,6 +131,24 @@ export function sshConnectCommand(
     throw new Error(`unsafe ssh alias: ${JSON.stringify(alias)}`);
   }
   const payload = base64Utf8(remoteRcScript(options));
+  if (options.localShell === "cmd") {
+    // cmd.exe does not treat ' as a quote, so the '…' wrapper below would
+    // leave | and > LIVE: no connection, a local `base64` run, and a stray
+    // file literally named `$tmp` dropped in the cwd (triage P0 #4). Instead:
+    // ONE pair of double quotes around the whole one-liner, with no inner
+    // quotes at all. cmd keeps every metacharacter inert inside "…" (it still
+    // expands %VAR% and, under delayed expansion, !VAR! — but base64's
+    // alphabet and the fixed text contain neither % nor !); ssh.exe's own
+    // argv parsing then strips the quotes and the remote shell receives the
+    // same one-liner with $tmp unquoted — safe, because mktemp's paths never
+    // contain spaces.
+    const oneLiner = [
+      "tmp=$(mktemp)",
+      `echo ${payload} | base64 -d > $tmp`,
+      "TERMX_RC=$tmp exec bash --rcfile $tmp -i",
+    ].join("; ");
+    return `ssh -t ${alias} "${oneLiner}"`;
+  }
   const oneLiner = [
     "tmp=$(mktemp)",
     `echo ${payload} | base64 -d > "$tmp"`,

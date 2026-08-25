@@ -74,6 +74,52 @@ describe("sshConnectCommand", () => {
   });
 });
 
+describe("sshConnectCommand for a cmd.exe launcher shell", () => {
+  // cmd has no single-quote syntax: the '…' wrapper leaves | and > live,
+  // running a local `base64` and dropping a file named `$tmp` (triage P0 #4).
+  const command = sshConnectCommand("myvps", { localShell: "cmd" });
+
+  it("wraps the whole one-liner in exactly one pair of double quotes", () => {
+    expect(command.startsWith('ssh -t myvps "')).toBe(true);
+    expect(command.endsWith('"')).toBe(true);
+    // Exactly two double quotes and no inner ones: with the full tail inside
+    // one "…" region, cmd treats every metacharacter as inert text, and
+    // ssh.exe's argv parsing hands the remote shell one clean string.
+    expect(command.split('"')).toHaveLength(3);
+    expect(command).not.toContain("'");
+  });
+
+  it("contains nothing cmd expands even inside double quotes", () => {
+    // %VAR% is expanded inside "…", and !VAR! is too under delayed expansion.
+    // base64's alphabet has neither character; neither may the fixed text.
+    expect(command).not.toContain("%");
+    expect(command).not.toContain("!");
+  });
+
+  it("keeps the remote side working with the quotes ssh strips away", () => {
+    // What the remote shell receives is the arg with the outer quotes gone —
+    // $tmp must therefore work unquoted (mktemp paths never contain spaces).
+    expect(command).toContain("tmp=$(mktemp)");
+    expect(command).toContain("base64 -d > $tmp");
+    expect(command).toContain("TERMX_RC=$tmp exec bash --rcfile $tmp -i");
+  });
+
+  it("carries the same rc script as the powershell variant", () => {
+    expect(decodedScript(command)).toBe(remoteRcScript());
+    expect(
+      decodedScript(
+        sshConnectCommand("myvps", { localShell: "cmd", remoteCwd: "/srv" }),
+      ),
+    ).toBe(remoteRcScript({ remoteCwd: "/srv" }));
+  });
+
+  it("treats powershell explicitly the same as the default", () => {
+    expect(sshConnectCommand("myvps", { localShell: "powershell" })).toBe(
+      sshConnectCommand("myvps"),
+    );
+  });
+});
+
 describe("remoteRcScript", () => {
   const script = remoteRcScript();
 
