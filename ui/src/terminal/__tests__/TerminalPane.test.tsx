@@ -72,6 +72,7 @@ function paneFixture() {
   const findPrevious = vi.fn();
   const focus = vi.fn();
   const dispose = vi.fn();
+  const setFontSize = vi.fn();
   const presentation: TerminalPresentation = {
     terminal,
     fit,
@@ -79,6 +80,7 @@ function paneFixture() {
     findPrevious,
     focus,
     dispose,
+    setFontSize,
     registerInputMarker: vi.fn(() => undefined),
     scrollToLine: vi.fn(),
     viewportY: vi.fn(() => 0),
@@ -125,6 +127,8 @@ function paneFixture() {
     client,
     dependencies,
     dispose,
+    fit,
+    setFontSize,
     terminal,
     emitHostError(error: Error) {
       if (!hostErrorListener) {
@@ -685,5 +689,110 @@ describe("the lost-scrollback notice", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("ctrl+scroll font zoom", () => {
+  function wheel(options: { ctrlKey: boolean; deltaY: number }) {
+    return new WheelEvent("wheel", { ...options, cancelable: true, bubbles: true });
+  }
+
+  function surfaceOf(container: HTMLElement): HTMLElement {
+    const surface = container.querySelector(".terminal-pane__surface");
+    if (!(surface instanceof HTMLElement)) {
+      throw new Error("terminal surface did not render");
+    }
+    return surface;
+  }
+
+  it("reports ctrl+wheel as zoom deltas and swallows the browser gesture", async () => {
+    const fixture = paneFixture();
+    const onFontSizeWheel = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          dependencies={fixture.dependencies}
+          onFontSizeWheel={onFontSizeWheel}
+        />,
+      );
+      await flushPromises();
+    });
+
+    const zoomIn = wheel({ ctrlKey: true, deltaY: -120 });
+    const zoomOut = wheel({ ctrlKey: true, deltaY: 120 });
+    await act(async () => {
+      surfaceOf(container).dispatchEvent(zoomIn);
+      surfaceOf(container).dispatchEvent(zoomOut);
+    });
+
+    expect(onFontSizeWheel.mock.calls).toEqual([[1], [-1]]);
+    // preventDefault is what keeps WebView2 from running its own page zoom.
+    expect(zoomIn.defaultPrevented).toBe(true);
+    expect(zoomOut.defaultPrevented).toBe(true);
+
+    await act(async () => root.unmount());
+  });
+
+  it("leaves plain scrolling alone", async () => {
+    const fixture = paneFixture();
+    const onFontSizeWheel = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane
+          dependencies={fixture.dependencies}
+          onFontSizeWheel={onFontSizeWheel}
+        />,
+      );
+      await flushPromises();
+    });
+
+    const scroll = wheel({ ctrlKey: false, deltaY: 120 });
+    await act(async () => {
+      surfaceOf(container).dispatchEvent(scroll);
+    });
+
+    expect(onFontSizeWheel).not.toHaveBeenCalled();
+    expect(scroll.defaultPrevented).toBe(false);
+
+    await act(async () => root.unmount());
+  });
+
+  it("applies the fontSize prop at mount and live on change, refitting each time", async () => {
+    const fixture = paneFixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane dependencies={fixture.dependencies} fontSize={16} />,
+      );
+      await flushPromises();
+    });
+
+    expect(fixture.setFontSize).toHaveBeenCalledWith(16);
+    const fitsAfterMount = fixture.fit.mock.calls.length;
+    expect(fitsAfterMount).toBeGreaterThan(0);
+
+    await act(async () => {
+      root.render(
+        <TerminalPane dependencies={fixture.dependencies} fontSize={17} />,
+      );
+      await flushPromises();
+    });
+
+    expect(fixture.setFontSize).toHaveBeenLastCalledWith(17);
+    // The refit runs through the binding so the new grid reaches the host.
+    expect(fixture.fit.mock.calls.length).toBeGreaterThan(fitsAfterMount);
+
+    await act(async () => root.unmount());
   });
 });

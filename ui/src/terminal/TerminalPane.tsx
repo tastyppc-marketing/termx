@@ -59,6 +59,13 @@ export interface TerminalPresentation {
    * it simply keeps the palette it was built with.
    */
   setTheme?(palette: XtermPalette): void;
+  /**
+   * Change the terminal's font size on a LIVE terminal (ctrl+scroll zoom).
+   * Sets the glyph size only — the caller refits, because a correct refit must
+   * also reach the host PTY and only the session binding can do that. Optional
+   * so existing presentations and fakes stay valid.
+   */
+  setFontSize?(size: number): void;
   findNext(query: string): boolean;
   findPrevious(query: string): boolean;
   focus(): void;
@@ -107,6 +114,11 @@ type TerminalPaneProps =
       onBell?: () => void;
       onConversationCaptured?: ConversationCaptureReporter;
       recordedDims?: TerminalDimensions | null;
+      /** Terminal text size in px (settings.terminalFontSize); applied live. */
+      fontSize?: number;
+      /** Ctrl+wheel over the pane: +1 zoom in, -1 out. The owner clamps and
+       * persists — the pane only reports the gesture. */
+      onFontSizeWheel?: (delta: 1 | -1) => void;
       suspended?: undefined;
       attachGeneration?: undefined;
       historyBefore?: undefined;
@@ -134,6 +146,11 @@ type TerminalPaneProps =
        * afterwards — the malformed-scrollback defense (spec §13).
        */
       recordedDims?: TerminalDimensions | null;
+      /** Terminal text size in px (settings.terminalFontSize); applied live. */
+      fontSize?: number;
+      /** Ctrl+wheel over the pane: +1 zoom in, -1 out. The owner clamps and
+       * persists — the pane only reports the gesture. */
+      onFontSizeWheel?: (delta: 1 | -1) => void;
       /**
        * The host connection is down and this session is presumed still running.
        * The pane shows a reconnecting chip and keeps its scrollback — it must
@@ -213,12 +230,32 @@ export function TerminalPane(props: TerminalPaneProps) {
   // Read at attach time only: a dims change must not remount the terminal.
   const recordedDimsRef = useRef(props.recordedDims);
   recordedDimsRef.current = props.recordedDims;
+  const fontSizeRef = useRef(props.fontSize);
+  fontSizeRef.current = props.fontSize;
+  const onFontSizeWheelRef = useRef(props.onFontSizeWheel);
+  onFontSizeWheelRef.current = props.onFontSizeWheel;
+  // The mounted binding, mirrored for the font-size effect: a zoom refit must
+  // reach the HOST PTY, and only the binding can carry a resize there.
+  const bindingRef = useRef<TerminalSessionBinding | null>(null);
 
   useEffect(() => {
     const element = containerRef.current;
     if (!element) {
       return;
     }
+
+    // Ctrl+wheel is font zoom. Capture phase + preventDefault keeps the
+    // gesture away from both xterm's scrollback and the webview's own page
+    // zoom; non-passive on purpose — preventDefault is the point.
+    const onFontZoomWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey || event.deltaY === 0) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      onFontSizeWheelRef.current?.(event.deltaY < 0 ? 1 : -1);
+    };
+    element.addEventListener("wheel", onFontZoomWheel, { passive: false, capture: true });
 
     let cancelled = false;
     let binding: TerminalSessionBinding | null = null;
@@ -256,10 +293,19 @@ export function TerminalPane(props: TerminalPaneProps) {
     try {
       presentation = dependencies.createPresentation(element, onLink);
     } catch (error) {
+      // This early return skips the cleanup function below, so the wheel
+      // listener must come off here or it leaks on a dead pane.
+      element.removeEventListener("wheel", onFontZoomWheel, { capture: true });
       setPaneState({ type: "error", message: safeErrorMessage(error) });
       return;
     }
     presentationRef.current = presentation;
+    // The presentation is born at the default size; apply the setting before
+    // anything is written so replay lays out against the real grid.
+    if (fontSizeRef.current !== undefined) {
+      presentation.setFontSize?.(fontSizeRef.current);
+      presentation.fit();
+    }
     stopScrollListener = presentation.onScroll?.((atTop) => {
       if (!cancelled) {
         setAtTopOfScrollback(atTop);
@@ -368,6 +414,7 @@ export function TerminalPane(props: TerminalPaneProps) {
             }
           },
         });
+        bindingRef.current = binding;
         const onJumpToLastInput = (event: Event) => {
           const detail = (event as CustomEvent<{ sessionId?: number }>).detail;
           if (detail?.sessionId !== supplied.sessionId) {
@@ -411,6 +458,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         stopHostErrors = () => undefined;
         attemptCleanup("terminal_attachment", () => binding?.dispose());
         binding = null;
+        bindingRef.current = null;
         attemptCleanup("host_client", () => ownedClient?.close());
         ownedClient = null;
         if (!cancelled) {
@@ -421,6 +469,8 @@ export function TerminalPane(props: TerminalPaneProps) {
 
     return () => {
       cancelled = true;
+      attemptCleanup("font_zoom_listener", () =>
+        element.removeEventListener("wheel", onFontZoomWheel, { capture: true }));
       attemptCleanup("scroll_listener", stopScrollListener);
       attemptCleanup("bell_listener", stopBell);
       attemptCleanup("jump_listener", stopJumpListener);
@@ -430,6 +480,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       attemptCleanup("terminal_attachment", () => binding?.dispose());
       attemptCleanup("host_client", () => ownedClient?.close());
       attemptCleanup("terminal_presentation", () => presentation.dispose());
+      bindingRef.current = null;
       if (presentationRef.current === presentation) {
         presentationRef.current = null;
       }
@@ -450,6 +501,25 @@ export function TerminalPane(props: TerminalPaneProps) {
       }),
     [],
   );
+
+  // Live ctrl+scroll zoom: forward the new size, then refit through the
+  // binding when one is up — a font change alters cols/rows without ever
+  // resizing the container, so the resize observer cannot deliver the new
+  // grid to the host PTY.
+  const fontSize = props.fontSize;
+  useEffect(() => {
+    const presentation = presentationRef.current;
+    if (fontSize === undefined || !presentation) {
+      return;
+    }
+    presentation.setFontSize?.(fontSize);
+    const binding = bindingRef.current;
+    if (binding) {
+      binding.fitAndResize();
+    } else {
+      presentation.fit();
+    }
+  }, [fontSize]);
 
   const runSearch = (direction: "next" | "previous") => {
     if (searchQuery.length === 0) {
@@ -670,6 +740,9 @@ function createPresentation(
     resize: (cols, rows) => terminal.resize(cols, rows),
     setTheme: (palette) => {
       terminal.options.theme = palette;
+    },
+    setFontSize: (size) => {
+      terminal.options.fontSize = size;
     },
     findNext: (query) => search.findNext(query, searchOptions()),
     findPrevious: (query) => search.findPrevious(query, searchOptions()),

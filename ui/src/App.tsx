@@ -49,6 +49,10 @@ import { probeRemoteTitle } from "./native/sshProbe";
 import { SetPasswordDialog } from "./ssh/SetPasswordDialog";
 import type { SshHost } from "./ssh/types";
 import { SettingsSurface } from "./settings/SettingsSurface";
+import {
+  TERMINAL_FONT_SIZE_MAX,
+  TERMINAL_FONT_SIZE_MIN,
+} from "./settings/settings";
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
 import { ThemeProvider } from "./theme/ThemeProvider";
@@ -422,6 +426,20 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     // A deliverable just landed — surface the dock like Claude Code's output
     // section does, instead of leaving it behind a chip the user must know.
     setOutputsOpen(true);
+  };
+
+  // Ctrl+scroll zoom from any pane. One shared size for every terminal —
+  // reading the store directly (not the render's `settings`) keeps a fast
+  // wheel burst from clamping against a stale snapshot.
+  const adjustTerminalFontSize = (delta: 1 | -1) => {
+    const current = settingsStore.getSnapshot().terminalFontSize;
+    const next = Math.min(
+      TERMINAL_FONT_SIZE_MAX,
+      Math.max(TERMINAL_FONT_SIZE_MIN, current + delta),
+    );
+    if (next !== current) {
+      settingsStore.update({ terminalFontSize: next });
+    }
   };
 
   // Resume with dedupe (polish P6): "already-open" raises the dialog; a
@@ -1063,6 +1081,8 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     sleep={sleepController}
                     sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
                     paneTitles={controller.paneTitles(tab.id)}
+                    fontSize={settings.terminalFontSize}
+                    onFontSizeWheel={adjustTerminalFontSize}
                     {...(openHistory ? { onLoadEarlier: openHistory } : {})}
                   />
                 </div>

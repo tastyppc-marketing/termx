@@ -104,7 +104,12 @@ export interface TermxSettings {
   readonly sshPasswordPolicy: SshPasswordPolicy;
   /** Encrypt stored passwords at rest (Windows DPAPI, no passphrase). */
   readonly sshEncryptPasswords: boolean;
+  /** Terminal text size in px. Ctrl+scroll over any pane adjusts it live. */
+  readonly terminalFontSize: number;
 }
+
+export const TERMINAL_FONT_SIZE_MIN = 8;
+export const TERMINAL_FONT_SIZE_MAX = 32;
 
 export const DEFAULT_SETTINGS: TermxSettings = {
   newTabPolicy: "group-active",
@@ -128,7 +133,20 @@ export const DEFAULT_SETTINGS: TermxSettings = {
   sshHostsMenu: true,
   sshPasswordPolicy: "store",
   sshEncryptPasswords: true,
+  terminalFontSize: 14,
 };
+
+/** Any finite number is honoured, rounded and clamped to the legible range;
+ * anything else falls back to the default. */
+function parseTerminalFontSize(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_SETTINGS.terminalFontSize;
+  }
+  return Math.min(
+    TERMINAL_FONT_SIZE_MAX,
+    Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(value)),
+  );
+}
 
 function isNewTabPolicy(value: unknown): value is NewTabPolicy {
   return (NEW_TAB_POLICIES as readonly unknown[]).includes(value);
@@ -260,6 +278,7 @@ export function parseSettings(text: string | null): TermxSettings {
       typeof record.sshEncryptPasswords === "boolean"
         ? record.sshEncryptPasswords
         : DEFAULT_SETTINGS.sshEncryptPasswords,
+    terminalFontSize: parseTerminalFontSize(record.terminalFontSize),
   };
 }
 

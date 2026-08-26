@@ -90,6 +90,10 @@ export interface SplitLayoutProps {
    * no bar.
    */
   paneTitles?: Readonly<Record<number, string>>;
+  /** Terminal text size in px for every pane (settings.terminalFontSize). */
+  fontSize?: number;
+  /** Ctrl+wheel zoom from any pane: +1 in, -1 out (App clamps and persists). */
+  onFontSizeWheel?: (delta: 1 | -1) => void;
 }
 
 interface DividerDrag {
@@ -133,6 +137,8 @@ export function SplitLayout({
   sessionDims,
   onLoadEarlier,
   paneTitles,
+  fontSize,
+  onFontSizeWheel,
 }: SplitLayoutProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [drag, setDrag] = useState<DividerDrag | null>(null);
@@ -390,6 +396,8 @@ export function SplitLayout({
                     {...(onConversationCaptured
                       ? { onConversationCaptured }
                       : {})}
+                    {...(fontSize !== undefined ? { fontSize } : {})}
+                    {...(onFontSizeWheel ? { onFontSizeWheel } : {})}
                   />
                 )}
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">

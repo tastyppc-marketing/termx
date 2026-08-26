@@ -34,6 +34,7 @@ const ALTERNATE_SETTINGS: TermxSettings = {
   sshHostsMenu: false,
   sshPasswordPolicy: "never",
   sshEncryptPasswords: false,
+  terminalFontSize: 18,
 };
 
 describe("parseSettings", () => {
@@ -70,6 +71,7 @@ describe("parseSettings", () => {
       sshHostsMenu: false,
       sshPasswordPolicy: "never",
       sshEncryptPasswords: false,
+      terminalFontSize: 18,
     } as const;
     expect(parseSettings(serializeSettings(settings))).toEqual(settings);
   });
@@ -98,6 +100,7 @@ describe("parseSettings", () => {
         sshHostsMenu: 1,
         sshPasswordPolicy: "sometimes",
         sshEncryptPasswords: "dpapi",
+        terminalFontSize: "big",
       }),
     );
     expect(parsed).toEqual({
@@ -122,7 +125,22 @@ describe("parseSettings", () => {
       sshHostsMenu: DEFAULT_SETTINGS.sshHostsMenu,
       sshPasswordPolicy: DEFAULT_SETTINGS.sshPasswordPolicy,
       sshEncryptPasswords: DEFAULT_SETTINGS.sshEncryptPasswords,
+      terminalFontSize: DEFAULT_SETTINGS.terminalFontSize,
     });
+  });
+
+  it("terminalFontSize: defaults to 14, rounds, and clamps to 8-32", () => {
+    expect(DEFAULT_SETTINGS.terminalFontSize).toBe(14);
+    expect(parseSettings(JSON.stringify({}))).toMatchObject({ terminalFontSize: 14 });
+    for (const bad of ["16", null, true, {}, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        parseSettings(JSON.stringify({ terminalFontSize: bad, defaultProfile: "cmd" })),
+      ).toMatchObject({ terminalFontSize: 14, defaultProfile: "cmd" });
+    }
+    expect(parseSettings(JSON.stringify({ terminalFontSize: 20 })).terminalFontSize).toBe(20);
+    expect(parseSettings(JSON.stringify({ terminalFontSize: 15.6 })).terminalFontSize).toBe(16);
+    expect(parseSettings(JSON.stringify({ terminalFontSize: 2 })).terminalFontSize).toBe(8);
+    expect(parseSettings(JSON.stringify({ terminalFontSize: 90 })).terminalFontSize).toBe(32);
   });
 
   it("theme: defaults to gunmetal-brass and rejects unknown ids", () => {

@@ -45,7 +45,11 @@ describe("SETTINGS_SECTIONS", () => {
     );
     expect(byId.general).toEqual(["onWindowClose", "sleepHiddenTerminals"]);
     expect(byId.appearance).toEqual(["theme"]);
-    expect(byId.terminal).toEqual(["defaultProfile", "shellIntegration"]);
+    expect(byId.terminal).toEqual([
+      "defaultProfile",
+      "terminalFontSize",
+      "shellIntegration",
+    ]);
     expect(byId.groups).toEqual(["newTabPolicy", "maxGroupDepth"]);
     expect(byId.conversations).toEqual([
       "conversationsRail",

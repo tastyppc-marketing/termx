@@ -33,7 +33,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "terminal",
     label: "Terminal",
-    fields: ["defaultProfile", "shellIntegration"],
+    fields: ["defaultProfile", "terminalFontSize", "shellIntegration"],
   },
   { id: "groups", label: "Groups & Tabs", fields: ["newTabPolicy", "maxGroupDepth"] },
   {

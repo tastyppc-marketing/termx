@@ -17,6 +17,8 @@ import { SETTINGS_SECTIONS, type SettingsSectionId } from "./sections";
 import type { SettingsStore } from "./SettingsStore";
 import {
   MAX_GROUP_DEPTH_OPTIONS,
+  TERMINAL_FONT_SIZE_MAX,
+  TERMINAL_FONT_SIZE_MIN,
   type AgentPaneView,
   type ChatDensity,
   type CloseBehavior,
@@ -463,6 +465,35 @@ function SettingsControl({
             <option value="cmd">Command Prompt</option>
           </select>
         </label>
+      );
+    case "terminalFontSize":
+      return (
+        <div>
+          <label className="settings-row">
+            <span className="settings-row__label">Terminal text size</span>
+            <input
+              type="number"
+              min={TERMINAL_FONT_SIZE_MIN}
+              max={TERMINAL_FONT_SIZE_MAX}
+              value={settings.terminalFontSize}
+              onChange={(event) => {
+                const raw = Number(event.currentTarget.value);
+                if (!Number.isFinite(raw)) {
+                  return;
+                }
+                onChange({
+                  terminalFontSize: Math.min(
+                    TERMINAL_FONT_SIZE_MAX,
+                    Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(raw)),
+                  ),
+                });
+              }}
+            />
+          </label>
+          <p className="settings-section__note">
+            Ctrl+scroll over any terminal zooms too — changes apply instantly.
+          </p>
+        </div>
       );
     case "shellIntegration":
       return (
