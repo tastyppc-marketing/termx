@@ -314,6 +314,29 @@ describe("Sidebar structure", () => {
     expect(mark).not.toBeNull();
     expect(mark!.getAttribute("aria-label")).toBe("Finished - needs a look");
   });
+
+  it("says when the work finished, so a tab cannot sit done for an unknown age", async () => {
+    const snapshot = workspace();
+    const first = snapshot.rootItems[0];
+    if (first?.kind !== "tab") throw new Error("fixture changed");
+    const finishedAt = new Date(2026, 7, 25, 14, 32).getTime();
+    Object.assign(first.tab, { activity: "attention", attentionSince: finishedAt });
+    await renderSidebar(snapshot);
+
+    const row = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+    const badge = row.querySelector<HTMLElement>(".sidebar-tab__badge--done");
+    expect(badge?.textContent).toBe("14:32");
+    expect(badge?.getAttribute("title")).toBe("Finished at 14:32 and still waiting");
+    expect(
+      row.querySelector("[data-activity='attention']")!.getAttribute("aria-label"),
+    ).toBe("Finished at 14:32 - needs a look");
+  });
+
+  it("shows no finished-at badge on a tab that is not waiting", async () => {
+    await renderSidebar();
+    const row = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+    expect(row.querySelector(".sidebar-tab__badge--done")).toBeNull();
+  });
 });
 
 /// Marketing > Clients > Acme, one tab at each level plus a root tab.

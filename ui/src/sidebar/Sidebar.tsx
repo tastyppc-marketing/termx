@@ -723,6 +723,14 @@ export function Sidebar({
             <span className="sidebar-tab__title">{tab.title}</span>
           )}
           {ended ? <span className="sidebar-tab__badge">Exited</span> : null}
+          {!ended && tab.activity === "attention" && finishedClock(tab.attentionSince) ? (
+            <span
+              className="sidebar-tab__badge sidebar-tab__badge--done"
+              title={`Finished at ${finishedClock(tab.attentionSince)} and still waiting`}
+            >
+              {finishedClock(tab.attentionSince)}
+            </span>
+          ) : null}
           {tab.status === "attach_error" ? (
             <span className="sidebar-tab__badge sidebar-tab__badge--error">Attach error</span>
           ) : null}
@@ -738,7 +746,7 @@ export function Sidebar({
         <span
           className="sidebar-tab__activity"
           data-activity={tab.activity}
-          aria-label={activityLabel(tab.activity)}
+          aria-label={activityLabel(tab.activity, tab.attentionSince)}
         />
         <button
           type="button"
@@ -1806,11 +1814,37 @@ function folderTail(cwd: string): string {
   return parts[parts.length - 1] ?? cwd;
 }
 
-function activityLabel(activity: SidebarTabModel["activity"]): string {
-  if (activity === "attention") return "Finished - needs a look";
+function activityLabel(
+  activity: SidebarTabModel["activity"],
+  attentionSince?: number | null,
+): string {
+  if (activity === "attention") {
+    const at = finishedClock(attentionSince);
+    return at === null
+      ? "Finished - needs a look"
+      : `Finished at ${at} - needs a look`;
+  }
   if (activity === "unread") return "Unread output";
   if (activity === "active") return "Terminal active";
   return "No recent output";
+}
+
+/**
+ * The wall clock the work stopped at, as HH:MM.
+ *
+ * Deliberately absolute rather than "18m ago": an attentive tab is by
+ * definition producing no output, so nothing re-renders the rail while it
+ * waits, and a relative label would freeze at the age it had when it was
+ * painted — the one number the user is trying to read would be the wrong one.
+ */
+function finishedClock(at?: number | null): string | null {
+  if (at === null || at === undefined || !Number.isFinite(at)) {
+    return null;
+  }
+  const when = new Date(at);
+  const hours = String(when.getHours()).padStart(2, "0");
+  const minutes = String(when.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
 }
 
 /**

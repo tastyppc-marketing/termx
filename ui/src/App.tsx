@@ -70,6 +70,7 @@ import {
   type Tab,
 } from "./state/layout";
 import { SleepController } from "./terminal/sleep";
+import { decideAttentionFlash } from "./workspace/attentionFlash";
 import {
   DEFAULT_VIEWER_GEOMETRY,
   viewerLayoutDirection,
@@ -324,19 +325,31 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
 
   // While the window is in the background, a tab entering "attention" flashes
   // the taskbar button — the "I'm in another app entirely" half of the ask.
-  const anyAttention = useMemo(
-    () =>
-      snapshot.ungroupedTabs.some((tab) => tab.activity === "attention") ||
-      snapshot.groups.some((group) =>
-        group.tabs.some((tab) => tab.activity === "attention"),
-      ),
-    [snapshot.ungroupedTabs, snapshot.groups],
-  );
-  const prevAttentionRef = useRef(false);
+  const attentionTabIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const tab of snapshot.ungroupedTabs) {
+      if (tab.activity === "attention") {
+        ids.push(tab.id);
+      }
+    }
+    for (const group of snapshot.groups) {
+      for (const tab of group.tabs) {
+        if (tab.activity === "attention") {
+          ids.push(tab.id);
+        }
+      }
+    }
+    return ids;
+  }, [snapshot.ungroupedTabs, snapshot.groups]);
+  const announcedAttentionRef = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
-    const rising = anyAttention && !prevAttentionRef.current;
-    prevAttentionRef.current = anyAttention;
-    if (!rising || windowFocused) {
+    const { flash, announced } = decideAttentionFlash(
+      attentionTabIds,
+      windowFocused,
+      announcedAttentionRef.current,
+    );
+    announcedAttentionRef.current = announced;
+    if (!flash) {
       return;
     }
     void (async () => {
@@ -344,14 +357,17 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         const { getCurrentWindow, UserAttentionType } = await import(
           "@tauri-apps/api/window"
         );
-        await getCurrentWindow().requestUserAttention(
-          UserAttentionType.Informational,
-        );
+        // Critical, not Informational: Informational blinks the taskbar button
+        // four times and gives up, so anyone not watching that exact strip of
+        // screen misses it. Critical holds the button lit until the window is
+        // brought forward, which is the whole point — it has to still be
+        // saying "done" when the user looks over minutes later.
+        await getCurrentWindow().requestUserAttention(UserAttentionType.Critical);
       } catch {
         // Not running under Tauri; the sidebar mark still shows.
       }
     })();
-  }, [anyAttention, windowFocused]);
+  }, [attentionTabIds, windowFocused]);
 
   // One window-wide sleep controller; SplitLayout is its only visibility
   // writer (observe), the App only reads the verdict for the zZ badges.

@@ -796,6 +796,44 @@ describe("AttachmentHub attention (settled bursts)", () => {
     expect(hub.getSnapshot().sessions[7]?.settled).toBe(false);
   });
 
+  it("stamps the settle with when output stopped, not when the timer fired", async () => {
+    vi.useFakeTimers();
+    const { host, hub } = await hubWithSession(7);
+    burst(host, 7, ATTENTION_MIN_BURST_MS + 1_000);
+    const settledAt = hub.getSnapshot().sessions[7]?.settledAt ?? null;
+    expect(settledAt).toBe(Date.now() - ACTIVITY_PULSE_MS);
+
+    // Sticky: the stamp must not creep while the tab waits to be noticed,
+    // or "done since" would always read as just now.
+    vi.advanceTimersByTime(60_000);
+    expect(hub.getSnapshot().sessions[7]?.settledAt).toBe(settledAt);
+  });
+
+  it("clears the settle stamp when the mark is delivered or superseded", async () => {
+    vi.useFakeTimers();
+    const { host, hub } = await hubWithSession(7);
+    burst(host, 7, ATTENTION_MIN_BURST_MS + 1_000);
+    expect(hub.getSnapshot().sessions[7]?.settledAt).not.toBeNull();
+
+    hub.markSeen(7);
+    expect(hub.getSnapshot().sessions[7]?.settledAt).toBeNull();
+
+    burst(host, 7, ATTENTION_MIN_BURST_MS + 1_000);
+    expect(hub.getSnapshot().sessions[7]?.settledAt).not.toBeNull();
+    emitOutput(host, 7, { offset: 500n, data: new Uint8Array([46]), source: "live" });
+    expect(hub.getSnapshot().sessions[7]).toMatchObject({
+      settled: false,
+      settledAt: null,
+    });
+  });
+
+  it("a bell stamps the settle at the moment it rang", async () => {
+    vi.useFakeTimers();
+    const { hub } = await hubWithSession(7);
+    hub.noteBell(7);
+    expect(hub.getSnapshot().sessions[7]?.settledAt).toBe(Date.now());
+  });
+
   it("replayed output never starts a burst clock toward attention", async () => {
     vi.useFakeTimers();
     const host = createFakeHost();

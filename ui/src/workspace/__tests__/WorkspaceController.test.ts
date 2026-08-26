@@ -263,6 +263,60 @@ describe("WorkspaceController projection", () => {
     expect(controller.getSnapshot().ungroupedTabs[0]?.activity).toBe("attention");
   });
 
+  it("dates the attention mark from the oldest pane still waiting", () => {
+    const { controller, setAttachmentSnapshot } = harness();
+    const hubSession = (sessionId: number, settledAt: number | null) => ({
+      sessionId,
+      hostAttached: true,
+      terminalAttached: false,
+      active: false,
+      unread: false,
+      settled: settledAt !== null,
+      settledAt,
+      exited: false,
+      exitCode: null,
+      lostScrollback: false,
+      attachError: null,
+    });
+    // The grouped tab holds panes 2 and 3: one finished long ago, one just now.
+    // The tab has been waiting since the older one.
+    setAttachmentSnapshot({
+      sessions: {
+        2: hubSession(2, 1_000),
+        3: hubSession(3, 9_000),
+      },
+    });
+
+    const tab = controller.getSnapshot().groups[0]?.tabs[0];
+    expect(tab?.activity).toBe("attention");
+    expect(tab?.attentionSince).toBe(1_000);
+  });
+
+  it("carries no attention date once the mark is gone", () => {
+    const { controller, setAttachmentSnapshot } = harness();
+    setAttachmentSnapshot({
+      sessions: {
+        1: {
+          sessionId: 1,
+          hostAttached: true,
+          terminalAttached: false,
+          active: false,
+          unread: true,
+          settled: false,
+          settledAt: null,
+          exited: false,
+          exitCode: null,
+          lostScrollback: false,
+          attachError: null,
+        },
+      },
+    });
+
+    const tab = controller.getSnapshot().ungroupedTabs[0];
+    expect(tab?.activity).toBe("unread");
+    expect(tab?.attentionSince).toBeNull();
+  });
+
   it("gives a lone pane its tab's rail title, split panes their own derivations", () => {
     const { controller } = harness();
 

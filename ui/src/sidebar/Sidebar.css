@@ -635,6 +635,12 @@
   color: var(--error);
 }
 
+/* "Finished at 14:32" — the answer to how long a done pane has been sitting. */
+.sidebar-tab__badge--done {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
 .sidebar-tab__badge--sleep {
   color: var(--accent);
   font-style: italic;

@@ -28,6 +28,9 @@ export interface HubSessionSnapshot {
    * this pane finished or is waiting — it needs a look. Sticky until
    * `markSeen` or the next burst. Optional so older fixtures type-check. */
   settled?: boolean;
+  /** Wall-clock time the pane went quiet, so the rail can say how long ago it
+   * finished rather than only that it did. Null whenever `settled` is false. */
+  settledAt?: number | null;
   exited: boolean;
   exitCode: number | null;
   lostScrollback: boolean;
@@ -84,6 +87,8 @@ interface SessionRecord {
   active: boolean;
   unread: boolean;
   settled: boolean;
+  /** When `settled` last turned true; null whenever it is false. */
+  settledAt: number | null;
   /** When the current output burst began; null while quiet. */
   burstStartedAt: number | null;
   exited: boolean;
@@ -583,6 +588,7 @@ export class AttachmentHub implements AttachmentClient {
       // work, and the burst clock starts now.
       record.burstStartedAt = Date.now();
       record.settled = false;
+      record.settledAt = null;
     }
     record.active = true;
     if (!record.terminalCallbacks) {
@@ -600,6 +606,9 @@ export class AttachmentHub implements AttachmentClient {
           lastOutputAt - record.burstStartedAt >= ATTENTION_MIN_BURST_MS
         ) {
           record.settled = true;
+          // Stamped with the last output, not with now: "done since" means
+          // since the work stopped, which is one pulse before this fires.
+          record.settledAt = lastOutputAt;
         }
         record.burstStartedAt = null;
         this.publish();
@@ -619,6 +628,7 @@ export class AttachmentHub implements AttachmentClient {
       return;
     }
     record.settled = true;
+    record.settledAt = Date.now();
     this.publish();
   }
 
@@ -630,6 +640,7 @@ export class AttachmentHub implements AttachmentClient {
       return;
     }
     record.settled = false;
+    record.settledAt = null;
     this.publish();
   }
 
@@ -656,6 +667,7 @@ export class AttachmentHub implements AttachmentClient {
       nextOffset: null,
       active: false,
       settled: false,
+      settledAt: null,
       burstStartedAt: null,
       unread: false,
       exited: false,
@@ -702,6 +714,7 @@ export class AttachmentHub implements AttachmentClient {
         active: record.active,
         unread: record.unread,
         settled: record.settled,
+        settledAt: record.settledAt,
         exited: record.exited,
         exitCode: record.exitCode,
         lostScrollback: record.lostRange !== null,

@@ -150,6 +150,10 @@ export interface SidebarTabModel {
   sessionIds: readonly number[];
   status: "live" | "dead" | "missing" | "attach_error";
   activity: "idle" | "active" | "unread" | "attention";
+  /** When the work in this tab went quiet, for an "and it has been done since"
+   * badge. Set only while `activity` is "attention". Optional so existing
+   * fixtures keep type-checking. */
+  attentionSince?: number | null;
   profile: string | null;
   cwd: string | null;
 }
@@ -563,6 +567,20 @@ export class WorkspaceController {
       const unread = sessionIds.some((id) => attachments.sessions[id]?.unread);
       const active = sessionIds.some((id) => attachments.sessions[id]?.active);
       const attention = sessionIds.some((id) => attachments.sessions[id]?.settled);
+      // The oldest still-unseen finish in the tab: a split whose first pane
+      // stopped twenty minutes ago has been waiting twenty minutes, even if a
+      // second pane only just went quiet.
+      let attentionSince: number | null = null;
+      for (const id of sessionIds) {
+        const session = attachments.sessions[id];
+        if (!session?.settled) {
+          continue;
+        }
+        const at = session.settledAt ?? null;
+        if (at !== null && (attentionSince === null || at < attentionSince)) {
+          attentionSince = at;
+        }
+      }
       return {
         id: tab.id,
         groupId,
@@ -580,6 +598,7 @@ export class WorkspaceController {
         activity: attention
           ? "attention"
           : (unread ? "unread" : (active ? "active" : "idle")),
+        attentionSince: attention ? attentionSince : null,
         profile: primary?.profile ?? null,
         cwd: primary?.cwd ?? null,
       };

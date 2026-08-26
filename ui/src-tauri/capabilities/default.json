@@ -7,6 +7,7 @@
     "core:default",
     "core:window:allow-close",
     "core:window:allow-destroy",
+    "core:window:allow-request-user-attention",
     "allow-bootstrap-host",
     "allow-read-app-file",
     "allow-write-app-file",
