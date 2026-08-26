@@ -519,6 +519,28 @@ describe("Sidebar rename and keyboard", () => {
     expect(sidebarActions.renameGroup).toHaveBeenCalledWith("group-1", "Team");
   });
 
+  it("opens a new terminal on a double-click of empty rail space", async () => {
+    const sidebarActions = await renderSidebar();
+    const scroll = container.querySelector<HTMLElement>(".sidebar__scroll")!;
+
+    await act(async () =>
+      scroll.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+
+    expect(sidebarActions.createTab).toHaveBeenCalledWith({
+      groupId: null,
+      profile: null,
+    });
+  });
+
+  it("keeps a double-click on a row meaning rename, never a new terminal", async () => {
+    const sidebarActions = await renderSidebar();
+    const tab = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+
+    await act(async () => tab.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+
+    expect(sidebarActions.createTab).not.toHaveBeenCalled();
+  });
+
   it("navigates visible tabs without wrapping and activates with Enter", async () => {
     const sidebarActions = await renderSidebar();
     const first = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;

@@ -594,6 +594,17 @@ export function Sidebar({
     }
   };
 
+  // Double-click on the rail's EMPTY space opens a terminal (Michael,
+  // 2026-08-26). Guarded to the container itself: a double-click on any row
+  // keeps meaning what that row says it means (rename, section behavior),
+  // because those land on child elements, never the container.
+  const onRailDoubleClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || !hostConnected || creating) {
+      return;
+    }
+    void createTab(null, null);
+  };
+
   const dismissDeadTab = async (tabId: string) => {
     if (dismissingTabIdsRef.current.has(tabId)) {
       return;
@@ -1546,7 +1557,7 @@ export function Sidebar({
         />
       ) : (
       <>
-      <div className="sidebar__scroll">
+      <div className="sidebar__scroll" onDoubleClick={onRailDoubleClick}>
         {savedSection}
         {hostsSection}
         <div
@@ -1557,6 +1568,7 @@ export function Sidebar({
           data-drop-group-id=""
           data-drop-index={snapshot.rootItems.length}
           data-empty={snapshot.rootItems.length === 0 ? "true" : undefined}
+          onDoubleClick={onRailDoubleClick}
         >
           {renderItems(snapshot.rootItems, 1)}
         </div>
