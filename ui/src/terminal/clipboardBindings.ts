@@ -18,6 +18,8 @@ export interface ClipboardTerminal {
   clearSelection(): void;
   getSelection(): string;
   hasSelection(): boolean;
+  /** Raw bytes into the pty as if typed — bypasses bracketed paste. */
+  input(data: string): void;
   paste(text: string): void;
 }
 
@@ -64,14 +66,24 @@ export function attachClipboardBindings(
   // `terminal.paste` rather than a raw write: it honours bracketed-paste mode,
   // and without that a multi-line paste would EXECUTE every line in a shell
   // instead of arriving as text.
+  //
+  // No text does NOT mean nothing to paste: a screenshot or a copied image
+  // file is invisible to the webview's clipboard, but the app in the pty can
+  // read the OS clipboard itself — Claude Code ingests both forms the moment
+  // it sees Ctrl+V. So an empty (or unreadable) clipboard forwards the paste
+  // key instead of swallowing it; to a shell with no image handling a lone
+  // ^V is inert, which is also what the empty clipboard deserved.
   const pasteFromClipboard = (): void => {
+    const forwardPasteKey = () => terminal.input("\x16");
     void clipboard?.readText?.()?.then(
       (text) => {
         if (text) {
           terminal.paste(text);
+        } else {
+          forwardPasteKey();
         }
       },
-      () => undefined,
+      forwardPasteKey,
     );
   };
 

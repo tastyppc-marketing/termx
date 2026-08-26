@@ -9,6 +9,7 @@ import {
 class FakeClipboardTerminal implements ClipboardTerminal {
   selection = "";
   readonly pastes: string[] = [];
+  readonly inputs: string[] = [];
   keyHandler: ((event: KeyboardEvent) => boolean) | undefined;
 
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
@@ -22,6 +23,9 @@ class FakeClipboardTerminal implements ClipboardTerminal {
   }
   hasSelection() {
     return this.selection.length > 0;
+  }
+  input(data: string) {
+    this.inputs.push(data);
   }
   paste(text: string) {
     this.pastes.push(text);
@@ -80,14 +84,19 @@ describe("clipboard key chords", () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
-  it("leaves an empty clipboard alone", async () => {
+  it("forwards Ctrl+V to the app when the clipboard has no text (image paste)", async () => {
+    // A screenshot or a copied image file yields NO text — the webview cannot
+    // read it, but the app in the pty (Claude Code) reads the OS clipboard
+    // itself the moment it sees Ctrl+V. Swallowing the chord here is what
+    // made image paste impossible (Michael, 2026-08-25).
     const empty = fixture("");
     empty.terminal.keyHandler?.(keydown({ ctrlKey: true, key: "v" }));
     await settle();
     expect(empty.terminal.pastes).toEqual([]);
+    expect(empty.terminal.inputs).toEqual(["\x16"]);
   });
 
-  it("survives a clipboard the webview refuses to read", async () => {
+  it("forwards Ctrl+V when the webview refuses to read the clipboard", async () => {
     const terminal = new FakeClipboardTerminal();
     const element = document.createElement("div");
     attachClipboardBindings(terminal, element, {
@@ -101,6 +110,14 @@ describe("clipboard key chords", () => {
     ).not.toThrow();
     await settle();
     expect(terminal.pastes).toEqual([]);
+    expect(terminal.inputs).toEqual(["\x16"]);
+  });
+
+  it("never forwards the chord when text was pasted", async () => {
+    f.terminal.keyHandler?.(keydown({ ctrlKey: true, key: "v" }));
+    await settle();
+    expect(f.terminal.pastes).toEqual(["pasted text"]);
+    expect(f.terminal.inputs).toEqual([]);
   });
 
   it("keeps Ctrl+C an interrupt when nothing is selected", () => {
