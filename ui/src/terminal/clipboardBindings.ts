@@ -69,12 +69,13 @@ export function attachClipboardBindings(
   //
   // No text does NOT mean nothing to paste: a screenshot or a copied image
   // file is invisible to the webview's clipboard, but the app in the pty can
-  // read the OS clipboard itself — Claude Code ingests both forms the moment
-  // it sees Ctrl+V. So an empty (or unreadable) clipboard forwards the paste
-  // key instead of swallowing it; to a shell with no image handling a lone
-  // ^V is inert, which is also what the empty clipboard deserved.
+  // read the OS clipboard itself. The forwarded chord is Alt+V (ESC v), NOT
+  // Ctrl+V: probed live against claude in a real ConPTY (2026-08-25), a raw
+  // 0x16 is ignored while ESC v ingests the image — Alt+V is Claude Code's
+  // documented Windows image-paste key. Cost when nothing can answer it: a
+  // shell may show a stray "v", only ever with a textless clipboard.
   const pasteFromClipboard = (): void => {
-    const forwardPasteKey = () => terminal.input("\x16");
+    const forwardPasteKey = () => terminal.input("\x1bv");
     void clipboard?.readText?.()?.then(
       (text) => {
         if (text) {
