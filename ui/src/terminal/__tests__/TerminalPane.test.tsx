@@ -10,6 +10,7 @@ import type {
 } from "../../host/client";
 import {
   activateTerminalLink,
+  hasLayout,
   PATH_LINK_REGEX,
   NOTICE_TTL_MS,
   TerminalPane,
@@ -689,6 +690,30 @@ describe("the lost-scrollback notice", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("hasLayout", () => {
+  const sized = (width: number, height: number): HTMLElement => {
+    const element = document.createElement("div");
+    Object.defineProperty(element, "clientWidth", { value: width });
+    Object.defineProperty(element, "clientHeight", { value: height });
+    return element;
+  };
+
+  it("refuses an element with no used size — the display:none 7x4 clobber", () => {
+    // In a display:none subtree, computed style reports the SPECIFIED "100%",
+    // which FitAddon parseInt-misreads as 100 PIXELS and turns into a "valid"
+    // ~7x4 grid that then resizes the HOST PTY. clientWidth reads USED values
+    // and is 0 there, so this is the gate that keeps hidden (and minimized)
+    // panes from ever fitting.
+    expect(hasLayout(sized(0, 0))).toBe(false);
+    expect(hasLayout(sized(0, 400))).toBe(false);
+    expect(hasLayout(sized(800, 0))).toBe(false);
+  });
+
+  it("accepts an element that is actually laid out", () => {
+    expect(hasLayout(sized(800, 400))).toBe(true);
   });
 });
 

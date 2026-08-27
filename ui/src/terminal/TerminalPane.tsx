@@ -673,6 +673,22 @@ function parseBootstrapResult(value: unknown): { port: number; token: string } {
   return { port: value.port as number, token: value.token };
 }
 
+/**
+ * True when the element actually has layout to fit against.
+ *
+ * A pane in a hidden tab sits in a display:none subtree, where computed style
+ * reports the SPECIFIED width ("100%"), which FitAddon parseInt-misreads as
+ * 100 PIXELS — a "valid" ~7x4 proposal that then resizes the HOST PTY, and
+ * every app in a background tab rewraps to one letter per line (Michael's
+ * screenshot, 2026-08-26; state.json showed all hidden sessions at 7x4).
+ * clientWidth uses USED values: it is 0 for display:none and for a minimized
+ * window alike, so refusing to fit at 0 kills both clobber paths. The resize
+ * observer refits with real numbers the moment the pane is visible again.
+ */
+export function hasLayout(element: HTMLElement): boolean {
+  return element.clientWidth > 0 && element.clientHeight > 0;
+}
+
 function createPresentation(
   element: HTMLElement,
   onLink: (link: string) => void,
@@ -700,7 +716,9 @@ function createPresentation(
       new WebLinksAddon(openLink, { urlRegex: new RegExp(PATH_LINK_REGEX.source) }),
     );
     terminal.open(element);
-    fit.fit();
+    if (hasLayout(element)) {
+      fit.fit();
+    }
   } catch (error) {
     attemptCleanup("partial_terminal_presentation", () => terminal.dispose());
     throw error;
@@ -736,7 +754,13 @@ function createPresentation(
 
   return {
     terminal: port,
-    fit: () => fit.fit(),
+    // Guarded centrally so EVERY fit caller — resize observer, zoom, attach —
+    // is protected: a fit with no layout must never happen (see hasLayout).
+    fit: () => {
+      if (hasLayout(element)) {
+        fit.fit();
+      }
+    },
     resize: (cols, rows) => terminal.resize(cols, rows),
     setTheme: (palette) => {
       terminal.options.theme = palette;
