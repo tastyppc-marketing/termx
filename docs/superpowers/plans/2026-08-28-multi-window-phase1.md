@@ -67,8 +67,8 @@
 - Every read of `layout.rootItems` / `layout.activeTabId` becomes `slotOf(this.layout, this.windowId)`. The controller's snapshot (`ungroupedTabs`, `groups`, `activeTabId`) reflects ONLY this window's slot. Sessions in other slots are not attached by this window (attach-active-first walks this slot only).
 - New mutations: `moveItemToWindow(item: Item, targetWindowId: string | "new"): string` (returns the target window id; allocates `aux-<n>` on "new"; removes from the source slot, appends to the target slot's rootItems); `returnWindowToMain(windowId)` (Task 4 uses it).
 
-- [ ] Failing tests: controller with `windowId: "aux-1"` snapshots only that slot; `moveItemToWindow` moves a tab out of main's slot into a fresh `aux-1` and out again; groups move whole; moving the last item of an aux slot leaves an empty slot (pruning happens on close, not on move).
-- [ ] Implement; run controller tests + full suite; commit.
+- [x] Failing tests: controller with `windowId: "aux-1"` snapshots only that slot; `moveItemToWindow` moves a tab out of main's slot into a fresh `aux-1` and out again; groups move whole; moving the last item of an aux slot leaves an empty slot (pruning happens on close, not on move).
+- [x] Implement; run controller tests + full suite; commit. **AS BUILT (4fe3db3):** container addressing widened project-wide (`store.ts` ContainerKey, `layoutOperations.ts` searches every window's root), not just the controller — Task 1 had left aux-slot items unreachable by ops. `moveItemToWindow` returns `string | null` (null = store refused). Snapshot gains optional `windowIds` (controller always sets it; optional so fixtures type-check).
 
 ### Task 3: single-writer mutation routing
 
@@ -94,8 +94,8 @@
 - v1 of the mutation protocol is deliberately coarse: an aux window sends its ENTIRE proposed layout (it holds the full model; it edited its own slot). Main validates (parse) and persists. Coarse is safe because slots partition ownership: aux only ever rewrites its own slot plus explicit cross-window moves, and simultaneous edits to different slots converge because main re-broadcasts the merged truth. (Finer-grained ops are a v2 refinement if drift is ever observed.)
 - Controller: `persistLayout()` branches — main window: `client.setLayout` + `bus.broadcastLayout`; aux window: `bus.forwardMutation` only. Main subscribes `onMutation` → adopt (parse, replace NON-own slots? no — replace whole model, then re-broadcast). Aux subscribes `onLayout` → adopt without persisting.
 
-- [ ] Failing tests with `loopbackBus`: aux mutation reaches main and main persists once; main broadcast reaches aux and aux does NOT persist; malformed forwarded blob is dropped (main keeps its model).
-- [ ] Implement; gates; commit.
+- [x] Failing tests with `loopbackBus`: aux mutation reaches main and main persists once; main broadcast reaches aux and aux does NOT persist; malformed forwarded blob is dropped (main keeps its model).
+- [x] Implement; gates; commit. **AS BUILT (0c0df3d):** wiring lives in `bootstrapWorkspace.ts` via the LayoutPersistence writer-injection seam — the controller is untouched. Bus sends return Promises so an aux window's close-time `flush()` covers event delivery. Aux boot attaches only its slot's sessions; main attaches ALL (nothing goes untracked if an aux window fails to open); boot-time persist/corpse-reap gated to main.
 
 ### Task 4: window lifecycle — spawn, adopt at boot, close-returns-to-main
 
@@ -115,8 +115,8 @@
 - Real factory: `new WebviewWindow(windowId, { url: `index.html?window=${windowId}`, ...bounds })`. Close-requested on an aux window: forward a `returnWindowToMain` mutation, await the layout broadcast, then destroy. Main window close keeps today's CloseGuard behavior (app exit).
 - Bounds recording: aux windows debounce `onMoved`/`onResized` into their slot via the bus (500ms).
 
-- [ ] Failing tests with a fake factory: boot with two aux slots opens both at recorded bounds; close-requested returns items to main slot and deletes the slot; a crash-left slot (no window ever opened) still opens next boot.
-- [ ] Implement; gates; commit.
+- [x] Failing tests with a fake factory: boot with two aux slots opens both at recorded bounds; close-requested returns items to main slot and deletes the slot; a crash-left slot (no window ever opened) still opens next boot.
+- [x] Implement; gates; commit. **AS BUILT (2917b45):** shipped as `openAuxWindows(layout, factory)` + `tauriWindowFactory()` + `manageAuxWindow({windowId, controller, chrome})` with an injected `AuxWindowChrome` seam; close order is preventDefault → returnWindowToMain → await flush → destroy. App.tsx: main-gated spawn effect keyed on aux window ids; aux-gated lifecycle effect; CloseGuard gated to main. `main.tsx` reads `?window=`.
 
 ### Task 5: UI surface — context-menu entries
 
@@ -128,8 +128,8 @@
 - `SidebarActions` += `moveToWindow(item: Item, targetWindowId: string | "new"): void`; sidebar props += `otherWindowIds: readonly string[]`.
 - Tab context menu and group context menu gain: **"Move to new window"** always; **"Move to <window label>"** per other window (label: "Main window" / "Window 2"…).
 
-- [ ] Failing tests: menu shows the entries; clicking calls `moveToWindow` with the right item; entries absent when the feature callback is not provided (legacy fixtures).
-- [ ] Implement; gates; full suite; commit.
+- [x] Failing tests: menu shows the entries; clicking calls `moveItemToWindow` with the right item; entries absent when the feature callback is not provided (legacy fixtures).
+- [x] Implement; gates; full suite; commit. **AS BUILT (72ae888):** action named `moveItemToWindow?` (optional, matches the controller method so `actions={controller}` needs zero wiring); no `otherWindowIds` prop — the list derives from `snapshot.windowIds` plus a new optional `windowId` Sidebar prop (App passes `controller.windowId`). Labels: "Main window", `aux-<n>` → "Window <n+1>".
 
 ### Task 6: live verification + staging
 
