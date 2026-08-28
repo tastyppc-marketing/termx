@@ -17,6 +17,7 @@ import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
 import type { SshHost } from "../ssh/types";
 import {
   canMoveItem,
+  MAIN_WINDOW_ID,
   PALETTE_IDS,
   type FillStrength,
   type Item,
@@ -64,6 +65,12 @@ export interface SidebarActions {
   /** Keep-children lifts the group's items into its own container. */
   deleteGroup(groupId: string, mode: "keep-children" | "close-tabs"): Promise<void>;
   dismissDeadTab(tabId: string): Promise<void>;
+  /**
+   * Multi-window Phase 1: tear the item out into `"new"` (a fresh OS window)
+   * or an existing window's root. Optional — when absent the window entries
+   * simply do not render. Null = the store refused the move.
+   */
+  moveItemToWindow?(item: Item, target: string | "new"): string | null;
 }
 
 /**
@@ -181,6 +188,12 @@ export interface SidebarProps {
    * the surface, the sidebar only asks for it.
    */
   onExpandConversations?(): void;
+  /**
+   * Which window's sidebar this is (multi-window Phase 1). Drives the
+   * "Move to <window>" entries — the current window is never offered as a
+   * target. Absent = the main window, so single-window callers are untouched.
+   */
+  windowId?: string;
   /** Sessions currently asleep (spec §13) — tabs holding one show a zZ badge. */
   sleeping?: ReadonlySet<number>;
   /**
@@ -200,6 +213,16 @@ export interface SidebarProps {
 
 /** Tooltip on the creation controls while the host connection is down. */
 const WAITING_FOR_HOST = "Waiting for host…";
+
+/** Human label for a window id: main → "Main window", aux-<n> → "Window <n+1>"
+ *  (main counts as window 1). Unrecognized ids fall back to the raw id. */
+function windowLabel(windowId: string): string {
+  if (windowId === MAIN_WINDOW_ID) {
+    return "Main window";
+  }
+  const match = /^aux-(\d+)$/.exec(windowId);
+  return match ? `Window ${Number(match[1]) + 1}` : windowId;
+}
 
 type SidebarMode = "terminals" | "conversations";
 
@@ -266,6 +289,7 @@ export function Sidebar({
   width,
   onResize,
   onExpandConversations,
+  windowId = MAIN_WINDOW_ID,
   sleeping,
   footerTray,
   hostConnected = true,
@@ -1198,6 +1222,39 @@ export function Sidebar({
     return targets;
   };
 
+  /// Multi-window Phase 1: "Move to new window" plus one entry per OTHER
+  /// window. Renders nothing when the action is unwired (legacy callers) —
+  /// the sidebar never offers a move it cannot perform.
+  const renderWindowEntries = (item: Item) => {
+    if (!actions.moveItemToWindow) {
+      return null;
+    }
+    const others = (snapshot.windowIds ?? [MAIN_WINDOW_ID]).filter(
+      (id) => id !== windowId,
+    );
+    return (
+      <>
+        <button type="button" role="menuitem" onClick={() => {
+          actions.moveItemToWindow!(item, "new");
+          closeMenu();
+        }}>Move to new window</button>
+        {others.map((target) => (
+          <button
+            type="button"
+            role="menuitem"
+            key={target}
+            onClick={() => {
+              actions.moveItemToWindow!(item, target);
+              closeMenu();
+            }}
+          >
+            Move to {windowLabel(target)}
+          </button>
+        ))}
+      </>
+    );
+  };
+
   const renderMovePanel = (
     label: string,
     item: Item,
@@ -1302,6 +1359,7 @@ export function Sidebar({
           }}>Open folder here</button>
           <button type="button" role="menuitem" onClick={() => setMenuPanel("color")}>Color</button>
           <button type="button" role="menuitem" onClick={() => setMenuPanel("move")}>Move to…</button>
+          {renderWindowEntries({ kind: "tab", id: tab.id })}
           <button
             type="button"
             role="menuitem"
@@ -1384,6 +1442,7 @@ export function Sidebar({
           ) : null}
           <button type="button" role="menuitem" onClick={() => setMenuPanel("color")}>Color</button>
           <button type="button" role="menuitem" onClick={() => setMenuPanel("move")}>Move to…</button>
+          {renderWindowEntries({ kind: "group", id: group.id })}
           <button type="button" role="menuitem" onClick={() => {
             actions.toggleGroup(group.id);
             closeMenu();

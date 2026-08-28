@@ -1109,6 +1109,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         <Sidebar
           snapshot={snapshot}
           actions={controller}
+          windowId={controller.windowId}
           hostConnected={connectionState.phase === "connected"}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenFolderSearch={(groupId) =>

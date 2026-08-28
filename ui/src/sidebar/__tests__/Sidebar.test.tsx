@@ -1176,3 +1176,105 @@ describe("Sidebar context menus and creation", () => {
     expect(document.activeElement).toBe(groupName);
   });
 });
+
+describe("move to window (multi-window Phase 1)", () => {
+  function menuItems(): HTMLButtonElement[] {
+    return [...container.querySelectorAll<HTMLButtonElement>("[role='menuitem']")];
+  }
+
+  it("offers new-window and other-window entries on the tab menu", async () => {
+    const sidebarActions = {
+      ...actions(),
+      moveItemToWindow: vi.fn(() => "aux-1"),
+    };
+    await renderSidebar(
+      { ...workspace(), windowIds: ["main", "aux-1"] },
+      sidebarActions,
+    );
+    const tab = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+    await act(async () => tab.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+    })));
+
+    const labels = menuItems().map((button) => button.textContent);
+    expect(labels).toContain("Move to new window");
+    expect(labels).toContain("Move to Window 2");
+    expect(labels).not.toContain("Move to Main window"); // it IS the main window
+
+    const entry = menuItems().find((button) =>
+      button.textContent === "Move to new window"
+    )!;
+    await act(async () => entry.click());
+    expect(sidebarActions.moveItemToWindow).toHaveBeenCalledWith(
+      { kind: "tab", id: "tab-1" },
+      "new",
+    );
+  });
+
+  it("moves a group to an existing window from its menu", async () => {
+    const sidebarActions = {
+      ...actions(),
+      moveItemToWindow: vi.fn(() => "aux-1"),
+    };
+    await renderSidebar(
+      { ...workspace(), windowIds: ["main", "aux-1"] },
+      sidebarActions,
+    );
+    await act(async () => groupHeader("group-1").dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+    })));
+
+    const entry = menuItems().find((button) =>
+      button.textContent === "Move to Window 2"
+    )!;
+    await act(async () => entry.click());
+    expect(sidebarActions.moveItemToWindow).toHaveBeenCalledWith(
+      { kind: "group", id: "group-1" },
+      "aux-1",
+    );
+  });
+
+  it("offers Main window from an aux window's sidebar", async () => {
+    const sidebarActions = {
+      ...actions(),
+      moveItemToWindow: vi.fn(() => "main"),
+    };
+    await renderSidebar(
+      { ...workspace(), windowIds: ["main", "aux-1"] },
+      sidebarActions,
+      { windowId: "aux-1" },
+    );
+    const tab = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+    await act(async () => tab.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+    })));
+
+    const labels = menuItems().map((button) => button.textContent);
+    expect(labels).toContain("Move to Main window");
+    expect(labels).not.toContain("Move to Window 2"); // its own window
+
+    const entry = menuItems().find((button) =>
+      button.textContent === "Move to Main window"
+    )!;
+    await act(async () => entry.click());
+    expect(sidebarActions.moveItemToWindow).toHaveBeenCalledWith(
+      { kind: "tab", id: "tab-1" },
+      "main",
+    );
+  });
+
+  it("hides the entries when the action is not provided", async () => {
+    await renderSidebar({ ...workspace(), windowIds: ["main", "aux-1"] });
+    const tab = container.querySelector<HTMLElement>("[data-tab-id='tab-1']")!;
+    await act(async () => tab.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+    })));
+    const labels = menuItems().map((button) => button.textContent);
+    expect(labels).not.toContain("Move to new window");
+    expect(labels).not.toContain("Move to Window 2");
+  });
+});
