@@ -417,3 +417,137 @@ describe("store mechanics", () => {
     expect(s.replaceState(broken)).toBe(fresh);
   });
 });
+
+/// baseLayout with t2 already torn out into aux-1.
+function withAux(): Layout {
+  const layout = baseLayout();
+  layout.rootItems = [tabItem("t1"), groupItem("g1")];
+  layout.auxWindows["aux-1"] = {
+    rootItems: [tabItem("t2")],
+    activeTabId: "t2",
+    bounds: null,
+  };
+  return layout;
+}
+
+describe("window slots", () => {
+  it("moveItemToWindow tears a tab out into a fresh aux slot", () => {
+    const s = store();
+    const next = s.moveItemToWindow(tabItem("t2"), "aux-1");
+    expect(next.rootItems).toEqual([tabItem("t1"), groupItem("g1")]);
+    expect(next.auxWindows["aux-1"]).toEqual({
+      rootItems: [tabItem("t2")],
+      activeTabId: "t2",
+      bounds: null,
+    });
+    expect(next.activeTabId).toBe("t1");
+    expect(validateInvariants(next)).toEqual([]);
+  });
+
+  it("moveItemToWindow keeps the source window's active tab when it did not move", () => {
+    const s = store();
+    const next = s.moveItemToWindow(tabItem("t2"), "aux-1");
+    expect(next.activeTabId).toBe("t1"); // t1 was active and stayed home
+  });
+
+  it("moveItemToWindow moves the source active pointer when its tab leaves", () => {
+    const s = store();
+    s.setActiveTab("t2");
+    const next = s.moveItemToWindow(tabItem("t2"), "aux-1");
+    expect(next.activeTabId).not.toBe("t2");
+    expect(next.activeTabId).not.toBeNull();
+  });
+
+  it("moveItemToWindow moves a group with its whole subtree", () => {
+    const s = store();
+    const next = s.moveItemToWindow(groupItem("g1"), "aux-1");
+    expect(next.rootItems).toEqual([tabItem("t1"), tabItem("t2")]);
+    expect(next.auxWindows["aux-1"]!.rootItems).toEqual([groupItem("g1")]);
+    expect(next.auxWindows["aux-1"]!.activeTabId).toBe("t3");
+    expect(validateInvariants(next)).toEqual([]);
+  });
+
+  it("moveItemToWindow brings a tab back to main", () => {
+    const s = store(withAux());
+    const next = s.moveItemToWindow(tabItem("t2"), "main");
+    expect(next.rootItems).toEqual([tabItem("t1"), groupItem("g1"), tabItem("t2")]);
+    expect(next.auxWindows["aux-1"]).toEqual({
+      rootItems: [],
+      activeTabId: null,
+      bounds: null,
+    });
+  });
+
+  it("moveItemToWindow refuses unknown items and no-op moves", () => {
+    const s = store(withAux());
+    const before = s.getState();
+    expect(s.moveItemToWindow(tabItem("ghost"), "aux-1")).toBe(before);
+    expect(s.moveItemToWindow(tabItem("t2"), "aux-1")).toBe(before);
+    expect(s.moveItemToWindow(tabItem("t1"), "")).toBe(before);
+  });
+
+  it("returnWindowToMain appends the slot's items and deletes the slot", () => {
+    const s = store(withAux());
+    const next = s.returnWindowToMain("aux-1");
+    expect(next.rootItems).toEqual([tabItem("t1"), groupItem("g1"), tabItem("t2")]);
+    expect(next.auxWindows).toEqual({});
+    expect(next.activeTabId).toBe("t1");
+  });
+
+  it("returnWindowToMain hands main the slot's active tab when main had none", () => {
+    const layout = withAux();
+    layout.activeTabId = null;
+    layout.rootItems = [];
+    layout.tabs = { t2: layout.tabs.t2 };
+    layout.groups = {};
+    const s = store(layout);
+    const next = s.returnWindowToMain("aux-1");
+    expect(next.activeTabId).toBe("t2");
+  });
+
+  it("returnWindowToMain ignores unknown windows and main itself", () => {
+    const s = store(withAux());
+    const before = s.getState();
+    expect(s.returnWindowToMain("ghost")).toBe(before);
+    expect(s.returnWindowToMain("main")).toBe(before);
+  });
+
+  it("setActiveTab targets the named window's slot", () => {
+    const s = store(withAux());
+    const next = s.setActiveTab(null, "aux-1");
+    expect(next.auxWindows["aux-1"]!.activeTabId).toBeNull();
+    expect(next.activeTabId).toBe("t1");
+    expect(s.setActiveTab("t1", "ghost")).toBe(next); // unknown window: no-op
+  });
+
+  it("createTab lands in the named window's root and focuses there", () => {
+    const s = store(withAux());
+    const next = s.createTab({ id: "t9", sessionId: 9, windowId: "aux-1" });
+    expect(next.auxWindows["aux-1"]!.rootItems).toEqual([
+      tabItem("t2"),
+      tabItem("t9"),
+    ]);
+    expect(next.auxWindows["aux-1"]!.activeTabId).toBe("t9");
+    expect(next.activeTabId).toBe("t1");
+  });
+
+  it("closeTab in an aux window fixes that window's active tab only", () => {
+    const s = store(withAux());
+    const next = s.closeTab("t2");
+    expect(next.auxWindows["aux-1"]!.rootItems).toEqual([]);
+    expect(next.auxWindows["aux-1"]!.activeTabId).toBeNull();
+    expect(next.activeTabId).toBe("t1");
+    expect(validateInvariants(next)).toEqual([]);
+  });
+
+  it("moveItem with a windowId drops at that window's root", () => {
+    const s = store(withAux());
+    const next = s.moveItem(tabItem("t1"), null, 0, "aux-1");
+    expect(next.auxWindows["aux-1"]!.rootItems).toEqual([
+      tabItem("t1"),
+      tabItem("t2"),
+    ]);
+    expect(next.rootItems).toEqual([groupItem("g1")]);
+    expect(validateInvariants(next)).toEqual([]);
+  });
+});

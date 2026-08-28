@@ -44,7 +44,10 @@ import {
   collectSubtreeTabIds,
   findContainer,
   groupDepth,
+  MAIN_WINDOW_ID,
   sessionIdsInLayout,
+  slotOf,
+  windowIds,
   type FillStrength,
   type Item,
   type Layout,
@@ -69,6 +72,7 @@ import {
   reorderGroup as reorderLayoutGroup,
   replaceSessionInTab,
   sessionIdsInTab,
+  withActiveTab,
 } from "./layoutOperations";
 
 export type WorkspaceHostClient = Pick<
@@ -206,17 +210,22 @@ export interface PaneSessionState {
 
 export interface WorkspaceSnapshot {
   layout: Layout;
-  /** Top level of the sidebar, in order — the recursive render's entry point. */
+  /** This window's slot of the sidebar, in order — the recursive render's
+   * entry point. A controller renders ONLY its own window's items. */
   rootItems: readonly SidebarItemModel[];
-  /** Root-level tabs only, in order. */
+  /** Root-level tabs only, in order (this window's). */
   ungroupedTabs: readonly SidebarTabModel[];
-  /** EVERY group, depth-first in render order (menus and lookups). */
+  /** EVERY group in this window, depth-first in render order. */
   groups: readonly SidebarGroupModel[];
   paneStates: Readonly<Record<number, PaneSessionState>>;
   activeTabId: string | null;
   activeSessionId: number | null;
   persistence: LayoutPersistenceSnapshot;
   notice: string | null;
+  /** All window ids in the layout, main first (menus' "Move to <window>").
+   * Optional so existing fixtures keep type-checking; the controller always
+   * sets it, and absent reads as "just the main window". */
+  windowIds?: readonly string[];
 }
 
 /** Read-only view of live settings (SettingsStore satisfies this). */
@@ -278,6 +287,11 @@ export interface WorkspaceControllerOptions {
    * terminal, which is the same place every other ssh failure surfaces.
    */
   sshHosts?: { byAlias(alias: string): SshHost | null };
+  /**
+   * Which window's slot this controller renders and mutates (multi-window
+   * spec). Default the main window — every pre-multi-window caller.
+   */
+  windowId?: string;
 }
 
 /** How long a connect watches its pane for a password prompt (spec §2). */
@@ -368,6 +382,8 @@ interface SshPaneRecord {
 
 export class WorkspaceController {
   readonly attachments: WorkspaceAttachmentHub;
+  /** Which window's slot this controller renders and mutates. */
+  readonly windowId: string;
 
   private readonly client: WorkspaceHostClient;
   private readonly store: LayoutStore;
@@ -445,6 +461,7 @@ export class WorkspaceController {
         ? { probeSession: (sessionId: number) => rawClient.probeSession!(sessionId) }
         : {}),
     };
+    this.windowId = options.windowId ?? MAIN_WINDOW_ID;
     this.store = options.store;
     this.persistence = options.persistence;
     this.attachments = options.attachments;
@@ -491,7 +508,11 @@ export class WorkspaceController {
             }
           }
         };
-        seedContainer(layout.rootItems, scopeKeyFor(null));
+        // Every window's slot seeds: a tab torn out into an aux window keeps
+        // the root scope, and its groups keep their own.
+        for (const windowId of windowIds(layout)) {
+          seedContainer(slotOf(layout, windowId)!.rootItems, scopeKeyFor(null));
+        }
         return next;
       }),
     );
@@ -640,7 +661,9 @@ export class WorkspaceController {
       }
       return projected;
     };
-    const rootItems = projectItems(layout.rootItems, null, 1);
+    // Only this window's slot is projected: each window renders its own rail.
+    const slot = slotOf(layout, this.windowId);
+    const rootItems = projectItems(slot?.rootItems ?? [], null, 1);
     const ungroupedTabs = rootItems.flatMap((item) =>
       item.kind === "tab" ? [item.tab] : []
     );
@@ -676,17 +699,19 @@ export class WorkspaceController {
         paneStates[sessionId] = { status: "missing", exitCode: null };
       }
     }
-    const activeTab = layout.activeTabId ? layout.tabs[layout.activeTabId] : undefined;
+    const activeTabId = slot?.activeTabId ?? null;
+    const activeTab = activeTabId ? layout.tabs[activeTabId] : undefined;
     const snapshot: WorkspaceSnapshot = {
       layout,
       rootItems,
       ungroupedTabs,
       groups,
       paneStates,
-      activeTabId: layout.activeTabId,
+      activeTabId,
       activeSessionId: activeTab ? firstSessionId(activeTab.split) : null,
       persistence,
       notice: this.notice,
+      windowIds: windowIds(layout),
     };
     this.cachedSnapshot = snapshot;
     this.cachedLayout = layout;
@@ -703,7 +728,7 @@ export class WorkspaceController {
   };
 
   activateTab = (tabId: string): void => {
-    this.mutate("active_tab", () => this.store.setActiveTab(tabId));
+    this.mutate("active_tab", () => this.store.setActiveTab(tabId, this.windowId));
   };
 
   renameTab = (tabId: string, title: string | null): void => {
@@ -726,8 +751,32 @@ export class WorkspaceController {
     if (!canMoveItem(layout, item, targetGroupId, this.maxGroupDepth())) {
       return false;
     }
-    this.mutate("structural", () => this.store.moveItem(item, targetGroupId, index));
+    this.mutate("structural", () =>
+      this.store.moveItem(item, targetGroupId, index, this.windowId)
+    );
     return true;
+  };
+
+  /// Multi-window spec: re-parent a tab or group into another window's root.
+  /// `"new"` allocates the next free `aux-<n>` slot. Returns the target window
+  /// id, or null when the store refused the move.
+  moveItemToWindow = (item: Item, target: string | "new"): string | null => {
+    const targetWindowId = target === "new"
+      ? this.allocateAuxWindowId()
+      : target;
+    const before = this.store.getState();
+    let after: Layout = before;
+    this.mutate("structural", () => {
+      after = this.store.moveItemToWindow(item, targetWindowId);
+      return after;
+    });
+    return after === before ? null : targetWindowId;
+  };
+
+  /// An aux window is closing: its items come home to the main rail and the
+  /// slot disappears. Sessions never notice (spec: close-returns-to-main).
+  returnWindowToMain = (windowId: string): void => {
+    this.mutate("structural", () => this.store.returnWindowToMain(windowId));
   };
 
   reorderGroup = (groupId: string, targetIndex: number): void => {
@@ -1787,7 +1836,12 @@ export class WorkspaceController {
   /// stays the active tab; UI pane focus belongs on the merged-in subtree,
   /// which is always `tabs[targetTabId].split.children[1]`.
   mergeTabs = (sourceTabId: string, targetTabId: string): void => {
-    const merged = mergeTabIntoTab(this.store.getState(), sourceTabId, targetTabId);
+    const merged = mergeTabIntoTab(
+      this.store.getState(),
+      sourceTabId,
+      targetTabId,
+      this.windowId,
+    );
     if (merged === null) {
       this.setNotice("The tabs could not be combined.");
       return;
@@ -1816,7 +1870,7 @@ export class WorkspaceController {
     }
     this.setNotice(null);
     this.mutate("structural", () =>
-      this.store.replaceState({ ...extracted, activeTabId: newTabId })
+      this.store.replaceState(withActiveTab(extracted, this.windowId, newTabId))
     );
   };
 
@@ -1859,6 +1913,9 @@ export class WorkspaceController {
       sessionId: session.id,
       color: nextTabColor(layout),
       groupId: targetGroupId,
+      // Ungrouped tabs land on THIS window's rail; a group target already
+      // names its own window.
+      windowId: this.windowId,
     }));
     if (session.cwd) {
       const cwd = session.cwd;
@@ -2219,6 +2276,19 @@ export class WorkspaceController {
     return this.settings.getSnapshot().maxGroupDepth;
   }
 
+  /// Smallest `aux-<n>` (n from 1) not already a window slot. Ids are reused
+  /// after a slot closes, which is fine: a slot IS the window's identity, and
+  /// a closed one has no leftovers to collide with.
+  private allocateAuxWindowId(): string {
+    const layout = this.store.getState();
+    for (let n = 1; ; n += 1) {
+      const candidate = `aux-${n}`;
+      if (!(candidate in layout.auxWindows)) {
+        return candidate;
+      }
+    }
+  }
+
   /// The injected probe is renderer code that can throw; a resume must never
   /// surface an exception, and an unanswerable probe means "not there".
   private async probeDir(path: string): Promise<boolean> {
@@ -2284,7 +2354,7 @@ export class WorkspaceController {
   /// new tab targets. Falls back to the group-active chain otherwise.
   private activeTabCwdInScope(key: ScopeKey): string | null {
     const layout = this.store.getState();
-    const activeTabId = layout.activeTabId;
+    const activeTabId = slotOf(layout, this.windowId)?.activeTabId ?? null;
     if (!activeTabId) {
       return null;
     }

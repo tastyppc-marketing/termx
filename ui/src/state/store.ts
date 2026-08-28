@@ -1,8 +1,10 @@
 import {
   canMoveItem,
+  collectSubtreeTabIds,
   emptyLayout,
   isFillStrength,
   isPaletteId,
+  MAIN_WINDOW_ID,
   MAX_GROUP_DEPTH,
   MAX_NAME_LENGTH,
   MAX_SPLIT_DEPTH,
@@ -11,6 +13,7 @@ import {
   validateInvariants,
 } from "./layout";
 import type {
+  AuxWindowSlot,
   FillStrength,
   Group,
   Item,
@@ -41,19 +44,37 @@ export interface LayoutStore {
   closeTab(tabId: string): Layout;
   renameTab(tabId: string, title: string | null): Layout;
   recolorTab(tabId: string, color: PaletteId): Layout;
-  setActiveTab(tabId: string | null): Layout;
+  /// `windowId` names whose active tab moves; default the main window's.
+  setActiveTab(tabId: string | null, windowId?: string): Layout;
 
   /// Drag-drop commit: remove from the current container, then insert at
   /// `index` in the target (index applies AFTER removal; clamped).
   moveTab(tabId: string, target: ContainerRef, index: number): Layout;
   /// moveTab for any item, subgroups included. Refused when the move would
   /// break an invariant (a group into its own subtree, past the depth cap).
-  moveItem(item: Item, targetGroupId: string | null, index: number): Layout;
+  /// A null `targetGroupId` is the root of `windowId` (default main).
+  moveItem(
+    item: Item,
+    targetGroupId: string | null,
+    index: number,
+    windowId?: string,
+  ): Layout;
   reorderWithinContainer(
     groupId: string | null,
     fromIndex: number,
     toIndex: number,
+    windowId?: string,
   ): Layout;
+
+  /// Re-parent an item into another window's root (multi-window spec): removed
+  /// from wherever it sits — any window's root or any group — and appended to
+  /// `targetWindowId`'s rootItems. A missing aux slot is created empty first.
+  /// Each affected window's active tab is kept coherent. Refused (previous
+  /// state returned) for unknown items or a no-op move.
+  moveItemToWindow(item: Item, targetWindowId: string): Layout;
+  /// Close-of-an-aux-window: its root items append to the main window's root
+  /// and the slot is deleted. Unknown windows are a no-op.
+  returnWindowToMain(windowId: string): Layout;
 
   createGroup(opts: CreateGroupOptions): Layout;
   renameGroup(groupId: string, name: string): Layout;
@@ -81,6 +102,8 @@ export interface LayoutStore {
 
 export interface ContainerRef {
   groupId: string | null;
+  /// Which window's root a null groupId means; default the main window's.
+  windowId?: string;
 }
 
 export interface CreateTabOptions {
@@ -91,6 +114,8 @@ export interface CreateTabOptions {
   fill?: FillStrength;
   groupId?: string | null;
   index?: number;
+  /// Which window's root a null/absent groupId means; default main.
+  windowId?: string;
 }
 
 export interface CreateGroupOptions {
@@ -100,6 +125,8 @@ export interface CreateGroupOptions {
   /// Container the new group lands in; null (the default) = the root.
   parentGroupId?: string | null;
   index?: number;
+  /// Which window's root a null parentGroupId means; default main.
+  windowId?: string;
 }
 
 const MAX_SESSION_ID = 0xffffffff;
@@ -142,26 +169,97 @@ function isItem(item: Item, kind: Item["kind"], id: string): boolean {
   return item.kind === kind && item.id === id;
 }
 
-/// Ordered children of a container: null groupId = the sidebar root. Undefined
-/// means the group does not exist.
-function itemsOf(
-  layout: Layout,
-  groupId: string | null,
-): readonly Item[] | undefined {
-  return groupId === null ? layout.rootItems : findGroup(layout, groupId)?.items;
+/// A container address: a group, or one window's root (groupId null).
+interface ContainerKey {
+  windowId: string;
+  groupId: string | null;
 }
 
-/// The container currently holding `item`: null groupId = the root.
+function sameContainer(a: ContainerKey, b: ContainerKey): boolean {
+  return a.groupId === b.groupId &&
+    (a.groupId !== null || a.windowId === b.windowId);
+}
+
+/// One window's root item list; undefined for a window with no slot.
+function rootsOf(layout: Layout, windowId: string): readonly Item[] | undefined {
+  return windowId === MAIN_WINDOW_ID
+    ? layout.rootItems
+    : layout.auxWindows[windowId]?.rootItems;
+}
+
+function withRoots(layout: Layout, windowId: string, items: Item[]): Layout {
+  if (windowId === MAIN_WINDOW_ID) {
+    return { ...layout, rootItems: items };
+  }
+  const slot = layout.auxWindows[windowId];
+  if (!slot) {
+    return layout;
+  }
+  return {
+    ...layout,
+    auxWindows: { ...layout.auxWindows, [windowId]: { ...slot, rootItems: items } },
+  };
+}
+
+/// One window's active tab (undefined for a window with no slot).
+function activeTabOf(layout: Layout, windowId: string): string | null | undefined {
+  return windowId === MAIN_WINDOW_ID
+    ? layout.activeTabId
+    : layout.auxWindows[windowId]?.activeTabId;
+}
+
+function withActiveTabIn(
+  layout: Layout,
+  windowId: string,
+  activeTabId: string | null,
+): Layout {
+  if (windowId === MAIN_WINDOW_ID) {
+    return { ...layout, activeTabId };
+  }
+  const slot = layout.auxWindows[windowId];
+  if (!slot) {
+    return layout;
+  }
+  return {
+    ...layout,
+    auxWindows: { ...layout.auxWindows, [windowId]: { ...slot, activeTabId } },
+  };
+}
+
+/// Ordered children of a container. Undefined means the group (or the window
+/// slot) does not exist.
+function itemsOf(
+  layout: Layout,
+  key: ContainerKey,
+): readonly Item[] | undefined {
+  return key.groupId === null
+    ? rootsOf(layout, key.windowId)
+    : findGroup(layout, key.groupId)?.items;
+}
+
+/// The container currently holding `item`: some window's root, or a group.
 function containerOf(
   layout: Layout,
   item: Item,
-): { groupId: string | null; list: readonly Item[] } | undefined {
+): { key: ContainerKey; list: readonly Item[] } | undefined {
   if (layout.rootItems.some((candidate) => isItem(candidate, item.kind, item.id))) {
-    return { groupId: null, list: layout.rootItems };
+    return {
+      key: { windowId: MAIN_WINDOW_ID, groupId: null },
+      list: layout.rootItems,
+    };
+  }
+  for (const [windowId, slot] of Object.entries(layout.auxWindows)) {
+    if (slot.rootItems.some((candidate) => isItem(candidate, item.kind, item.id))) {
+      return { key: { windowId, groupId: null }, list: slot.rootItems };
+    }
   }
   for (const group of Object.values(layout.groups)) {
     if (group.items.some((candidate) => isItem(candidate, item.kind, item.id))) {
-      return { groupId: group.id, list: group.items };
+      // A group container's windowId is immaterial to same-container edits.
+      return {
+        key: { windowId: MAIN_WINDOW_ID, groupId: group.id },
+        list: group.items,
+      };
     }
   }
   return undefined;
@@ -169,25 +267,25 @@ function containerOf(
 
 function withContainerItems(
   layout: Layout,
-  groupId: string | null,
+  key: ContainerKey,
   items: Item[],
 ): Layout {
-  if (groupId === null) {
-    return { ...layout, rootItems: items };
+  if (key.groupId === null) {
+    return withRoots(layout, key.windowId, items);
   }
-  const group = layout.groups[groupId];
+  const group = layout.groups[key.groupId];
   if (!group) {
     return layout;
   }
   return {
     ...layout,
-    groups: { ...layout.groups, [groupId]: { ...group, items } },
+    groups: { ...layout.groups, [key.groupId]: { ...group, items } },
   };
 }
 
-/// Sidebar render order: every container's items in order, subgroups walked
-/// where they sit.
-function flattenedTabOrder(layout: Layout): string[] {
+/// Sidebar render order of ONE window's rail: every container's items in
+/// order, subgroups walked where they sit.
+function flattenedTabOrder(layout: Layout, windowId: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const walk = (items: readonly Item[]): void => {
@@ -206,8 +304,35 @@ function flattenedTabOrder(layout: Layout): string[] {
       }
     }
   };
-  walk(layout.rootItems);
+  walk(rootsOf(layout, windowId) ?? []);
   return out;
+}
+
+/// The window whose root reaches the container `key` (a root key names it
+/// directly; a group key is chased up through the layout).
+function windowOfContainer(layout: Layout, key: ContainerKey): string {
+  if (key.groupId === null) {
+    return key.windowId;
+  }
+  for (const [windowId, slot] of [
+    [MAIN_WINDOW_ID, { rootItems: layout.rootItems }] as const,
+    ...Object.entries(layout.auxWindows),
+  ]) {
+    const seen = new Set<string>();
+    const stack = [...slot.rootItems];
+    while (stack.length > 0) {
+      const item = stack.pop()!;
+      if (item.kind !== "group" || seen.has(item.id)) {
+        continue;
+      }
+      if (item.id === key.groupId) {
+        return windowId;
+      }
+      seen.add(item.id);
+      stack.push(...(layout.groups[item.id]?.items ?? []));
+    }
+  }
+  return MAIN_WINDOW_ID;
 }
 
 function nodeAtPath(
@@ -306,56 +431,65 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
     if (container === undefined || !(tabId in state.tabs)) {
       return state;
     }
-
-    let activeTabId = state.activeTabId;
-    if (activeTabId === tabId) {
-      const order = flattenedTabOrder(state);
-      const at = order.indexOf(tabId);
-      activeTabId = order[at + 1] ?? order[at - 1] ?? null;
-    }
+    const owningWindow = windowOfContainer(state, container.key);
 
     const tabs = { ...state.tabs };
     delete tabs[tabId];
-    const next = withContainerItems(
+    let next = withContainerItems(
       state,
-      container.groupId,
+      container.key,
       container.list.filter((item) => !isItem(item, "tab", tabId)),
     );
-    return commit({ ...next, tabs, activeTabId });
+    next = { ...next, tabs };
+    // Every window whose active tab this was moves on: the owning window to
+    // its own next-in-rail tab, any other (a stale pointer) to null.
+    for (const windowId of [MAIN_WINDOW_ID, ...Object.keys(state.auxWindows)]) {
+      if (activeTabOf(state, windowId) !== tabId) {
+        continue;
+      }
+      let replacement: string | null = null;
+      if (windowId === owningWindow) {
+        const order = flattenedTabOrder(state, windowId);
+        const at = order.indexOf(tabId);
+        replacement = order[at + 1] ?? order[at - 1] ?? null;
+      }
+      next = withActiveTabIn(next, windowId, replacement);
+    }
+    return commit(next);
   }
 
   /// Shared move engine: pull the item out of its container, drop it back in
   /// at `index` of the target (clamped, applied AFTER the removal).
   function moveItemImpl(
     item: Item,
-    targetGroupId: string | null,
+    target: ContainerKey,
     index: number,
   ): Layout {
     const source = containerOf(state, item);
-    if (source === undefined || itemsOf(state, targetGroupId) === undefined) {
+    if (source === undefined || itemsOf(state, target) === undefined) {
       return state;
     }
     // The hard cap guards the blob; the user setting gates the UI upstream.
-    if (!canMoveItem(state, item, targetGroupId, MAX_GROUP_DEPTH)) {
+    if (!canMoveItem(state, item, target.groupId, MAX_GROUP_DEPTH)) {
       return state;
     }
 
     const removed = withContainerItems(
       state,
-      source.groupId,
+      source.key,
       source.list.filter((candidate) => !isItem(candidate, item.kind, item.id)),
     );
-    const listAfterRemoval = itemsOf(removed, targetGroupId)!;
+    const listAfterRemoval = itemsOf(removed, target)!;
     const at = clampIndex(index, listAfterRemoval.length);
     const next = withContainerItems(
       removed,
-      targetGroupId,
+      target,
       insertAt(listAfterRemoval, at, item),
     );
 
     if (
-      source.groupId === targetGroupId &&
-      sameItems(source.list, itemsOf(next, targetGroupId)!)
+      sameContainer(source.key, target) &&
+      sameItems(source.list, itemsOf(next, target)!)
     ) {
       return state;
     }
@@ -403,8 +537,11 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       if (!isFillStrength(fill)) {
         return state;
       }
-      const groupId = opts.groupId ?? null;
-      const targetList = itemsOf(state, groupId);
+      const target: ContainerKey = {
+        windowId: opts.windowId ?? MAIN_WINDOW_ID,
+        groupId: opts.groupId ?? null,
+      };
+      const targetList = itemsOf(state, target);
       if (targetList === undefined) {
         return state;
       }
@@ -413,14 +550,14 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       const index = clampIndex(opts.index ?? targetList.length, targetList.length);
       const next = withContainerItems(
         state,
-        groupId,
+        target,
         insertAt(targetList, index, { kind: "tab", id }),
       );
-      return commit({
-        ...next,
-        tabs: { ...next.tabs, [id]: tab },
-        activeTabId: id,
-      });
+      return commit(withActiveTabIn(
+        { ...next, tabs: { ...next.tabs, [id]: tab } },
+        windowOfContainer(state, target),
+        id,
+      ));
     },
 
     closeTab: closeTabImpl,
@@ -458,27 +595,35 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       });
     },
 
-    setActiveTab(tabId) {
+    setActiveTab(tabId, windowId = MAIN_WINDOW_ID) {
       if (tabId !== null && !(tabId in state.tabs)) {
         return state;
       }
-      if (tabId === state.activeTabId) {
+      const current = activeTabOf(state, windowId);
+      if (current === undefined || tabId === current) {
         return state;
       }
-      return commit({ ...state, activeTabId: tabId });
+      return commit(withActiveTabIn(state, windowId, tabId));
     },
 
     moveTab(tabId, target, index) {
       if (!(tabId in state.tabs)) {
         return state;
       }
-      return moveItemImpl({ kind: "tab", id: tabId }, target.groupId, index);
+      return moveItemImpl(
+        { kind: "tab", id: tabId },
+        { windowId: target.windowId ?? MAIN_WINDOW_ID, groupId: target.groupId },
+        index,
+      );
     },
 
-    moveItem: moveItemImpl,
+    moveItem(item, targetGroupId, index, windowId = MAIN_WINDOW_ID) {
+      return moveItemImpl(item, { windowId, groupId: targetGroupId }, index);
+    },
 
-    reorderWithinContainer(groupId, fromIndex, toIndex) {
-      const list = itemsOf(state, groupId);
+    reorderWithinContainer(groupId, fromIndex, toIndex, windowId = MAIN_WINDOW_ID) {
+      const key: ContainerKey = { windowId, groupId };
+      const list = itemsOf(state, key);
       if (list === undefined) {
         return state;
       }
@@ -491,7 +636,89 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       if (sameItems(list, next)) {
         return state;
       }
-      return commit(withContainerItems(state, groupId, next));
+      return commit(withContainerItems(state, key, next));
+    },
+
+    moveItemToWindow(item, targetWindowId) {
+      const exists = item.kind === "tab"
+        ? item.id in state.tabs
+        : item.id in state.groups;
+      if (!exists || targetWindowId.length === 0) {
+        return state;
+      }
+      const source = containerOf(state, item);
+      if (source === undefined) {
+        return state;
+      }
+      if (
+        source.key.groupId === null &&
+        source.key.windowId === targetWindowId
+      ) {
+        return state; // already at that window's root
+      }
+      const sourceWindow = windowOfContainer(state, source.key);
+
+      // A fresh aux slot appears the moment something moves into it; main
+      // always exists. (Pruning an emptied slot is the CLOSE path's job.)
+      let next: Layout = state;
+      if (targetWindowId !== MAIN_WINDOW_ID && !state.auxWindows[targetWindowId]) {
+        const slot: AuxWindowSlot = {
+          rootItems: [],
+          activeTabId: null,
+          bounds: null,
+        };
+        next = {
+          ...next,
+          auxWindows: { ...next.auxWindows, [targetWindowId]: slot },
+        };
+      }
+      next = withContainerItems(
+        next,
+        source.key,
+        source.list.filter((candidate) => !isItem(candidate, item.kind, item.id)),
+      );
+      const targetList = rootsOf(next, targetWindowId)!;
+      next = withRoots(next, targetWindowId, [...targetList, item]);
+
+      // Active-tab coherence: the tabs that moved are the item itself or the
+      // group's whole subtree.
+      const movedTabs = new Set(
+        item.kind === "tab" ? [item.id] : collectSubtreeTabIds(state, item.id),
+      );
+      const sourceActive = activeTabOf(next, sourceWindow);
+      if (
+        sourceWindow !== targetWindowId &&
+        sourceActive != null && movedTabs.has(sourceActive)
+      ) {
+        const order = flattenedTabOrder(next, sourceWindow)
+          .filter((id) => !movedTabs.has(id));
+        next = withActiveTabIn(next, sourceWindow, order[0] ?? null);
+      }
+      const targetActive = activeTabOf(next, targetWindowId);
+      if (targetActive === null && movedTabs.size > 0) {
+        const first = flattenedTabOrder(next, targetWindowId)
+          .find((id) => movedTabs.has(id));
+        next = withActiveTabIn(next, targetWindowId, first ?? null);
+      }
+      return validateInvariants(next).length === 0 ? commit(next) : state;
+    },
+
+    returnWindowToMain(windowId) {
+      const slot = state.auxWindows[windowId];
+      if (windowId === MAIN_WINDOW_ID || slot === undefined) {
+        return state;
+      }
+      const auxWindows = { ...state.auxWindows };
+      delete auxWindows[windowId];
+      const next: Layout = {
+        ...state,
+        auxWindows,
+        rootItems: [...state.rootItems, ...slot.rootItems],
+        // Main keeps its own active tab; it only adopts the slot's when it
+        // had none to show.
+        activeTabId: state.activeTabId ?? slot.activeTabId,
+      };
+      return validateInvariants(next).length === 0 ? commit(next) : state;
     },
 
     createGroup(opts) {
@@ -503,8 +730,11 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       if (color !== null && !isPaletteId(color)) {
         return state;
       }
-      const parentGroupId = opts.parentGroupId ?? null;
-      const targetList = itemsOf(state, parentGroupId);
+      const target: ContainerKey = {
+        windowId: opts.windowId ?? MAIN_WINDOW_ID,
+        groupId: opts.parentGroupId ?? null,
+      };
+      const targetList = itemsOf(state, target);
       if (targetList === undefined) {
         return state;
       }
@@ -512,7 +742,7 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       const index = clampIndex(opts.index ?? targetList.length, targetList.length);
       const next = withContainerItems(
         { ...state, groups: { ...state.groups, [opts.id]: group } },
-        parentGroupId,
+        target,
         insertAt(targetList, index, { kind: "group", id: opts.id }),
       );
       // A new group is empty, so only the depth cap can refuse it.
@@ -570,7 +800,7 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       items.splice(at, 1, ...group.items);
       const groups = { ...state.groups };
       delete groups[groupId];
-      return commit(withContainerItems({ ...state, groups }, container.groupId, items));
+      return commit(withContainerItems({ ...state, groups }, container.key, items));
     },
 
     setTabFill(tabId, fill) {

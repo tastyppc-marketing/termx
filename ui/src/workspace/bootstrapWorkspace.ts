@@ -25,11 +25,11 @@ import {
 } from "../saved/store";
 import { SettingsStore, loadSettingsStore } from "../settings/SettingsStore";
 import { UiStateStore, loadUiStateStore } from "./uiState";
-import { parseLayout } from "../state/layout";
+import { MAIN_WINDOW_ID, parseLayout, slotOf } from "../state/layout";
 import { reconcile } from "../state/reconcile";
 import { createLayoutStore } from "../state/store";
 import { AttachmentHub } from "./AttachmentHub";
-import { firstSessionId } from "./layoutOperations";
+import { firstSessionId, flattenTabIds, sessionIdsInTab } from "./layoutOperations";
 import { LayoutPersistence } from "./LayoutPersistence";
 import { WorkspaceController } from "./WorkspaceController";
 
@@ -58,6 +58,13 @@ export interface BootstrapWorkspaceOptions {
   appFiles?: AppFileStore;
   /** Injected `list_llm_sessions`; tests fake the scan. */
   listSessions?: SessionLister;
+  /**
+   * Which window slot this workspace instance renders (multi-window spec).
+   * Default the main window. An aux window attaches only its own slot's
+   * sessions; the main window attaches everything, so no session goes
+   * untracked when an aux window fails to open.
+   */
+  windowId?: string;
 }
 
 /**
@@ -317,15 +324,29 @@ export async function bootstrapWorkspace(
       sshHosts: { byAlias: (alias: string) => sshHosts.find((host) => host.aliases.includes(alias)) ?? null },
       ...(options.generateId ? { generateId: options.generateId } : {}),
       ...(options.pickFolder ? { pickFolder: options.pickFolder } : {}),
+      ...(options.windowId ? { windowId: options.windowId } : {}),
     };
     controller = new WorkspaceController(controllerOptions);
 
-    const activeTab = reconciled.layout.activeTabId
-      ? reconciled.layout.tabs[reconciled.layout.activeTabId]
-      : undefined;
+    const windowId = options.windowId ?? MAIN_WINDOW_ID;
+    const slot = slotOf(reconciled.layout, windowId);
+    const activeTabId = slot?.activeTabId ?? null;
+    const activeTab = activeTabId ? reconciled.layout.tabs[activeTabId] : undefined;
     const activeSessionId = activeTab ? firstSessionId(activeTab.split) : null;
+    // The main window attaches every live session — including ones sitting in
+    // aux slots — so nothing goes untracked when an aux window fails to open.
+    // An aux window attaches only its own slot's sessions (multi-window spec).
+    const windowSessionIds = windowId === MAIN_WINDOW_ID
+      ? null
+      : new Set(
+          flattenTabIds(reconciled.layout, windowId).flatMap((tabId) => {
+            const tab = reconciled.layout.tabs[tabId];
+            return tab ? sessionIdsInTab(tab) : [];
+          }),
+        );
     const liveSessionIds = state.sessions
       .filter((session) => session.alive)
+      .filter((session) => windowSessionIds === null || windowSessionIds.has(session.id))
       .map((session) => session.id);
     await attachments.attachAll(liveSessionIds, activeSessionId);
     for (const session of state.sessions) {
@@ -334,18 +355,22 @@ export async function bootstrapWorkspace(
       }
     }
 
-    if (restored !== null && reconciled.orphanAdoptedIds.length > 0) {
-      persistence.record(reconciled.layout, "structural");
-      await persistence.flush();
-    }
+    // Boot-time writes belong to the main window alone (single-writer rule):
+    // an aux window adopts the same daemon state read-only.
+    if (windowId === MAIN_WINDOW_ID) {
+      if (restored !== null && reconciled.orphanAdoptedIds.length > 0) {
+        persistence.record(reconciled.layout, "structural");
+        await persistence.flush();
+      }
 
-    // Corpse hygiene: dead host-side records no pane references (their tab
-    // was closed while the daemon was down) hold nothing anyone can reach —
-    // reap them so state.json does not accumulate a graveyard across
-    // reboots. Fire-and-forget: a failed close leaves a record the next
-    // bootstrap reaps again.
-    for (const deadId of reconciled.unreferencedDeadSessionIds) {
-      client.closeSession(deadId).catch(() => undefined);
+      // Corpse hygiene: dead host-side records no pane references (their tab
+      // was closed while the daemon was down) hold nothing anyone can reach —
+      // reap them so state.json does not accumulate a graveyard across
+      // reboots. Fire-and-forget: a failed close leaves a record the next
+      // bootstrap reaps again.
+      for (const deadId of reconciled.unreferencedDeadSessionIds) {
+        client.closeSession(deadId).catch(() => undefined);
+      }
     }
 
     // Losing the socket suspends attachments; it never destroys them. The

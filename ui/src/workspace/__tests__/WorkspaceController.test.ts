@@ -83,6 +83,8 @@ function harness(options: {
   }) => Promise<SessionInfo>;
   /** Dead-pane resume lookup: cwd -> newest conversation record. */
   latestForCwd?: (cwd: string) => LlmSessionRecord | null;
+  /** Which window slot this controller renders (multi-window Phase 1). */
+  windowId?: string;
 } = {}) {
   const exitListeners = new Set<(event: { sessionId: number; exitCode: number | null }) => void>();
   const closeListeners = new Set<(event: { sessionId: number }) => void>();
@@ -168,6 +170,7 @@ function harness(options: {
     ...(options.latestForCwd
       ? { conversations: { latestForCwd: options.latestForCwd } }
       : {}),
+    ...(options.windowId ? { windowId: options.windowId } : {}),
   });
   return {
     controller,
@@ -1519,5 +1522,107 @@ describe("WorkspaceController sessionDims (spec §13)", () => {
   it("works against a hub without the lastDims seam", () => {
     const { controller } = harness({ sessions: [session(3)] });
     expect(controller.sessionDims([3])).toEqual({ 3: { cols: 120, rows: 30 } });
+  });
+});
+
+describe("WorkspaceController multi-window (Phase 1)", () => {
+  /// layout() with tab-1 torn out into aux-1; the group stays in main.
+  function tornLayout(): Layout {
+    const initial = layout();
+    initial.rootItems = [{ kind: "group", id: "group" }];
+    initial.activeTabId = "tab-2";
+    initial.auxWindows["aux-1"] = {
+      rootItems: [{ kind: "tab", id: "tab-1" }],
+      activeTabId: "tab-1",
+      bounds: null,
+    };
+    return initial;
+  }
+
+  it("an aux controller snapshots only its own window's slot", () => {
+    const { controller } = harness({ initial: tornLayout(), windowId: "aux-1" });
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.ungroupedTabs.map((tab) => tab.id)).toEqual(["tab-1"]);
+    expect(snapshot.groups).toEqual([]);
+    expect(snapshot.activeTabId).toBe("tab-1");
+    expect(snapshot.activeSessionId).toBe(1);
+    expect(snapshot.windowIds).toEqual(["main", "aux-1"]);
+  });
+
+  it("the main controller no longer shows a torn-out tab", () => {
+    const { controller } = harness({ initial: tornLayout() });
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.ungroupedTabs).toEqual([]);
+    expect(snapshot.groups.map((group) => group.id)).toEqual(["group"]);
+    expect(snapshot.activeTabId).toBe("tab-2");
+  });
+
+  it("moveItemToWindow('new') allocates aux ids and records a structural write", () => {
+    const { controller, persistenceCalls } = harness();
+    const target = controller.moveItemToWindow({ kind: "tab", id: "tab-1" }, "new");
+    expect(target).toBe("aux-1");
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.ungroupedTabs).toEqual([]);
+    expect(snapshot.layout.auxWindows["aux-1"]!.rootItems).toEqual([
+      { kind: "tab", id: "tab-1" },
+    ]);
+    expect(persistenceCalls.at(-1)).toMatchObject({ kind: "structural" });
+
+    const second = controller.moveItemToWindow({ kind: "group", id: "group" }, "new");
+    expect(second).toBe("aux-2");
+  });
+
+  it("moveItemToWindow moves a group whole and back again", () => {
+    const { controller } = harness();
+    expect(
+      controller.moveItemToWindow({ kind: "group", id: "group" }, "new"),
+    ).toBe("aux-1");
+    expect(controller.getSnapshot().groups).toEqual([]);
+    expect(
+      controller.moveItemToWindow({ kind: "group", id: "group" }, "main"),
+    ).toBe("main");
+    expect(controller.getSnapshot().groups.map((group) => group.id)).toEqual([
+      "group",
+    ]);
+    // The emptied slot survives the move; only closing the window prunes it.
+    expect(controller.getSnapshot().windowIds).toEqual(["main", "aux-1"]);
+  });
+
+  it("moveItemToWindow refuses unknown items", () => {
+    const { controller, persistenceCalls } = harness();
+    expect(
+      controller.moveItemToWindow({ kind: "tab", id: "ghost" }, "new"),
+    ).toBeNull();
+    expect(persistenceCalls).toEqual([]);
+  });
+
+  it("returnWindowToMain brings the slot's items home and deletes the slot", () => {
+    const { controller } = harness({ initial: tornLayout() });
+    controller.returnWindowToMain("aux-1");
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.windowIds).toEqual(["main"]);
+    expect(snapshot.ungroupedTabs.map((tab) => tab.id)).toEqual(["tab-1"]);
+    expect(snapshot.activeTabId).toBe("tab-2");
+  });
+
+  it("an aux controller's activateTab writes its own slot, not main's", () => {
+    const initial = tornLayout();
+    initial.auxWindows["aux-1"]!.rootItems.push({ kind: "tab", id: "tab-3" });
+    initial.tabs["tab-3"] = {
+      id: "tab-3",
+      title: null,
+      color: "green",
+      fill: "off",
+      split: { kind: "pane", sessionId: 9 },
+    };
+    const { controller } = harness({
+      initial,
+      windowId: "aux-1",
+      sessions: [session(1), session(2), session(3), session(9)],
+    });
+    controller.activateTab("tab-3");
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.activeTabId).toBe("tab-3");
+    expect(snapshot.layout.activeTabId).toBe("tab-2");
   });
 });

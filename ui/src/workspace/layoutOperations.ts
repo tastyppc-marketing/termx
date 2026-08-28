@@ -1,10 +1,13 @@
 import {
   collectSubtreeTabIds,
+  MAIN_WINDOW_ID,
   MAX_SPLIT_DEPTH,
   PALETTE_IDS,
   sessionIdsInSplit,
   splitDepth,
   validateInvariants,
+  windowIds,
+  type AuxWindowSlot,
   type Group,
   type Item,
   type Layout,
@@ -13,18 +16,25 @@ import {
   type Tab,
 } from "../state/layout";
 
-/// The container holding `item` (null groupId = the sidebar root) and its
-/// ordered contents. Undefined when nothing references the item.
+/// The container holding `item` — a group, or one window's root (groupId null;
+/// windowId says whose) — and its ordered contents. Undefined when nothing
+/// references the item.
 function containerOf(
   layout: Layout,
   item: Item,
-): { groupId: string | null; items: readonly Item[] } | undefined {
+): { windowId: string; groupId: string | null; items: readonly Item[] } | undefined {
   if (layout.rootItems.some((candidate) => sameItem(candidate, item))) {
-    return { groupId: null, items: layout.rootItems };
+    return { windowId: MAIN_WINDOW_ID, groupId: null, items: layout.rootItems };
+  }
+  for (const [windowId, slot] of Object.entries(layout.auxWindows)) {
+    if (slot.rootItems.some((candidate) => sameItem(candidate, item))) {
+      return { windowId, groupId: null, items: slot.rootItems };
+    }
   }
   for (const group of Object.values(layout.groups)) {
     if (group.items.some((candidate) => sameItem(candidate, item))) {
-      return { groupId: group.id, items: group.items };
+      // Which window holds the group does not matter to a same-container edit.
+      return { windowId: MAIN_WINDOW_ID, groupId: group.id, items: group.items };
     }
   }
   return undefined;
@@ -34,22 +44,99 @@ function sameItem(a: Item, b: Item): boolean {
   return a.kind === b.kind && a.id === b.id;
 }
 
-function withContainerItems(
+/// One window's root item list. Undefined for a window the layout has no slot
+/// for.
+export function rootItemsOf(
   layout: Layout,
-  groupId: string | null,
-  items: Item[],
-): Layout {
-  if (groupId === null) {
+  windowId: string,
+): readonly Item[] | undefined {
+  if (windowId === MAIN_WINDOW_ID) {
+    return layout.rootItems;
+  }
+  return layout.auxWindows[windowId]?.rootItems;
+}
+
+/// The window whose root reaches `item` (directly or through groups), or null
+/// when no window does.
+export function windowOfItem(layout: Layout, item: Item): string | null {
+  for (const windowId of windowIds(layout)) {
+    const roots = rootItemsOf(layout, windowId);
+    if (roots !== undefined && reaches(layout, roots, item)) {
+      return windowId;
+    }
+  }
+  return null;
+}
+
+function reaches(layout: Layout, roots: readonly Item[], item: Item): boolean {
+  const seen = new Set<string>();
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const candidate = stack.pop()!;
+    if (sameItem(candidate, item)) {
+      return true;
+    }
+    if (candidate.kind === "group" && !seen.has(candidate.id)) {
+      seen.add(candidate.id);
+      stack.push(...(layout.groups[candidate.id]?.items ?? []));
+    }
+  }
+  return false;
+}
+
+function withRootItems(layout: Layout, windowId: string, items: Item[]): Layout {
+  if (windowId === MAIN_WINDOW_ID) {
     return { ...layout, rootItems: items };
   }
-  const group = layout.groups[groupId];
+  const slot = layout.auxWindows[windowId];
+  if (!slot) {
+    return layout;
+  }
+  return {
+    ...layout,
+    auxWindows: { ...layout.auxWindows, [windowId]: { ...slot, rootItems: items } },
+  };
+}
+
+/// The active tab of one window's slot, applied without touching the others.
+export function withActiveTab(
+  layout: Layout,
+  windowId: string,
+  activeTabId: string | null,
+): Layout {
+  if (windowId === MAIN_WINDOW_ID) {
+    return { ...layout, activeTabId };
+  }
+  const slot = layout.auxWindows[windowId];
+  if (!slot) {
+    return layout;
+  }
+  return {
+    ...layout,
+    auxWindows: { ...layout.auxWindows, [windowId]: { ...slot, activeTabId } },
+  };
+}
+
+function withContainerItems(
+  layout: Layout,
+  container: { windowId: string; groupId: string | null },
+  items: Item[],
+): Layout {
+  if (container.groupId === null) {
+    return withRootItems(layout, container.windowId, items);
+  }
+  const group = layout.groups[container.groupId];
   if (!group) {
     return layout;
   }
-  return { ...layout, groups: { ...layout.groups, [groupId]: { ...group, items } } };
+  return {
+    ...layout,
+    groups: { ...layout.groups, [container.groupId]: { ...group, items } },
+  };
 }
 
-/// Drops every listed tab id from every container, leaving groups in place.
+/// Drops every listed tab id from every container — every window's root and
+/// every group — leaving groups in place.
 function withoutTabItems(layout: Layout, removed: ReadonlySet<string>): Layout {
   const keep = (items: readonly Item[]): Item[] =>
     items.filter((item) => !(item.kind === "tab" && removed.has(item.id)));
@@ -58,7 +145,33 @@ function withoutTabItems(layout: Layout, removed: ReadonlySet<string>): Layout {
     const items = keep(group.items);
     groups[id] = items.length === group.items.length ? group : { ...group, items };
   }
-  return { ...layout, groups, rootItems: keep(layout.rootItems) };
+  const auxWindows: Record<string, AuxWindowSlot> = {};
+  for (const [id, slot] of Object.entries(layout.auxWindows)) {
+    const items = keep(slot.rootItems);
+    auxWindows[id] =
+      items.length === slot.rootItems.length ? slot : { ...slot, rootItems: items };
+  }
+  return { ...layout, groups, auxWindows, rootItems: keep(layout.rootItems) };
+}
+
+/// After tabs leave the layout, every window whose active tab was among them
+/// moves to the next surviving tab in its own slot's order (or null).
+function fixActiveTabs(layout: Layout, removedTabs: ReadonlySet<string>): Layout {
+  let next = layout;
+  for (const windowId of windowIds(layout)) {
+    const active = windowId === MAIN_WINDOW_ID
+      ? layout.activeTabId
+      : layout.auxWindows[windowId]!.activeTabId;
+    if (active === null || !removedTabs.has(active)) {
+      continue;
+    }
+    next = withActiveTab(
+      next,
+      windowId,
+      nextActiveTab(layout, windowId, active, removedTabs),
+    );
+  }
+  return next;
 }
 
 /// Every group id at or under `groupId`, itself included.
@@ -109,8 +222,12 @@ export function sessionIdsInTab(tab: Tab): number[] {
 }
 
 /// Every tab id in sidebar order: each container's items in order, subgroups
-/// walked where they sit.
-export function flattenTabIds(layout: Layout): string[] {
+/// walked where they sit. `windowId` picks whose rail; default the main
+/// window's, matching every pre-multi-window caller.
+export function flattenTabIds(
+  layout: Layout,
+  windowId: string = MAIN_WINDOW_ID,
+): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const walk = (items: readonly Item[]): void => {
@@ -123,7 +240,7 @@ export function flattenTabIds(layout: Layout): string[] {
       }
     }
   };
-  walk(layout.rootItems);
+  walk(rootItemsOf(layout, windowId) ?? []);
   return out;
 }
 
@@ -157,7 +274,7 @@ export function reorderGroup(
   if (items.every((candidate, index) => candidate === container.items[index])) {
     return layout;
   }
-  return admit(layout, withContainerItems(layout, container.groupId, items));
+  return admit(layout, withContainerItems(layout, container, items));
 }
 
 export function pruneSessionIds(
@@ -189,12 +306,9 @@ export function pruneSessionIds(
     return layout;
   }
 
-  const activeTabId = layout.activeTabId && removedTabs.has(layout.activeTabId)
-    ? nextActiveTab(layout, removedTabs)
-    : layout.activeTabId;
   return admit(
     layout,
-    withoutTabItems({ ...layout, tabs, activeTabId }, removedTabs),
+    withoutTabItems(fixActiveTabs({ ...layout, tabs }, removedTabs), removedTabs),
   );
 }
 
@@ -216,14 +330,11 @@ export function removeGroupAndTabs(layout: Layout, groupId: string): Layout {
   for (const id of removedGroups) {
     delete groups[id];
   }
-  const activeTabId = layout.activeTabId && removedTabs.has(layout.activeTabId)
-    ? nextActiveTab(layout, removedTabs)
-    : layout.activeTabId;
   return admit(
     layout,
     withContainerItems(
-      { ...layout, groups, tabs, activeTabId },
-      container.groupId,
+      { ...fixActiveTabs(layout, removedTabs), groups, tabs },
+      container,
       container.items.filter((candidate) => !sameItem(candidate, item)),
     ),
   );
@@ -242,6 +353,7 @@ export function mergeTabIntoTab(
   layout: Layout,
   sourceTabId: string,
   targetTabId: string,
+  windowId: string = MAIN_WINDOW_ID,
 ): Layout | null {
   const source = layout.tabs[sourceTabId];
   const target = layout.tabs[targetTabId];
@@ -261,14 +373,15 @@ export function mergeTabIntoTab(
 
   const tabs: Record<string, Tab> = { ...layout.tabs, [targetTabId]: { ...target, split } };
   delete tabs[sourceTabId];
+  // The merge happens INTO the active tab of the window it ran in, and that
+  // stays active afterwards (the source tab is gone, so an active source
+  // would dangle). Other windows whose active tab WAS the source move on.
   return admitOrNull(withoutTabItems(
-    {
-      ...layout,
-      tabs,
-      // The merge happens INTO the active tab, and it stays active afterwards
-      // (the source tab is gone, so an active source would dangle).
-      activeTabId: targetTabId,
-    },
+    withActiveTab(
+      fixActiveTabs({ ...layout, tabs }, new Set([sourceTabId])),
+      windowId,
+      targetTabId,
+    ),
     new Set([sourceTabId]),
   ));
 }
@@ -319,7 +432,7 @@ export function extractSessionToTab(
         [newTabId]: extracted,
       },
     },
-    container.groupId,
+    container,
     insertAfter(
       container.items,
       container.items.findIndex((candidate) => sameItem(candidate, source)),
@@ -400,12 +513,14 @@ function pruneNode(node: SplitNode, sessionIds: ReadonlySet<number>): SplitNode 
   return { ...node, children: [first, second] };
 }
 
-function nextActiveTab(layout: Layout, removedTabs: ReadonlySet<string>): string | null {
-  if (!layout.activeTabId) {
-    return null;
-  }
-  const order = flattenTabIds(layout);
-  const at = order.indexOf(layout.activeTabId);
+function nextActiveTab(
+  layout: Layout,
+  windowId: string,
+  activeTabId: string,
+  removedTabs: ReadonlySet<string>,
+): string | null {
+  const order = flattenTabIds(layout, windowId);
+  const at = order.indexOf(activeTabId);
   for (let index = at + 1; index < order.length; index += 1) {
     if (!removedTabs.has(order[index]!)) {
       return order[index]!;
