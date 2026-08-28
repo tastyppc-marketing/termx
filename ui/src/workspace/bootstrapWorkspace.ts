@@ -31,6 +31,7 @@ import { createLayoutStore } from "../state/store";
 import { AttachmentHub } from "./AttachmentHub";
 import { firstSessionId, flattenTabIds, sessionIdsInTab } from "./layoutOperations";
 import { LayoutPersistence } from "./LayoutPersistence";
+import type { WindowBus } from "./windowBus";
 import { WorkspaceController } from "./WorkspaceController";
 
 export type BootstrapWorkspaceClient = Pick<
@@ -65,6 +66,15 @@ export interface BootstrapWorkspaceOptions {
    * untracked when an aux window fails to open.
    */
   windowId?: string;
+  /**
+   * Cross-window layout plumbing (single-writer rule). With a bus, the main
+   * window persists to the daemon AND broadcasts every write, and adopts
+   * mutations forwarded by aux windows; an aux window never writes the daemon
+   * — its persistence path forwards over the bus instead, and it adopts every
+   * broadcast. Without one (single-window fixtures), main writes directly and
+   * an aux window's mutations go nowhere.
+   */
+  windowBus?: WindowBus;
 }
 
 /**
@@ -292,7 +302,53 @@ export async function bootstrapWorkspace(
       options.generateId ? { generateId: options.generateId } : undefined,
     );
     const store = createLayoutStore(reconciled.layout);
-    const persistence = new LayoutPersistence(client);
+    // Single-writer rule (multi-window spec): only the MAIN window's
+    // persistence reaches the daemon. With a bus, every main write also
+    // broadcasts the fresh blob to the other windows; an aux window's
+    // persistence path forwards its proposed layout to main instead of
+    // writing — reusing all of LayoutPersistence's debounce machinery.
+    const bootWindowId = options.windowId ?? MAIN_WINDOW_ID;
+    const bus = options.windowBus ?? null;
+    const daemonWriter = client;
+    const layoutWriter = bus === null
+      ? daemonWriter
+      : bootWindowId === MAIN_WINDOW_ID
+        ? {
+            setLayout: async (layout: Parameters<typeof daemonWriter.setLayout>[0]) => {
+              await daemonWriter.setLayout(layout);
+              bus.broadcastLayout(layout);
+            },
+          }
+        : {
+            setLayout: async (layout: Parameters<typeof daemonWriter.setLayout>[0]) => {
+              bus.forwardMutation({ kind: "setLayout", layout });
+            },
+          };
+    const persistence = new LayoutPersistence(layoutWriter);
+    if (bus !== null) {
+      if (bootWindowId === MAIN_WINDOW_ID) {
+        // A forwarded blob is untrusted input from another window: parse it
+        // like any GetState blob and drop it on any violation — main keeps
+        // its own model, which the next broadcast re-asserts.
+        bus.onMutation((mutation) => {
+          const proposed = parseLayout(mutation.layout);
+          if (proposed === null) {
+            return;
+          }
+          const adopted = store.replaceState(proposed);
+          if (adopted === proposed) {
+            persistence.record(adopted, "structural");
+          }
+        });
+      } else {
+        bus.onLayout((layout) => {
+          const truth = parseLayout(layout);
+          if (truth !== null) {
+            store.replaceState(truth);
+          }
+        });
+      }
+    }
     const attachments = new AttachmentHub(client);
     const controllerOptions = {
       client,
@@ -328,7 +384,7 @@ export async function bootstrapWorkspace(
     };
     controller = new WorkspaceController(controllerOptions);
 
-    const windowId = options.windowId ?? MAIN_WINDOW_ID;
+    const windowId = bootWindowId;
     const slot = slotOf(reconciled.layout, windowId);
     const activeTabId = slot?.activeTabId ?? null;
     const activeTab = activeTabId ? reconciled.layout.tabs[activeTabId] : undefined;
