@@ -1380,3 +1380,17 @@ STILL OPEN: Michael's call on `preferredNotifChannel: terminal_bell` (via harnes
 **Multi-window:** phases APPROVED by Michael. Spec written + committed: `C:\Dev\TermX\docs\superpowers\specs\2026-08-26-multi-window-design.md` — layout_v3 windows slots over shared tab/group pools, main-window single-writer rule (aux forwards mutations via Tauri event bus), close-returns-to-main, restore with bounds, daemon untouched (broadcast + multi-client already suffice). AWAITING his spec review → then writing-plans for Phase 1.
 
 STILL OPEN: spec review; terminal_bell decision; Batch 2; Direction B; sharing/teams review; daemon still pre-cwd-fix until full exit.
+
+## Delta 2026-08-28 (later 16) — notifications batch COMPLETE; multi-window Phase 1 STARTED (T1 done)
+
+**Bell authority + terminal identity (bf93f4b):** (a) AttachmentHub `SessionRecord.bellCapable` — once a session rings a real BEL, the 5s-burst quiescence heuristic stops settling it WHILE a terminal is attached (`terminalCallbacks !== null`); sleeping panes keep the heuristic (no xterm to parse BEL). Kills "Finished at 2:06" over still-thinking Claude for awake panes. (b) daemon `stamp_termx_env` now also stamps `TERM_PROGRAM=TermX` + `TERM_PROGRAM_VERSION` alongside TERMX/TERMX_SESSION_ID — the hook for terminal-conditional CLAUDE.md rules. cargo 161/161.
+
+**settings.json flipped (exception to harness-lab rule, justified):** `preferredNotifChannel` "auto"→"terminal_bell" in C:\Users\mjfos\.claude\settings.json; backup at settings.json.bak-2026-08-28-notifchannel. harness-lab MANIFEST does not manage settings.json (only hooks/skills/commands/mindset), so deploy.ps1 could not carry it; surgical edit + backup, flagged to Michael. Claude Code now rings BEL on completion in every terminal.
+
+**Staged:** UI build with bell authority → **`.prev22` rotation (02:40, next = .prev23)**; daemon already `.prev5` (02:33, next .prev6). Fingerprint 0 dev-cfgs. **Michael still needs a FULL TermX+daemon exit** — his daemon is the Aug 25 13:41 process; cwd-tracking, TERM_PROGRAM, and the new binaries all inactive until then.
+
+**Multi-window Phase 1 (plan 2d714d9: docs\superpowers\plans\2026-08-28-multi-window-phase1.md; spec approved):** **Task 1 DONE — fdd65f8.** layout_v3 shape DEVIATES from the plan doc deliberately: instead of `windows.main`, LayoutV3 KEEPS `rootItems`/`activeTabId` as the main window's slot and ADDS `auxWindows: Record<id, {rootItems, activeTabId, bounds}>` — every v2-era call site keeps reading main without indirection, minimal blast radius. parseLayout chains v1→v2→v3; serializeLayout writes v3; invariant DFS seeds from every window's root (uniqueness across windows); new exports MAIN_WINDOW_ID / windowIds() / slotOf() / migrateV2(). Consumers: LayoutV2→Layout rename across 22 files; fixtures to v3. Suite **1512/1512, 121 files**; tsc clean. NEXT: Task 2 (WorkspaceController windowId + moveItemToWindow), then T3 windowBus, T4 windowManager, T5 sidebar menu, T6 live verify + stage.
+
+**Pending for Michael (end-of-turn):** review the terminal-conditional CLAUDE.md snippet (TermX detection via $env:TERMX / $env:TERM_PROGRAM; Warp/plain PowerShell get nothing); full TermX+daemon restart. **Plugin feature parked until multi-window lands (his sequencing).**
+
+STILL OPEN: Batch 2 (P1s 6-9); Direction B; sharing/teams review; chat dormant; rich-input/drag-drop idea.
