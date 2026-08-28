@@ -1407,3 +1407,5 @@ STILL OPEN: Batch 2 (P1s 6-9); Direction B; sharing/teams review; chat dormant; 
 **T6 (staging + live verify) in progress:** production build running at delta time; stage rotation next = **`.prev23`** (UI), daemon unchanged (.prev5 current). LIVE VERIFY NEEDS MICHAEL — cannot kill his running TermX: after his full exit+relaunch on the new build → move a running Claude tab to a new window (stream must continue), close that window (tab returns to main alive), relaunch (windows restore at bounds). Phase 2 (literal drag-out) not started, by design.
 
 STILL OPEN: Michael items — CLAUDE.md snippet review, full TermX+daemon restart, live multi-window verify. Then: Plugin feature (unparks after verify), Batch 2, Direction B, sharing/teams review.
+
+**T6 staging DONE (03:42 build):** fingerprint 0 dev-cfgs; staged into C:\Dev\TermX\dist-portable\TermX\ via `.prev23` rotation (next = .prev24). Multi-window is IN the staged exe; live verify still awaits Michael's full exit+relaunch.
