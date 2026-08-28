@@ -82,6 +82,14 @@ fn validate_cwd(cwd: Option<&Path>) -> Result<Option<PathBuf>> {
 fn stamp_termx_env(env: &mut Vec<(String, String)>, id: SessionId) {
     env.push(("TERMX".to_string(), "1".to_string()));
     env.push(("TERMX_SESSION_ID".to_string(), id.to_string()));
+    // The cross-tool convention on top of the TERMX-specific pair: CLIs that
+    // ask "which terminal am I in?" read TERM_PROGRAM (Claude Code's terminal
+    // detection among them), and conditional CLAUDE.md rules key off it.
+    env.push(("TERM_PROGRAM".to_string(), "TermX".to_string()));
+    env.push((
+        "TERM_PROGRAM_VERSION".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    ));
 }
 
 impl Registry {
@@ -1077,6 +1085,11 @@ mod tests {
                 ("PROMPT".to_string(), "$P$G".to_string()),
                 ("TERMX".to_string(), "1".to_string()),
                 ("TERMX_SESSION_ID".to_string(), "42".to_string()),
+                ("TERM_PROGRAM".to_string(), "TermX".to_string()),
+                (
+                    "TERM_PROGRAM_VERSION".to_string(),
+                    env!("CARGO_PKG_VERSION").to_string(),
+                ),
             ],
             "TERMX vars must be appended, not replace existing profile env"
         );

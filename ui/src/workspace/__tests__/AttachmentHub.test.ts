@@ -796,6 +796,35 @@ describe("AttachmentHub attention (settled bursts)", () => {
     expect(hub.getSnapshot().sessions[7]?.settled).toBe(false);
   });
 
+  it("bell-capable + terminal attached: quiet is not done, only the bell settles", async () => {
+    // "Finished at 2:06" over a still-thinking Claude (Michael, 2026-08-26):
+    // once an app has rung a real bell, it announces completion itself, and
+    // the burst-quiet guess only ever adds false marks on top.
+    vi.useFakeTimers();
+    const { host, hub } = await hubWithSession(7);
+    await hub.attach(7, {});
+    hub.noteBell(7);
+    hub.markSeen(7);
+
+    burst(host, 7, ATTENTION_MIN_BURST_MS + 1_000);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(false);
+
+    hub.noteBell(7);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(true);
+  });
+
+  it("bell-capable but no terminal attached: the quiet guess still stands", async () => {
+    // A sleeping pane has no xterm to parse a bell, so silence is the only
+    // signal left — better a heuristic mark than none.
+    vi.useFakeTimers();
+    const { host, hub } = await hubWithSession(7);
+    hub.noteBell(7);
+    hub.markSeen(7);
+
+    burst(host, 7, ATTENTION_MIN_BURST_MS + 1_000);
+    expect(hub.getSnapshot().sessions[7]?.settled).toBe(true);
+  });
+
   it("stamps the settle with when output stopped, not when the timer fired", async () => {
     vi.useFakeTimers();
     const { host, hub } = await hubWithSession(7);

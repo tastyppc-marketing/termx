@@ -89,6 +89,12 @@ interface SessionRecord {
   settled: boolean;
   /** When `settled` last turned true; null whenever it is false. */
   settledAt: number | null;
+  /** This session's app has rung a real bell at least once — it announces
+   * completion explicitly, so the burst-quiet guess would only ever add
+   * false "finished" marks on top (Michael saw "Finished at 2:06" over a
+   * still-thinking Claude). While a terminal is attached to parse bells,
+   * bell-capable sessions settle on bells alone. */
+  bellCapable: boolean;
   /** When the current output burst began; null while quiet. */
   burstStartedAt: number | null;
   exited: boolean;
@@ -601,7 +607,14 @@ export class AttachmentHub implements AttachmentClient {
         // The burst ran from its start to the last output (one pulse ago).
         // Long enough means an agent worked and stopped — mark it.
         const lastOutputAt = Date.now() - ACTIVITY_PULSE_MS;
+        // A bell-capable session with a terminal attached settles on bells
+        // alone — quiet is not done, the bell says when. The guess still
+        // stands for panes ASLEEP (no xterm mounted, so a bell could not be
+        // parsed) and for apps that never ring.
+        const bellOwnsSettling =
+          record.bellCapable && record.terminalCallbacks !== null;
         if (
+          !bellOwnsSettling &&
           record.burstStartedAt !== null &&
           lastOutputAt - record.burstStartedAt >= ATTENTION_MIN_BURST_MS
         ) {
@@ -624,7 +637,11 @@ export class AttachmentHub implements AttachmentClient {
    * burst, delivered instantly. */
   noteBell(sessionId: number): void {
     const record = this.records.get(sessionId);
-    if (!record || record.settled) {
+    if (!record) {
+      return;
+    }
+    record.bellCapable = true;
+    if (record.settled) {
       return;
     }
     record.settled = true;
@@ -668,6 +685,7 @@ export class AttachmentHub implements AttachmentClient {
       active: false,
       settled: false,
       settledAt: null,
+      bellCapable: false,
       burstStartedAt: null,
       unread: false,
       exited: false,
