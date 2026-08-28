@@ -81,9 +81,17 @@ import { ViewerHost, type ViewerApi } from "./viewer/ViewerHost";
 import {
   bootstrapWorkspace,
   type BootstrappedWorkspace,
+  type BootstrapWorkspaceOptions,
 } from "./workspace/bootstrapWorkspace";
 import type { FolderSearchTarget } from "./workspace/WorkspaceController";
 import { firstSessionId } from "./workspace/layoutOperations";
+import { tauriWindowBus } from "./workspace/windowBus";
+import {
+  manageAuxWindow,
+  openAuxWindows,
+  tauriWindowFactory,
+} from "./workspace/windowManager";
+import { MAIN_WINDOW_ID } from "./state/layout";
 import type { ConnectionState } from "./host/reconnect";
 import {
   DEFAULT_SIDEBAR_WIDTH,
@@ -101,7 +109,15 @@ type AppState =
   | { type: "error"; message: string };
 
 export interface AppProps {
-  bootstrap?: () => Promise<BootstrappedWorkspace>;
+  bootstrap?: (
+    options?: BootstrapWorkspaceOptions,
+  ) => Promise<BootstrappedWorkspace>;
+  /**
+   * Which window slot this instance renders (multi-window spec): absent/main
+   * for the primary window, an `aux-<n>` id for a torn-out one (main.tsx
+   * reads it from `?window=`).
+   */
+  windowId?: string;
 }
 
 /* Action chips (spec §14). Registered at module scope so trays are populated
@@ -165,7 +181,7 @@ const NO_SSH_HOSTS: readonly SshHost[] = [];
 const EMPTY_WITH_PASSWORD: ReadonlySet<string> = new Set();
 const noopSubscribe = () => () => {};
 
-export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
+export default function App({ bootstrap = bootstrapWorkspace, windowId }: AppProps) {
   const [state, setState] = useState<AppState>({ type: "loading" });
 
   useEffect(() => {
@@ -173,7 +189,14 @@ export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
     let ownedWorkspace: BootstrappedWorkspace | null = null;
     setState({ type: "loading" });
 
-    void bootstrap().then(
+    // One bus per window process: main broadcasts layout truth over it, an
+    // aux window forwards its mutations (single-writer rule). Outside Tauri
+    // its emits reject and are swallowed, so tests and plain browsers keep
+    // working unchanged.
+    void bootstrap({
+      windowBus: tauriWindowBus(),
+      ...(windowId ? { windowId } : {}),
+    }).then(
       (workspace) => {
         if (canceled) {
           disposeWorkspace(workspace);
@@ -199,7 +222,7 @@ export default function App({ bootstrap = bootstrapWorkspace }: AppProps) {
         ownedWorkspace = null;
       }
     };
-  }, [bootstrap]);
+  }, [bootstrap, windowId]);
 
   return (
     <div className="app-shell">
@@ -532,9 +555,64 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     return () => window.removeEventListener("keydown", handleKey, true);
   }, [conversationsStore, settingsStore]);
 
+  // ---- Multi-window lifecycle (multi-window spec) ----
+  // MAIN keeps every aux slot backed by a real OS window: at boot (adopt) and
+  // whenever a move-to-new-window adds a slot. Outside Tauri the factory's
+  // probes throw and openAuxWindows contains that per window.
+  const auxWindowIds = (snapshot.windowIds ?? [])
+    .filter((id) => id !== MAIN_WINDOW_ID)
+    .join(" ");
+  useEffect(() => {
+    if (controller.windowId !== MAIN_WINDOW_ID || auxWindowIds.length === 0) {
+      return;
+    }
+    void openAuxWindows(controller.getSnapshot().layout, tauriWindowFactory());
+  }, [controller, auxWindowIds]);
+  // An AUX window owns its own close: items return to main (forwarded and
+  // flushed over the bus), then the window destroys itself — the app-level
+  // CloseGuard below never runs here. It also records its bounds, debounced,
+  // so relaunch restores the position.
+  useEffect(() => {
+    if (controller.windowId === MAIN_WINDOW_ID) {
+      return;
+    }
+    let dispose: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const current = getCurrentWindow();
+        const managed = manageAuxWindow({
+          windowId: controller.windowId,
+          controller,
+          chrome: {
+            onCloseRequested: (handler) => current.onCloseRequested(handler),
+            onMoved: (handler) => current.onMoved(handler),
+            onResized: (handler) => current.onResized(handler),
+            outerPosition: () => current.outerPosition(),
+            outerSize: () => current.outerSize(),
+            destroy: () => current.destroy(),
+          },
+        });
+        if (cancelled) {
+          managed();
+        } else {
+          dispose = managed;
+        }
+      } catch {
+        // Not running under Tauri; the OS close button just closes.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
+  }, [controller]);
+
   // Window close (spec §15): silent/keep-running lets the window close (the
   // daemon keeps sessions), stop-all shuts the host down first, ask shows the
   // CloseGuard. Outside Tauri (tests, plain browser) this wires nothing.
+  // MAIN window only — an aux window's close is the return-to-main flow above.
   const anyAlive = useMemo(
     () => Object.values(snapshot.paneStates).some((pane) => pane.status === "live"),
     [snapshot.paneStates],
@@ -563,6 +641,9 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const closeWindowRef = useRef(closeWindow);
   closeWindowRef.current = closeWindow;
   useEffect(() => {
+    if (controller.windowId !== MAIN_WINDOW_ID) {
+      return;
+    }
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     void (async () => {
@@ -599,7 +680,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       cancelled = true;
       unlisten?.();
     };
-  }, [settingsStore]);
+  }, [settingsStore, controller]);
   const handleCloseDecision = (decision: CloseDecision, remember: boolean) => {
     setCloseGuardOpen(false);
     if (remember) {

@@ -16,10 +16,13 @@ import type { JsonValue } from "../host/protocol";
 export type LayoutMutation = { kind: "setLayout"; layout: JsonValue };
 
 export interface WindowBus {
-  /** Aux → main: apply this mutation to the shared layout. */
-  forwardMutation(mutation: LayoutMutation): void;
+  /** Aux → main: apply this mutation to the shared layout. The promise
+   * resolves once the runtime has taken the event — a closing aux window
+   * awaits it before destroying itself, so the mutation cannot die with the
+   * webview. */
+  forwardMutation(mutation: LayoutMutation): Promise<void>;
   /** Main → all: the layout changed; here is the new blob. */
-  broadcastLayout(layout: JsonValue): void;
+  broadcastLayout(layout: JsonValue): Promise<void>;
   onMutation(handler: (mutation: LayoutMutation) => void): () => void;
   onLayout(handler: (layout: JsonValue) => void): () => void;
 }
@@ -44,16 +47,16 @@ export function tauriWindowBus(
   const channel = (
     event: string,
   ): {
-    send(payload: unknown): void;
+    send(payload: unknown): Promise<void>;
     subscribe(handler: (payload: unknown) => void): () => void;
   } => {
     const handlers = new Set<(payload: unknown) => void>();
     let listening = false;
     return {
       send(payload) {
-        // Fire-and-forget: a failed emit means the receiving window is gone,
-        // and the next broadcast carries the full truth anyway.
-        void transport.emit(event, payload).catch(() => undefined);
+        // A failed emit means the receiving window is gone, and the next
+        // broadcast carries the full truth anyway — never an error upstream.
+        return transport.emit(event, payload).catch(() => undefined);
       },
       subscribe(handler) {
         handlers.add(handler);
@@ -101,7 +104,7 @@ export function loopbackBus(): WindowBus {
   const mutationHandlers = new Set<(mutation: LayoutMutation) => void>();
   const layoutHandlers = new Set<(layout: JsonValue) => void>();
   return {
-    forwardMutation(mutation) {
+    async forwardMutation(mutation) {
       for (const handler of [...mutationHandlers]) {
         try {
           handler(mutation);
@@ -110,7 +113,7 @@ export function loopbackBus(): WindowBus {
         }
       }
     },
-    broadcastLayout(layout) {
+    async broadcastLayout(layout) {
       for (const handler of [...layoutHandlers]) {
         try {
           handler(layout);

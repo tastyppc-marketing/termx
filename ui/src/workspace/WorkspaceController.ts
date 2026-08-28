@@ -779,6 +779,23 @@ export class WorkspaceController {
     this.mutate("structural", () => this.store.returnWindowToMain(windowId));
   };
 
+  /// This aux window moved or resized (already debounced upstream): remember
+  /// its outer bounds so relaunch restores the position. Main's bounds are
+  /// not tracked — the OS restores the primary window as it always has.
+  recordWindowBounds = (bounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): void => {
+    if (this.windowId === MAIN_WINDOW_ID) {
+      return;
+    }
+    this.mutate("structural", () =>
+      this.store.setWindowBounds(this.windowId, bounds)
+    );
+  };
+
   reorderGroup = (groupId: string, targetIndex: number): void => {
     this.mutate("structural", () =>
       this.store.replaceState(reorderLayoutGroup(this.store.getState(), groupId, targetIndex))

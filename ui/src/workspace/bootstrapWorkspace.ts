@@ -316,12 +316,14 @@ export async function bootstrapWorkspace(
         ? {
             setLayout: async (layout: Parameters<typeof daemonWriter.setLayout>[0]) => {
               await daemonWriter.setLayout(layout);
-              bus.broadcastLayout(layout);
+              await bus.broadcastLayout(layout);
             },
           }
         : {
             setLayout: async (layout: Parameters<typeof daemonWriter.setLayout>[0]) => {
-              bus.forwardMutation({ kind: "setLayout", layout });
+              // Awaited so an aux window's flush() really covers delivery —
+              // the close path destroys the webview right after it.
+              await bus.forwardMutation({ kind: "setLayout", layout });
             },
           };
     const persistence = new LayoutPersistence(layoutWriter);

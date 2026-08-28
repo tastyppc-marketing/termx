@@ -22,6 +22,7 @@ import type {
   SplitDir,
   SplitNode,
   Tab,
+  WindowBounds,
 } from "./layout";
 
 /// Framework-free layout store. React binds via useSyncExternalStore later;
@@ -75,6 +76,10 @@ export interface LayoutStore {
   /// Close-of-an-aux-window: its root items append to the main window's root
   /// and the slot is deleted. Unknown windows are a no-op.
   returnWindowToMain(windowId: string): Layout;
+  /// Record an aux window's outer bounds (debounced upstream) so relaunch
+  /// restores its position. Unknown windows, main, and invalid bounds are
+  /// no-ops.
+  setWindowBounds(windowId: string, bounds: WindowBounds): Layout;
 
   createGroup(opts: CreateGroupOptions): Layout;
   renameGroup(groupId: string, name: string): Layout;
@@ -701,6 +706,34 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
         next = withActiveTabIn(next, targetWindowId, first ?? null);
       }
       return validateInvariants(next).length === 0 ? commit(next) : state;
+    },
+
+    setWindowBounds(windowId, bounds) {
+      const slot = state.auxWindows[windowId];
+      if (slot === undefined) {
+        return state;
+      }
+      const { x, y, width, height } = bounds;
+      if (
+        ![x, y, width, height].every((v) => Number.isFinite(v)) ||
+        width <= 0 || height <= 0
+      ) {
+        return state;
+      }
+      if (
+        slot.bounds !== null &&
+        slot.bounds.x === x && slot.bounds.y === y &&
+        slot.bounds.width === width && slot.bounds.height === height
+      ) {
+        return state;
+      }
+      return commit({
+        ...state,
+        auxWindows: {
+          ...state.auxWindows,
+          [windowId]: { ...slot, bounds: { x, y, width, height } },
+        },
+      });
     },
 
     returnWindowToMain(windowId) {
