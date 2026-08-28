@@ -26,30 +26,35 @@
 - Modify: `ui/src/state/layout.ts`
 - Test: `ui/src/state/__tests__/layout.test.ts` (extend)
 
-**Interfaces:**
-- Produces:
+**Interfaces (AS BUILT — deviates from the original sketch on purpose):**
+- Produces (shipped in fdd65f8):
   ```ts
-  export interface WindowSlot {
+  export interface WindowBounds { x: number; y: number; width: number; height: number }
+  export interface AuxWindowSlot {
     rootItems: Item[];
     activeTabId: string | null;
-    bounds: { x: number; y: number; width: number; height: number } | null;
+    bounds: WindowBounds | null;
   }
   export interface LayoutV3 {
     version: 3;
     groups: Record<string, Group>;
+    rootItems: Item[];            // the MAIN window's slot — kept top-level
     tabs: Record<string, Tab>;
-    windows: Record<string, WindowSlot>; // always contains "main"
+    activeTabId: string | null;   // main's active tab — kept top-level
+    auxWindows: Record<string, AuxWindowSlot>; // never contains "main"
   }
   export type Layout = LayoutV3;
   export const MAIN_WINDOW_ID = "main";
-  export function emptyLayout(): LayoutV3; // { windows: { main: emptySlot } }
+  export function emptyLayout(): Layout;            // auxWindows: {}
   export function windowIds(layout: Layout): string[]; // "main" first, aux sorted
+  export function slotOf(layout: Layout, windowId: string): AuxWindowSlot | null; // read view; main shares layout's arrays
+  export function migrateV2(v2: LayoutV2): Layout;
   ```
-- Compat shims so the diff stays reviewable: `layout.rootItems` / `layout.activeTabId` accessors are REMOVED, and every call site is repointed at an explicit slot (Task 2 does the repointing; this task keeps both worlds compiling via exported helpers `slotOf(layout, windowId)` returning the `WindowSlot`).
+- Design decision: the main window's slot stays in the top-level `rootItems`/`activeTabId` instead of moving under `windows.main`, so every v2-era call site keeps reading the main window unchanged — minimal blast radius. Tasks 2–4 must branch on windowId: main reads/writes the top-level fields, aux reads/writes `auxWindows[id]`.
 
-- [ ] Failing tests first: v2 blob parses into `windows.main` verbatim (rootItems, activeTabId preserved; groups/tabs untouched); v3 round-trips; unknown window ids survive; a v3 blob missing `main` gains an empty main slot; malformed windows record → parse failure (existing malformed path).
-- [ ] Implement: `LayoutV3` shapes, `migrateV2toV3`, `parseLayout` accepting v1→v2→v3 chain, `serializeLayout` writing v3, validation (every `rootItems` item id must exist exactly once across ALL slots + group items — the existing uniqueness walk widened to iterate slots).
-- [ ] Full layout test file green; commit.
+- [x] Failing tests first: v2 blob adopts as v3 with `auxWindows: {}` and rootItems/activeTabId preserved; v3 round-trips (bounds and null bounds); cross-window tab/group uniqueness enforced; aux-only tabs/groups valid with depths counted from their window's root; malformed auxWindows/bounds → parse null; version 4 rejected.
+- [x] Implement: shapes above, `migrateV2`, `parseLayout` v1→v2→v3 chain, `serializeLayout` writing v3, invariant walk seeded from every window's root; consumers renamed LayoutV2 → Layout; fixtures migrated to v3.
+- [x] Full suite 1512/1512 + tsc clean; committed fdd65f8.
 
 ### Task 2: WorkspaceController learns which window it is
 
