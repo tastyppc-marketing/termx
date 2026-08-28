@@ -1415,3 +1415,14 @@ STILL OPEN: Michael items — CLAUDE.md snippet review, full TermX+daemon restar
 Michael did the full TermX+daemon restart and **verified multi-window Phase 1 live** — tear-out, close-returns-to-main, restore all confirmed working. His runtime is now the 03:42 staged build + current daemon (cwd-tracking, TERM_PROGRAM=TermX stamp, bell authority all ACTIVE). The "Terminal awareness" section is installed at the END of C:\Users\mjfos\.claude\CLAUDE.md (backup: C:\Users\mjfos\.claude\CLAUDE.md.bak-2026-08-28-terminal-awareness) — TermX detection via $env:TERMX / TERMX_SESSION_ID / TERM_PROGRAM; BEL after >30s tasks in TermX only; Warp/plain PowerShell match nothing. Same surgical-edit-with-backup precedent as the settings.json flip (harness-lab MANIFEST manages neither file). **Plugin feature now UNPARKED** (his sequencing condition met) — needs full brainstorming with Michael, not a one-shot; Showroom is his first-plugin concept and he refines that himself.
 
 STILL OPEN: Plugin feature kickoff (next), Batch 2 (P1s 6-9), Direction B design batch, sharing/teams review, multi-window Phase 2 (drag-out).
+
+## Delta 2026-08-28 (later 19) — Michael's new feature batch CAPTURED (brainstorming begins)
+
+Michael's brain-dump decomposes into FIVE items (his words paraphrased tight):
+1. **Plugin feature** (brainstorm FIRST, his lead ask) — Showroom is his first-plugin concept.
+2. **Sleep/Rest sessions** — right-click tab → "Rest": save cwd + session identity + the LAST Claude launch command (e.g. `claude --dangerously-skip-permissions --verbose --flex`), stop everything, hide into a sleeping-sessions dropdown (little button top/bottom of rail); click later → reopens dir, reruns the captured command. DISTINCT from daemon keep-alive: processes actually stop.
+3. **Quick-launch buttons** (top-right of rail area) — one-click "claude" / "codex" starts with per-tool configured flags; if current terminal already runs Claude/Codex, offer: split pane in current tab OR new rail tab.
+4. **Pane visibility/navigation** — rail tabs with split panes: hover popup (3-5s delay before showing; auto-close after ~10-15s hover) listing each pane with FULL working directory (never ~ or branch-only), click a row to activate that pane; pane RENAME (his screenshot: "powershell · Rob Kittle" twice, indistinguishable).
+5. **Status bar info** — bottom-right: live full cwd (follows cd), click → folder browser that cd's the terminal; plus whatever else is genuinely useful. General theme: "I'm finding myself confused about what's going on, where I am" as terminal count grows.
+
+Classification: plugin = ARCHITECTURAL (spec required). Sleep/Rest = architectural-lite (overlaps saved-sessions resume flow — likely an extension of it). 3-5 = BOUNDED UI batch. Sequencing proposed: brainstorm plugin now; 2-5 queued behind it as their own designs.
