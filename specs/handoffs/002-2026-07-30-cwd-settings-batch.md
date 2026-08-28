@@ -1409,3 +1409,9 @@ STILL OPEN: Batch 2 (P1s 6-9); Direction B; sharing/teams review; chat dormant; 
 STILL OPEN: Michael items — CLAUDE.md snippet review, full TermX+daemon restart, live multi-window verify. Then: Plugin feature (unparks after verify), Batch 2, Direction B, sharing/teams review.
 
 **T6 staging DONE (03:42 build):** fingerprint 0 dev-cfgs; staged into C:\Dev\TermX\dist-portable\TermX\ via `.prev23` rotation (next = .prev24). Multi-window is IN the staged exe; live verify still awaits Michael's full exit+relaunch.
+
+## Delta 2026-08-28 (later 18) — multi-window VERIFIED live by Michael; CLAUDE.md terminal-awareness installed
+
+Michael did the full TermX+daemon restart and **verified multi-window Phase 1 live** — tear-out, close-returns-to-main, restore all confirmed working. His runtime is now the 03:42 staged build + current daemon (cwd-tracking, TERM_PROGRAM=TermX stamp, bell authority all ACTIVE). The "Terminal awareness" section is installed at the END of C:\Users\mjfos\.claude\CLAUDE.md (backup: C:\Users\mjfos\.claude\CLAUDE.md.bak-2026-08-28-terminal-awareness) — TermX detection via $env:TERMX / TERMX_SESSION_ID / TERM_PROGRAM; BEL after >30s tasks in TermX only; Warp/plain PowerShell match nothing. Same surgical-edit-with-backup precedent as the settings.json flip (harness-lab MANIFEST manages neither file). **Plugin feature now UNPARKED** (his sequencing condition met) — needs full brainstorming with Michael, not a one-shot; Showroom is his first-plugin concept and he refines that himself.
+
+STILL OPEN: Plugin feature kickoff (next), Batch 2 (P1s 6-9), Direction B design batch, sharing/teams review, multi-window Phase 2 (drag-out).
