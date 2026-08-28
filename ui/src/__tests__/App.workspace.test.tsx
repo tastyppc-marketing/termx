@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LayoutV2 } from "../state/layout";
+import type { Layout } from "../state/layout";
 import type {
   SidebarTabModel,
   WorkspaceSnapshot,
@@ -82,8 +82,9 @@ function snapshot(activeTab: SidebarTabModel | null = tab()): WorkspaceSnapshot 
         },
       }
     : {};
-  const layout: LayoutV2 = {
-    version: 2,
+  const layout: Layout = {
+    version: 3,
+    auxWindows: {},
     groups: {},
     rootItems: activeTab ? [{ kind: "tab", id: activeTab.id }] : [],
     tabs,
@@ -348,8 +349,9 @@ describe("App settings surface", () => {
 function twoTabSnapshot(activeTabId: "tab-a" | "tab-b"): WorkspaceSnapshot {
   const tabA = tab({ id: "tab-a", primarySessionId: 1, sessionIds: [1] });
   const tabB = tab({ id: "tab-b", primarySessionId: 2, sessionIds: [2] });
-  const layout: LayoutV2 = {
-    version: 2,
+  const layout: Layout = {
+    version: 3,
+    auxWindows: {},
     groups: {},
     rootItems: [{ kind: "tab", id: "tab-a" }, { kind: "tab", id: "tab-b" }],
     tabs: {

@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LayoutV2 } from "../../state/layout";
+import type { Layout } from "../../state/layout";
 import type {
   SidebarGroupModel,
   SidebarItemModel,
@@ -82,7 +82,7 @@ function flatGroups(items: readonly SidebarItemModel[]): SidebarGroupModel[] {
   );
 }
 
-function fromRoot(rootItems: readonly SidebarItemModel[], layout: LayoutV2): WorkspaceSnapshot {
+function fromRoot(rootItems: readonly SidebarItemModel[], layout: Layout): WorkspaceSnapshot {
   return {
     layout,
     rootItems,
@@ -101,8 +101,9 @@ function fromRoot(rootItems: readonly SidebarItemModel[], layout: LayoutV2): Wor
 }
 
 function workspace(): WorkspaceSnapshot {
-  const layout: LayoutV2 = {
-    version: 2,
+  const layout: Layout = {
+    version: 3,
+    auxWindows: {},
     groups: {
       "group-1": {
         id: "group-1",
@@ -341,8 +342,9 @@ describe("Sidebar structure", () => {
 
 /// Marketing > Clients > Acme, one tab at each level plus a root tab.
 function nestedWorkspace(): WorkspaceSnapshot {
-  const layout: LayoutV2 = {
-    version: 2,
+  const layout: Layout = {
+    version: 3,
+    auxWindows: {},
     groups: {
       marketing: {
         id: "marketing",

@@ -19,7 +19,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionAttachment } from "../../host/client";
 import type { SessionInfo } from "../../host/protocol";
-import { emptyLayout, type LayoutV2 } from "../../state/layout";
+import { emptyLayout, type Layout } from "../../state/layout";
 import { createLayoutStore } from "../../state/store";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../../settings/settings";
 import { sshConnectCommand } from "../../ssh/bootstrap";
@@ -69,7 +69,7 @@ async function settleMicrotasks(): Promise<void> {
 function harness(options: {
   settings?: Partial<TermxSettings>;
   sessions?: readonly SessionInfo[];
-  layout?: LayoutV2;
+  layout?: Layout;
   uiState?: UiStateV1;
   passwords?: Record<string, string>;
   passwordsThrow?: boolean;

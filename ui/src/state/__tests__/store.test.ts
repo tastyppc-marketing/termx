@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { groupDepth, MAX_GROUP_DEPTH, validateInvariants } from "../layout";
-import type { FillStrength, LayoutV2, PaletteId, SplitNode } from "../layout";
+import type { FillStrength, Layout, PaletteId, SplitNode } from "../layout";
 import { createLayoutStore } from "../store";
 import { baseLayout, groupItem, tabItem } from "./helpers";
 
-function store(initial: LayoutV2 = baseLayout()) {
+function store(initial: Layout = baseLayout()) {
   return createLayoutStore(initial);
 }
 
-function rootSplit(state: LayoutV2, tabId: string): SplitNode {
+function rootSplit(state: Layout, tabId: string): SplitNode {
   return state.tabs[tabId].split;
 }
 
 /// Ids of a container's items in order, tabs and subgroups alike.
-function itemIds(state: LayoutV2, groupId: string | null): string[] {
+function itemIds(state: Layout, groupId: string | null): string[] {
   const items = groupId === null ? state.rootItems : state.groups[groupId]!.items;
   return items.map((item) => item.id);
 }
@@ -381,7 +381,7 @@ describe("splitPane / closePane / resizePane", () => {
 describe("store mechanics", () => {
   it("notifies once per real change and never on no-ops", () => {
     const s = store();
-    const seen: LayoutV2[] = [];
+    const seen: Layout[] = [];
     const unsubscribe = s.subscribe((state) => seen.push(state));
 
     s.renameTab("t1", "deploy");

@@ -14,7 +14,7 @@ import type {
   FillStrength,
   Group,
   Item,
-  LayoutV2,
+  Layout,
   PaletteId,
   SplitDir,
   SplitNode,
@@ -31,52 +31,52 @@ import type {
 /// sharing. Ids for new tabs/groups are caller-supplied uuids (the spec says
 /// ids are UI-generated), which keeps the store deterministic under test.
 export interface LayoutStore {
-  getState(): LayoutV2;
-  subscribe(listener: (state: LayoutV2) => void): () => void;
+  getState(): Layout;
+  subscribe(listener: (state: Layout) => void): () => void;
   /// Wholesale adoption (e.g. the reconciled boot layout). Rejected if the
   /// candidate violates any spec invariant.
-  replaceState(layout: LayoutV2): LayoutV2;
+  replaceState(layout: Layout): Layout;
 
-  createTab(opts: CreateTabOptions): LayoutV2;
-  closeTab(tabId: string): LayoutV2;
-  renameTab(tabId: string, title: string | null): LayoutV2;
-  recolorTab(tabId: string, color: PaletteId): LayoutV2;
-  setActiveTab(tabId: string | null): LayoutV2;
+  createTab(opts: CreateTabOptions): Layout;
+  closeTab(tabId: string): Layout;
+  renameTab(tabId: string, title: string | null): Layout;
+  recolorTab(tabId: string, color: PaletteId): Layout;
+  setActiveTab(tabId: string | null): Layout;
 
   /// Drag-drop commit: remove from the current container, then insert at
   /// `index` in the target (index applies AFTER removal; clamped).
-  moveTab(tabId: string, target: ContainerRef, index: number): LayoutV2;
+  moveTab(tabId: string, target: ContainerRef, index: number): Layout;
   /// moveTab for any item, subgroups included. Refused when the move would
   /// break an invariant (a group into its own subtree, past the depth cap).
-  moveItem(item: Item, targetGroupId: string | null, index: number): LayoutV2;
+  moveItem(item: Item, targetGroupId: string | null, index: number): Layout;
   reorderWithinContainer(
     groupId: string | null,
     fromIndex: number,
     toIndex: number,
-  ): LayoutV2;
+  ): Layout;
 
-  createGroup(opts: CreateGroupOptions): LayoutV2;
-  renameGroup(groupId: string, name: string): LayoutV2;
-  recolorGroup(groupId: string, color: PaletteId | null): LayoutV2;
-  toggleGroupCollapsed(groupId: string): LayoutV2;
+  createGroup(opts: CreateGroupOptions): Layout;
+  renameGroup(groupId: string, name: string): Layout;
+  recolorGroup(groupId: string, color: PaletteId | null): Layout;
+  toggleGroupCollapsed(groupId: string): Layout;
   /// Keep-children delete: the group's items take its place in its own
   /// container, in order. Closing the tabs first is the caller's business.
-  deleteGroup(groupId: string): LayoutV2;
+  deleteGroup(groupId: string): Layout;
 
-  setTabFill(tabId: string, fill: FillStrength): LayoutV2;
+  setTabFill(tabId: string, fill: FillStrength): Layout;
 
   splitPane(
     tabId: string,
     paneSessionId: number,
     dir: SplitDir,
     newSessionId: number,
-  ): LayoutV2;
+  ): Layout;
   /// Prunes the pane and collapses its parent split into the sibling. Closing
   /// a tab's last pane closes the tab.
-  closePane(tabId: string, sessionId: number): LayoutV2;
+  closePane(tabId: string, sessionId: number): Layout;
   /// `path` walks child indices (0|1) from the tab's root to a split node.
   /// Sizes are normalized to sum 1 with each side clamped to ≥ 0.1.
-  resizePane(tabId: string, path: number[], sizes: [number, number]): LayoutV2;
+  resizePane(tabId: string, path: number[], sizes: [number, number]): Layout;
 }
 
 export interface ContainerRef {
@@ -134,7 +134,7 @@ function insertAt<T>(list: readonly T[], index: number, item: T): T[] {
   return next;
 }
 
-function findGroup(layout: LayoutV2, groupId: string): Group | undefined {
+function findGroup(layout: Layout, groupId: string): Group | undefined {
   return layout.groups[groupId];
 }
 
@@ -145,7 +145,7 @@ function isItem(item: Item, kind: Item["kind"], id: string): boolean {
 /// Ordered children of a container: null groupId = the sidebar root. Undefined
 /// means the group does not exist.
 function itemsOf(
-  layout: LayoutV2,
+  layout: Layout,
   groupId: string | null,
 ): readonly Item[] | undefined {
   return groupId === null ? layout.rootItems : findGroup(layout, groupId)?.items;
@@ -153,7 +153,7 @@ function itemsOf(
 
 /// The container currently holding `item`: null groupId = the root.
 function containerOf(
-  layout: LayoutV2,
+  layout: Layout,
   item: Item,
 ): { groupId: string | null; list: readonly Item[] } | undefined {
   if (layout.rootItems.some((candidate) => isItem(candidate, item.kind, item.id))) {
@@ -168,10 +168,10 @@ function containerOf(
 }
 
 function withContainerItems(
-  layout: LayoutV2,
+  layout: Layout,
   groupId: string | null,
   items: Item[],
-): LayoutV2 {
+): Layout {
   if (groupId === null) {
     return { ...layout, rootItems: items };
   }
@@ -187,7 +187,7 @@ function withContainerItems(
 
 /// Sidebar render order: every container's items in order, subgroups walked
 /// where they sit.
-function flattenedTabOrder(layout: LayoutV2): string[] {
+function flattenedTabOrder(layout: Layout): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const walk = (items: readonly Item[]): void => {
@@ -286,11 +286,11 @@ function prunePane(
   return "not-found";
 }
 
-export function createLayoutStore(initial?: LayoutV2): LayoutStore {
-  let state: LayoutV2 = initial ?? emptyLayout();
-  const listeners = new Set<(state: LayoutV2) => void>();
+export function createLayoutStore(initial?: Layout): LayoutStore {
+  let state: Layout = initial ?? emptyLayout();
+  const listeners = new Set<(state: Layout) => void>();
 
-  function commit(next: LayoutV2): LayoutV2 {
+  function commit(next: Layout): Layout {
     if (next === state) {
       return state;
     }
@@ -301,7 +301,7 @@ export function createLayoutStore(initial?: LayoutV2): LayoutStore {
     return state;
   }
 
-  function closeTabImpl(tabId: string): LayoutV2 {
+  function closeTabImpl(tabId: string): Layout {
     const container = containerOf(state, { kind: "tab", id: tabId });
     if (container === undefined || !(tabId in state.tabs)) {
       return state;
@@ -330,7 +330,7 @@ export function createLayoutStore(initial?: LayoutV2): LayoutStore {
     item: Item,
     targetGroupId: string | null,
     index: number,
-  ): LayoutV2 {
+  ): Layout {
     const source = containerOf(state, item);
     if (source === undefined || itemsOf(state, targetGroupId) === undefined) {
       return state;

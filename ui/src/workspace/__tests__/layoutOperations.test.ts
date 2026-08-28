@@ -3,7 +3,7 @@ import {
   PALETTE_IDS,
   validateInvariants,
   type Item,
-  type LayoutV2,
+  type Layout,
   type SplitNode,
 } from "../../state/layout";
 import {
@@ -30,14 +30,15 @@ function groupItem(id: string): Item {
 }
 
 /// Ids of a container's items in order (null = the root).
-function itemIds(state: LayoutV2, groupId: string | null): string[] {
+function itemIds(state: Layout, groupId: string | null): string[] {
   const items = groupId === null ? state.rootItems : state.groups[groupId]!.items;
   return items.map((item) => item.id);
 }
 
-function layout(): LayoutV2 {
+function layout(): Layout {
   return {
-    version: 2,
+    version: 3,
+    auxWindows: {},
     groups: {
       g1: { id: "g1", name: "One", collapsed: false, color: null, items: [tabItem("t2")] },
       g2: { id: "g2", name: "Two", collapsed: false, color: null, items: [tabItem("t3")] },
@@ -174,7 +175,7 @@ describe("layoutOperations", () => {
 /// Depth fixtures for the §16 cap: "deep" is exactly MAX_SPLIT_DEPTH (4), so
 /// grafting anything beside it would make 5; "three" is 3, so a pane grafted
 /// beside it lands exactly ON the cap.
-function depthLayout(): LayoutV2 {
+function depthLayout(): Layout {
   const depth4: SplitNode = {
     kind: "split",
     dir: "row",
@@ -234,7 +235,8 @@ function depthLayout(): LayoutV2 {
     ],
   };
   return {
-    version: 2,
+    version: 3,
+    auxWindows: {},
     groups: {},
     rootItems: [tabItem("deep"), tabItem("three"), tabItem("simple")],
     tabs: {

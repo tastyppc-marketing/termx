@@ -201,7 +201,7 @@ describe("bootstrapWorkspace", () => {
 
     expect(fake.setLayout).toHaveBeenCalledTimes(1);
     expect(fake.setLayout.mock.calls[0]?.[0]).toMatchObject({
-      version: 2,
+      version: 3,
       rootItems: [{ kind: "tab", id: "orphan" }],
     });
   });

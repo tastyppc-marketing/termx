@@ -1,5 +1,5 @@
 import { sessionIdsInLayout } from "./layout";
-import type { Item, LayoutV2, Tab } from "./layout";
+import type { Item, Layout, Tab } from "./layout";
 
 /// Boot-time reconciliation of the persisted layout against the host's actual
 /// session list (spec "Restore reconciliation", rules 1–3).
@@ -17,7 +17,7 @@ export interface SessionLike {
 }
 
 export interface ReconcileResult {
-  layout: LayoutV2;
+  layout: Layout;
   /// Session ids referenced by panes but not alive (absent host-side, or
   /// present with alive=false). Their panes render dead placeholders;
   /// Dismiss prunes the pane and CloseSessions ids still known to the host.
@@ -67,7 +67,7 @@ function freshTabId(
 /// never a silent migration). A valid layout with nothing to adopt is
 /// returned unchanged by identity.
 export function reconcile(
-  layout: LayoutV2 | null,
+  layout: Layout | null,
   hostSessions: readonly SessionLike[],
   opts?: ReconcileOptions,
 ): ReconcileResult {
@@ -90,11 +90,12 @@ export function reconcile(
     }
     return {
       layout: {
-        version: 2,
+        version: 3,
         groups: {},
         rootItems,
         tabs,
         activeTabId: rootItems[0]?.id ?? null,
+        auxWindows: {},
       },
       deadSessionIds: [],
       orphanAdoptedIds,

@@ -47,7 +47,7 @@ import {
   sessionIdsInLayout,
   type FillStrength,
   type Item,
-  type LayoutV2,
+  type Layout,
   type PaletteId,
   type SplitDir,
 } from "../state/layout";
@@ -134,7 +134,7 @@ export interface WorkspaceAttachmentHub {
 export interface WorkspacePersistence {
   getSnapshot(): LayoutPersistenceSnapshot;
   subscribe(listener: () => void): () => void;
-  record(layout: LayoutV2, kind: LayoutChangeKind): void;
+  record(layout: Layout, kind: LayoutChangeKind): void;
   flush(): Promise<void>;
   dispose(): void;
 }
@@ -205,7 +205,7 @@ export interface PaneSessionState {
 }
 
 export interface WorkspaceSnapshot {
-  layout: LayoutV2;
+  layout: Layout;
   /** Top level of the sidebar, in order — the recursive render's entry point. */
   rootItems: readonly SidebarItemModel[];
   /** Root-level tabs only, in order. */
@@ -414,7 +414,7 @@ export class WorkspaceController {
   private readonly listeners = new Set<() => void>();
   private readonly cleanups: Array<() => void> = [];
   private cachedSnapshot: WorkspaceSnapshot | null = null;
-  private cachedLayout: LayoutV2 | null = null;
+  private cachedLayout: Layout | null = null;
   private cachedAttachments: AttachmentHubSnapshot | null = null;
   private cachedPersistence: LayoutPersistenceSnapshot | null = null;
   private sessionsRevision = 0;
@@ -2384,7 +2384,7 @@ export class WorkspaceController {
     this.publish();
   }
 
-  private mutate(kind: LayoutChangeKind, mutation: () => LayoutV2): void {
+  private mutate(kind: LayoutChangeKind, mutation: () => Layout): void {
     const before = this.store.getState();
     const after = mutation();
     if (after !== before) {
@@ -2398,7 +2398,7 @@ export class WorkspaceController {
   }
 
   /// Drops any resume-dedupe entry whose tab id no longer exists in `layout`.
-  private purgeResumedTabsNotIn(layout: LayoutV2): void {
+  private purgeResumedTabsNotIn(layout: Layout): void {
     if (this.resumedTabs.size === 0) {
       return;
     }
@@ -2473,7 +2473,7 @@ export class WorkspaceController {
 }
 
 /// Every group id strictly under `groupId` (its scope entries die with it).
-function subtreeGroupIdsOf(layout: LayoutV2, groupId: string): string[] {
+function subtreeGroupIdsOf(layout: Layout, groupId: string): string[] {
   const out: string[] = [];
   const walk = (id: string): void => {
     for (const item of layout.groups[id]?.items ?? []) {

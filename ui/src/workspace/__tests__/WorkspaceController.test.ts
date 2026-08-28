@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SessionAttachment, SessionAttachmentCallbacks } from "../../host/client";
 import type { SessionInfo } from "../../host/protocol";
 import { createLayoutStore } from "../../state/store";
-import type { Item, LayoutV2 } from "../../state/layout";
+import type { Item, Layout } from "../../state/layout";
 import {
   WorkspaceController,
   type WorkspaceAttachmentHub,
@@ -26,9 +26,10 @@ function session(id: number, overrides: Partial<SessionInfo> = {}): SessionInfo 
   };
 }
 
-function layout(): LayoutV2 {
+function layout(): Layout {
   return {
-    version: 2,
+    version: 3,
+    auxWindows: {},
     groups: {
       group: {
         id: "group",
@@ -69,7 +70,7 @@ function layout(): LayoutV2 {
 
 function harness(options: {
   sessions?: SessionInfo[];
-  initial?: LayoutV2;
+  initial?: Layout;
   closeSession?: (sessionId: number) => Promise<void>;
   pickFolder?: () => Promise<string | null>;
   settings?: Partial<TermxSettings>;
@@ -117,7 +118,7 @@ function harness(options: {
       return () => errorListeners.delete(listener);
     },
   };
-  const persistenceCalls: Array<{ layout: LayoutV2; kind: "structural" | "active_tab" }> = [];
+  const persistenceCalls: Array<{ layout: Layout; kind: "structural" | "active_tab" }> = [];
   const persistence: WorkspacePersistence = {
     getSnapshot: () => ({ saving: false, error: null }),
     subscribe: () => () => undefined,
@@ -785,8 +786,9 @@ describe("WorkspaceController split actions", () => {
   });
 
   it("refuses a depth-capped split before creating any session", async () => {
-    const initial: LayoutV2 = {
-      version: 2,
+    const initial: Layout = {
+      version: 3,
+      auxWindows: {},
       groups: {},
       rootItems: [{ kind: "tab", id: "deep" }],
       tabs: {
@@ -1400,9 +1402,10 @@ describe("WorkspaceController new-tab cwd policy (F1)", () => {
 
 /// Marketing > Clients with the active tab two levels down, and a root tab
 /// beside it — the shape spec §6 is about.
-function nestedLayout(): LayoutV2 {
+function nestedLayout(): Layout {
   return {
-    version: 2,
+    version: 3,
+    auxWindows: {},
     groups: {
       marketing: {
         id: "marketing",

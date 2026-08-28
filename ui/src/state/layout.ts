@@ -1,10 +1,10 @@
 import type { JsonValue } from "../host/protocol";
 
-/// Shapes mirror docs/superpowers/specs/2026-08-09-termx-layout-v2.md exactly.
-/// Nothing outside that document may be added to the serialized blob. The v1
-/// shapes below (docs/superpowers/specs/2026-07-22-termx-layout-v1.md) survive
-/// as a parse-only stepping stone: a v1 blob is shape-parsed, migrated, and
-/// then validated as v2 — nothing writes v1 again.
+/// Shapes mirror docs/superpowers/specs/2026-08-09-termx-layout-v2.md plus the
+/// multi-window extension in docs/superpowers/specs/2026-08-26-multi-window-design.md.
+/// Nothing outside those documents may be added to the serialized blob. The v1
+/// and v2 shapes below survive as parse-only stepping stones: an old blob is
+/// shape-parsed, migrated, and then validated as v3 — nothing writes them again.
 
 export const PALETTE_IDS = [
   "blue",
@@ -88,8 +88,56 @@ export interface LayoutV2 {
   activeTabId: string | null;
 }
 
+export const MAIN_WINDOW_ID = "main";
+
+/// Last recorded outer bounds of an aux window, in physical pixels. Positions
+/// may be negative (monitors left of or above the primary).
+export interface WindowBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/// One secondary OS window's share of the layout. The main window's share
+/// stays in the top-level rootItems/activeTabId, so every v2-era call site
+/// keeps reading the main window without indirection.
+export interface AuxWindowSlot {
+  rootItems: Item[];
+  activeTabId: string | null;
+  /// null until the window first reports its position.
+  bounds: WindowBounds | null;
+}
+
+export interface LayoutV3 {
+  version: 3;
+  groups: Record<string, Group>;
+  rootItems: Item[];
+  tabs: Record<string, Tab>;
+  activeTabId: string | null;
+  auxWindows: Record<string, AuxWindowSlot>;
+}
+
 /// The current layout shape everywhere in the UI.
-export type Layout = LayoutV2;
+export type Layout = LayoutV3;
+
+/// Main window first, then aux window ids in stable (sorted) order.
+export function windowIds(layout: Layout): string[] {
+  return [MAIN_WINDOW_ID, ...Object.keys(layout.auxWindows).sort()];
+}
+
+/// Read view of one window's slot; null for an unknown window id. The main
+/// view shares the layout's own arrays — treat the result as read-only.
+export function slotOf(layout: Layout, windowId: string): AuxWindowSlot | null {
+  if (windowId === MAIN_WINDOW_ID) {
+    return {
+      rootItems: layout.rootItems,
+      activeTabId: layout.activeTabId,
+      bounds: null,
+    };
+  }
+  return layout.auxWindows[windowId] ?? null;
+}
 
 interface TabV1 {
   id: string;
@@ -123,13 +171,14 @@ export function isFillStrength(value: unknown): value is FillStrength {
     (FILL_STRENGTHS as readonly string[]).includes(value);
 }
 
-export function emptyLayout(): LayoutV2 {
+export function emptyLayout(): Layout {
   return {
-    version: 2,
+    version: 3,
     groups: {},
     rootItems: [],
     tabs: {},
     activeTabId: null,
+    auxWindows: {},
   };
 }
 
@@ -152,7 +201,7 @@ export function sessionIdsInSplit(node: SplitNode, out: number[] = []): number[]
   return out;
 }
 
-export function sessionIdsInLayout(layout: LayoutV2): number[] {
+export function sessionIdsInLayout(layout: Layout): number[] {
   const out: number[] = [];
   for (const tab of Object.values(layout.tabs)) {
     sessionIdsInSplit(tab.split, out);
@@ -163,19 +212,19 @@ export function sessionIdsInLayout(layout: LayoutV2): number[] {
 /// Nesting level of `groupId` counted from the sidebar root: a top-level group
 /// is 1. Unknown or unreachable groups are 0, so callers can treat "not there"
 /// and "no depth" alike.
-export function groupDepth(layout: LayoutV2, groupId: string): number {
+export function groupDepth(layout: Layout, groupId: string): number {
   return walkGroups(layout).get(groupId) ?? 0;
 }
 
 /// Height of the subtree rooted at `groupId`: a group with no subgroups is 1.
 /// Unknown groups are 0. Safe on cyclic input (each group counts once).
-export function subtreeDepth(layout: LayoutV2, groupId: string): number {
+export function subtreeDepth(layout: Layout, groupId: string): number {
   return subtreeDepthFrom(layout, groupId, new Set());
 }
 
 /// The container currently holding `item`: a parent group id, or null for the
 /// root — which is also the answer for an item that is nowhere at all.
-export function findContainer(layout: LayoutV2, item: Item): string | null {
+export function findContainer(layout: Layout, item: Item): string | null {
   for (const [groupId, group] of Object.entries(layout.groups)) {
     if (group.items.some((candidate) => sameItem(candidate, item))) {
       return groupId;
@@ -186,7 +235,7 @@ export function findContainer(layout: LayoutV2, item: Item): string | null {
 
 /// Every tab under `groupId`, its own first then each subgroup's, depth-first
 /// in sidebar order. Safe on cyclic input (each group is walked once).
-export function collectSubtreeTabIds(layout: LayoutV2, groupId: string): string[] {
+export function collectSubtreeTabIds(layout: Layout, groupId: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const walk = (id: string): void => {
@@ -216,7 +265,7 @@ export function collectSubtreeTabIds(layout: LayoutV2, groupId: string): string[
 /// own subtree, and a moved subtree must fit under the target; reordering
 /// inside the container an item already sits in is always legal.
 export function canMoveItem(
-  layout: LayoutV2,
+  layout: Layout,
   item: Item,
   targetGroupId: string | null,
   maxDepth: number,
@@ -251,14 +300,13 @@ function sameItem(a: Item, b: Item): boolean {
   return a.kind === b.kind && a.id === b.id;
 }
 
-/// Depth of every group reachable from `rootItems`, keyed by id. A group met a
-/// second time (a cycle, or a double reference) keeps its first depth and is
-/// never re-entered, so this terminates on any input.
-function walkGroups(layout: LayoutV2): Map<string, number> {
+/// Depth of every group reachable from any window's root, keyed by id. A group
+/// met a second time (a cycle, or a double reference) keeps its first depth and
+/// is never re-entered, so this terminates on any input.
+function walkGroups(layout: Layout): Map<string, number> {
   const depths = new Map<string, number>();
-  const stack: Array<{ items: readonly Item[]; depth: number }> = [
-    { items: layout.rootItems, depth: 0 },
-  ];
+  const stack: Array<{ items: readonly Item[]; depth: number }> =
+    windowRoots(layout);
   while (stack.length > 0) {
     const { items, depth } = stack.pop()!;
     for (const item of items) {
@@ -276,8 +324,22 @@ function walkGroups(layout: LayoutV2): Map<string, number> {
   return depths;
 }
 
+/// Every window's root item list at depth 0 — the seed for group walks, so
+/// groups torn out into aux windows keep well-defined depths.
+function windowRoots(
+  layout: Layout,
+): Array<{ items: readonly Item[]; depth: number }> {
+  return [
+    { items: layout.rootItems, depth: 0 },
+    ...Object.values(layout.auxWindows).map((slot) => ({
+      items: slot.rootItems,
+      depth: 0,
+    })),
+  ];
+}
+
 function subtreeDepthFrom(
-  layout: LayoutV2,
+  layout: Layout,
   groupId: string,
   seen: Set<string>,
 ): number {
@@ -295,7 +357,7 @@ function subtreeDepthFrom(
   return 1 + deepest;
 }
 
-function subtreeGroupIds(layout: LayoutV2, groupId: string): Set<string> {
+function subtreeGroupIds(layout: Layout, groupId: string): Set<string> {
   const out = new Set<string>();
   const walk = (id: string): void => {
     const group = layout.groups[id];
@@ -357,18 +419,17 @@ function validateSplit(
 
 /// Every spec invariant, as human-readable violations. Empty array = valid.
 /// Used by tests and debug assertions; parseLayout rejects on any violation.
-export function validateInvariants(layout: LayoutV2): string[] {
+export function validateInvariants(layout: Layout): string[] {
   const problems: string[] = [];
   const tabRefs = new Map<string, number>();
   const groupRefs = new Map<string, number>();
   const groupDepths = new Map<string, number>();
 
-  // One DFS from the root counts every reference and records nesting depth. A
-  // group met twice is counted but never re-entered, so a cycle shows up as a
-  // multi-container reference instead of hanging the walk.
-  const stack: Array<{ items: readonly Item[]; depth: number }> = [
-    { items: layout.rootItems, depth: 0 },
-  ];
+  // One DFS seeded from every window's root counts every reference and records
+  // nesting depth. A group met twice is counted but never re-entered, so a
+  // cycle shows up as a multi-container reference instead of hanging the walk.
+  const stack: Array<{ items: readonly Item[]; depth: number }> =
+    windowRoots(layout);
   while (stack.length > 0) {
     const { items, depth } = stack.pop()!;
     for (const item of items) {
@@ -406,7 +467,7 @@ export function validateInvariants(layout: LayoutV2): string[] {
     }
     const refs = groupRefs.get(key) ?? 0;
     if (refs === 0) {
-      problems.push(`group ${key} is not reachable from rootItems`);
+      problems.push(`group ${key} is not reachable from any window`);
     } else if (refs > 1) {
       problems.push(`group ${key} appears in ${refs} containers, expected 1`);
     }
@@ -454,6 +515,25 @@ export function validateInvariants(layout: LayoutV2): string[] {
 
   if (layout.activeTabId !== null && !(layout.activeTabId in layout.tabs)) {
     problems.push(`activeTabId ${layout.activeTabId} is not a tab`);
+  }
+
+  for (const [windowId, slot] of Object.entries(layout.auxWindows)) {
+    if (windowId.length === 0) {
+      problems.push("aux window with empty id");
+    }
+    if (windowId === MAIN_WINDOW_ID) {
+      problems.push(`aux window id "${MAIN_WINDOW_ID}" collides with the main window`);
+    }
+    if (slot.activeTabId !== null && !(slot.activeTabId in layout.tabs)) {
+      problems.push(`window ${windowId}: activeTabId ${slot.activeTabId} is not a tab`);
+    }
+    if (slot.bounds !== null) {
+      const { x, y, width, height } = slot.bounds;
+      const finite = [x, y, width, height].every((v) => Number.isFinite(v));
+      if (!finite || width <= 0 || height <= 0) {
+        problems.push(`window ${windowId}: invalid bounds`);
+      }
+    }
   }
 
   const bytes = JSON.stringify(layout).length;
@@ -680,12 +760,56 @@ export function migrateV1(v1: LayoutV1): LayoutV2 {
   return { version: 2, groups, rootItems, tabs, activeTabId: v1.activeTabId };
 }
 
-/// Parse an untrusted GetState blob, v1 or v2. Returns null on ANY version,
+/// One-way v2 → v3: everything the v2 blob held becomes the main window's
+/// share; there are no aux windows yet. Exported for tests; parseLayout
+/// applies it.
+export function migrateV2(v2: LayoutV2): Layout {
+  return { ...v2, version: 3, auxWindows: {} };
+}
+
+function parseWindowBounds(value: unknown): WindowBounds | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const { x, y, width, height } = value;
+  if (
+    typeof x !== "number" || typeof y !== "number" ||
+    typeof width !== "number" || typeof height !== "number" ||
+    ![x, y, width, height].every((v) => Number.isFinite(v)) ||
+    width <= 0 || height <= 0
+  ) {
+    return null;
+  }
+  return { x, y, width, height };
+}
+
+function parseAuxWindowSlot(value: unknown): AuxWindowSlot | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const rootItems = parseItems(value.rootItems);
+  if (rootItems === null) {
+    return null;
+  }
+  if (value.activeTabId !== null && typeof value.activeTabId !== "string") {
+    return null;
+  }
+  let bounds: WindowBounds | null = null;
+  if (value.bounds !== null) {
+    bounds = parseWindowBounds(value.bounds);
+    if (bounds === null) {
+      return null;
+    }
+  }
+  return { rootItems, activeTabId: value.activeTabId, bounds };
+}
+
+/// Parse an untrusted GetState blob, v1..v3. Returns null on ANY version,
 /// shape, or invariant violation — never throws into UI code (restore rule 3:
-/// malformed layouts fall back, they don't crash). A v1 blob is migrated in
+/// malformed layouts fall back, they don't crash). Old blobs are migrated in
 /// place of failing; unknown extra fields are dropped; the result is a fresh
 /// deep copy detached from the input.
-export function parseLayout(value: unknown): LayoutV2 | null {
+export function parseLayout(value: unknown): Layout | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -694,10 +818,10 @@ export function parseLayout(value: unknown): LayoutV2 | null {
     if (v1 === null) {
       return null;
     }
-    const migrated = migrateV1(v1);
+    const migrated = migrateV2(migrateV1(v1));
     return validateInvariants(migrated).length === 0 ? migrated : null;
   }
-  if (value.version !== 2) {
+  if (value.version !== 2 && value.version !== 3) {
     return null;
   }
   if (
@@ -730,12 +854,27 @@ export function parseLayout(value: unknown): LayoutV2 | null {
     tabs[key] = tab;
   }
 
-  const layout: LayoutV2 = {
-    version: 2,
+  const auxWindows: Record<string, AuxWindowSlot> = {};
+  if (value.version === 3) {
+    if (!isRecord(value.auxWindows)) {
+      return null;
+    }
+    for (const [key, raw] of Object.entries(value.auxWindows)) {
+      const slot = parseAuxWindowSlot(raw);
+      if (slot === null) {
+        return null;
+      }
+      auxWindows[key] = slot;
+    }
+  }
+
+  const layout: Layout = {
+    version: 3,
     groups,
     rootItems,
     tabs,
     activeTabId: value.activeTabId,
+    auxWindows,
   };
 
   return validateInvariants(layout).length === 0 ? layout : null;
@@ -744,6 +883,6 @@ export function parseLayout(value: unknown): LayoutV2 | null {
 /// Deep-copy into a plain JsonValue for ClientMsg::set_layout. The store never
 /// mutates state in place, but the copy keeps the wire payload detached from
 /// live state regardless.
-export function serializeLayout(layout: LayoutV2): JsonValue {
+export function serializeLayout(layout: Layout): JsonValue {
   return JSON.parse(JSON.stringify(layout)) as JsonValue;
 }

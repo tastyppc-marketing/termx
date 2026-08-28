@@ -59,7 +59,8 @@ function rootTab(): SidebarTabModel {
 function snapshot(): WorkspaceSnapshot {
   return {
     layout: {
-      version: 2,
+      version: 3,
+      auxWindows: {},
       groups: {},
       rootItems: [{ kind: "tab", id: "tab-1" }],
       tabs: {

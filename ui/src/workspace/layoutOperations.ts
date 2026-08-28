@@ -7,7 +7,7 @@ import {
   validateInvariants,
   type Group,
   type Item,
-  type LayoutV2,
+  type Layout,
   type PaletteId,
   type SplitNode,
   type Tab,
@@ -16,7 +16,7 @@ import {
 /// The container holding `item` (null groupId = the sidebar root) and its
 /// ordered contents. Undefined when nothing references the item.
 function containerOf(
-  layout: LayoutV2,
+  layout: Layout,
   item: Item,
 ): { groupId: string | null; items: readonly Item[] } | undefined {
   if (layout.rootItems.some((candidate) => sameItem(candidate, item))) {
@@ -35,10 +35,10 @@ function sameItem(a: Item, b: Item): boolean {
 }
 
 function withContainerItems(
-  layout: LayoutV2,
+  layout: Layout,
   groupId: string | null,
   items: Item[],
-): LayoutV2 {
+): Layout {
   if (groupId === null) {
     return { ...layout, rootItems: items };
   }
@@ -50,7 +50,7 @@ function withContainerItems(
 }
 
 /// Drops every listed tab id from every container, leaving groups in place.
-function withoutTabItems(layout: LayoutV2, removed: ReadonlySet<string>): LayoutV2 {
+function withoutTabItems(layout: Layout, removed: ReadonlySet<string>): Layout {
   const keep = (items: readonly Item[]): Item[] =>
     items.filter((item) => !(item.kind === "tab" && removed.has(item.id)));
   const groups: Record<string, Group> = {};
@@ -62,7 +62,7 @@ function withoutTabItems(layout: LayoutV2, removed: ReadonlySet<string>): Layout
 }
 
 /// Every group id at or under `groupId`, itself included.
-function subtreeGroupIds(layout: LayoutV2, groupId: string): Set<string> {
+function subtreeGroupIds(layout: Layout, groupId: string): Set<string> {
   const ids = new Set<string>([groupId]);
   const walk = (id: string): void => {
     for (const item of layout.groups[id]?.items ?? []) {
@@ -110,7 +110,7 @@ export function sessionIdsInTab(tab: Tab): number[] {
 
 /// Every tab id in sidebar order: each container's items in order, subgroups
 /// walked where they sit.
-export function flattenTabIds(layout: LayoutV2): string[] {
+export function flattenTabIds(layout: Layout): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const walk = (items: readonly Item[]): void => {
@@ -127,7 +127,7 @@ export function flattenTabIds(layout: LayoutV2): string[] {
   return out;
 }
 
-export function nextTabColor(layout: LayoutV2): PaletteId {
+export function nextTabColor(layout: Layout): PaletteId {
   const order = flattenTabIds(layout);
   const last = order.length === 0 ? undefined : layout.tabs[order[order.length - 1]!];
   if (!last) {
@@ -140,10 +140,10 @@ export function nextTabColor(layout: LayoutV2): PaletteId {
 /// Reposition a group inside the container it already sits in. Nesting is
 /// `moveItem`'s job; this is the sibling-order drag.
 export function reorderGroup(
-  layout: LayoutV2,
+  layout: Layout,
   groupId: string,
   targetIndex: number,
-): LayoutV2 {
+): Layout {
   const item: Item = { kind: "group", id: groupId };
   const container = containerOf(layout, item);
   if (container === undefined || !Number.isInteger(targetIndex)) {
@@ -161,9 +161,9 @@ export function reorderGroup(
 }
 
 export function pruneSessionIds(
-  layout: LayoutV2,
+  layout: Layout,
   sessionIds: ReadonlySet<number>,
-): LayoutV2 {
+): Layout {
   if (sessionIds.size === 0) {
     return layout;
   }
@@ -200,7 +200,7 @@ export function pruneSessionIds(
 
 /// Close-tabs group delete: the group, every subgroup under it, and every tab
 /// in that subtree leave the layout together.
-export function removeGroupAndTabs(layout: LayoutV2, groupId: string): LayoutV2 {
+export function removeGroupAndTabs(layout: Layout, groupId: string): Layout {
   const item: Item = { kind: "group", id: groupId };
   const container = containerOf(layout, item);
   if (!layout.groups[groupId] || container === undefined) {
@@ -239,10 +239,10 @@ export function removeGroupAndTabs(layout: LayoutV2, groupId: string): LayoutV2 
 /// unknown, both ids are the same tab, or the grafted tree would exceed the
 /// MAX_SPLIT_DEPTH cap this module already mirrors for splits.
 export function mergeTabIntoTab(
-  layout: LayoutV2,
+  layout: Layout,
   sourceTabId: string,
   targetTabId: string,
-): LayoutV2 | null {
+): Layout | null {
   const source = layout.tabs[sourceTabId];
   const target = layout.tabs[targetTabId];
   if (!source || !target || sourceTabId === targetTabId) {
@@ -281,11 +281,11 @@ export function mergeTabIntoTab(
 /// Returns null when the tab is unknown, `newTabId` is unusable, the session is
 /// not in this tab, or it is the tab's ONLY pane (already its own tab).
 export function extractSessionToTab(
-  layout: LayoutV2,
+  layout: Layout,
   tabId: string,
   sessionId: number,
   newTabId: string,
-): LayoutV2 | null {
+): Layout | null {
   const tab = layout.tabs[tabId];
   if (!tab || newTabId.length === 0 || newTabId in layout.tabs) {
     return null;
@@ -336,11 +336,11 @@ export function extractSessionToTab(
 /// old session is not one of its panes, or the swap would violate an invariant
 /// (e.g. the new session id already lives in another pane).
 export function replaceSessionInTab(
-  layout: LayoutV2,
+  layout: Layout,
   tabId: string,
   oldSessionId: number,
   newSessionId: number,
-): LayoutV2 | null {
+): Layout | null {
   const tab = layout.tabs[tabId];
   if (!tab || oldSessionId === newSessionId) {
     return null;
@@ -400,7 +400,7 @@ function pruneNode(node: SplitNode, sessionIds: ReadonlySet<number>): SplitNode 
   return { ...node, children: [first, second] };
 }
 
-function nextActiveTab(layout: LayoutV2, removedTabs: ReadonlySet<string>): string | null {
+function nextActiveTab(layout: Layout, removedTabs: ReadonlySet<string>): string | null {
   if (!layout.activeTabId) {
     return null;
   }
@@ -419,12 +419,12 @@ function nextActiveTab(layout: LayoutV2, removedTabs: ReadonlySet<string>): stri
   return null;
 }
 
-function admit(previous: LayoutV2, candidate: LayoutV2): LayoutV2 {
+function admit(previous: Layout, candidate: Layout): Layout {
   return validateInvariants(candidate).length === 0 ? candidate : previous;
 }
 
 /// admit() for operations whose refusal the caller must SEE (spec §16): an
 /// invariant violation is a refusal, never a silently unchanged layout.
-function admitOrNull(candidate: LayoutV2): LayoutV2 | null {
+function admitOrNull(candidate: Layout): Layout | null {
   return validateInvariants(candidate).length === 0 ? candidate : null;
 }

@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionAttachment } from "../../host/client";
 import type { SessionInfo } from "../../host/protocol";
-import { emptyLayout, type LayoutV2 } from "../../state/layout";
+import { emptyLayout, type Layout } from "../../state/layout";
 import { createLayoutStore } from "../../state/store";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../../settings/settings";
 import type { DirExists } from "../../conversations/resume";
@@ -53,7 +53,7 @@ function session(id: number, overrides: Partial<SessionInfo> = {}): SessionInfo 
 }
 
 /** A layout holding one tab over `sessionId`, with nothing active yet. */
-function layoutWithTab(tabId: string, sessionId: number): LayoutV2 {
+function layoutWithTab(tabId: string, sessionId: number): Layout {
   const layout = emptyLayout();
   layout.tabs[tabId] = {
     id: tabId,
@@ -78,7 +78,7 @@ function harness(options: {
   settings?: Partial<TermxSettings>;
   dirExists?: DirExists;
   sessions?: readonly SessionInfo[];
-  layout?: LayoutV2;
+  layout?: Layout;
   createSession?: (cwd: string | null) => Promise<SessionInfo>;
   /** The daemon's busy-probe answer. Omitted = a client without the method
    * (an older daemon), "reject" = the probe call fails. */

@@ -2,15 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   canMoveItem,
   collectSubtreeTabIds,
+  emptyLayout,
   findContainer,
   groupDepth,
+  MAIN_WINDOW_ID,
   parseLayout,
   serializeLayout,
+  slotOf,
   splitDepth,
   subtreeDepth,
   validateInvariants,
+  windowIds,
 } from "../layout";
-import type { Item, LayoutV2, SplitNode } from "../layout";
+import type { AuxWindowSlot, Item, Layout, SplitNode } from "../layout";
 import { baseLayout, groupItem, pane, split, tab, tabItem } from "./helpers";
 
 function chain(depth: number, firstSession: number): SplitNode {
@@ -33,7 +37,7 @@ describe("validateInvariants", () => {
     expect(validateInvariants(layout)).toEqual([]);
   });
 
-  it.each<[string, (l: LayoutV2) => void]>([
+  it.each<[string, (l: Layout) => void]>([
     ["container references a missing tab", (l) => {
       l.rootItems.push(tabItem("ghost"));
     }],
@@ -134,7 +138,7 @@ describe("parseLayout / serializeLayout", () => {
     ["a string", "layout"],
     ["an array", []],
     ["an empty object", {}],
-    ["version 3", { ...serializeLayout(baseLayout()) as object, version: 3 }],
+    ["version 4", { ...serializeLayout(baseLayout()) as object, version: 4 }],
     ["groups as an array", {
       ...serializeLayout(baseLayout()) as object,
       groups: [],
@@ -238,8 +242,8 @@ describe("parseLayout / serializeLayout", () => {
 });
 
 /// g1 > g2 > … > gN, the deepest holding the fixture's only tab.
-function nestedChain(depth: number): LayoutV2 {
-  const groups: LayoutV2["groups"] = {};
+function nestedChain(depth: number): Layout {
+  const groups: Layout["groups"] = {};
   for (let level = 1; level <= depth; level++) {
     groups[`g${level}`] = {
       id: `g${level}`,
@@ -252,19 +256,20 @@ function nestedChain(depth: number): LayoutV2 {
     };
   }
   return {
-    version: 2,
+    version: 3,
     groups,
     rootItems: [{ kind: "group", id: "g1" }],
     tabs: {
       t1: { id: "t1", title: null, color: "slate", fill: "off", split: pane(1) },
     },
     activeTabId: "t1",
+    auxWindows: {},
   };
 }
 
 describe("layout v2", () => {
-  it("parses a valid v2 blob round-trip", () => {
-    const layout: LayoutV2 = {
+  it("adopts a valid v2 blob as v3 with no aux windows", () => {
+    const blob = {
       version: 2,
       groups: {
         g1: {
@@ -290,7 +295,7 @@ describe("layout v2", () => {
       },
       activeTabId: "t1",
     };
-    expect(parseLayout(serializeLayout(layout))).toEqual(layout);
+    expect(parseLayout(blob)).toEqual({ ...blob, version: 3, auxWindows: {} });
   });
 
   it("migrates a v1 blob preserving order and defaulting fill/color", () => {
@@ -305,7 +310,7 @@ describe("layout v2", () => {
       activeTabId: "t2",
     });
     expect(v2).not.toBeNull();
-    expect(v2!.version).toBe(2);
+    expect(v2!.version).toBe(3);
     expect(v2!.rootItems).toEqual([{ kind: "group", id: "g1" }, { kind: "tab", id: "t2" }]);
     expect(v2!.groups.g1!.items).toEqual([{ kind: "tab", id: "t1" }]);
     expect(v2!.groups.g1!.color).toBeNull();
@@ -412,5 +417,157 @@ describe("layout v2", () => {
     const layout = nestedChain(3);
     expect(canMoveItem(layout, { kind: "group", id: "g3" }, "g2", 1)).toBe(true);
     expect(canMoveItem(layout, { kind: "tab", id: "t1" }, "g3", 1)).toBe(true);
+  });
+});
+
+/// baseLayout with t2 torn out of the main window into one aux window.
+function withAuxWindow(id = "aux-1"): Layout {
+  const layout = baseLayout();
+  layout.rootItems = [tabItem("t1"), groupItem("g1")];
+  const slot: AuxWindowSlot = {
+    rootItems: [tabItem("t2")],
+    activeTabId: "t2",
+    bounds: { x: 1920, y: 0, width: 1280, height: 800 },
+  };
+  layout.auxWindows[id] = slot;
+  return layout;
+}
+
+describe("layout v3 (aux windows)", () => {
+  it("emptyLayout is v3 with no aux windows", () => {
+    expect(emptyLayout()).toEqual({
+      version: 3,
+      groups: {},
+      rootItems: [],
+      tabs: {},
+      activeTabId: null,
+      auxWindows: {},
+    });
+  });
+
+  it("round-trips aux window slots", () => {
+    const layout = withAuxWindow();
+    expect(parseLayout(serializeLayout(layout))).toEqual(layout);
+  });
+
+  it("round-trips an aux slot with null bounds", () => {
+    const layout = withAuxWindow();
+    layout.auxWindows["aux-1"]!.bounds = null;
+    expect(parseLayout(serializeLayout(layout))).toEqual(layout);
+  });
+
+  it("accepts a tab living only in an aux slot", () => {
+    expect(validateInvariants(withAuxWindow())).toEqual([]);
+  });
+
+  it("counts group depth from the aux window's root", () => {
+    const layout = withAuxWindow();
+    layout.rootItems = [tabItem("t1")];
+    layout.auxWindows["aux-1"]!.rootItems.push(groupItem("g1"));
+    expect(validateInvariants(layout)).toEqual([]);
+    expect(groupDepth(layout, "g1")).toBe(1);
+    expect(findContainer(layout, tabItem("t3"))).toBe("g1");
+  });
+
+  it.each<[string, (l: Layout) => void]>([
+    ["tab referenced by main and an aux window", (l) => {
+      l.rootItems.push(tabItem("t2"));
+    }],
+    ["tab referenced by two aux windows", (l) => {
+      l.auxWindows["aux-2"] = {
+        rootItems: [tabItem("t2")],
+        activeTabId: null,
+        bounds: null,
+      };
+    }],
+    ["group referenced by main and an aux window", (l) => {
+      l.auxWindows["aux-1"]!.rootItems.push(groupItem("g1"));
+    }],
+    ["aux activeTabId pointing nowhere", (l) => {
+      l.auxWindows["aux-1"]!.activeTabId = "ghost";
+    }],
+    ["aux window with empty id", (l) => {
+      l.auxWindows[""] = { rootItems: [], activeTabId: null, bounds: null };
+    }],
+    ["aux window id colliding with the main window", (l) => {
+      l.auxWindows[MAIN_WINDOW_ID] = {
+        rootItems: [],
+        activeTabId: null,
+        bounds: null,
+      };
+    }],
+    ["aux bounds with non-positive size", (l) => {
+      l.auxWindows["aux-1"]!.bounds = { x: 0, y: 0, width: 0, height: 600 };
+    }],
+  ])("flags: %s", (_label, mutate) => {
+    const layout = withAuxWindow();
+    mutate(layout);
+    expect(validateInvariants(layout).length).toBeGreaterThan(0);
+  });
+
+  it("rejects malformed auxWindows without throwing", () => {
+    const tamper = (
+      mutate: (blob: Record<string, unknown>) => void,
+    ): unknown => {
+      const blob = serializeLayout(withAuxWindow()) as Record<string, unknown>;
+      mutate(blob);
+      return blob;
+    };
+    const slotOn = (blob: Record<string, unknown>): Record<string, unknown> => {
+      const windows = blob.auxWindows as Record<string, Record<string, unknown>>;
+      windows["aux-1"] = { ...windows["aux-1"] };
+      return windows["aux-1"];
+    };
+    const cases: unknown[] = [
+      tamper((blob) => {
+        blob.auxWindows = [];
+      }),
+      tamper((blob) => {
+        (blob.auxWindows as Record<string, unknown>)["aux-2"] = null;
+      }),
+      tamper((blob) => {
+        delete slotOn(blob).rootItems;
+      }),
+      tamper((blob) => {
+        slotOn(blob).activeTabId = 5;
+      }),
+      tamper((blob) => {
+        delete slotOn(blob).bounds;
+      }),
+      tamper((blob) => {
+        slotOn(blob).bounds = "wide";
+      }),
+      tamper((blob) => {
+        slotOn(blob).bounds = { x: 0, y: 0, width: 800 };
+      }),
+      tamper((blob) => {
+        slotOn(blob).bounds = { x: Number.NaN, y: 0, width: 800, height: 600 };
+      }),
+    ];
+    for (const value of cases) {
+      expect(parseLayout(value)).toBeNull();
+    }
+  });
+
+  it("windowIds lists main first, then aux ids sorted", () => {
+    const layout = withAuxWindow("aux-2");
+    layout.auxWindows["aux-10"] = {
+      rootItems: [],
+      activeTabId: null,
+      bounds: null,
+    };
+    expect(windowIds(layout)).toEqual([MAIN_WINDOW_ID, "aux-10", "aux-2"]);
+    expect(windowIds(baseLayout())).toEqual([MAIN_WINDOW_ID]);
+  });
+
+  it("slotOf reads main, aux, and missing windows", () => {
+    const layout = withAuxWindow();
+    expect(slotOf(layout, MAIN_WINDOW_ID)).toEqual({
+      rootItems: layout.rootItems,
+      activeTabId: "t1",
+      bounds: null,
+    });
+    expect(slotOf(layout, "aux-1")).toBe(layout.auxWindows["aux-1"]);
+    expect(slotOf(layout, "ghost")).toBeNull();
   });
 });

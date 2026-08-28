@@ -10,7 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationsStore } from "../conversations/store";
 import type { LlmSessionRecord } from "../conversations/types";
-import type { LayoutV2 } from "../state/layout";
+import type { Layout } from "../state/layout";
 import type { WorkspaceSnapshot } from "../workspace/WorkspaceController";
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
 import { UiStateStore } from "../workspace/uiState";
@@ -63,8 +63,9 @@ function record(overrides: Partial<LlmSessionRecord> = {}): LlmSessionRecord {
 }
 
 function workspaceSnapshot(): WorkspaceSnapshot {
-  const layout: LayoutV2 = {
-    version: 2,
+  const layout: Layout = {
+    version: 3,
+    auxWindows: {},
     groups: {},
     rootItems: [{ kind: "tab", id: "tab-1" }],
     tabs: {

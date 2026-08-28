@@ -1,5 +1,5 @@
 import type { HostClient } from "../host/client";
-import { serializeLayout, type LayoutV2 } from "../state/layout";
+import { serializeLayout, type Layout } from "../state/layout";
 
 export const ACTIVE_TAB_PERSIST_DEBOUNCE_MS = 2_000;
 
@@ -11,7 +11,7 @@ export interface LayoutPersistenceSnapshot {
 }
 
 interface PendingWrite {
-  layout: LayoutV2;
+  layout: Layout;
   attempts: number;
 }
 
@@ -32,7 +32,7 @@ export class LayoutPersistence {
     return () => this.listeners.delete(listener);
   };
 
-  record(layout: LayoutV2, kind: LayoutChangeKind): void {
+  record(layout: Layout, kind: LayoutChangeKind): void {
     if (this.disposed) {
       return;
     }

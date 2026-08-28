@@ -8,7 +8,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LayoutV2 } from "../../state/layout";
+import type { Layout } from "../../state/layout";
 import { applyTheme } from "../../theme/ThemeProvider";
 import { DEFAULT_THEME_ID, resolveTabColor, THEMES } from "../../theme/themes";
 import type {
@@ -89,8 +89,9 @@ function groupModel(
  * orange tab with a strong fill, plus a neutral group and a plain root tab.
  */
 function coloredWorkspace(): WorkspaceSnapshot {
-  const layout: LayoutV2 = {
-    version: 2,
+  const layout: Layout = {
+    version: 3,
+    auxWindows: {},
     groups: {
       blue: {
         id: "blue",

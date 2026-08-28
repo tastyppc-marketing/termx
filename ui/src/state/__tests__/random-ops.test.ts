@@ -7,7 +7,7 @@ import {
   sessionIdsInLayout,
   validateInvariants,
 } from "../layout";
-import type { LayoutV2, SplitNode } from "../layout";
+import type { Layout, SplitNode } from "../layout";
 import { createLayoutStore } from "../store";
 import { baseLayout, mulberry32 } from "./helpers";
 
@@ -16,7 +16,7 @@ interface PaneRef {
   sessionId: number;
 }
 
-function panes(layout: LayoutV2): PaneRef[] {
+function panes(layout: Layout): PaneRef[] {
   const out: PaneRef[] = [];
   for (const tab of Object.values(layout.tabs)) {
     const walk = (node: SplitNode): void => {

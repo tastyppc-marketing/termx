@@ -1,4 +1,4 @@
-import type { Group, Item, LayoutV2, SplitNode, Tab } from "../layout";
+import type { Group, Item, Layout, SplitNode, Tab } from "../layout";
 
 export function pane(sessionId: number): SplitNode {
   return { kind: "pane", sessionId };
@@ -54,9 +54,9 @@ export function groupItem(id: string): Item {
 }
 
 /// t1(session 1), t2(session 2) at the root; g1 "Servers" holds t3(session 3).
-export function baseLayout(): LayoutV2 {
+export function baseLayout(): Layout {
   return {
-    version: 2,
+    version: 3,
     groups: { g1: group("g1", "Servers", ["t3"]) },
     rootItems: [tabItem("t1"), tabItem("t2"), groupItem("g1")],
     tabs: {
@@ -65,6 +65,7 @@ export function baseLayout(): LayoutV2 {
       t3: tab("t3", 3, { color: "red" }),
     },
     activeTabId: "t1",
+    auxWindows: {},
   };
 }
 

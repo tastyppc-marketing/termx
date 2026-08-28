@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { emptyLayout, type LayoutV2 } from "../../state/layout";
+import { emptyLayout, type Layout } from "../../state/layout";
 import {
   ACTIVE_TAB_PERSIST_DEBOUNCE_MS,
   LayoutPersistence,
@@ -21,7 +21,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-function state(activeTabId: string | null): LayoutV2 {
+function state(activeTabId: string | null): Layout {
   const layout = emptyLayout();
   return { ...layout, activeTabId };
 }
@@ -66,7 +66,7 @@ describe("LayoutPersistence", () => {
         g: { id: "g", name: "Group", collapsed: false, color: null, items: [] },
       },
       rootItems: [{ kind: "group" as const, id: "g" }],
-    } satisfies LayoutV2;
+    } satisfies Layout;
 
     persistence.record(active, "active_tab");
     persistence.record(structural, "structural");
@@ -88,14 +88,14 @@ describe("LayoutPersistence", () => {
         g2: { id: "g2", name: "Second", collapsed: false, color: null, items: [] },
       },
       rootItems: [{ kind: "group" as const, id: "g2" }],
-    } satisfies LayoutV2;
+    } satisfies Layout;
     const third = {
       ...emptyLayout(),
       groups: {
         g3: { id: "g3", name: "Third", collapsed: false, color: null, items: [] },
       },
       rootItems: [{ kind: "group" as const, id: "g3" }],
-    } satisfies LayoutV2;
+    } satisfies Layout;
 
     persistence.record(emptyLayout(), "structural");
     persistence.record(second, "structural");

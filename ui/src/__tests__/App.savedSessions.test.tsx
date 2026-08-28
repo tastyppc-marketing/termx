@@ -6,7 +6,7 @@ import type { LlmSessionRecord } from "../conversations/types";
 import { createSavedSessionsStore } from "../saved/store";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
 import { SettingsStore } from "../settings/SettingsStore";
-import type { LayoutV2 } from "../state/layout";
+import type { Layout } from "../state/layout";
 import type {
   SidebarTabModel,
   WorkspaceSnapshot,
@@ -71,8 +71,9 @@ function tab(overrides: Partial<SidebarTabModel> = {}): SidebarTabModel {
 }
 
 function snapshot(activeTab: SidebarTabModel = tab()): WorkspaceSnapshot {
-  const layout: LayoutV2 = {
-    version: 2,
+  const layout: Layout = {
+    version: 3,
+    auxWindows: {},
     groups: {},
     rootItems: [{ kind: "tab", id: activeTab.id }],
     tabs: {
