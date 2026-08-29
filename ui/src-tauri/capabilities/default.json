@@ -2,12 +2,16 @@
   "$schema": "https://schema.tauri.app/config/2",
   "identifier": "default",
   "description": "Capability for the main TermX window",
-  "windows": ["main"],
+  "windows": [
+    "main",
+    "aux-*"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-request-user-attention",
+    "core:webview:allow-create-webview-window",
     "allow-bootstrap-host",
     "allow-read-app-file",
     "allow-write-app-file",

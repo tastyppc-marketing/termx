@@ -39,3 +39,26 @@ describe("main window capability", () => {
     expect(capability.permissions).toContain("core:window:allow-destroy");
   });
 });
+
+describe("multi-window capability (Phase 1)", () => {
+  it(
+    "covers aux windows — a capability names the windows it applies to, so " +
+      "without the aux-* glob a torn-out window has NO permissions at all " +
+      "(no daemon bootstrap, no IPC — a dead shell)",
+    () => {
+      expect(capability.windows).toContain("aux-*");
+    },
+  );
+
+  it(
+    "grants create-webview-window — 'Move to new window' spawns a " +
+      "WebviewWindow from JS, and without this grant the create call is " +
+      "rejected at IPC and swallowed by openAuxWindows' per-slot catch: the " +
+      "slot fills but no window ever appears",
+    () => {
+      expect(capability.permissions).toContain(
+        "core:webview:allow-create-webview-window",
+      );
+    },
+  );
+});
