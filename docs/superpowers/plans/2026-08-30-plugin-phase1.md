@@ -52,7 +52,7 @@
   ```
 - The registry deliberately ignores `requests`, `chrome`, and `connector` keys in Phase 1 (unknown keys tolerated, not validated).
 
-- [ ] **Step 1: Failing tests** — `manifest.test.ts`:
+- [x] **Step 1: Failing tests** — `manifest.test.ts`:
   ```ts
   it("parses the Showroom manifest", () => {
     expect(parseManifest(showroomJson)).toMatchObject({ id: "showroom", singleton: true, discovery: { healthPath: "/api/health" } });
@@ -67,8 +67,8 @@
   });
   ```
   `registry.test.ts`: tolerant parse (`null`, garbage, missing `plugins` → empty), round-trip, `manifestFor("showroom", null)` returns the bundled manifest, `manifestFor("showroom", fileText)` prefers the file, `manifestFor("unknown", null)` is null.
-- [ ] **Step 2: Run** `npx vitest run src/plugins` — FAIL (modules missing).
-- [ ] **Step 3: Implement** the four exports + bundled Showroom manifest:
+- [x] **Step 2: Run** `npx vitest run src/plugins` — FAIL (modules missing).
+- [x] **Step 3: Implement** the four exports + bundled Showroom manifest:
   ```ts
   export const BUNDLED_MANIFESTS: Record<string, PluginManifest> = {
     showroom: {
@@ -81,8 +81,9 @@
   };
   ```
   Add `"plugins_v1.json" | "plugin_panes_v1.json"` to `AppFileName` and to `ALLOWED_FILES` (array length 6 → 8).
-- [ ] **Step 4: Run** the two test files + `npx tsc -b` — PASS. `cargo test` in `ui/src-tauri` still green (ALLOWED_FILES is a const; any pinning test updates its count).
-- [ ] **Step 5: Commit** `feat(plugins): manifest parsing + registry store (P1 T1)`.
+- [x] **Step 4: Run** the two test files + `npx tsc -b` — PASS. `cargo test` in `ui/src-tauri` still green (ALLOWED_FILES is a const; any pinning test updates its count).
+- [x] **Step 5: Commit** `feat(plugins): manifest parsing + registry store (P1 T1)`.
+> **As built (2026-08-31):** initial T1 commit + review fixes 9037dd6. `readManifest(folder)` added to `PluginNative` later (T5/T7) so a plugin folder's own `termx-plugin.json` overrides the bundled table when it parses and its id matches; bundled stays the fallback.
 
 ### Task 2: Native commands — spawn, read runtime file, HTTP probe
 
@@ -104,7 +105,7 @@
   ```
 - TS wrapper produced for T3: `ui/src/plugins/native.ts` — `PluginNative { readRuntime(path): Promise<string|null>; probe(url, timeoutMs): Promise<string>; spawn(command, args, cwd): Promise<number>; stderrTail(pid): Promise<string> }` + `tauriPluginNative`.
 
-- [ ] **Step 1: Failing Rust tests** in `plugins.rs`:
+- [x] **Step 1: Failing Rust tests** in `plugins.rs`:
   ```rust
   #[test] fn probe_rejects_non_loopback() { assert!(validate_probe_url("http://example.com/").is_err()); assert!(validate_probe_url("http://127.0.0.1:7345/api/health").is_ok()); }
   #[test] fn read_runtime_requires_absolute() { assert!(plugin_read_runtime("relative\\runtime.json".into()).is_err()); }
@@ -112,10 +113,11 @@
   #[test] fn spawn_records_stderr_tail() { let pid = plugin_spawn("cmd".into(), vec!["/c".into(), "echo boom 1>&2".into()], std::env::temp_dir().to_string_lossy().into()).unwrap(); std::thread::sleep(std::time::Duration::from_millis(500)); assert!(plugin_stderr_tail(pid).unwrap().contains("boom")); }
   ```
   `capabilities.test.ts`: `expect(capability.permissions).toContain("allow-plugin-spawn")` (+ read-runtime, probe, stderr-tail).
-- [ ] **Step 2: Run** `cargo test plugins` — FAIL (module missing); vitest capabilities — FAIL.
-- [ ] **Step 3: Implement.** Probe uses `ureq::AgentBuilder::new().timeout(...)` inside `tauri::async_runtime::spawn_blocking` (same shape as `ssh_probe`, ssh.rs:244-257). Spawn uses `std::process::Command` with `creation_flags(0x08000000 | 0x00000008)` on Windows, `.stderr(Stdio::piped())`, a thread draining stderr into `static TAILS: Mutex<HashMap<u32, VecDeque<u8>>>` capped at 8 KiB. Register the four commands in `generate_handler!`, add the four `allow-*` grants.
-- [ ] **Step 4: Run** `cargo test` (all), `npx tsc -b`, capabilities test — PASS.
-- [ ] **Step 5: Commit** `feat(plugins): native spawn/read-runtime/probe commands (P1 T2)`.
+- [x] **Step 2: Run** `cargo test plugins` — FAIL (module missing); vitest capabilities — FAIL.
+- [x] **Step 3: Implement.** Probe uses `ureq::AgentBuilder::new().timeout(...)` inside `tauri::async_runtime::spawn_blocking` (same shape as `ssh_probe`, ssh.rs:244-257). Spawn uses `std::process::Command` with `creation_flags(0x08000000 | 0x00000008)` on Windows, `.stderr(Stdio::piped())`, a thread draining stderr into `static TAILS: Mutex<HashMap<u32, VecDeque<u8>>>` capped at 8 KiB. Register the four commands in `generate_handler!`, add the four `allow-*` grants.
+- [x] **Step 4: Run** `cargo test` (all), `npx tsc -b`, capabilities test — PASS.
+- [x] **Step 5: Commit** `feat(plugins): native spawn/read-runtime/probe commands (P1 T2)`.
+> **As built:** commits a188faa / bff7170 / 04ba5b0 / daaafb1 / 3fd66fe. Stderr goes to a per-spawn log file under `<data dir>\plugin-logs` (pruned to 16 files) instead of a pipe + 8 KiB ring — a drained pipe EPIPEs the plugin when TermX exits; `plugin_stderr_tail` reads the last 8 KiB with `SeekFrom::End`. Runtime/manifest reads and spawn are `spawn_blocking`/async commands. `read_manifest_in`: missing folder = Err, missing file = Ok(None). Per-spawn logs have no byte cap (deferred).
 
 ### Task 3: Ensure-up lifecycle
 
@@ -135,16 +137,17 @@
   ```
 - Algorithm (spec §3): read runtime → if parse ok, probe `${url}${healthPath}` → healthy → return. Else spawn (`command`, `args`, cwd = pluginPath) → poll every 250 ms: re-read runtime file, probe; stop at first healthy or when `spawnTimeoutMs` elapses → `{ok:false, reason:"health probe never passed", stderrTail}`. A spawn that throws → `{ok:false, reason: error}`. **Never treat a fast process exit as failure** (there is no exit signal at all — only the probe decides).
 
-- [ ] **Step 1: Failing tests** with a fake native (scripted runtime-file/probe answers + a call log) and fake timers:
+- [x] **Step 1: Failing tests** with a fake native (scripted runtime-file/probe answers + a call log) and fake timers:
   - already healthy → no spawn call, returns runtime with url from the port.
   - runtime missing → spawn once → healthy on 3rd poll → ok; spawn args `("node", ["server/showroom.js"], "<pluginPath>")`.
   - probe body `{ok:true}` WITHOUT version → treated unhealthy (identity rule).
   - never healthy → `{ok:false}` after 10 s with the stderr tail included; exactly one spawn.
   - token is re-read: two successive `ensureUp` calls with a rotated token return the new one.
-- [ ] **Step 2: Run** `npx vitest run src/plugins/__tests__/lifecycle.test.ts` — FAIL.
-- [ ] **Step 3: Implement** per the algorithm; `native.ts` wraps the four `invoke`s.
-- [ ] **Step 4: Run** tests + `npx tsc -b` — PASS.
-- [ ] **Step 5: Commit** `feat(plugins): ensure-up lifecycle (P1 T3)`.
+- [x] **Step 2: Run** `npx vitest run src/plugins/__tests__/lifecycle.test.ts` — FAIL.
+- [x] **Step 3: Implement** per the algorithm; `native.ts` wraps the four `invoke`s.
+- [x] **Step 4: Run** tests + `npx tsc -b` — PASS.
+- [x] **Step 5: Commit** `feat(plugins): ensure-up lifecycle (P1 T3)`.
+> **As built:** commits cb0cce8 / f4d2348; `PROBE_TIMEOUT_MS`, `DEFAULT_SPAWN_TIMEOUT_MS`, `POLL_INTERVAL_MS` exported (fa0cdfa) so the aux observe loop shares the beat. Lifecycle is MAIN-ONLY: an aux window's `ensureUp` observes (runtime file + probe, never spawns) and answers "The plugin is not running. Relaunch it from the main window."
 
 ### Task 4: Pane bindings store + cross-window sync
 
@@ -173,11 +176,12 @@
 - windowBus: `PLUGIN_PANES_EVENT = "termx:plugin-panes"`; `WindowBus.broadcastPluginPanes(state: JsonValue): Promise<void>`; `WindowBus.onPluginPanes(handler)`. Loopback + tauri implementations both.
 - bootstrapWorkspace: main → `new PaneBindingsStore({ initial: parsed, save: (t) => appFiles.write("plugin_panes_v1.json", t), onBroadcast: (s) => bus.broadcastPluginPanes(s) })`; aux → `save: null`, subscribes `bus.onPluginPanes` → `adopt`. Exposed on `BootstrappedWorkspace.pluginPanes`.
 
-- [ ] **Step 1: Failing tests** — store: bind persists exactly once with string keys and broadcasts; unbind removes; aux store (`save: null`) never calls save even after bind; adopt replaces state without persisting; `allocatePluginPaneId` returns ≥ 2^31, re-rolls when the first roll is taken (inject `random`), throws only after 64 collisions. windowBus: loopback delivers plugin-panes to subscribers; tauri fake transport uses `termx:plugin-panes`; `pair()` harness: main bind → aux adopts (`auxFake` never writes the file).
-- [ ] **Step 2: Run** — FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the two test files + windowBus + bootstrapWorkspace tests + `npx tsc -b` — PASS.
-- [ ] **Step 5: Commit** `feat(plugins): pane bindings store synced over the window bus (P1 T4)`.
+- [x] **Step 1: Failing tests** — store: bind persists exactly once with string keys and broadcasts; unbind removes; aux store (`save: null`) never calls save even after bind; adopt replaces state without persisting; `allocatePluginPaneId` returns ≥ 2^31, re-rolls when the first roll is taken (inject `random`), throws only after 64 collisions. windowBus: loopback delivers plugin-panes to subscribers; tauri fake transport uses `termx:plugin-panes`; `pair()` harness: main bind → aux adopts (`auxFake` never writes the file).
+- [x] **Step 2: Run** — FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** the two test files + windowBus + bootstrapWorkspace tests + `npx tsc -b` — PASS.
+- [x] **Step 5: Commit** `feat(plugins): pane bindings store synced over the window bus (P1 T4)`.
+> **As built:** commits 705f0ee / 106372f / db59e6a; `PaneBindingsStore.flush()` rejects with the first failed save/forward and clears it on the next success; main broadcasts a binding only AFTER its save resolves; `normalizePluginPath` (leading `/` required — T5 addendum). Aux registry replica (main→aux `plugins` channel) deferred to Phase C.
 
 ### Task 5: Layout integration — reserved ids, reconcile, pane states, cleanup
 
@@ -217,11 +221,12 @@
 - CSP becomes: `default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:* http://ipc.localhost; frame-src http://127.0.0.1:* http://localhost:*`.
 - Health polling: while any plugin pane for a plugin is mounted and `up`, the controller re-probes every 15 s (T3's `native.probe`); a failed probe flips `pluginHealth` to `"down"`. Lives in the controller (one poller per plugin), not per pane.
 
-- [ ] **Step 1: Failing tests** — PluginPane: renders an iframe with the exact URL when up; renders "Starting" when starting; renders the error + a Relaunch button when down and clicking calls `onRelaunch`. SplitLayout: a paneStates entry with `status:"plugin"` renders `<iframe>` inside the pane section with the pane title chrome and no terminal. csp.test: `frame-src` present with both hosts; `connect-src` unchanged.
-- [ ] **Step 2: Run** — FAIL.
-- [ ] **Step 3: Implement** (branch order in SplitLayout: live terminal → sleeping → plugin → dead).
-- [ ] **Step 4: Run** split tests + full suite + `npx tsc -b` — PASS.
-- [ ] **Step 5: Commit** `feat(plugins): iframe plugin panes with health-driven relaunch (P1 T6)`.
+- [x] **Step 1: Failing tests** — PluginPane: renders an iframe with the exact URL when up; renders "Starting" when starting; renders the error + a Relaunch button when down and clicking calls `onRelaunch`. SplitLayout: a paneStates entry with `status:"plugin"` renders `<iframe>` inside the pane section with the pane title chrome and no terminal. csp.test: `frame-src` present with both hosts; `connect-src` unchanged.
+- [x] **Step 2: Run** — FAIL.
+- [x] **Step 3: Implement** (branch order in SplitLayout: live terminal → sleeping → plugin → dead).
+- [x] **Step 4: Run** split tests + full suite + `npx tsc -b` — PASS.
+- [x] **Step 5: Commit** `feat(plugins): iframe plugin panes with health-driven relaunch (P1 T6)`.
+> **As built:** commits ecc379c / 48a9642 / 0b59df4. PluginPane branches on `status === "plugin"` (manifest only dresses: name, icon "?", panelPath "/"); `panelSrc(origin, panelPath)` roots the path and guards same-origin via `new URL`; loopback-only origin regex; `allow="clipboard-write"`, no sandbox, `referrerpolicy="no-referrer"`; 4-side 1px hairline matching TerminalPane.css; status "missing" → dismiss-only DeadPane. Gemini final design pass PASS.
 
 ### Task 7: Settings "Plugins" section
 
@@ -234,11 +239,12 @@
 - `<PluginsPanel store={PluginsStore} health={Record<string, "starting"|"up"|"down"|"unknown">} onOpenTab={(id) => void} onAddFolder={() => Promise<void>} />` — rows: icon + name + folder path + health dot; toggle `enabled`; "Open as tab"; "Remove"; footer "Add plugin folder…" (uses the existing `dialog:allow-open` grant via the folder picker seam `pickFolder` already injected into the controller; reads `<folder>\termx-plugin.json` else bundled by folder name; malformed → inline error listing `parseManifestErrors`).
 - `PluginsStore` (add to T1's registry.ts if not yet): `getSnapshot(): PluginsV1; subscribe; setEnabled(id, bool); add(id, path); remove(id)` persisting via `appFiles.write("plugins_v1.json", …)` with the UiStateStore-style debounce.
 
-- [ ] **Step 1: Failing tests** — renders one row per plugin with its health dot; toggling enabled calls `store.setEnabled`; "Open as tab" calls `onOpenTab("showroom")`; "Add plugin folder…" with a folder lacking a manifest and an unknown id shows "No termx-plugin.json found"; sections.test expects nine sections including `plugins`.
-- [ ] **Step 2: Run** — FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** settings tests + full suite + `npx tsc -b` — PASS.
-- [ ] **Step 5: Commit** `feat(plugins): Plugins settings section (P1 T7)`.
+- [x] **Step 1: Failing tests** — renders one row per plugin with its health dot; toggling enabled calls `store.setEnabled`; "Open as tab" calls `onOpenTab("showroom")`; "Add plugin folder…" with a folder lacking a manifest and an unknown id shows "No termx-plugin.json found"; sections.test expects nine sections including `plugins`.
+- [x] **Step 2: Run** — FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** settings tests + full suite + `npx tsc -b` — PASS.
+- [x] **Step 5: Commit** `feat(plugins): Plugins settings section (P1 T7)`.
+> **As built:** commits e34e3a1 / 3fd66fe / 6db1169 / c6094f4. Props `{ store; native; onOpen?; health? }`; `Toggle` in its own module (aria-label + aria-hidden label); Remove is confirm-in-place ("Confirm remove", blur/Esc/4 s reset; Esc ownership via `data-esc-guard`); "Change folder…" on bundled rows; scoped `addFolder(expectedId)` refuses a folder holding another id; manifest id ≠ registry key shown inline; middle-truncated paths; per-row health mark (no blink). Copy differs from the plan's draft strings — see the panel.
 
 ### Task 8: Entry points in the sidebar menus
 
@@ -250,11 +256,12 @@
 - Background menu gains "New <icon> <name> tab" per enabled plugin (hidden when `plugins` is empty/absent or the action is unwired). Tab menu gains "Split with <name>" per enabled plugin (calls `openPluginSplit(tab.id, pluginId)`; the controller splits the tab's focused pane, falling back to its first pane). Group menu gains "New <name> tab in group".
 - App: `plugins={enabledPlugins}` derived from the PluginsStore snapshot joined with manifests; `openPluginSplit` in App adapts to the controller's `(tabId, anchorSessionId, pluginId, dir)` using the tab's focused pane.
 
-- [ ] **Step 1: Failing tests** — with `plugins=[showroom]` and `openPluginTab: vi.fn()`, the background menu shows "New 🖼 Showroom tab" and clicking calls `openPluginTab("showroom", null)`; the tab menu shows "Split with Showroom" → `openPluginSplit("tab-1","showroom")`; legacy fixture (no plugins prop) shows neither.
-- [ ] **Step 2: Run** — FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** Sidebar tests + full suite + `npx tsc -b` — PASS.
-- [ ] **Step 5: Commit** `feat(plugins): sidebar entry points for plugin tabs and splits (P1 T8)`.
+- [x] **Step 1: Failing tests** — with `plugins=[showroom]` and `openPluginTab: vi.fn()`, the background menu shows "New 🖼 Showroom tab" and clicking calls `openPluginTab("showroom", null)`; the tab menu shows "Split with Showroom" → `openPluginSplit("tab-1","showroom")`; legacy fixture (no plugins prop) shows neither.
+- [x] **Step 2: Run** — FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** Sidebar tests + full suite + `npx tsc -b` — PASS.
+- [x] **Step 5: Commit** `feat(plugins): sidebar entry points for plugin tabs and splits (P1 T8)`.
+> **As built:** commits c7348f8 / 72d32ce / bc6a20b / 3e56e7d / 8027832 / fa0cdfa. Sidebar list = registry ∪ bundled, sorted by name; "Split with <plugin>" anchors on `resolveFocusedSession(tab.split, focusByTab[tabId])`; App resolves names through `BootstrappedWorkspace.pluginManifestFor` and re-renders on `subscribeManifests` (manifestRevision); Settings bundle main-window only with health = worst on-screen reading; presence gate kept (a removed plugin keeps its rail glyph — deliberate). `fixtureWorkspace()` for App test fixtures.
 
 ### Task 9: Live verification, downgrade test, staging
 
@@ -291,6 +298,7 @@ export function parseCaptures(text: string | null): Map<number, ConversationCapt
 - `deadPaneConversation(id)`: capture for `id` → matching index record by provider+id (title for the tooltip) or, if the index has not scanned it yet, a synthesized record `{ provider, id, cwd, title: "Captured conversation" }` → Resume is EXACT. No capture → today's `latestForCwd` fallback.
 - `restartPane` cwd: `dead?.cwd ?? capture?.cwd ?? null` — a null-cwd corpse still restarts in the right folder when a capture exists.
 
-- [ ] Failing tests: parseCaptures (tolerant lines, latest wins, bad id dropped); controller: dead pane with a capture resolves Resume to that exact id even when three newer conversations exist in the same folder; null-cwd corpse + capture → restart uses the capture cwd; no capture → fallback unchanged (existing tests still pass).
-- [ ] Implement; gates; commit `feat(conversations): local conversation capture for exact dead-pane resume`.
-- [ ] Hook installed with backup; verify by starting `claude` in a TermX pane and checking the JSONL gains a line with the right TERMX_SESSION_ID.
+- [x] Failing tests: parseCaptures (tolerant lines, latest wins, bad id dropped); controller: dead pane with a capture resolves Resume to that exact id even when three newer conversations exist in the same folder; null-cwd corpse + capture → restart uses the capture cwd; no capture → fallback unchanged (existing tests still pass).
+- [x] Implement; gates; commit `feat(conversations): local conversation capture for exact dead-pane resume`.
+- [x] Hook installed with backup; verify by starting `claude` in a TermX pane and checking the JSONL gains a line with the right TERMX_SESSION_ID.
+> **As built:** commits 32ccfa9 / badcdda / 839a181 / c555321 / de6f251; hook `tools\claude-hooks\termx-capture.py`; captures in `<data dir>\conversation_captures_v1.jsonl`; SessionStart hook (`startup|resume|clear`) installed in `%USERPROFILE%\.claude\settings.json` with backup `settings.json.bak-2026-08-31-termx-capture`; post-reboot MISSING sessions now resume (de6f251: `deadPaneConversation` disqualifies only a LIVE session); captures compacted against the layout keep-set only when the layout parsed; `notifyCapturesChanged()` repaints (test de-tautologised in T5 addendum).
