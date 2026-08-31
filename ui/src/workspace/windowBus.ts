@@ -183,6 +183,15 @@ export function tauriWindowBus(
     // NOT yet receiving the event, so anything emitted meanwhile is lost —
     // which is why `ready()` exists.
     let listening: Promise<void> | null = null;
+    /// What Tauri gives back for taking the registration off this window. A
+    /// webview outlives its workspace — reconnects and remounts build a new
+    /// one in the same page — so dropping this would leave every dead
+    /// workspace still receiving, and re-dispatching, every broadcast for the
+    /// life of the process.
+    let unlisten: (() => void) | null = null;
+    /// Bumped when the channel is released, so a registration still in flight
+    /// knows it is already unwanted and hands itself straight back.
+    let epoch = 0;
     return {
       send(payload) {
         // A failed emit means the receiving window is gone, and the next
@@ -192,6 +201,7 @@ export function tauriWindowBus(
       subscribe(handler) {
         handlers.add(handler);
         if (listening === null) {
+          const mine = ++epoch;
           listening = transport
             .listen(event, ({ payload }) => {
               for (const registered of [...handlers]) {
@@ -202,10 +212,38 @@ export function tauriWindowBus(
                 }
               }
             })
-            .then(() => undefined)
+            .then((stop) => {
+              if (mine !== epoch) {
+                // Released while it was registering.
+                try {
+                  stop();
+                } catch {
+                  // A transport that cannot unlisten is not our problem here.
+                }
+                return;
+              }
+              unlisten = stop;
+            })
             .catch(() => undefined);
         }
-        return () => handlers.delete(handler);
+        return () => {
+          handlers.delete(handler);
+          if (handlers.size > 0) {
+            return;
+          }
+          // The last subscriber has gone: give the native registration back
+          // and forget it, so a later workspace in this same webview listens
+          // afresh rather than inheriting a dead channel.
+          epoch += 1;
+          listening = null;
+          const stop = unlisten;
+          unlisten = null;
+          try {
+            stop?.();
+          } catch {
+            // Same as above: nothing upstream can act on this.
+          }
+        };
       },
       ready() {
         return listening ?? Promise.resolve();

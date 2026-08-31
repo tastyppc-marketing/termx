@@ -420,6 +420,40 @@ describe("plugin health polling", () => {
     expect(panelState(controller).pluginHealth).toBe("up");
   });
 
+  it("lets a probe from a CLOSED pane's runtime change nothing when the panel is back", async () => {
+    // The existing late-probe test settles the old answer while the pane is
+    // still gone. Reopen first and the answer lands on a runtime it never
+    // asked about: the pane the user is looking at goes to the offline card
+    // for good — nothing re-probes a plugin believed dead — over a probe that
+    // was asked before the panel was even reopened.
+    const pending: { settle: ((alive: boolean) => void) | null } = { settle: null };
+    const { controller, ensureUp } = harness({
+      probe: () => new Promise<boolean>((resolve) => {
+        pending.settle = resolve;
+      }),
+    });
+    const tabId = await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+    const sessionId = panelId(controller);
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
+    expect(pending.settle).not.toBeNull();
+
+    await controller.closePane(tabId!, sessionId);
+    await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ensureUp).toHaveBeenCalledTimes(2);
+    expect(panelState(controller).pluginHealth).toBe("up");
+
+    // NOW the probe asked of the previous runtime answers.
+    pending.settle?.(false);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(panelState(controller)).toMatchObject({
+      pluginHealth: "up",
+      pluginUrl: "http://127.0.0.1:7345",
+    });
+  });
+
   it("polls only for panes in THIS window", async () => {
     // Every window builds its own controller from the same blob. A
     // layout-wide answer would have three windows polling one pane's plugin,

@@ -224,6 +224,40 @@ export function PluginsPanel({
   /** Guards the picker synchronously; `picking` only disables the buttons. */
   const pickingRef = useRef(false);
 
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  /** Id of a just-removed plugin, until focus has been placed after it. */
+  const [removedId, setRemovedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (removedId === null) {
+      return;
+    }
+    setRemovedId(null);
+    // Confirming destroys the button that had focus — with the whole row, for
+    // a folder plugin. Focus would fall to <body>, and the Settings surface's
+    // Esc guard only acts while focus is inside the surface, so the keyboard
+    // user would be stuck in Settings until they clicked something. Runs after
+    // the commit, when the replacement control actually exists.
+    const root = panelRef.current;
+    if (!root) {
+      return;
+    }
+    // A bundled row survives its own removal and drops back to "No folder
+    // added yet", so the next thing to do is right there in the row. Plugin
+    // ids are /^[a-z0-9][a-z0-9-]*$/ (manifest.ts), so they are safe to
+    // interpolate into a selector.
+    const inRow = root.querySelector<HTMLElement>(
+      `.settings-plugin[data-plugin-id="${removedId}"] [data-plugin-action="add-folder"]`,
+    );
+    const target =
+      inRow ??
+      root.querySelector<HTMLElement>("[data-testid='plugins-add']") ??
+      // Last resort: the surface itself is focusable (tabIndex -1) purely so
+      // there is always somewhere inside it for focus to be.
+      root.closest<HTMLElement>(".settings-surface");
+    target?.focus();
+  }, [removedId]);
+
   useEffect(() => {
     if (confirming === null) {
       return;
@@ -384,7 +418,7 @@ export function PluginsPanel({
   );
 
   return (
-    <div className="settings-plugins">
+    <div className="settings-plugins" ref={panelRef}>
       <div className="settings-subsection__title">Installed</div>
       {rows.length === 0 ? (
         <div className="settings-plugins__empty">
@@ -480,6 +514,7 @@ export function PluginsPanel({
                   <button
                     type="button"
                     className="settings-plugins__action"
+                    data-plugin-action="add-folder"
                     aria-label={`Add folder: ${row.name}`}
                     disabled={picking}
                     onClick={() => void addFolder(row.id)}
@@ -545,6 +580,7 @@ export function PluginsPanel({
                       if (confirming === row.id) {
                         setConfirming(null);
                         store.remove(row.id);
+                        setRemovedId(row.id);
                       } else {
                         setConfirming(row.id);
                       }

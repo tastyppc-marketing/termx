@@ -553,6 +553,41 @@ describe("PluginsPanel remove confirmation", () => {
     expect(rowIds()).toEqual(["showroom"]);
   });
 
+  it("puts focus on the section's own Add action when the row goes", async () => {
+    // Confirming destroys the button that was focused. Left alone, focus falls
+    // to <body>, and the surface's Esc guard — which requires focus inside the
+    // surface — then ignores Escape until the user clicks something.
+    const store = widgetsStore();
+    await renderWidgets(store);
+
+    const button = removeButton("widgets")!;
+    button.focus();
+    await click(button);
+    await click(removeButton("widgets")!);
+
+    expect(rowIds()).toEqual(["showroom"]);
+    expect(document.activeElement).toBe(
+      container.querySelector("[data-testid='plugins-add']"),
+    );
+  });
+
+  it("puts focus on the surviving row's Add folder when only the path goes", async () => {
+    // A bundled row is not destroyed by Remove — it drops back to "No folder
+    // added yet", so the natural next control is right there in the row.
+    const store = storeWith({
+      showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+    });
+    await renderPanel({ store });
+
+    const button = removeButton("showroom")!;
+    button.focus();
+    await click(button);
+    await click(removeButton("showroom")!);
+
+    expect(rowIds()).toEqual(["showroom"]);
+    expect(document.activeElement).toBe(action("showroom", "Add folder…"));
+  });
+
   it("disarms when the button loses focus", async () => {
     const store = widgetsStore();
     const remove = vi.spyOn(store, "remove");
@@ -1251,6 +1286,26 @@ describe("PluginsPanel inside the real Settings surface", () => {
     // The guard is gone with the armed state, so Esc means what it always
     // means again.
     await pressEscape(removeButton("widgets")!);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("can still be closed by keyboard after a removal", async () => {
+    // The whole point of moving focus after a removal: the surface's Esc guard
+    // only acts while focus is inside the surface, so focus landing on <body>
+    // would leave the keyboard user with no way out of Settings.
+    const onClose = vi.fn();
+    const store = storeWith({
+      widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+    });
+    await openPluginsSection(store, onClose);
+
+    const button = removeButton("widgets")!;
+    button.focus();
+    await click(button);
+    await click(removeButton("widgets")!);
+    expect(rowIds()).toEqual(["showroom"]);
+
+    await pressEscape(document.activeElement as HTMLElement);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

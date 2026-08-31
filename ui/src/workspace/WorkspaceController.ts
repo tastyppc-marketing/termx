@@ -597,6 +597,11 @@ export class WorkspaceController {
   /// Binding keys already accounted for, so a row this window has just
   /// ACCEPTED can be told from one it has held all along.
   private knownBindingKeys: ReadonlySet<string> = new Set();
+  /// The plugins this window is currently responsible for — what
+  /// `syncPluginScope` last decided to keep alive (rendered here, plus the
+  /// rows main has just accepted). Read by work that was queued earlier and
+  /// has to ask whether it is still wanted.
+  private pluginScopeIds: ReadonlySet<string> = new Set();
   /// Reserved ids this window gave up waiting for main to acknowledge. A late
   /// broadcast for one of them is an orphan, not a panel.
   private readonly abandonedBindings = new Set<string>();
@@ -866,6 +871,10 @@ export class WorkspaceController {
         scope.add(bindings[key]!.pluginId);
       }
     }
+    // What this window is responsible for, as of this moment: read by a
+    // queued Relaunch that has to decide whether the pane it was for is still
+    // there when its turn finally comes.
+    this.pluginScopeIds = scope;
     for (const pluginId of [...this.pluginRuntimes.keys()]) {
       if (!scope.has(pluginId)) {
         this.forgetPluginRuntime(pluginId);
@@ -3283,6 +3292,14 @@ export class WorkspaceController {
       }
       const chained = inFlight.then(() => {
         this.pluginForceRuns.delete(pluginId);
+        if (!this.pluginScopeIds.has(pluginId)) {
+          // The pane that wanted it closed while the first attempt hung. The
+          // window is still alive, so nothing else stops this retry — and its
+          // answer would be cached for a plugin with no pane and no poller,
+          // leaving the next open to inherit an "up" for a process that may
+          // have died since, or a "down" nobody watched happen.
+          return;
+        }
         return this.startPluginEnsure(plugins, pluginId);
       });
       this.pluginForceRuns.set(pluginId, chained);
@@ -3507,6 +3524,11 @@ export class WorkspaceController {
       return;
     }
     this.pluginHealthProbes.add(pluginId);
+    // Which runtime this probe is asking about. A close bumps it, and so does
+    // every fresh start — so a late "no" can be told apart from a "no" about
+    // what is on screen now. The url cannot do this job: a plugin restarted on
+    // its old port is a different process behind the same origin.
+    const generation = this.pluginEnsureGenerations.get(pluginId) ?? 0;
     let alive = false;
     try {
       // The origin the iframe is ACTUALLY pointed at, not whatever the runtime
@@ -3524,8 +3546,12 @@ export class WorkspaceController {
     if (alive || this.disposed) {
       return;
     }
-    // Re-read: a Relaunch (or a close) may have landed while the probe was in
-    // flight, and its answer is fresher than this one.
+    // Re-read: a Relaunch (or a close, or a close and a reopen) may have
+    // landed while the probe was in flight, and its answer is fresher than
+    // this one.
+    if ((this.pluginEnsureGenerations.get(pluginId) ?? 0) !== generation) {
+      return;
+    }
     if (this.pluginRuntimes.get(pluginId)?.health !== "up") {
       return;
     }
@@ -3646,6 +3672,16 @@ export class WorkspaceController {
     if (this.disposed) {
       return;
     }
+    if (this.windowId !== MAIN_WINDOW_ID) {
+      // An aux window's "persistence" is an event emission: it resolves the
+      // moment main has been TOLD, which says nothing about whether the daemon
+      // accepted the layout. Sweeping on that promise deletes the binding
+      // while the stored layout still names the pane — the crash order this
+      // whole mechanism exists to prevent, one window over. Main adopts the
+      // forwarded layout, and THAT adoption runs this sweep against its own
+      // write, which is the only one that reaches disk.
+      return;
+    }
     try {
       await this.persistence.flush();
     } catch {
@@ -3674,7 +3710,15 @@ export class WorkspaceController {
     for (const id of sessionIdsInLayout(after)) {
       gone.delete(id);
     }
-    const departed = keys.filter((key) => gone.has(Number(key)));
+    // ...and is STILL absent. This sweep waited for a write, and a layout from
+    // another window can be adopted in that gap — one that still names the
+    // pane, or that brings it back. Judging on history alone would unbind a
+    // pane the stored layout does mention, which is the dead-pane order in
+    // reverse: the binding gone while the pane lives on.
+    const current = new Set(sessionIdsInLayout(this.store.getState()));
+    const departed = keys.filter(
+      (key) => gone.has(Number(key)) && !current.has(Number(key)),
+    );
     if (departed.length === 0) {
       return;
     }
@@ -3687,6 +3731,13 @@ export class WorkspaceController {
   /// Forget what we knew about a plugin's process. The health poll prunes its
   /// own timer on the next publish, since no pane names this plugin any more.
   private forgetPluginRuntime(pluginId: string): void {
+    // NOTE: the queued-Relaunch entry is deliberately NOT dropped here. It is
+    // the record that a retry is already chained onto the attempt in flight,
+    // and a pane that comes back must JOIN it — clearing it lets the reopen
+    // chain a second retry onto the same unsettled attempt, and when that
+    // attempt finally answers both fire: two concurrent spawns of a plugin the
+    // spec says is a singleton. The retry itself is made safe by the scope
+    // check in `ensurePluginUp`, not by forgetting it was requested.
     // Bumped even when there was no entry: an ensure-up may be in flight for a
     // plugin whose last pane has just gone, and its answer must not land in an
     // empty map — the next open would then skip the probe and frame whatever

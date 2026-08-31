@@ -2805,6 +2805,32 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
     expect(h.pluginPanes.getSnapshot()).toEqual({});
   });
 
+  it("keeps a binding for a pane that came BACK before the sweep ran", async () => {
+    // The sweep is queued against the layout change that removed the pane, and
+    // it waits for the write. Another window can forward a layout that still
+    // holds the pane in that gap — main adopts it, the pane is real again, and
+    // a sweep judging by history alone then unbinds a pane the persisted
+    // layout DOES name: a dead pane where a working panel is.
+    const h = harness({ initial: layoutWithPanel(), pluginBindings: BOUND_PANEL });
+    let release = (): void => undefined;
+    h.layoutWrites.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const closing = h.controller.closePane("tab-3", PLUGIN_PANE_MIN_ID);
+    await tick();
+    // Another window's blob, still naming the pane, adopted before the write
+    // that dropped it has landed.
+    h.store.replaceState(layoutWithPanel());
+    await tick();
+
+    release();
+    await closing;
+    await tick();
+
+    expect(h.pluginPanes.getSnapshot()[String(PLUGIN_PANE_MIN_ID)]).toBeDefined();
+  });
+
   it("keeps a binding when the layout write FAILED", async () => {
     const h = harness({ initial: layoutWithPanel(), pluginBindings: BOUND_PANEL });
     h.layoutWrites.error = "Unable to save the workspace layout.";
@@ -3208,6 +3234,71 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("drops a Relaunch still queued behind a slow start when the last pane closes", async () => {
+    // Same queue as the teardown case, one step less final: the window lives
+    // on, so nothing stops the chained retry — but the pane it was for is
+    // gone. It would start the plugin nobody is showing and cache the answer
+    // with no pane and no poller behind it, and the NEXT open would inherit
+    // that: an "up" for a process that may have died since, or a "down" the
+    // user never saw happen.
+    const gates: Array<(result: EnsureUpResult) => void> = [];
+    const h = harness({
+      ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+        gates.push(resolve);
+      }),
+    });
+    const tabId = await h.controller.openPluginTab("showroom");
+    const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+    void h.controller.relaunchPlugin(sessionId);
+    await tick();
+    expect(h.ensureUp).toHaveBeenCalledTimes(1);
+
+    await h.controller.closePane(tabId!, sessionId);
+    await tick();
+    // The hung first attempt finally answers, releasing the queued retry.
+    gates[0]?.(runtimeUp());
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(1);
+    // Nothing cached either: the next open asks the plugin again.
+    const reopened = await h.controller.openPluginTab("showroom");
+    const nextId = panelId(h.controller.getSnapshot().layout, reopened!);
+    await tick();
+    expect(h.ensureUp).toHaveBeenCalledTimes(2);
+    expect(h.controller.getSnapshot().paneStates[nextId]?.pluginHealth)
+      .toBe("starting");
+  });
+
+  it("a queued Relaunch outlived by a close and a reopen is still ONE retry", async () => {
+    // Close and reopen a panel while the start it is waiting on is hung, and
+    // the reopen must JOIN the retry already chained onto that attempt. Chain
+    // a second one and the day the attempt answers, both fire: two spawns of
+    // a plugin the spec says is a singleton, one of which nothing is waiting
+    // for and nothing will poll.
+    const gates: Array<(result: EnsureUpResult) => void> = [];
+    const h = harness({
+      ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+        gates.push(resolve);
+      }),
+    });
+    const tabId = await h.controller.openPluginTab("showroom");
+    const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+    void h.controller.relaunchPlugin(sessionId);
+    await tick();
+    await h.controller.closePane(tabId!, sessionId);
+    await tick();
+    await h.controller.openPluginTab("showroom");
+    await tick();
+    // Still just the hung start: the retry has nothing to run on yet.
+    expect(h.ensureUp).toHaveBeenCalledTimes(1);
+
+    gates[0]?.(runtimeUp());
+    await tick();
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(2);
   });
 
   it("an aux window gives up when main never acknowledges the binding", async () => {

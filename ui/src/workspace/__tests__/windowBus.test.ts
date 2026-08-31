@@ -87,9 +87,13 @@ describe("tauriWindowBus", () => {
   function fakeTransport() {
     const emitted: Array<{ event: string; payload: unknown }> = [];
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    /// Every native registration this transport handed out, and whether the
+    /// bus ever gave it back.
+    const registrations: Array<{ event: string; released: boolean }> = [];
     return {
       emitted,
       listeners,
+      registrations,
       transport: {
         emit: vi.fn(async (event: string, payload: unknown) => {
           emitted.push({ event, payload });
@@ -101,7 +105,12 @@ describe("tauriWindowBus", () => {
             handler: (event: { payload: unknown }) => void,
           ) => {
             listeners.set(event, handler);
-            return () => listeners.delete(event);
+            const registration = { event, released: false };
+            registrations.push(registration);
+            return () => {
+              registration.released = true;
+              listeners.delete(event);
+            };
           },
         ),
       },
@@ -156,6 +165,47 @@ describe("tauriWindowBus", () => {
 
     expect(emitted.map((entry) => entry.event)).toEqual([PLUGIN_PANES_EVENT]);
     expect(bindings).toEqual([{ "2147483648": { pluginId: "showroom" } }]);
+  });
+
+  it("hands the native subscription back when its last subscriber goes", async () => {
+    // A webview outlives its workspace: reconnects and remounts build a new
+    // one in the same page. The unlisten Tauri returns is the ONLY way to take
+    // a native registration off that window, so dropping it leaves every dead
+    // workspace still receiving — and re-dispatching — every layout broadcast
+    // for the life of the process.
+    const { transport, registrations } = fakeTransport();
+    const bus = tauriWindowBus(transport);
+
+    const stopFirst = bus.onMutation(() => undefined);
+    const stopSecond = bus.onMutation(() => undefined);
+    await Promise.resolve();
+    expect(registrations).toHaveLength(1);
+
+    stopFirst();
+    // One subscriber left: the registration is still doing work.
+    expect(registrations[0]?.released).toBe(false);
+    stopSecond();
+
+    expect(registrations[0]?.released).toBe(true);
+  });
+
+  it("listens again after the channel was released", async () => {
+    // Releasing must not leave the channel deaf: a later workspace in the same
+    // webview subscribes to the same event and has to hear it.
+    const { transport, registrations, listeners } = fakeTransport();
+    const bus = tauriWindowBus(transport);
+
+    bus.onMutation(() => undefined)();
+    await Promise.resolve();
+    const seen: LayoutMutation[] = [];
+    bus.onMutation((mutation) => seen.push(mutation));
+    await Promise.resolve();
+
+    expect(registrations.length).toBeGreaterThanOrEqual(1);
+    listeners.get(LAYOUT_MUTATION_EVENT)?.({
+      payload: { kind: "setLayout", layout: { tabs: {} } },
+    });
+    expect(seen).toHaveLength(1);
   });
 
   it("ready() waits for the transport's listen registration", async () => {
@@ -738,6 +788,103 @@ describe("single-writer wiring over the bus", () => {
     });
 
     main.controller.dispose();
+  });
+
+  it("an aux window's close keeps the binding when MAIN's layout write fails", async () => {
+    // The crash order across windows. An aux window's "persistence" is an
+    // event emission: it succeeds the moment main is TOLD, which says nothing
+    // about whether the daemon accepted the layout. Sweeping on that promise
+    // deletes the binding while the stored layout still names the pane —
+    // the next boot restores a reserved pane with no panel behind it, and the
+    // identity of what the user had open is gone for good.
+    const bus = loopbackBus();
+    const layout = panelTornOut();
+    const seed = {
+      "plugins_v1.json": SHOWROOM_REGISTRY,
+      "plugin_panes_v1.json": PANEL_BINDING,
+    } as Partial<Record<AppFileName, string>>;
+    const plugin = { alive: true };
+    const mainFake = fakeClient(layout);
+    const auxFake = fakeClient(layout);
+    const mainFiles = fakeAppFiles(seed);
+    const main = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => mainFake.client,
+      appFiles: mainFiles.store,
+      pluginEnv: { APPDATA: "C:\data" },
+      pluginNative: killablePlugin(plugin).native,
+      windowBus: bus,
+    });
+    const aux = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => auxFake.client,
+      appFiles: fakeAppFiles(seed).store,
+      windowId: "aux-1",
+      pluginEnv: { APPDATA: "C:\data" },
+      pluginNative: killablePlugin(plugin).native,
+      windowBus: bus,
+    });
+    // The daemon refuses from here on: disk full, a rejected blob, a host that
+    // died between the forward and the write.
+    mainFake.setLayout.mockRejectedValue(new Error("the daemon refused it"));
+
+    await aux.controller.closePane("tab-3", PLUGIN_PANE_MIN_ID);
+    await aux.controller.flush();
+    await main.controller.flush();
+
+    const key = String(PLUGIN_PANE_MIN_ID);
+    expect(main.pluginPanes.getSnapshot()[key]).toBeDefined();
+    expect(aux.pluginPanes.getSnapshot()[key]).toBeDefined();
+    expect(mainFiles.write.mock.calls.map((call) => call[0]))
+      .not.toContain("plugin_panes_v1.json");
+
+    main.controller.dispose();
+    aux.controller.dispose();
+  });
+
+  it("an aux window's close DOES clear the binding once main's write lands", async () => {
+    // The half that makes the failure case mean something: the aux window
+    // stops unbinding, it does not stop the binding being cleaned up. Main
+    // adopts the forwarded layout and sweeps against its own write — the only
+    // one that reaches disk.
+    const bus = loopbackBus();
+    const layout = panelTornOut();
+    const seed = {
+      "plugins_v1.json": SHOWROOM_REGISTRY,
+      "plugin_panes_v1.json": PANEL_BINDING,
+    } as Partial<Record<AppFileName, string>>;
+    const plugin = { alive: true };
+    const mainFiles = fakeAppFiles(seed);
+    const main = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fakeClient(layout).client,
+      appFiles: mainFiles.store,
+      pluginEnv: { APPDATA: "C:\data" },
+      pluginNative: killablePlugin(plugin).native,
+      windowBus: bus,
+    });
+    const aux = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fakeClient(layout).client,
+      appFiles: fakeAppFiles(seed).store,
+      windowId: "aux-1",
+      pluginEnv: { APPDATA: "C:\data" },
+      pluginNative: killablePlugin(plugin).native,
+      windowBus: bus,
+    });
+
+    await aux.controller.closePane("tab-3", PLUGIN_PANE_MIN_ID);
+    await aux.controller.flush();
+    await main.controller.flush();
+    await aux.pluginPanes.flush();
+
+    expect(main.pluginPanes.getSnapshot()).toEqual({});
+    expect(aux.pluginPanes.getSnapshot()).toEqual({});
+    expect(mainFiles.write.mock.calls.map((call) => call[0]))
+      .toContain("plugin_panes_v1.json");
+
+    main.controller.dispose();
+    aux.controller.dispose();
   });
 
   it("an aux boot attaches only its own slot's sessions", async () => {
