@@ -224,6 +224,59 @@ describe("compactCaptures", () => {
     expect(result.length).toBeGreaterThan(512 * KIB);
     expect(compactCaptures(result)).toBeNull();
   });
+
+  /**
+   * Host session ids are monotonic and never reused, so a capture naming a
+   * pane that is gone from the layout can never be resumed by anything. That
+   * is the only truly unbounded axis: newest-per-pane still grows one line per
+   * pane forever, and a long-lived install opens a lot of panes.
+   */
+  describe("with a keep set", () => {
+    it("drops captures for panes the layout no longer has", () => {
+      const text = log(6000, 50);
+
+      const result = compactCaptures(text, new Set([1, 2, 3])) as string;
+
+      expect(result).not.toBeNull();
+      expect(result.trimEnd().split("\n")).toHaveLength(3);
+      expect([...parseCaptures(result).keys()].sort((left, right) => left - right))
+        .toEqual([1, 2, 3]);
+      // The lines that survive are still the newest-per-pane ones, unchanged.
+      expect(parseCaptures(result).get(3)).toEqual(parseCaptures(text).get(3));
+    });
+
+    it("ignores ids in the keep set that the log never captured", () => {
+      const result = compactCaptures(log(6000, 50), new Set([1, 999, 1000])) as string;
+
+      expect([...parseCaptures(result).keys()]).toEqual([1]);
+    });
+
+    it("keeps every pane when no keep set is given", () => {
+      const text = log(6000, 50);
+
+      expect(compactCaptures(text, undefined)).toBe(compactCaptures(text));
+      expect((compactCaptures(text) as string).trimEnd().split("\n")).toHaveLength(50);
+    });
+
+    it("returns null when the keep set would change nothing", () => {
+      const already = compactCaptures(log(10000, 5000)) as string;
+      const everyPane = new Set(Array.from({ length: 5000 }, (_, index) => index));
+
+      expect(compactCaptures(already, everyPane)).toBeNull();
+    });
+
+    it("does not lower the threshold: a small log is still left alone", () => {
+      // The keep set prunes; it does not decide WHEN to prune. A small log is
+      // not worth racing the hook's appends for, however stale it looks.
+      expect(compactCaptures(log(200, 5), new Set([1]))).toBeNull();
+    });
+
+    it("an empty keep set clears the log, because nothing is resumable", () => {
+      // Pinned deliberately: this is the sharp edge for the caller. An empty
+      // set means "no pane in the layout", and every capture really is dead.
+      expect(compactCaptures(log(6000, 50), new Set())).toBe("");
+    });
+  });
 });
 
 describe("the hook's own output", () => {

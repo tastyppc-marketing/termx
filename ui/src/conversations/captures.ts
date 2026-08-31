@@ -143,8 +143,22 @@ const COMPACT_THRESHOLD_BYTES = 512 * 1024;
  * know. That is the deliberate trade: an old build compacting a newer build's
  * log loses captures it was already ignoring, and the alternative — carrying
  * unreadable lines forever — is the unbounded growth this exists to stop.
+ *
+ * `keep`, when given, is the set of TermX session ids still present in the
+ * layout; captures naming any other pane are dropped. Host session ids are
+ * monotonic and never reused, so a capture for a pane that is gone can never
+ * be resumed by anything — and this is the only genuinely unbounded axis, as
+ * newest-per-pane alone still grows by one line per pane forever.
+ *
+ * CALLER BEWARE: an EMPTY `keep` set means "no pane in the layout" and clears
+ * the log. That is correct by this function's rules, but it makes the set the
+ * caller's responsibility — pass the real layout, never a set you built before
+ * the layout was restored.
  */
-export function compactCaptures(text: string): string | null {
+export function compactCaptures(
+  text: string,
+  keep?: ReadonlySet<number>,
+): string | null {
   // A UTF-8 encoding is never SHORTER than the string's UTF-16 length, so a
   // short string is guaranteed to be a small file. Cheap, and never early.
   if (text.length <= COMPACT_THRESHOLD_BYTES) {
@@ -158,6 +172,12 @@ export function compactCaptures(text: string): string | null {
     }
     const capture = parseCaptureLine(line);
     if (capture === null) {
+      continue;
+    }
+    // Filtered before the winner contest rather than after: a dropped pane's
+    // newest line should not displace anything, and this way it never even
+    // enters the map.
+    if (keep !== undefined && !keep.has(capture.termxSessionId)) {
       continue;
     }
     const previous = winners.get(capture.termxSessionId);
