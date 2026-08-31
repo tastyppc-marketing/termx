@@ -132,33 +132,53 @@ fn validate_probe_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Read a plugin-owned runtime discovery file without widening the app-data
-/// storage allowlist. A missing file is normal while a plugin is starting.
-#[tauri::command]
-pub fn plugin_read_runtime(path: String) -> Result<Option<String>, String> {
-    let path = PathBuf::from(path);
-    if !path.is_absolute() {
-        return Err("plugin runtime path must be absolute".to_string());
-    }
-
-    let file = match std::fs::File::open(&path) {
+/// Read a small plugin-owned file whole, or `None` when it does not exist.
+///
+/// `label` names the file in the size error so each caller's message stays its
+/// own. The bound is enforced by reading ONE byte past it rather than trusting
+/// `metadata().len()`: a plugin may still be writing the file we are reading.
+fn read_bounded(path: &Path, max_bytes: u64, label: &str) -> Result<Option<String>, String> {
+    let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("reading {}: {error}", path.display())),
     };
     let mut bytes = Vec::new();
-    file.take(RUNTIME_MAX_BYTES + 1)
+    file.take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("reading {}: {error}", path.display()))?;
-    if bytes.len() as u64 > RUNTIME_MAX_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(format!(
-            "reading {}: plugin runtime file exceeds 64 KiB",
-            path.display()
+            "reading {}: {label} exceeds {} KiB",
+            path.display(),
+            max_bytes / 1024
         ));
     }
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|error| format!("reading {} as UTF-8: {error}", path.display()))
+}
+
+/// Read a plugin-owned runtime discovery file without widening the app-data
+/// storage allowlist. A missing file is normal while a plugin is starting.
+///
+/// `async` + `spawn_blocking`, not a plain command: the path comes from the
+/// registry and may be a UNC/SMB or otherwise slow location, and T3's ensure-up
+/// polls this every 250 ms while a plugin starts. One stalled `open` on the IPC
+/// thread would freeze the whole window, so the blocking pool takes it.
+#[tauri::command]
+pub async fn plugin_read_runtime(path: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_runtime_at(&PathBuf::from(path)))
+        .await
+        .map_err(|_| "the plugin runtime file could not be read".to_string())?
+}
+
+/// Command body against the real filesystem.
+fn read_runtime_at(path: &Path) -> Result<Option<String>, String> {
+    if !path.is_absolute() {
+        return Err("plugin runtime path must be absolute".to_string());
+    }
+    read_bounded(path, RUNTIME_MAX_BYTES, "plugin runtime file")
 }
 
 /// Read a plugin folder's `termx-plugin.json`, or `None` when it has none.
@@ -168,32 +188,26 @@ pub fn plugin_read_runtime(path: String) -> Result<Option<String>, String> {
 /// repository never needs a TermX file. The command takes the FOLDER the user
 /// picked and joins the file name here, so the "which path is this" question
 /// has one answer on both sides of the IPC boundary.
+///
+/// Off the IPC thread for the same reason as `plugin_read_runtime`: the folder
+/// is whatever the user pointed the picker at, network shares included.
 #[tauri::command]
-pub fn plugin_read_manifest(folder: String) -> Result<Option<String>, String> {
-    let folder = PathBuf::from(folder);
+pub async fn plugin_read_manifest(folder: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_manifest_in(&PathBuf::from(folder)))
+        .await
+        .map_err(|_| "the plugin manifest could not be read".to_string())?
+}
+
+/// Command body against the real filesystem.
+fn read_manifest_in(folder: &Path) -> Result<Option<String>, String> {
     if !folder.is_absolute() {
         return Err("plugin folder path must be absolute".to_string());
     }
-    let path = folder.join(MANIFEST_FILE_NAME);
-
-    let file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("reading {}: {error}", path.display())),
-    };
-    let mut bytes = Vec::new();
-    file.take(MANIFEST_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("reading {}: {error}", path.display()))?;
-    if bytes.len() as u64 > MANIFEST_MAX_BYTES {
-        return Err(format!(
-            "reading {}: plugin manifest exceeds 64 KiB",
-            path.display()
-        ));
-    }
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|error| format!("reading {} as UTF-8: {error}", path.display()))
+    read_bounded(
+        &folder.join(MANIFEST_FILE_NAME),
+        MANIFEST_MAX_BYTES,
+        "plugin manifest",
+    )
 }
 
 /// GET one loopback health endpoint on a blocking worker so the Tauri async
@@ -271,9 +285,15 @@ fn plugin_spawn_in(
     let log_path = new_log_path_in(log_dir)?;
     let log_file = std::fs::File::create(&log_path)
         .map_err(|error| format!("creating {}: {error}", log_path.display()))?;
-    let child_stderr = log_file
-        .try_clone()
-        .map_err(|error| format!("preparing {}: {error}", log_path.display()))?;
+    let child_stderr = match log_file.try_clone() {
+        Ok(handle) => handle,
+        Err(error) => {
+            // Nothing ever wrote to it — same cleanup the failed-spawn arm
+            // below does, so no path out of here leaves an empty log behind.
+            let _ = std::fs::remove_file(&log_path);
+            return Err(format!("preparing {}: {error}", log_path.display()));
+        }
+    };
 
     let mut process = Command::new(&command);
     process
@@ -336,9 +356,19 @@ fn log_dir() -> Result<PathBuf, String> {
     Ok(crate::paths::resolve_data_dir(None)?.join(LOG_DIR_NAME))
 }
 
-/// Keep only the newest `LOG_FILES_KEEP` stderr logs. Best-effort throughout:
-/// a log still held open by a running plugin fails to delete on Windows, which
-/// is the behaviour we want, and a prune failure must never fail a spawn.
+/// Keep only the newest `LOG_FILES_KEEP` stderr logs. Best-effort: a prune
+/// failure must never fail a spawn.
+///
+/// Rust opens files with FILE_SHARE_DELETE, so deleting a log a running plugin
+/// still holds SUCCEEDS on Windows: the name is unlinked immediately and the
+/// bytes go when the last handle closes. `plugin_stderr_tail` for that pid then
+/// answers "", which is harmless — every caller reads the pid it just spawned,
+/// and that log is the newest of the 16 kept.
+///
+/// Accepted tradeoff: a per-spawn log has no byte cap of its own, so a chatty
+/// plugin grows its file until it exits. Capping it would mean a pipe, and a
+/// pipe reintroduces exactly the lifetime coupling this module exists to avoid
+/// (TermX holding the read end; EPIPE for a plugin that outlives TermX).
 fn prune_log_files_in(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -374,7 +404,10 @@ fn prune_log_files_in(dir: &Path) {
 /// not an error: this only ever feeds a diagnostic panel, and T3/T6 call it on
 /// the failure path where a second failure would replace a real reason with a
 /// meaningless one.
-#[tauri::command]
+///
+/// `async` so the macro runs the read on the blocking pool: small as it is, it
+/// is still a file open on a path the IPC thread has no business waiting on.
+#[tauri::command(async)]
 pub fn plugin_stderr_tail(pid: u32) -> Result<String, String> {
     let Some(path) = LOG_PATHS.lock().ok().and_then(|paths| paths.get(pid)) else {
         return Ok(String::new());
@@ -386,10 +419,16 @@ fn read_tail(path: &Path) -> String {
     let Ok(mut file) = std::fs::File::open(path) else {
         return String::new();
     };
-    let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    // Seek from the END, not from a length read a moment earlier: the plugin
+    // owning this log is usually still running and appending to it, and a stale
+    // length would put the cursor short of the real tail — the newest lines,
+    // which are the ones the failure UI exists to show.
     if file
-        .seek(SeekFrom::Start(len.saturating_sub(STDERR_TAIL_MAX_BYTES)))
+        .seek(SeekFrom::End(-(STDERR_TAIL_MAX_BYTES as i64)))
         .is_err()
+        // Shorter than the bound, so seeking back past the start failed: the
+        // whole file IS the tail.
+        && file.seek(SeekFrom::Start(0)).is_err()
     {
         return String::new();
     }
@@ -488,7 +527,7 @@ mod tests {
 
     #[test]
     fn read_runtime_requires_absolute() {
-        assert!(plugin_read_runtime("relative\\runtime.json".into()).is_err());
+        assert!(read_runtime_at(Path::new("relative\\runtime.json")).is_err());
     }
 
     #[test]
@@ -498,14 +537,14 @@ mod tests {
         // otherwise turn the test red.
         let _ = std::fs::remove_file(&p);
         assert_eq!(
-            plugin_read_runtime(p.to_string_lossy().into()).unwrap(),
+            read_runtime_at(&p).unwrap(),
             None
         );
     }
 
     #[test]
     fn read_manifest_requires_absolute() {
-        assert!(plugin_read_manifest("showroom".into()).is_err());
+        assert!(read_manifest_in(Path::new("showroom")).is_err());
     }
 
     #[test]
@@ -514,7 +553,7 @@ mod tests {
         // repository has none and answers from the bundled manifest instead.
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            plugin_read_manifest(dir.path().to_string_lossy().into()).unwrap(),
+            read_manifest_in(dir.path()).unwrap(),
             None
         );
     }
@@ -525,7 +564,7 @@ mod tests {
         let text = "{\n  \"manifest\": 1,\n  \"id\": \"showroom\"\n}\n";
         std::fs::write(dir.path().join(MANIFEST_FILE_NAME), text).unwrap();
         assert_eq!(
-            plugin_read_manifest(dir.path().to_string_lossy().into()).unwrap(),
+            read_manifest_in(dir.path()).unwrap(),
             Some(text.to_string())
         );
     }
@@ -538,7 +577,7 @@ mod tests {
             vec![b'x'; MANIFEST_MAX_BYTES as usize + 1],
         )
         .unwrap();
-        assert!(plugin_read_manifest(dir.path().to_string_lossy().into()).is_err());
+        assert!(read_manifest_in(dir.path()).is_err());
     }
 
     #[test]

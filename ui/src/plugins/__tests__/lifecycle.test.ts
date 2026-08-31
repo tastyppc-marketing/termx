@@ -76,6 +76,11 @@ function createNative(script: {
   return {
     calls,
     spawns,
+    // Settings-only seam; ensure-up never reads a manifest, so a call here is a
+    // test failure, not an answer.
+    async readManifest() {
+      throw new Error("ensureUp must not read manifests");
+    },
     async readRuntime(path) {
       calls.push(`readRuntime:${path}`);
       return script.runtime ? script.runtime(reads++) : null;
