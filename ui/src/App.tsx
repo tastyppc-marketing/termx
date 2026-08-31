@@ -36,6 +36,10 @@ import {
 } from "./native/sessionData";
 import { OutputPane, type LiveOutputRow } from "./outputs/OutputPane";
 import { OutputsStore } from "./outputs/outputsStore";
+import { BUNDLED_MANIFESTS } from "./plugins/bundled";
+import type { PluginManifest } from "./plugins/manifest";
+import { tauriPluginNative } from "./plugins/native";
+import { manifestFor, PluginsStore } from "./plugins/registry";
 import {
   SaveSessionDialog,
   type SaveSessionPrefill,
@@ -48,7 +52,10 @@ import type {
 import { probeRemoteTitle } from "./native/sshProbe";
 import { SetPasswordDialog } from "./ssh/SetPasswordDialog";
 import type { SshHost } from "./ssh/types";
-import { SettingsSurface } from "./settings/SettingsSurface";
+import {
+  SettingsSurface,
+  type SettingsPlugins,
+} from "./settings/SettingsSurface";
 import {
   TERMINAL_FONT_SIZE_MAX,
   TERMINAL_FONT_SIZE_MIN,
@@ -60,6 +67,7 @@ import {
   Sidebar,
   type SidebarConversations,
   type SidebarHosts,
+  type SidebarPlugin,
   type SidebarSaved,
 } from "./sidebar/Sidebar";
 import { SplitLayout, type SplitLayoutActions } from "./split/SplitLayout";
@@ -753,6 +761,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           resizePane(path, sizes) {
             controller.resizePane(tabId, path, sizes);
           },
+          // A panel's Relaunch re-runs the plugin's ensure-up and KEEPS the
+          // pane id — never `restartPane`, which would hand the pane a shell.
+          relaunchPlugin(sessionId) {
+            void controller.relaunchPlugin(sessionId);
+          },
           popOutPane(sessionId) {
             controller.popOutPane(tabId, sessionId);
           },
@@ -913,6 +926,78 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     uiSnapshot.hostsCollapsed,
     uiStateStore,
   ]);
+
+  // Installed plugins (plugin spec §2). The registry answers which plugins
+  // exist and whether they are switched on; the manifest supplies the name and
+  // glyph every surface shows. Legacy fixtures boot without a registry, so
+  // they simply get an empty one and no plugin entries anywhere.
+  const pluginsStore = useMemo(
+    () => workspace.plugins ?? new PluginsStore(),
+    [workspace],
+  );
+  const pluginsRegistry = useSyncExternalStore(
+    pluginsStore.subscribe,
+    pluginsStore.getSnapshot,
+  );
+  // Registered plugins UNION the bundled table: a first-party panel is named
+  // even before anyone adds its folder, which is what keeps the right glyph on
+  // a pane whose plugin has since been removed. `enabled` is the registry's
+  // alone, so an un-added plugin is listed and offered by nothing. Sorted by
+  // name, so the menus read the same however the JSON file is keyed.
+  const sidebarPlugins = useMemo<readonly SidebarPlugin[]>(() => {
+    const ids = new Set([
+      ...Object.keys(pluginsRegistry.plugins),
+      ...Object.keys(BUNDLED_MANIFESTS),
+    ]);
+    const listed: SidebarPlugin[] = [];
+    for (const id of ids) {
+      const manifest = manifestFor(id, null);
+      if (manifest === null) {
+        // A plugin TermX cannot name has nothing to put in a menu. Settings is
+        // where that is explained, with the field that failed.
+        continue;
+      }
+      listed.push({
+        id,
+        name: manifest.name,
+        icon: manifest.icon,
+        enabled: pluginsRegistry.plugins[id]?.enabled === true,
+      });
+    }
+    return listed.sort((left, right) => left.name.localeCompare(right.name));
+  }, [pluginsRegistry]);
+
+  // The manifest behind a bound pane. Registry PRESENCE is the gate, never the
+  // enabled flag: switching a plugin off must not turn its open panels into
+  // corpses, while REMOVING it is exactly the case SplitLayout degrades to a
+  // dismissible dead pane. The lookup is the bundled table, the same one
+  // bootstrap resolves against — when that learns to read a folder's own
+  // manifest, this is the second caller to follow.
+  const pluginManifestFor = useMemo(
+    () =>
+      (pluginId: string): PluginManifest | null =>
+        pluginsRegistry.plugins[pluginId] === undefined
+          ? null
+          : manifestFor(pluginId, null),
+    [pluginsRegistry],
+  );
+
+  // Plugin management WRITES `plugins_v1.json`, and the main window is its only
+  // writer (spec §2) — bootstrap hands every window a read-write store, so the
+  // single-writer rule is kept here. An aux window is handed no bundle and
+  // shows the surface's own "unavailable in this window" note.
+  const settingsPlugins = useMemo<SettingsPlugins | null>(() => {
+    if (controller.windowId !== MAIN_WINDOW_ID) {
+      return null;
+    }
+    return {
+      store: pluginsStore,
+      // The panel reads a registered folder's own `termx-plugin.json` through
+      // this seam; a folder without one falls back to the bundled table.
+      native: tauriPluginNative,
+      onOpen: (pluginId: string) => void controller.openPluginTab(pluginId),
+    };
+  }, [controller, pluginsStore]);
 
   // Flipping the "encrypt stored passwords" setting rewrites every stored
   // secret to match (spec §6). Skip the first render — the setting did not
@@ -1118,6 +1203,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
           {...(sidebarSaved ? { saved: sidebarSaved } : {})}
           {...(sidebarHosts ? { hosts: sidebarHosts } : {})}
+          plugins={sidebarPlugins}
           width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
           onResize={(width) =>
             uiStateStore.update((current) => setSidebarWidth(current, width))}
@@ -1179,6 +1265,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     sleep={sleepController}
                     sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
                     paneTitles={controller.paneTitles(tab.id)}
+                    pluginManifestFor={pluginManifestFor}
                     fontSize={settings.terminalFontSize}
                     onFontSizeWheel={adjustTerminalFontSize}
                     {...(openHistory ? { onLoadEarlier: openHistory } : {})}
@@ -1209,6 +1296,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           <SettingsSurface
             store={settingsStore}
             onClose={() => setSettingsOpen(false)}
+            {...(settingsPlugins ? { plugins: settingsPlugins } : {})}
           />
         ) : null}
         <FeaturesDock
