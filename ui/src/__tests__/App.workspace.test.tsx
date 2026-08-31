@@ -7,6 +7,7 @@ import type {
   WorkspaceSnapshot,
 } from "../workspace/WorkspaceController";
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
+import { fixtureWorkspace } from "./fixtureWorkspace";
 
 const terminalRender = vi.hoisted(() => vi.fn());
 
@@ -162,7 +163,7 @@ function controllerHarness(initial = snapshot()): ControllerHarness {
     close: vi.fn(() => order.push("client.close")),
   };
   return {
-    workspace: { controller, client } as unknown as BootstrappedWorkspace,
+    workspace: fixtureWorkspace({ controller, client }),
     setSnapshot(next) {
       current = next;
     },

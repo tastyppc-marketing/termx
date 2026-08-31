@@ -12,6 +12,7 @@ import type {
   WorkspaceSnapshot,
 } from "../workspace/WorkspaceController";
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
+import { fixtureWorkspace } from "./fixtureWorkspace";
 
 vi.mock("../sidebar/Sidebar", () => ({
   // The real rail lives inside the Sidebar; the mock surfaces just the save
@@ -188,7 +189,7 @@ function harness(options: HarnessOptions = {}) {
     { read: async () => null, write: async () => undefined },
     { now: () => 1000, generateId: () => `saved-${++counter}` },
   );
-  const workspace = {
+  const workspace = fixtureWorkspace({
     controller,
     client,
     settings: new SettingsStore({
@@ -196,7 +197,7 @@ function harness(options: HarnessOptions = {}) {
     }),
     ...(options.records ? { conversations: conversationsFake(options.records) } : {}),
     ...(options.savedStore === false ? {} : { saved }),
-  } as unknown as BootstrappedWorkspace;
+  });
   return { workspace, controller, saved };
 }
 

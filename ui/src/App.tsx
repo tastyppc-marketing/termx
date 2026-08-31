@@ -39,7 +39,7 @@ import { OutputsStore } from "./outputs/outputsStore";
 import { BUNDLED_MANIFESTS } from "./plugins/bundled";
 import type { PluginManifest } from "./plugins/manifest";
 import { tauriPluginNative } from "./plugins/native";
-import { manifestFor, PluginsStore } from "./plugins/registry";
+import { manifestFor } from "./plugins/registry";
 import {
   SaveSessionDialog,
   type SaveSessionPrefill,
@@ -929,12 +929,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
 
   // Installed plugins (plugin spec §2). The registry answers which plugins
   // exist and whether they are switched on; the manifest supplies the name and
-  // glyph every surface shows. Legacy fixtures boot without a registry, so
-  // they simply get an empty one and no plugin entries anywhere.
-  const pluginsStore = useMemo(
-    () => workspace.plugins ?? new PluginsStore(),
-    [workspace],
-  );
+  // glyph every surface shows. Bootstrap always builds this store — a fallback
+  // here would be a SECOND registry with no `save` behind it and a different
+  // instance from the one the plugin lifecycle gates on, so Settings would
+  // write nothing, report nothing, and disagree with `ensureUp`.
+  const pluginsStore = workspace.plugins;
   const pluginsRegistry = useSyncExternalStore(
     pluginsStore.subscribe,
     pluginsStore.getSnapshot,

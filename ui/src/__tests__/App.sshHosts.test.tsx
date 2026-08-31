@@ -28,6 +28,7 @@ import type {
   WorkspaceSnapshot,
 } from "../workspace/WorkspaceController";
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
+import { fixtureWorkspace } from "./fixtureWorkspace";
 
 const probeRemoteTitle = vi.fn(async () => null as string | null);
 vi.mock("../native/sshProbe", async (orig) => ({
@@ -237,7 +238,7 @@ function harness(options: HarnessOptions = {}) {
     { now: () => 1000, generateId: () => `saved-${++counter}` },
   );
   const sshCredentials = createSshCredentialsStore(fakeFiles(), fakeCrypto());
-  const workspace = {
+  const workspace = fixtureWorkspace({
     controller,
     client: { close: vi.fn() },
     settings: new SettingsStore({
@@ -246,7 +247,7 @@ function harness(options: HarnessOptions = {}) {
     saved,
     sshHosts: options.hosts ?? [MYVPS],
     sshCredentials,
-  } as unknown as BootstrappedWorkspace;
+  });
   return { workspace, controller, saved, sshCredentials };
 }
 

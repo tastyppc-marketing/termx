@@ -22,6 +22,7 @@ import type {
   WorkspaceSnapshot,
 } from "../workspace/WorkspaceController";
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
+import { fixtureWorkspace } from "./fixtureWorkspace";
 
 const captured = vi.hoisted(() => ({
   sidebar: null as unknown,
@@ -167,11 +168,12 @@ function harness(
     setResumeBootListener: vi.fn(),
   };
   return {
-    workspace: {
+    workspace: fixtureWorkspace({
       controller,
       client: { close: vi.fn() },
+      // The registry under test, so these tests watch the same store App does.
       plugins,
-    } as unknown as BootstrappedWorkspace,
+    }),
     openPluginTab,
     openPluginSplit,
     relaunchPlugin,
@@ -239,24 +241,20 @@ describe("App plugin wiring — sidebar", () => {
     expect(sidebarProps().plugins?.[0]?.enabled).toBe(false);
   });
 
-  it("opens a plugin tab through the controller", async () => {
+  // App passes `actions={controller}` with no adapter, so the sidebar holds the
+  // controller's own methods — identity is the whole claim, and calling them
+  // through `actions` to assert they were called would only be testing the
+  // mock. DEVIATION from the plan's Task 8 wording ("openPluginSplit in App
+  // adapts … using the tab's focused pane"): anchor resolution lives in the
+  // Sidebar instead (`anchorPane`), which is where the workspace snapshot is;
+  // App never sees a pane. The real click-to-anchor path is covered in
+  // sidebar/__tests__/SidebarPlugins.test.tsx.
+  it("hands the sidebar the controller's own plugin entry points", async () => {
     const fixture = harness();
     await renderApp(fixture);
 
-    await act(async () => sidebarProps().actions.openPluginTab?.("showroom", null));
-
-    expect(fixture.openPluginTab).toHaveBeenCalledWith("showroom", null);
-  });
-
-  it("splits a pane with a plugin through the controller", async () => {
-    const fixture = harness();
-    await renderApp(fixture);
-
-    await act(async () =>
-      sidebarProps().actions.openPluginSplit?.("tab-1", 1, "showroom", "row")
-    );
-
-    expect(fixture.openPluginSplit).toHaveBeenCalledWith("tab-1", 1, "showroom", "row");
+    expect(sidebarProps().actions.openPluginTab).toBe(fixture.openPluginTab);
+    expect(sidebarProps().actions.openPluginSplit).toBe(fixture.openPluginSplit);
   });
 });
 
@@ -301,13 +299,8 @@ describe("App plugin wiring — split layout", () => {
 describe("App plugin wiring — settings", () => {
   it("gives the main window the plugins bundle, opening a plugin as a tab", async () => {
     const fixture = harness();
-    const container = await renderApp(fixture);
+    await renderApp(fixture);
 
-    await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>("[data-testid='workspace-settings']")
-        ?.click()
-    );
     // The surface only mounts once Settings is open; drive it the way the
     // sidebar does.
     await act(async () => sidebarProps().onOpenSettings?.());

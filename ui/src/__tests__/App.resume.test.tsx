@@ -13,6 +13,7 @@ import type { LlmSessionRecord } from "../conversations/types";
 import type { Layout } from "../state/layout";
 import type { WorkspaceSnapshot } from "../workspace/WorkspaceController";
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
+import { fixtureWorkspace } from "./fixtureWorkspace";
 import { UiStateStore } from "../workspace/uiState";
 
 vi.mock("../sidebar/Sidebar", () => ({
@@ -169,12 +170,12 @@ function harness(options: { outcome: ResumeOutcome }): Harness {
     resumedSessionKeyForTab: vi.fn(() => null),
   };
   return {
-    workspace: {
+    workspace: fixtureWorkspace({
       controller,
       client: { close: vi.fn() },
       conversations,
       uiState: new UiStateStore(),
-    } as unknown as BootstrappedWorkspace,
+    }),
     conversations,
     resumeSession,
     activateTab,

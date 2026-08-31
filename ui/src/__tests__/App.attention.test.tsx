@@ -7,6 +7,7 @@ import type {
   WorkspaceSnapshot,
 } from "../workspace/WorkspaceController";
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
+import { fixtureWorkspace } from "./fixtureWorkspace";
 
 const { requestUserAttention } = vi.hoisted(() => ({
   requestUserAttention: vi.fn(async () => undefined),
@@ -133,10 +134,10 @@ function harness(initial: WorkspaceSnapshot) {
     markTabSeen: vi.fn(),
   };
   return {
-    workspace: {
+    workspace: fixtureWorkspace({
       controller,
       client: { close: vi.fn() },
-    } as unknown as BootstrappedWorkspace,
+    }),
     publish(next: WorkspaceSnapshot) {
       current = next;
       for (const listener of listeners) {

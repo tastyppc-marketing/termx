@@ -373,6 +373,42 @@ describe("Sidebar plugin tab rows", () => {
     expect(glyph?.getAttribute("aria-hidden")).toBe("true");
   });
 
+  // The whole reason disabled plugins stay in the list: a pane bound to one the
+  // user has since switched off must keep its identity on the rail, while the
+  // menus that would open ANOTHER one stay shut.
+  it("keeps the glyph on a pane whose plugin was switched off, and offers no entry", async () => {
+    const panel = tabModel("tab-1", { title: "Showroom", primarySessionId: 9, sessionIds: [9] });
+    await act(async () =>
+      root.render(
+        <Sidebar
+          snapshot={snapshot({
+            rootItems: [{ kind: "tab", tab: panel }],
+            ungroupedTabs: [panel],
+            groups: [],
+            activeSessionId: null,
+            paneStates: {
+              9: {
+                status: "plugin",
+                exitCode: null,
+                pluginId: "showroom",
+                pluginUrl: null,
+                pluginHealth: "up",
+              },
+            },
+          })}
+          actions={actions({ openPluginTab: vi.fn(), openPluginSplit: vi.fn() })}
+          plugins={[{ ...SHOWROOM, enabled: false }]}
+        />,
+      )
+    );
+
+    expect(tabRow("tab-1").querySelector(".sidebar-tab__glyph")?.textContent).toBe("🖼");
+
+    await openCreateMenu();
+    expect(item("create-menu-plugin-showroom")).toBeNull();
+    expect(menuOrder()).not.toContain("Plugins");
+  });
+
   it("leaves a terminal tab unmarked", async () => {
     await renderSidebar({ plugins: [SHOWROOM] });
 
