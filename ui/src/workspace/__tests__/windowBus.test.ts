@@ -12,6 +12,7 @@ import {
 import type { AppFileName, AppFileStore } from "../../native/appFiles";
 import { PLUGIN_PANE_MIN_ID } from "../../plugins/paneBindings";
 import {
+  BUS_READY_TIMEOUT_MS,
   LAYOUT_MUTATION_EVENT,
   LAYOUT_STATE_EVENT,
   PLUGIN_PANES_EVENT,
@@ -185,6 +186,36 @@ describe("tauriWindowBus", () => {
     letListenLand?.();
     await ready;
     expect(settled).toBe(true);
+  });
+
+  it("ready() gives up after the timeout instead of hanging the window", async () => {
+    // A listen() that never settles must not wedge a booting window with no
+    // UI and no error path — the caller's own fallback carries it.
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const transport = {
+        emit: vi.fn(async () => undefined),
+        listen: vi.fn(() => new Promise<() => void>(() => undefined)),
+      };
+      const bus = tauriWindowBus(transport);
+      bus.onPluginPanes(() => undefined);
+
+      let settled = false;
+      const ready = bus.ready().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(BUS_READY_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await ready;
+      expect(settled).toBe(true);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("carries forwarded binding mutations and validates them field by field", async () => {

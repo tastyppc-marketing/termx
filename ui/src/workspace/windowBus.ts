@@ -47,9 +47,10 @@ export interface WindowBus {
   broadcastLayout(layout: JsonValue): Promise<void>;
   /**
    * Main → all: the plugin pane bindings changed; here is the whole map
-   * (plugin spec §4). One-directional by design — `plugin_panes_v1.json` has
-   * the layout's single-writer discipline, so an aux window only ever adopts,
-   * and there is deliberately no aux → main binding mutation.
+   * (plugin spec §4). This channel carries main's authoritative truth only —
+   * `plugin_panes_v1.json` has the layout's single-writer discipline, so an
+   * aux window adopts what arrives here and sends its own changes back the
+   * other way, over `forwardPluginPanes`.
    */
   broadcastPluginPanes(state: JsonValue): Promise<void>;
   /** Aux → main: apply this binding change, or (`sync`) re-send the truth. */
@@ -63,6 +64,11 @@ export interface WindowBus {
    * events. Subscribing is fire-and-forget (the transport's `listen` is
    * async), so a window that subscribes and IMMEDIATELY asks another window to
    * send it something can miss the answer. Await this in between.
+   *
+   * ALWAYS resolves, never rejects, and never waits longer than
+   * `BUS_READY_TIMEOUT_MS`: this sits on a window's boot path, and a
+   * registration that never settles must degrade to "carry on with local
+   * state", not hang a window with no UI and no error path.
    */
   ready(): Promise<void>;
 }
@@ -71,6 +77,13 @@ export const LAYOUT_MUTATION_EVENT = "termx:layout-mutation";
 export const LAYOUT_STATE_EVENT = "termx:layout-state";
 export const PLUGIN_PANES_EVENT = "termx:plugin-panes";
 export const PLUGIN_PANES_MUTATION_EVENT = "termx:plugin-panes-mutation";
+
+/**
+ * How long `ready()` will wait for the transport's listener registrations.
+ * Generous for an IPC round trip, short enough that a window that will never
+ * hear anything still boots.
+ */
+export const BUS_READY_TIMEOUT_MS = 2_000;
 
 /**
  * Forwarded bindings are untrusted input from another window, so the payload
@@ -184,7 +197,26 @@ export function tauriWindowBus(
   const channels = [mutations, layouts, pluginPanes, pluginPaneMutations];
   return {
     ready: async () => {
-      await Promise.all(channels.map((entry) => entry.ready()));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), BUS_READY_TIMEOUT_MS);
+      });
+      const outcome = await Promise.race([
+        Promise.all(channels.map((entry) => entry.ready())).then(
+          () => "ready" as const,
+        ),
+        timeout,
+      ]);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      if (outcome === "timeout") {
+        // Visible, but never fatal: the caller's own fallback (for the
+        // bindings, the file it already read) is what carries the window.
+        console.warn(
+          "[termx] window bus listeners did not register in time; continuing without cross-window sync",
+        );
+      }
     },
     forwardMutation: (mutation) => mutations.send(mutation),
     broadcastLayout: (layout) => layouts.send(layout),

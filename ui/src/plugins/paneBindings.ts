@@ -92,6 +92,19 @@ function isBindingKey(key: string): boolean {
 }
 
 /**
+ * The ONE rule for an optional panel path, applied identically by `bind`, by
+ * the file parse, and by the bus payload parse. It has to be one rule: an
+ * empty (or whitespace) path that survived in one place and was dropped in
+ * another produced three spellings of the same binding — the main window would
+ * hold `{pluginId, path: ""}` until the next boot read it back as `{pluginId}`,
+ * while the same call from an aux window produced `{pluginId}` immediately,
+ * and `sameBinding` counts those as different (a spurious rebroadcast).
+ */
+export function normalizePluginPath(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+/**
  * Per-entry tolerant, like every other user-data parse in this app: a junk
  * entry is dropped rather than propagated, and a junk FILE reads as "no
  * bindings" — which renders every reserved pane as a dismissible dead pane
@@ -116,9 +129,10 @@ export function parsePluginPanesValue(value: unknown): PluginPanesV1 {
     if (typeof pluginId !== "string" || pluginId.length === 0) {
       continue;
     }
+    const panelPath = normalizePluginPath(path);
     result[key] = {
       pluginId,
-      ...(typeof path === "string" && path.length > 0 ? { path } : {}),
+      ...(panelPath !== undefined ? { path: panelPath } : {}),
     };
   }
   return result;
@@ -207,28 +221,44 @@ export type PluginPanesRequest =
   | { op: "bind"; sessionId: number; binding: PluginPaneBinding }
   | { op: "unbind"; sessionIds: readonly number[] };
 
-export interface PaneBindingsStoreOptions {
-  initial: PluginPanesV1;
-  /**
-   * `null` in every non-main window: an aux window is a replica of the
-   * bindings file and must never write it (single-writer rule).
-   */
-  save: ((text: string) => Promise<void>) | null;
-  /** Main window: fan the new state out to the other windows over the bus. */
-  onBroadcast?: (state: PluginPanesV1) => void;
-  /**
-   * Replica window: forward this change to the main window instead of applying
-   * it. Wiring this is what MAKES a store a replica — a store without it edits
-   * its own map (and persists if `save` is wired), which is the single-window
-   * and legacy-fixture shape.
-   *
-   * WHY forward instead of edit-then-sync: main's next broadcast REPLACES the
-   * replica's whole map, so a local edit here would appear and then snap back
-   * the moment anything else changed. Round-tripping through main means the
-   * binding the pane sees is the binding that was persisted.
-   */
-  onForward?: (request: PluginPanesRequest) => void;
-}
+/**
+ * `save` is the discriminant, and it maps 1:1 to the window: a function makes
+ * this the WRITER (the main window — it edits its own map, persists, and
+ * broadcasts), `null` makes it a REPLICA (any other window — it forwards and
+ * adopts, and can never write the file).
+ *
+ * The union is what stops the two halves being mixed: a writer cannot forward
+ * to itself, and a replica cannot broadcast (that would echo main's own truth
+ * back at it). A replica with no `onForward` has no channel to main at all, so
+ * it is READ-ONLY — `bind`/`unbind` are dropped rather than applied locally,
+ * because a local edit in a window that can neither persist nor forward is a
+ * binding that exists nowhere else and vanishes at the next broadcast.
+ */
+export type PaneBindingsStoreOptions =
+  | {
+      initial: PluginPanesV1;
+      save: (text: string) => Promise<void>;
+      /** Fan the new state out to the other windows over the bus. */
+      onBroadcast?: (state: PluginPanesV1) => void;
+      onForward?: never;
+    }
+  | {
+      initial: PluginPanesV1;
+      save: null;
+      /**
+       * Ask the main window to make this change. Returning the delivery
+       * promise is what lets `flush()` cover it — an aux window's close path
+       * awaits `flush()`, and an unbind that is still in flight dies with the
+       * webview.
+       *
+       * WHY forward instead of edit-then-sync: main's next broadcast REPLACES
+       * the replica's whole map, so a local edit would appear and then snap
+       * back the moment anything else changed. Round-tripping through main
+       * means the binding the pane sees is the binding that was persisted.
+       */
+      onForward?: (request: PluginPanesRequest) => Promise<void> | void;
+      onBroadcast?: never;
+    };
 
 /**
  * The live bindings map. Writes are NOT debounced (unlike ui-state): binding a
@@ -239,13 +269,16 @@ export class PaneBindingsStore {
   private current: PluginPanesV1;
   private readonly save: ((text: string) => Promise<void>) | null;
   private readonly onBroadcast?: (state: PluginPanesV1) => void;
-  private readonly onForward?: (request: PluginPanesRequest) => void;
+  private readonly onForward?: (request: PluginPanesRequest) => Promise<void> | void;
+  /** `save === null`. Cached because every mutator branches on it. */
+  private readonly replica: boolean;
   private readonly listeners = new Set<() => void>();
   private saveChain: Promise<void> = Promise.resolve();
 
   constructor(options: PaneBindingsStoreOptions) {
     this.current = options.initial;
     this.save = options.save;
+    this.replica = options.save === null;
     if (options.onBroadcast) {
       this.onBroadcast = options.onBroadcast;
     }
@@ -273,16 +306,22 @@ export class PaneBindingsStore {
     if (!isPluginPaneId(sessionId)) {
       return;
     }
-    const key = String(sessionId);
-    if (sameBinding(this.current[key], binding)) {
-      return;
-    }
+    const path = normalizePluginPath(binding.path);
     const normalized: PluginPaneBinding = {
       pluginId: binding.pluginId,
-      ...(binding.path !== undefined ? { path: binding.path } : {}),
+      ...(path !== undefined ? { path } : {}),
     };
-    if (this.onForward) {
-      this.onForward({ op: "bind", sessionId, binding: normalized });
+    if (this.replica) {
+      // Forwarded UNCONDITIONALLY, without the same-binding short-circuit: a
+      // replica's map can be ahead of main's (a broadcast that failed to
+      // emit is swallowed by design), and in that state a short-circuit would
+      // make re-binding the same plugin silently un-re-assertable. Main
+      // de-dupes on arrival, so the cost of a redundant forward is nil.
+      this.forward({ op: "bind", sessionId, binding: normalized });
+      return;
+    }
+    const key = String(sessionId);
+    if (sameBinding(this.current[key], normalized)) {
       return;
     }
     this.commit({ ...this.current, [key]: normalized });
@@ -294,11 +333,11 @@ export class PaneBindingsStore {
    * never bound (ordinary panes) are simply absent and cost nothing.
    */
   unbind = (sessionIds: readonly number[]): void => {
-    if (this.onForward) {
+    if (this.replica) {
       // Forwarded unfiltered: only main knows the current map, and a replica
       // that "helpfully" dropped ids it cannot see would lose real unbinds.
       if (sessionIds.length > 0) {
-        this.onForward({ op: "unbind", sessionIds: [...sessionIds] });
+        this.forward({ op: "unbind", sessionIds: [...sessionIds] });
       }
       return;
     }
@@ -330,7 +369,7 @@ export class PaneBindingsStore {
    * empty fallback layout would delete every binding the user has.
    */
   prune = (keep: ReadonlySet<number>): void => {
-    if (this.onForward) {
+    if (this.replica) {
       return;
     }
     const next: PluginPanesV1 = {};
@@ -362,10 +401,39 @@ export class PaneBindingsStore {
     this.notify();
   };
 
-  /** Await the pending write chain (the aux close path and tests need this). */
+  /**
+   * Await everything this store has started, in BOTH window roles: the main
+   * window's file writes and a replica's forwarded requests share one chain.
+   *
+   * This has to cover the forward, not just the write. An aux window's close
+   * path flushes before destroying its webview — an unbind still in flight
+   * would die with it — and whatever binds a pane must await this before
+   * persisting a layout that references the new binding, or the reserved pane
+   * reaches the blob while the binding does not (a dismissible dead pane, and
+   * the panel's identity is gone). In an aux window, a flush that only covered
+   * writes would be a no-op and both guarantees would be fiction.
+   */
   flush = async (): Promise<void> => {
     await this.saveChain;
   };
+
+  /**
+   * Queue a request to main on the SAME chain as the writer's disk writes, so
+   * one `flush()` means "delivered" in either role. Delivery failures are
+   * contained like a failed write: main's next broadcast is the truth anyway.
+   */
+  private forward(request: PluginPanesRequest): void {
+    const onForward = this.onForward;
+    if (onForward === undefined) {
+      // A replica with no channel to main is READ-ONLY. Applying the change
+      // locally would create a binding that exists in no file and in no other
+      // window, and that main's next broadcast would erase.
+      return;
+    }
+    this.saveChain = this.saveChain
+      .then(() => onForward(request))
+      .catch(() => undefined);
+  }
 
   private commit(next: PluginPanesV1): void {
     this.current = next;

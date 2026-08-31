@@ -215,6 +215,31 @@ describe("PaneBindingsStore (main window)", () => {
     expect(broadcasts).toEqual([]);
   });
 
+  it("spells an empty path the same way the parsers do", async () => {
+    // Three normalizations of one binding used to exist: bind kept `path: ""`,
+    // both parsers dropped it. The stored map then disagreed with its own
+    // reload AND with the same call made from an aux window.
+    const { store, saves, broadcasts } = mainStore();
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom", path: "" });
+    store.bind(PLUGIN_PANE_MIN_ID + 1, { pluginId: "showroom", path: "   " });
+    await store.flush();
+
+    const expected = {
+      "2147483648": { pluginId: "showroom" },
+      "2147483649": { pluginId: "showroom" },
+    };
+    expect(store.getSnapshot()).toEqual(expected);
+    // Survives its own round trip unchanged: no spurious rebind on next boot.
+    expect(parsePluginPanes(saves.at(-1)!)).toEqual(expected);
+
+    // And re-binding with the same empty path is now a genuine no-op.
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom", path: "" });
+    await store.flush();
+    expect(saves).toHaveLength(2);
+    expect(broadcasts).toHaveLength(2);
+  });
+
   it("refuses to bind an id outside the reserved range", async () => {
     const { store, saves, broadcasts } = mainStore();
 
@@ -276,10 +301,84 @@ describe("PaneBindingsStore (aux window)", () => {
     const store = new PaneBindingsStore({
       initial,
       save: null,
-      onForward: (request) => forwarded.push(request),
+      onForward: (request) => {
+        forwarded.push(request);
+      },
     });
     return { store, forwarded };
   }
+
+  /// Same shape, but delivery is a real promise resolved on command — the
+  /// production case, where the forward is an IPC emit.
+  function asyncReplica() {
+    const forwarded: PluginPanesRequest[] = [];
+    let deliver: (() => void) | undefined;
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: null,
+      onForward: (request) =>
+        new Promise<void>((resolve) => {
+          deliver = () => {
+            forwarded.push(request);
+            resolve();
+          };
+        }),
+    });
+    return { store, forwarded, deliver: () => deliver?.() };
+  }
+
+  it("flush() does not resolve until the forward has been delivered", async () => {
+    // The aux close path awaits flush() before destroying the webview, and T5
+    // awaits it before persisting a layout that references a fresh binding.
+    // If flush() only covered disk writes it would be a no-op here, and both
+    // of those guarantees would be fiction.
+    const { store, forwarded, deliver } = asyncReplica();
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    let flushed = false;
+    const pending = store.flush().then(() => {
+      flushed = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+    expect(forwarded).toEqual([]);
+
+    deliver();
+    await pending;
+    expect(flushed).toBe(true);
+    expect(forwarded).toHaveLength(1);
+  });
+
+  it("survives a forward that rejects", async () => {
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: null,
+      onForward: async () => {
+        throw new Error("the main window is gone");
+      },
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+
+    await expect(store.flush()).resolves.toBeUndefined();
+  });
+
+  it("is read-only when it has no channel to main", async () => {
+    // Neither persists nor forwards: applying locally would invent a binding
+    // that exists in no file and no other window.
+    const store = new PaneBindingsStore({ initial: {}, save: null });
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    store.unbind([PLUGIN_PANE_MIN_ID]);
+    await store.flush();
+
+    expect(store.getSnapshot()).toEqual({});
+    expect(listener).not.toHaveBeenCalled();
+  });
 
   it("forwards a bind to main instead of applying it locally", async () => {
     const { store, forwarded } = replica();
@@ -302,13 +401,35 @@ describe("PaneBindingsStore (aux window)", () => {
     ]);
   });
 
-  it("forwards an unbind unfiltered and drops an empty one", () => {
+  it("forwards a bind even when its own map already says the same thing", async () => {
+    // A replica's map can be AHEAD of main's — a broadcast whose emit failed
+    // is swallowed by design — and a same-binding short-circuit here would
+    // make that state permanent: re-binding the same plugin would send
+    // nothing. Main de-dupes on arrival, so a redundant forward costs nothing.
+    const { store, forwarded } = replica({
+      "2147483648": { pluginId: "showroom", path: "/" },
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom", path: "/" });
+    await store.flush();
+
+    expect(forwarded).toEqual([
+      {
+        op: "bind",
+        sessionId: PLUGIN_PANE_MIN_ID,
+        binding: { pluginId: "showroom", path: "/" },
+      },
+    ]);
+  });
+
+  it("forwards an unbind unfiltered and drops an empty one", async () => {
     const { store, forwarded } = replica({
       "2147483648": { pluginId: "showroom" },
     });
 
     store.unbind([PLUGIN_PANE_MIN_ID, 12]);
     store.unbind([]);
+    await store.flush();
 
     // The id it cannot see (12) still travels: only main knows the whole map.
     expect(forwarded).toEqual([
@@ -343,10 +464,10 @@ describe("PaneBindingsStore (aux window)", () => {
     expect(save).toHaveBeenCalledTimes(1);
   });
 
-  it("adopts bus state without persisting or echoing it back", async () => {
-    const save = vi.fn(async () => undefined);
-    const onBroadcast = vi.fn();
-    const store = new PaneBindingsStore({ initial: {}, save: null, onBroadcast });
+  it("adopts bus state without echoing anything back to main", async () => {
+    // A replica cannot even be CONSTRUCTED with an onBroadcast (the options
+    // union forbids it), so the only echo it could produce is a forward.
+    const { store, forwarded } = replica();
     const listener = vi.fn();
     store.subscribe(listener);
 
@@ -357,8 +478,23 @@ describe("PaneBindingsStore (aux window)", () => {
       "2147483648": { pluginId: "showroom", path: "/" },
     });
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(save).not.toHaveBeenCalled();
-    expect(onBroadcast).not.toHaveBeenCalled();
+    expect(forwarded).toEqual([]);
+  });
+
+  it("copies what it adopts, so the sender cannot mutate it afterwards", () => {
+    // `loopbackBus` hands the payload over by reference; without the copy the
+    // two windows would share binding objects.
+    const store = new PaneBindingsStore({ initial: {}, save: null });
+    const sent: PluginPanesV1 = { "2147483648": { pluginId: "showroom" } };
+
+    store.adopt(sent);
+    sent["2147483648"]!.pluginId = "impostor";
+    sent["2147483649"] = { pluginId: "late" };
+
+    expect(store.getSnapshot()).toEqual({
+      "2147483648": { pluginId: "showroom" },
+    });
+    expect(store.getSnapshot()["2147483648"]).not.toBe(sent["2147483648"]);
   });
 
   it("keeps the same snapshot reference when an adopted state changes nothing", () => {
