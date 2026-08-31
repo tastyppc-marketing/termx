@@ -1550,6 +1550,89 @@ describe("bootstrapWorkspace plugin panes", () => {
       vi.useRealTimers();
     }
   });
+
+  it("an aux window's one look adopts a plugin that is back, without spawning", async () => {
+    // What the 15 s health poll calls in a non-main window. `ensureUp` is the
+    // wrong seam for it: that one waits out a ten-second budget, so a poll
+    // built on it would still be waiting when the next tick arrived.
+    vi.useFakeTimers();
+    try {
+      const spy = healthyNative();
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+        windowId: "aux-1",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const workspace = await booting;
+
+      const look = workspace.pluginHost.observeOnce;
+      if (look === undefined) {
+        throw new Error("an aux host must carry the one-look seam");
+      }
+      const pending = look("showroom");
+      // No clock advance: one read, one probe, an answer.
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(await pending).toEqual({
+        ok: true,
+        runtime: { url: FRAMED, port: 7788, token: "t", version: "1.0.0" },
+      });
+      expect(spy.probeUrls.length).toBeGreaterThan(0);
+      expect(spy.spawn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an aux window's one look gives up at once when the plugin is still gone", async () => {
+    // The half that makes "one look" mean one. Built on the observe LOOP this
+    // would read the runtime file over and over for ten seconds and answer
+    // nothing at t=0 — every health tick starting another one.
+    vi.useFakeTimers();
+    try {
+      const spy = healthyNative({ readRuntime: async () => null });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+        windowId: "aux-1",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const workspace = await booting;
+
+      const look = workspace.pluginHost.observeOnce;
+      if (look === undefined) {
+        throw new Error("an aux host must carry the one-look seam");
+      }
+      const reads = spy.runtimeReads.length;
+      const pending = look("showroom");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(await pending).toEqual({
+        ok: false,
+        reason: "The plugin is not running. Relaunch it from the main window.",
+        stderrTail: "",
+      });
+      expect(spy.runtimeReads.length).toBe(reads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("MAIN carries no one-look seam, so its health poll stays one-way", async () => {
+    // Re-looking is only safe where it cannot lead to a spawn. On main a
+    // second look at a plugin believed dead is the first step towards
+    // restarting something the user killed on purpose, and the offline card
+    // that names Relaunch would become unreachable.
+    const spy = healthyNative();
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    expect(workspace.pluginHost.observeOnce).toBeUndefined();
+    workspace.controller.dispose();
+  });
 });
 
 /**
