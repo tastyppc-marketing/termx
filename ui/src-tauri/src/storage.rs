@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// than growing a second storage API. The ssh file holds secrets, but it needs
 /// no special handling HERE — encryption happens renderer-side (src/ssh.rs's
 /// DPAPI commands) before the bytes ever reach this module.
-pub const ALLOWED_FILES: [&str; 8] = [
+pub const ALLOWED_FILES: [&str; 9] = [
     "settings_v1.json",
     "ui_state_v1.json",
     "sessions_index_v1.json",
@@ -28,6 +28,11 @@ pub const ALLOWED_FILES: [&str; 8] = [
     // bindings. Both are TermX-owned user data, never plugin-writable.
     "plugins_v1.json",
     "plugin_panes_v1.json",
+    // Conversation captures: JSONL, and the only allowlisted file another
+    // process (the Claude Code SessionStart hook) appends to. TermX only ever
+    // READS it — the hook owns the writes — so the atomic-rename write path
+    // here exists for symmetry, not because anything in the UI uses it.
+    "conversation_captures_v1.jsonl",
 ];
 
 /// Keeps concurrent temp files distinct within one process (two debounced
@@ -112,7 +117,7 @@ mod tests {
     const SETTINGS: &str = "settings_v1.json";
 
     #[test]
-    fn allowlist_is_exactly_the_eight_app_files() {
+    fn allowlist_is_exactly_the_nine_app_files() {
         assert_eq!(
             ALLOWED_FILES,
             [
@@ -124,7 +129,23 @@ mod tests {
                 "ssh_credentials_v1.json",
                 "plugins_v1.json",
                 "plugin_panes_v1.json",
+                "conversation_captures_v1.jsonl",
             ]
+        );
+    }
+
+    /// The capture log is the first NON-json allowlisted name and the first one
+    /// a process outside TermX appends to; it must still read and write through
+    /// the same atomic path as the rest.
+    #[test]
+    fn the_capture_log_reads_and_writes_like_the_json_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "conversation_captures_v1.jsonl";
+        assert_eq!(read_file_in(tmp.path(), name).unwrap(), None);
+        write_file_in(tmp.path(), name, "{\"v\":1}\n").unwrap();
+        assert_eq!(
+            read_file_in(tmp.path(), name).unwrap().as_deref(),
+            Some("{\"v\":1}\n")
         );
     }
 

@@ -273,6 +273,15 @@ export interface WorkspaceControllerOptions {
   conversations?: {
     latestForCwd(cwd: string): LlmSessionRecord | null;
   };
+  /**
+   * The conversation a given pane ACTUALLY ran, recorded at the source by the
+   * Claude Code SessionStart hook (`tools/claude-hooks/termx-capture.py`).
+   * Exact where `conversations.latestForCwd` only guesses — two panes in one
+   * folder are indistinguishable to the folder lookup, and a corpse whose cwd
+   * the daemon never recorded is invisible to it. Optional: without the hook
+   * installed (and in every legacy fixture) the folder fallback is unchanged.
+   */
+  capturedConversationFor?: (sessionId: number) => LlmSessionRecord | null;
   savedSessions?: SavedSessionsRecorder;
   /**
    * Stored ssh passwords (ssh-sessions spec §2). Absent — or a policy that
@@ -396,6 +405,9 @@ export class WorkspaceController {
   private readonly conversations?: {
     latestForCwd(cwd: string): LlmSessionRecord | null;
   };
+  private readonly capturedConversationFor?: (
+    sessionId: number,
+  ) => LlmSessionRecord | null;
   private readonly savedSessions: SavedSessionsRecorder | null;
   private readonly sshPasswords:
     | { passwordFor(alias: string): Promise<string | null> }
@@ -472,6 +484,7 @@ export class WorkspaceController {
     this.dirExists = options.dirExists ?? tauriDirExists;
     this.savedSessions = options.savedSessions ?? null;
     this.conversations = options.conversations;
+    this.capturedConversationFor = options.capturedConversationFor;
     this.sshPasswords = options.sshPasswords ?? null;
     this.sshHosts = options.sshHosts ?? null;
     for (const session of options.sessions) {
@@ -1624,16 +1637,31 @@ export class WorkspaceController {
   };
 
   /// The conversation a dead pane's "Resume conversation" would bring back:
-  /// the newest resumable conversation recorded in the pane's directory, or
-  /// null when the pane has no directory, no conversations index is wired, or
-  /// nothing ever ran there. The title is for the button's tooltip.
+  /// the conversation THAT pane ran when a capture recorded it, else the
+  /// newest resumable conversation in the pane's directory, else null (no
+  /// capture, no directory, no index, or nothing ever ran there). The title is
+  /// for the button's tooltip.
   deadPaneResumeTitle = (deadSessionId: number): string | null => {
     return this.deadPaneConversation(deadSessionId)?.title ?? null;
   };
 
+  /**
+   * Capture first, folder second. The capture names the conversation this very
+   * pane started, so it is right where the folder lookup is only plausible: N
+   * panes in one repo, or a pane whose recorded cwd is not where the agent ran.
+   * A capture that fails `resumeCommand` (a corrupt id) is not "no resume" —
+   * it just cannot be typed, so the folder fallback still gets its turn.
+   */
   private deadPaneConversation(deadSessionId: number): LlmSessionRecord | null {
     const dead = this.sessions.get(deadSessionId);
-    if (!dead || dead.alive === true || !dead.cwd || !this.conversations) {
+    if (!dead || dead.alive === true) {
+      return null;
+    }
+    const captured = this.capturedConversationFor?.(deadSessionId) ?? null;
+    if (captured !== null && resumeCommand(captured) !== null) {
+      return captured;
+    }
+    if (!dead.cwd || !this.conversations) {
       return null;
     }
     const record = this.conversations.latestForCwd(dead.cwd);
@@ -1674,7 +1702,13 @@ export class WorkspaceController {
     const profile = mode === "fresh"
       ? defaultProfile
       : (dead?.profile ?? defaultProfile);
-    const cwd = mode === "fresh" ? null : (dead?.cwd ?? null);
+    // A corpse from a pre-cwd-tracking daemon carries no directory at all; the
+    // capture recorded where the agent CLI started in that very pane, which is
+    // the only other honest answer. Restart AND resume both take it — landing
+    // in the right folder is the whole point of "restart in place".
+    const cwd = mode === "fresh"
+      ? null
+      : (dead?.cwd ?? this.capturedConversationFor?.(deadSessionId)?.cwd ?? null);
     // Resolved BEFORE the shell exists, so a resume that has nothing to
     // resume degrades to a restart without ever arming a wait.
     const record = mode === "resume" ? this.deadPaneConversation(deadSessionId) : null;

@@ -12,7 +12,9 @@ export type AppFileName =
   | "saved_sessions_v1.json"
   | "ssh_credentials_v1.json"
   | "plugins_v1.json"
-  | "plugin_panes_v1.json";
+  | "plugin_panes_v1.json"
+  /** Append-only capture log; the Claude Code hook writes it, TermX reads. */
+  | "conversation_captures_v1.jsonl";
 
 export interface AppFileStore {
   /** Returns file contents, or null when the file doesn't exist yet. */

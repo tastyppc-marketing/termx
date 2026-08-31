@@ -83,6 +83,8 @@ function harness(options: {
   }) => Promise<SessionInfo>;
   /** Dead-pane resume lookup: cwd -> newest conversation record. */
   latestForCwd?: (cwd: string) => LlmSessionRecord | null;
+  /** Exact per-pane capture: session id -> the conversation that pane ran. */
+  capturedConversationFor?: (sessionId: number) => LlmSessionRecord | null;
   /** Which window slot this controller renders (multi-window Phase 1). */
   windowId?: string;
 } = {}) {
@@ -169,6 +171,9 @@ function harness(options: {
     uiState,
     ...(options.latestForCwd
       ? { conversations: { latestForCwd: options.latestForCwd } }
+      : {}),
+    ...(options.capturedConversationFor
+      ? { capturedConversationFor: options.capturedConversationFor }
       : {}),
     ...(options.windowId ? { windowId: options.windowId } : {}),
   });
@@ -1019,6 +1024,91 @@ describe("WorkspaceController dead-pane relaunch", () => {
     });
 
     expect(h.controller.deadPaneResumeTitle(3)).toBeNull();
+  });
+
+  // A capture (tools/claude-hooks/termx-capture.py) pairs a pane with the
+  // conversation it actually ran, so resume stops guessing "newest in this
+  // folder" — which is wrong whenever two panes share a folder.
+  const CAPTURED_ID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+  const captured = (
+    overrides: Partial<LlmSessionRecord> = {},
+  ): LlmSessionRecord => ({
+    provider: "claude",
+    id: CAPTURED_ID,
+    title: "Captured conversation",
+    cwd: "C:\\work\\project-3",
+    filePath: "",
+    updatedAtMs: 50,
+    summary: null,
+    recap: null,
+    titleSource: "derived",
+    ...overrides,
+  });
+
+  it("resumes the pane's captured conversation, not the newest one in its folder", async () => {
+    const h = harness({
+      sessions: [session(1), session(2), session(3, { alive: false, pid: null })],
+      latestForCwd: (cwd) => record(cwd),
+      capturedConversationFor: (id) => (id === 3 ? captured() : null),
+    });
+
+    expect(h.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+
+    const pending = h.controller.restartPane("tab-2", 3, "resume");
+    for (let i = 0; i < 25; i += 1) {
+      await Promise.resolve();
+    }
+    h.controller.reportSessionCwd(50, "C:\\work\\project-3", true);
+    await pending;
+
+    expect(h.writes).toEqual([[50, "claude --resume " + CAPTURED_ID + "\r"]]);
+  });
+
+  it("restarts a cwd-less corpse in the captured folder", async () => {
+    const h = harness({
+      sessions: [
+        session(1),
+        session(2),
+        session(3, { alive: false, pid: null, cwd: null }),
+      ],
+      capturedConversationFor: () => captured({ cwd: "C:\\work\\captured" }),
+    });
+
+    const created = await h.controller.restartPane("tab-2", 3, "restart");
+
+    expect(created).toBe(50);
+    expect(h.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "C:\\work\\captured" }),
+    );
+  });
+
+  it("offers a resume for a cwd-less corpse the folder lookup could never serve", () => {
+    const h = harness({
+      sessions: [session(3, { alive: false, pid: null, cwd: null })],
+      latestForCwd: (cwd) => record(cwd),
+      capturedConversationFor: () => captured({ cwd: null }),
+    });
+
+    expect(h.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+  });
+
+  it("ignores a capture whose id could not be typed and falls back to the folder", () => {
+    const h = harness({
+      sessions: [session(3, { alive: false, pid: null })],
+      latestForCwd: (cwd) => record(cwd),
+      capturedConversationFor: () => captured({ id: "not a; valid id" }),
+    });
+
+    expect(h.controller.deadPaneResumeTitle(3)).toBe("Daemon work");
+  });
+
+  it("never captures a live pane's resume", () => {
+    const h = harness({
+      sessions: [session(1)],
+      capturedConversationFor: () => captured(),
+    });
+
+    expect(h.controller.deadPaneResumeTitle(1)).toBeNull();
   });
 
   it("restarts a dead pane in place with its own profile and cwd", async () => {
