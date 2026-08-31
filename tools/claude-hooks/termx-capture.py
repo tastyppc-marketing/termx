@@ -146,7 +146,13 @@ def main():
     os.makedirs(directory, exist_ok=True)
     # One write of one short line in append mode: the OS appends it whole, so
     # concurrent panes cannot interleave halves of two captures.
-    with open(os.path.join(directory, CAPTURES_FILE), "a", encoding="utf-8") as handle:
+    #
+    # newline="" stops Windows text mode translating the "\n" into "\r\n". The
+    # UI's boot compaction rewrites this file with bare "\n", and a log that
+    # mixed both would be needlessly hard to diff and reason about. The parser
+    # tolerates either, so this is about keeping the file honest, not correct.
+    path = os.path.join(directory, CAPTURES_FILE)
+    with open(path, "a", encoding="utf-8", newline="") as handle:
         handle.write(line + "\n")
 
 

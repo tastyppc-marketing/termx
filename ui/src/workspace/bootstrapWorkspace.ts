@@ -8,6 +8,7 @@ import { sameFolder } from "./WorkspaceController";
 import {
   CAPTURES_FILE,
   capturedRecord,
+  compactCaptures,
   parseCaptures,
   type ConversationCapture,
 } from "../conversations/captures";
@@ -362,17 +363,54 @@ export async function bootstrapWorkspace(
       save: (text) => appFiles.write("plugins_v1.json", text),
     });
     // Conversation captures: written by the Claude Code SessionStart hook, so
-    // TermX only ever reads them, and a read that fails (no hook installed, an
-    // older host without the file in its allowlist) simply means "no captures"
-    // and the folder-based resume fallback stands.
-    const readCaptures = async (): Promise<Map<number, ConversationCapture>> => {
+    // TermX only ever reads them. A MISSING file is "no captures yet" and the
+    // folder-based resume fallback stands; a THROWN read is "I don't know",
+    // which is a different answer and must never be mistaken for the first.
+    // Returning an empty map on a throw would erase every capture the process
+    // had already learned, and Resume would vanish from the next dead pane.
+    const readCaptures = async (): Promise<Map<number, ConversationCapture> | null> => {
       try {
         return parseCaptures(await appFiles.read(CAPTURES_FILE));
       } catch {
-        return new Map();
+        return null;
       }
     };
-    let captures = await readCaptures();
+    let capturesText: string | null = null;
+    try {
+      capturesText = await appFiles.read(CAPTURES_FILE);
+    } catch {
+      capturesText = null;
+    }
+    let captures = parseCaptures(capturesText);
+    // Nothing else ever prunes an append-only log the UI re-reads on every
+    // session exit, so boot is where it gets bounded. Errors are swallowed on
+    // purpose: the hook is a separate process that may be appending at this
+    // very instant, and Windows refuses a write over a file another process
+    // holds open. Losing the rewrite costs nothing — the next boot retries,
+    // and the log we just parsed is still correct either way.
+    if (capturesText !== null) {
+      const compacted = compactCaptures(capturesText);
+      if (compacted !== null) {
+        try {
+          await appFiles.write(CAPTURES_FILE, compacted);
+        } catch {
+          // Next boot tries again.
+        }
+      }
+    }
+    // Overlapping refreshes: two panes exiting together start two reads, and
+    // the SLOWER one may resolve last while holding the OLDER file. Only the
+    // most recently started read may apply its result.
+    let capturesGeneration = 0;
+    const refreshCaptures = (): void => {
+      capturesGeneration += 1;
+      const generation = capturesGeneration;
+      void readCaptures().then((next) => {
+        if (next !== null && generation === capturesGeneration) {
+          captures = next;
+        }
+      });
+    };
     const conversationsIo = conversationsFileIo(appFiles);
     const conversations = await loadConversationsStore({
       read: () => conversationsIo.read(),
@@ -651,9 +689,7 @@ export async function bootstrapWorkspace(
     // place. Fire-and-forget: nothing waits on the refresh, the pane simply
     // has its capture by the time the user reaches for the button.
     client.onSessionExited(() => {
-      void readCaptures().then((next) => {
-        captures = next;
-      });
+      refreshCaptures();
     });
 
     const windowId = bootWindowId;

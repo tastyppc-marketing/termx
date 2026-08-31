@@ -1168,6 +1168,35 @@ describe("WorkspaceController dead-pane relaunch", () => {
     expect(h.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
   });
 
+  /**
+   * The title only proves a button would appear. This proves the pane actually
+   * comes BACK: a corpse from a pre-cwd-tracking daemon has no folder to look
+   * in, so the capture is the only thing that can name the conversation, and
+   * the id it names has to reach the shell as a typed command.
+   */
+  it("types the captured id when resuming a cwd-less corpse", async () => {
+    const h = harness({
+      sessions: [
+        session(1),
+        session(2),
+        session(3, { alive: false, pid: null, cwd: null }),
+      ],
+      // The folder lookup is armed and would answer "Daemon work" for any
+      // directory — but there is no directory, so only the capture can serve.
+      latestForCwd: (cwd) => record(cwd),
+      capturedConversationFor: () => captured({ cwd: null }),
+    });
+
+    const pending = h.controller.restartPane("tab-2", 3, "resume");
+    for (let i = 0; i < 25; i += 1) {
+      await Promise.resolve();
+    }
+    h.controller.reportSessionCwd(50, "C:\\work\\wherever", true);
+    await pending;
+
+    expect(h.writes).toEqual([[50, "claude --resume " + CAPTURED_ID + "\r"]]);
+  });
+
   it("ignores a capture whose id could not be typed and falls back to the folder", () => {
     const h = harness({
       sessions: [session(3, { alive: false, pid: null })],

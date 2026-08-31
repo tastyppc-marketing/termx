@@ -6,6 +6,8 @@ import type {
 } from "../../host/client";
 import type { JsonValue, SessionInfo } from "../../host/protocol";
 import type { AppFileStore } from "../../native/appFiles";
+import { CAPTURES_FILE, compactCaptures } from "../../conversations/captures";
+import type { LlmSessionRecord } from "../../conversations/types";
 import { PLUGIN_PANE_MIN_ID, parsePluginPanes } from "../../plugins/paneBindings";
 import { emptyLayout, serializeLayout } from "../../state/layout";
 import {
@@ -536,5 +538,277 @@ describe("bootstrapWorkspace plugin panes", () => {
     expect(Object.values(workspace.controller.getSnapshot().paneStates)).toContainEqual(
       expect.objectContaining({ status: "plugin", pluginHealth: "down" }),
     );
+  });
+});
+
+/**
+ * Conversation captures end to end (plugin-phase1 Task C). The unit tests in
+ * conversations/__tests__/captures.test.ts prove the parser; these prove the
+ * WIRING — that the file is actually read at boot, re-read when a pane dies,
+ * and that a failed read degrades to "I do not know" instead of "no captures".
+ */
+describe("bootstrapWorkspace conversation captures", () => {
+  const CAPTURED_ID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+  const OTHER_ID = "7d9e2f10-3a4b-4c5d-8e6f-102938475650";
+
+  /** A layout holding one pane, so a corpse has somewhere to be. */
+  function soloLayout(sessionId: number): JsonValue {
+    const state = emptyLayout();
+    state.tabs.only = {
+      id: "only",
+      title: null,
+      color: "blue",
+      fill: "off",
+      split: { kind: "pane", sessionId },
+    };
+    state.rootItems = [{ kind: "tab", id: "only" }];
+    state.activeTabId = "only";
+    return serializeLayout(state);
+  }
+
+  /** A session the host still remembers but that has already exited. */
+  function corpse(id: number): SessionInfo {
+    return { ...session(id), alive: false, pid: null };
+  }
+
+  function captureLine(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      v: 1,
+      termxSessionId: 3,
+      provider: "claude",
+      id: CAPTURED_ID,
+      cwd: "C:\\work\\3",
+      atMs: 1000,
+      ...overrides,
+    });
+  }
+
+  /** A capture store whose contents and failure mode a test can steer. */
+  function captureFiles(initial: string | null) {
+    const state = { text: initial, throwOnRead: false, throwOnWrite: false };
+    const writes: Array<[string, string]> = [];
+    const appFiles: AppFileStore = {
+      read: async (name) => {
+        if (name !== CAPTURES_FILE) {
+          return null;
+        }
+        if (state.throwOnRead) {
+          throw new Error("read_app_file failed");
+        }
+        return state.text;
+      },
+      write: async (name, contents) => {
+        if (name === CAPTURES_FILE && state.throwOnWrite) {
+          throw new Error("write_app_file failed");
+        }
+        writes.push([name, contents]);
+      },
+    };
+    return { appFiles, state, writes };
+  }
+
+  async function flush(): Promise<void> {
+    for (let index = 0; index < 20; index += 1) {
+      await Promise.resolve();
+    }
+  }
+
+  function boot(
+    appFiles: AppFileStore,
+    fake: ReturnType<typeof fakeClient>,
+    extra: { listSessions?: () => Promise<readonly LlmSessionRecord[]> } = {},
+  ) {
+    return bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      ...(extra.listSessions ? { listSessions: extra.listSessions } : {}),
+    });
+  }
+
+  it("reads the log at boot so a dead pane resumes the conversation IT ran", async () => {
+    const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+    const { appFiles } = captureFiles(`${captureLine()}\n`);
+
+    const workspace = await boot(appFiles, fake);
+
+    // Synthesized: the index has not scanned yet, and resume must not wait.
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+  });
+
+  it("resolves the capture to the EXACT indexed conversation, not the newest in the folder", async () => {
+    // Pins the id rather than the placeholder title: once the index holds
+    // records, capturedConversationFor joins on provider + id, so a
+    // distinctive title coming back proves the captured id was matched.
+    const indexed: LlmSessionRecord = {
+      provider: "claude",
+      id: CAPTURED_ID,
+      title: "The captured one",
+      cwd: "C:\\work\\3",
+      filePath: "C:\\transcripts\\captured.jsonl",
+      updatedAtMs: 10,
+      summary: null,
+      recap: null,
+      titleSource: "named",
+    };
+    // Newer, and in the SAME folder — exactly what the old folder-based
+    // lookup would have resumed instead.
+    const decoy: LlmSessionRecord = {
+      ...indexed,
+      id: OTHER_ID,
+      title: "A stranger",
+      updatedAtMs: 99,
+    };
+    const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+    const { appFiles } = captureFiles(`${captureLine()}\n`);
+
+    const workspace = await boot(appFiles, fake, {
+      listSessions: async () => [decoy, indexed],
+    });
+    await workspace.conversations?.refresh(true);
+
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBe("The captured one");
+  });
+
+  it("offers no capture-based resume when the log names a different pane", async () => {
+    const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+    const { appFiles } = captureFiles(`${captureLine({ termxSessionId: 9 })}\n`);
+
+    const workspace = await boot(appFiles, fake);
+
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBeNull();
+  });
+
+  it("re-reads the log when a session exits, catching a capture written after boot", async () => {
+    const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+    const { appFiles, state } = captureFiles(null);
+
+    const workspace = await boot(appFiles, fake);
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBeNull();
+
+    // The pane ran `claude` long after boot; the hook appended just now.
+    state.text = `${captureLine()}\n`;
+    fake.emitExit(3, 0);
+    await flush();
+
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+  });
+
+  /**
+   * The regression Grok caught: a THROWN read used to return an empty map and
+   * be assigned unconditionally, erasing every capture for the rest of the
+   * process — so Resume silently vanished from every later dead pane.
+   */
+  it("keeps the last good map when a re-read throws", async () => {
+    const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+    const { appFiles, state } = captureFiles(`${captureLine()}\n`);
+
+    const workspace = await boot(appFiles, fake);
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+
+    state.throwOnRead = true;
+    fake.emitExit(3, 0);
+    await flush();
+
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+  });
+
+  it("boots with no captures when the boot read throws", async () => {
+    const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+    const { appFiles, state } = captureFiles(`${captureLine()}\n`);
+    state.throwOnRead = true;
+
+    const workspace = await boot(appFiles, fake);
+
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBeNull();
+  });
+
+  /**
+   * Two panes exiting together start two reads. The SLOWER one may resolve
+   * last while holding the OLDER file, so ordering by completion would undo a
+   * capture that had already landed.
+   */
+  it("never lets a slow earlier read overwrite a newer one", async () => {
+    const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+    let defer = false;
+    const pending: Array<(text: string | null) => void> = [];
+    const appFiles: AppFileStore = {
+      read: async (name) => {
+        if (name !== CAPTURES_FILE || !defer) {
+          return null;
+        }
+        return new Promise<string | null>((resolve) => {
+          pending.push(resolve);
+        });
+      },
+      write: async () => undefined,
+    };
+
+    const workspace = await boot(appFiles, fake);
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBeNull();
+    defer = true;
+
+    fake.emitExit(3, 0); // read A — opened first, holds the older file
+    fake.emitExit(3, 0); // read B — opened second, holds the newer file
+    await flush();
+    expect(pending).toHaveLength(2);
+
+    // B finishes first and brings the capture the hook has just written.
+    pending[1]?.(`${captureLine()}\n`);
+    await flush();
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+
+    // A finally lands, holding the log from BEFORE that capture existed.
+    pending[0]?.(null);
+    await flush();
+
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+  });
+
+  describe("boot-time compaction", () => {
+    /** A log past the 512 KiB threshold, with many lines per pane. */
+    function hugeLog(): string {
+      const lines: string[] = [];
+      for (let index = 0; index < 6000; index += 1) {
+        lines.push(captureLine({ termxSessionId: index % 50, atMs: 1000 + index }));
+      }
+      return `${lines.join("\n")}\n`;
+    }
+
+    it("writes the compacted log back when the file has grown past the threshold", async () => {
+      const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+      const big = hugeLog();
+      const { appFiles, writes } = captureFiles(big);
+
+      const workspace = await boot(appFiles, fake);
+
+      const written = writes.filter(([name]) => name === CAPTURES_FILE);
+      expect(written).toHaveLength(1);
+      expect(written[0]?.[1]).toBe(compactCaptures(big));
+      expect((written[0]?.[1] ?? "").length).toBeLessThan(big.length);
+      // Compaction must not cost the boot a single resume.
+      expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+    });
+
+    it("leaves a small log alone rather than racing the hook for nothing", async () => {
+      const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+      const { appFiles, writes } = captureFiles(`${captureLine()}\n`);
+
+      await boot(appFiles, fake);
+
+      expect(writes.filter(([name]) => name === CAPTURES_FILE)).toEqual([]);
+    });
+
+    it("swallows a failed compaction write — the hook may hold the file open", async () => {
+      const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+      const { appFiles, state } = captureFiles(hugeLog());
+      state.throwOnWrite = true;
+
+      const workspace = await boot(appFiles, fake);
+
+      // Boot completed and the captures it parsed are still in hand; the next
+      // boot simply tries the rewrite again.
+      expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+    });
   });
 });
