@@ -200,6 +200,15 @@
   overflow-wrap: anywhere;
 }
 
+/* The block is `tabIndex={0}` so it can be scrolled from the keyboard, and
+   anything focusable has to SHOW focus. Same recipe as `.split-layout
+   :focus-visible`, restated here rather than inherited so the component keeps
+   its focus ring wherever it is mounted. */
+.plugin-pane__stderr:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .plugin-pane__actions {
   display: flex;
   flex-wrap: wrap;

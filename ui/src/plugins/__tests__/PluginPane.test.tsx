@@ -120,6 +120,18 @@ describe("plugin pane — up", () => {
     expect(frame()?.getAttribute("src")).toBe("http://localhost:7345/");
   });
 
+  it("reads the scheme and host case-insensitively, and normalises them", async () => {
+    await renderPane({ state: pluginState({ pluginUrl: "HTTP://LOCALHOST:7345" }) });
+
+    expect(frame()?.getAttribute("src")).toBe("http://localhost:7345/");
+  });
+
+  it("keeps a panel path's query string intact", async () => {
+    await renderPane({ panelPath: "/panel?x=1" });
+
+    expect(frame()?.getAttribute("src")).toBe("http://127.0.0.1:7345/panel?x=1");
+  });
+
   it(
     "carries NO sandbox attribute — Showroom's own scripts and storage are " +
       "same-origin, and the CSP frame-src is what bounds the panel",
@@ -157,6 +169,36 @@ describe("plugin pane — origin refusal", () => {
     // It is an offline card, not a wait: nothing is coming.
     expect(container.querySelector(".plugin-pane__relaunch")).not.toBeNull();
     expect(container.querySelector(".plugin-pane__wait")).toBeNull();
+  });
+
+  /**
+   * The origin is only half the address. A panel PATH that escapes its origin
+   * is the same bug wearing the manifest's clothes — and `panel.path` is
+   * checked for a leading "/" by the manifest parser and nothing else, so
+   * `//evil.com/` passes that check today.
+   */
+  const ESCAPING_PATHS = [
+    // Not rooted: string concatenation put this in the URL's USERINFO slot, so
+    // `http://127.0.0.1:7345` + `@evil.com/` parsed to host `evil.com`
+    // (verified against the WHATWG parser, not assumed).
+    "@evil.com/",
+    // Rooted, so the manifest parser accepts it, but protocol-relative: it
+    // resolves to another host entirely.
+    "//evil.com/",
+    "//evil.com/panel",
+    // Same escape wearing a backslash — the WHATWG parser folds `\` to `/` for
+    // special schemes, so this reaches evil.com too.
+    "/\\evil.com/",
+    // Absolute: a path that is really a whole URL replaces the base outright.
+    "https://evil.com/",
+  ];
+
+  it.each(ESCAPING_PATHS)("refuses a panel path of %s", async (panelPath) => {
+    await renderPane({ panelPath });
+
+    expect(frame()).toBeNull();
+    expect(container.querySelector(".plugin-pane__reason")?.textContent)
+      .toBe("The plugin reported a non-local address.");
   });
 });
 

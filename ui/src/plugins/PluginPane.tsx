@@ -28,11 +28,45 @@ export interface PluginPaneProps {
  * loopback. The CSP's `frame-src` says the same thing at the webview level;
  * this is the half that can explain itself to the user instead of rendering an
  * empty rectangle.
+ *
+ * Case-insensitive because a host is, but deliberately NOT widened beyond an
+ * origin: no trailing slash, no path, no query, no fragment, no `[::1]`.
+ * `pluginUrl` is a normalized origin by construction — `lifecycle.ts` builds it
+ * as `http://127.0.0.1:${port}` from the port in the runtime file, and the Rust
+ * probe validator only ever accepts 127.0.0.1/localhost — so anything with more
+ * in it did not come from that path, and the narrow pattern is what makes that
+ * detectable instead of tolerated.
  */
-const LOOPBACK_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
+const LOOPBACK_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i;
 
 /** Shown instead of a frame when the plugin hands back an address we refuse. */
 const NON_LOCAL_REASON = "The plugin reported a non-local address.";
+
+/**
+ * Join the manifest's panel path onto the plugin's origin, or refuse.
+ *
+ * String concatenation cannot do this job. `panel.path` is checked for a
+ * leading "/" by the manifest parser and nothing else, and two shapes escape
+ * the origin: `@evil.com/` is not rooted at all, so `origin + path` lands it in
+ * the URL's USERINFO slot and the real host becomes `evil.com`; `//evil.com/`
+ * IS rooted, passes that check, and is protocol-relative, so it resolves to
+ * another host entirely. Parsing the result and comparing origins is the only
+ * check that catches both — and it keeps a legitimate query string intact,
+ * which a hand-rolled sanitiser would have to reinvent.
+ */
+function panelSrc(origin: string, panelPath: string): string | null {
+  if (!panelPath.startsWith("/")) {
+    return null;
+  }
+  try {
+    const base = new URL(origin);
+    const url = new URL(panelPath, base);
+    return url.origin === base.origin ? url.href : null;
+  } catch {
+    // An unparseable origin or path is a refusal, never a thrown render.
+    return null;
+  }
+}
 
 /** What the health mark on the title bar means, for the screen reader. */
 const HEALTH_LABEL: Record<"starting" | "up" | "down", string> = {
@@ -109,10 +143,13 @@ export function PluginPane({
   const reported = state.pluginHealth ?? "starting";
   const origin = state.pluginUrl ?? null;
   // A reported-up plugin that names an address off this machine is a refusal,
-  // not a wait: nothing further is coming, and the user is told why.
-  const foreign = reported === "up" && origin !== null && !LOOPBACK_ORIGIN.test(origin);
+  // not a wait: nothing further is coming, and the user is told why. The panel
+  // PATH gets the same treatment as the origin — it can escape one too.
   const src =
-    reported === "up" && origin !== null && !foreign ? `${origin}${panelPath}` : null;
+    reported === "up" && origin !== null && LOOPBACK_ORIGIN.test(origin)
+      ? panelSrc(origin, panelPath)
+      : null;
+  const foreign = reported === "up" && origin !== null && src === null;
   // "up" with no origin at all cannot be framed either, but that one IS a wait:
   // what the pane shows follows what it can actually draw, never a label.
   const health = src !== null ? "up" : foreign || reported === "down" ? "down" : "starting";
