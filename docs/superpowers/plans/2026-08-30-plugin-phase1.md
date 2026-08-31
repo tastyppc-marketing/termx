@@ -268,3 +268,29 @@
 - Spec coverage: §2 (T1, T7), §3 + §3a (T2, T3), §4 incl. bindings file, reserved ids, no-binding rule, Relaunch-not-restartPane, cleanup, CSP (T4, T5, T6), §7 (T7), §9 Showroom via bundled manifest — zero Showroom-repo changes (T1), §12 P1 criteria (T9). §5/§6/§8 are Phase 2/3 and intentionally absent.
 - Type consistency: `PluginManifest`, `PluginNative`, `EnsureUpResult`, `PaneBindingsStore`, `isPluginPaneId`, `PaneSessionState.status "plugin"` are each defined once (T1/T2/T3/T4/T5) and consumed by the same names in later tasks.
 - Open judgment call surfaced for execution: the iframe carries NO `sandbox` attribute in v1 (Showroom needs same-origin scripts and clipboard); revisit when a third-party plugin exists.
+
+---
+
+### Task C: Local conversation capture (Michael's "Resume conversation" gap) — runs after T4, before T5
+
+**Diagnosis (2026-08-31):** "Resume conversation" on a dead LOCAL pane is chosen by `latestForCwd(dead.cwd)` (WorkspaceController.ts:1635-1645 → bootstrapWorkspace.ts:367-378): the NEWEST conversation in the pane's recorded folder. Exact per-pane pairing (OSC `9;78` conversation capture) exists ONLY for SSH panes — the remote bash bootstrap emits it; nothing emits it on Windows. Consequences: (1) corpses with `cwd: null` (pre-cwd-tracking daemon) get no Resume at all; (2) N panes in one folder all resume the same newest conversation; (3) a pane whose recorded cwd differs from where Claude ran resumes a stranger. Fix = record the pairing at the source.
+
+**Files:**
+- Create: `tools/claude-hooks/termx-capture.py` (Claude Code SessionStart hook; Python 3, stdlib only), `ui/src/conversations/captures.ts`, `ui/src/conversations/__tests__/captures.test.ts`
+- Modify: `ui/src-tauri/src/storage.rs` (ALLOWED_FILES += `conversation_captures_v1.jsonl`), `ui/src/native/appFiles.ts` (AppFileName), `ui/src/workspace/bootstrapWorkspace.ts` (load captures; hand `capturedConversationFor` to the controller), `ui/src/workspace/WorkspaceController.ts` (`deadPaneConversation` prefers the capture; restart/resume cwd falls back to the capture's cwd when the corpse has none)
+- Test: `ui/src/workspace/__tests__/WorkspaceController.test.ts` (extend)
+
+**Hook contract:** Claude Code runs `python <repo>\tools\claude-hooks\termx-capture.py` on `SessionStart` (matcher `startup|resume|clear|compact`) with JSON on stdin `{ session_id, cwd, transcript_path, hook_event_name, source }`. If `TERMX_SESSION_ID` is absent → exit 0 silently. Else append ONE JSON line to `%APPDATA%\TermX\conversation_captures_v1.jsonl`: `{"v":1,"termxSessionId":<int>,"provider":"claude","id":"<session_id>","cwd":"<cwd>","atMs":<epoch ms>}`. Validate `id` against `^[A-Za-z0-9-]+$` before writing (same rule `resumeCommand` enforces — the id becomes a shell command later). Never raise; never print (stdout would land in Claude's context). File is append-only; the UI dedupes (latest `atMs` per `termxSessionId` wins). Installation into `~/.claude/settings.json` is a surgical edit WITH a dated backup (same precedent as the terminal-awareness section); the hook path is derived from the TermX repo location the installer is run from — the settings entry is the ONE place an absolute path is allowed, because settings.json is user config, not code.
+
+**UI:**
+```ts
+export interface ConversationCapture { termxSessionId: number; provider: "claude" | "codex"; id: string; cwd: string | null; atMs: number }
+export function parseCaptures(text: string | null): Map<number, ConversationCapture>; // tolerant per line; latest atMs wins; invalid ids dropped
+```
+- bootstrap reads `conversation_captures_v1.jsonl` at boot AND re-reads it whenever a session exits (`onSessionExited`) — cheap, and it is exactly when the dead pane appears.
+- `deadPaneConversation(id)`: capture for `id` → matching index record by provider+id (title for the tooltip) or, if the index has not scanned it yet, a synthesized record `{ provider, id, cwd, title: "Captured conversation" }` → Resume is EXACT. No capture → today's `latestForCwd` fallback.
+- `restartPane` cwd: `dead?.cwd ?? capture?.cwd ?? null` — a null-cwd corpse still restarts in the right folder when a capture exists.
+
+- [ ] Failing tests: parseCaptures (tolerant lines, latest wins, bad id dropped); controller: dead pane with a capture resolves Resume to that exact id even when three newer conversations exist in the same folder; null-cwd corpse + capture → restart uses the capture cwd; no capture → fallback unchanged (existing tests still pass).
+- [ ] Implement; gates; commit `feat(conversations): local conversation capture for exact dead-pane resume`.
+- [ ] Hook installed with backup; verify by starting `claude` in a TermX pane and checking the JSONL gains a line with the right TERMX_SESSION_ID.
