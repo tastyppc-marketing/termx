@@ -165,15 +165,42 @@ async function describeFolder(
     return { manifest: null, problem: "Manifest is not valid JSON" };
   }
   const manifest = parseManifest(raw);
-  return manifest
-    ? { manifest, problem: null }
-    : {
-        manifest: null,
-        problem: `Manifest invalid: ${parseManifestErrors(raw).join(", ")}`,
-      };
+  if (!manifest) {
+    return {
+      manifest: null,
+      problem: `Manifest invalid: ${parseManifestErrors(raw).join(", ")}`,
+    };
+  }
+
+  // The registry key, not the manifest, is what the lifecycle and the layout
+  // blob start from — so a folder whose manifest names some other plugin can
+  // never be started under this row. Reporting it healthy would put an "Open
+  // as tab" button on a plugin that refuses to open, with nothing on screen
+  // saying why.
+  if (manifest.id !== id) {
+    return {
+      manifest: null,
+      problem: `This folder's manifest says ${manifest.id}, not ${id}.`,
+    };
+  }
+  return { manifest, problem: null };
 }
 
-/** Last segment of a Windows or POSIX path, lowercased to match plugin ids. */
+/**
+ * Last segment of a Windows or POSIX path, lowercased to match plugin ids.
+ *
+ * This is the ONLY place the panel interprets a folder string, and it
+ * normalises what matters here: repeated and trailing separators fall out of
+ * the filter, and case falls out of the lowercasing, so `C:\code\Showroom\`
+ * and `\\server\share\showroom` both answer "showroom".
+ *
+ * Paths are deliberately NOT normalised anywhere else. Identity is the
+ * manifest's `id`, never the folder: two spellings of one folder collide on
+ * the id and are refused as a duplicate, and the registry stores whatever
+ * string the picker returned so the value the user chose is the value TermX
+ * hands back to the OS. The only cost is that re-spelling a path counts as a
+ * change to `folderKey` and re-reads that folder once.
+ */
 function folderName(folder: string): string {
   const parts = folder.split(/[\\/]+/).filter((part) => part.length > 0);
   return (parts[parts.length - 1] ?? "").toLowerCase();
@@ -305,7 +332,16 @@ export function PluginsPanel({
       pickingRef.current = true;
       setPicking(true);
       try {
-        const folder = await pickFolder({ title: "Choose a plugin folder" });
+        let folder: string | null;
+        try {
+          folder = await pickFolder({ title: "Choose a plugin folder" });
+        } catch {
+          // A picker that rejects — no dialog plugin, a denied capability —
+          // used to escape this callback as an unhandled rejection, leaving a
+          // click that did nothing and a panel that said nothing.
+          setError("The folder picker could not be opened.");
+          return;
+        }
         if (folder === null) {
           // Cancelling is not a failure; leave whatever is on screen alone.
           return;
@@ -438,7 +474,14 @@ export function PluginsPanel({
                   // plugin the switch belongs to.
                   ariaLabel={`Enable ${row.name}`}
                   checked={row.enabled}
-                  disabled={row.path === null}
+                  // Nothing to switch on without a folder, and nothing to
+                  // switch on when the folder is broken — the lifecycle would
+                  // refuse it either way. Switching OFF stays available
+                  // whatever the state: a row that broke while it was on must
+                  // not be trapped there.
+                  disabled={
+                    row.path === null || (!row.enabled && row.problem !== null)
+                  }
                   onToggle={(checked) => store.setEnabled(row.id, checked)}
                 />
                 {onOpen && row.enabled && row.path !== null && row.problem === null ? (
@@ -477,7 +520,13 @@ export function PluginsPanel({
                     Change folder…
                   </button>
                 ) : null}
-                {row.bundled ? null : (
+                {/* Remove clears the registry entry, so it appears wherever
+                    there is one. For a folder plugin that takes the row with
+                    it; for a bundled plugin the catalog row stays and falls
+                    back to "No folder added yet", which is the only way to
+                    forget a wrong Showroom folder short of editing
+                    plugins_v1.json by hand. */}
+                {row.path === null ? null : (
                   // Confirm in place rather than in a dialog: the row being
                   // removed stays on screen and under the pointer, and one
                   // stray click can no longer drop a plugin.
@@ -497,7 +546,9 @@ export function PluginsPanel({
                     aria-label={
                       confirming === row.id
                         ? `Confirm removing ${row.name}`
-                        : `Remove ${row.name}`
+                        : row.bundled
+                          ? `Remove the folder for ${row.name}`
+                          : `Remove ${row.name}`
                     }
                     onClick={() => {
                       if (confirming === row.id) {

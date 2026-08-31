@@ -193,7 +193,7 @@ describe("PluginsPanel rows", () => {
     ).toBe(true);
   });
 
-  it("removes a folder plugin but never the bundled one", async () => {
+  it("removes a folder plugin, row and all", async () => {
     const store = storeWith({
       showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
       widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
@@ -204,16 +204,39 @@ describe("PluginsPanel rows", () => {
       native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
     });
 
-    // Showroom ships with TermX: its row is permanent, the toggle is the only
-    // way to stand it down.
-    expect(removeButton("showroom")).toBeNull();
-
     // Removal is two-step (see the confirm-in-place suite); the first click
     // only arms the button.
     await click(removeButton("widgets")!);
     await click(removeButton("widgets")!);
     expect(remove).toHaveBeenCalledWith("widgets");
     expect(rowIds()).toEqual(["showroom"]);
+  });
+
+  it("removes the folder from a bundled plugin but keeps its row", async () => {
+    // Showroom ships with TermX, so the catalog entry is permanent — but the
+    // folder it points at is the user's and has to be forgettable.
+    const store = storeWith({
+      showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+    });
+    const remove = vi.spyOn(store, "remove");
+    await renderPanel({ store });
+
+    await click(removeButton("showroom")!);
+    await click(removeButton("showroom")!);
+
+    expect(remove).toHaveBeenCalledWith("showroom");
+    expect(rowIds()).toEqual(["showroom"]);
+    expect(text(row("showroom").querySelector(".settings-plugin__hint"))).toBe(
+      "No folder added yet.",
+    );
+    // And the way back is right there.
+    expect(action("showroom", "Add folder…")).not.toBeNull();
+  });
+
+  it("offers nothing to remove on a bundled row with no folder", async () => {
+    await renderPanel({ store: storeWith({}) });
+
+    expect(removeButton("showroom")).toBeNull();
   });
 
   it("opens a plugin as a tab", async () => {
@@ -562,6 +585,54 @@ describe("PluginsPanel manifest problems", () => {
     );
   });
 
+  it("refuses a manifest that names a different plugin than the row", async () => {
+    // Someone edited the manifest, or pointed two rows at one folder. The
+    // lifecycle keys on the registry id and would refuse to start it, so a
+    // healthy-looking row here is a lie with an "Open as tab" button on it.
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: false, grants: [] },
+      }),
+      native: fakeNative({ [WIDGETS_PATH]: manifestText({ id: "gadgets" }) }),
+      onOpen: vi.fn(),
+    });
+
+    expect(text(row("widgets").querySelector(".settings-plugin__status"))).toBe(
+      "This folder's manifest says gadgets, not widgets.",
+    );
+    expect(action("widgets", "Open as tab")).toBeNull();
+  });
+
+  it("will not switch on a plugin whose folder is broken", async () => {
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: false, grants: [] },
+      }),
+    });
+
+    // Nothing to enable: the lifecycle would refuse it, so the switch would
+    // silently do nothing.
+    const toggle = row("widgets").querySelector<HTMLInputElement>(
+      "input[type='checkbox']",
+    )!;
+    expect(toggle.disabled).toBe(true);
+  });
+
+  it("still lets a broken plugin be switched off", async () => {
+    // The row broke while it was on. Trapping it there is worse than the
+    // problem it is reporting.
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+    });
+
+    const toggle = row("widgets").querySelector<HTMLInputElement>(
+      "input[type='checkbox']",
+    )!;
+    expect(toggle.disabled).toBe(false);
+  });
+
   it("uses the bundled manifest when the bundled plugin's folder has no file", async () => {
     // Showroom's repository carries no termx-plugin.json by design (spec §9);
     // its bundled manifest is the answer, not a problem chip.
@@ -695,6 +766,74 @@ describe("PluginsPanel add flow", () => {
     expect(error()).toBe("That folder could not be read.");
   });
 
+  it("says so when the folder picker itself fails to open", async () => {
+    // A rejected picker used to escape as an unhandled rejection: the click
+    // did nothing and the panel said nothing.
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    await renderPanel({
+      store,
+      pickFolder: async () => {
+        throw new Error("dialog plugin not initialised");
+      },
+    });
+
+    await click(addButton());
+
+    expect(add).not.toHaveBeenCalled();
+    expect(error()).toBe("The folder picker could not be opened.");
+  });
+
+  it("recovers from a failed picker on the next click", async () => {
+    // The guard has to be released even when the picker throws, or the button
+    // is dead for the rest of the session.
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    let fail = true;
+    await renderPanel({
+      store,
+      pickFolder: async () => {
+        if (fail) {
+          throw new Error("dialog plugin not initialised");
+        }
+        return SHOWROOM_PATH;
+      },
+    });
+
+    await click(addButton());
+    fail = false;
+    await click(addButton());
+
+    expect(add).toHaveBeenCalledWith("showroom", SHOWROOM_PATH);
+    expect(error()).toBe("");
+  });
+
+  it("reads a folder's own name past a trailing separator and case", async () => {
+    // The registry stores the path the user picked, verbatim; the only place
+    // the panel interprets one is this bundled-by-folder-name fallback, and it
+    // must not care how the picker spelled it.
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    const spelled = "C:\\code\\Showroom\\";
+    await renderPanel({ store, pickFolder: async () => spelled });
+
+    await click(addButton());
+
+    expect(add).toHaveBeenCalledWith("showroom", spelled);
+    expect(error()).toBe("");
+  });
+
+  it("reads a UNC folder's own name the same way", async () => {
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    const unc = "\\\\fileserver01\\team-share\\showroom";
+    await renderPanel({ store, pickFolder: async () => unc });
+
+    await click(addButton());
+
+    expect(add).toHaveBeenCalledWith("showroom", unc);
+  });
+
   it("treats a cancelled picker as nothing happening", async () => {
     const store = storeWith({});
     const add = vi.spyOn(store, "add");
@@ -810,6 +949,71 @@ describe("PluginsPanel row-scoped folder actions", () => {
 
     expect(picks).toBe(1);
     expect(add).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("PluginsPanel late folder reads", () => {
+  /** A `readManifest` whose promises only settle when the test says so. */
+  function deferredNative(): {
+    native: PluginNative;
+    release(text: string | null): Promise<void>;
+  } {
+    const pending: ((value: string | null) => void)[] = [];
+    const native = fakeNative();
+    native.readManifest = vi.fn(
+      () => new Promise<string | null>((resolve) => pending.push(resolve)),
+    );
+    return {
+      native,
+      release: async (value) => {
+        await act(async () => {
+          for (const resolve of pending.splice(0)) {
+            resolve(value);
+          }
+        });
+      },
+    };
+  }
+
+  it("ignores a read that lands after the panel is gone", async () => {
+    const { native, release } = deferredNative();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderPanel({
+        store: storeWith({
+          widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+        }),
+        native,
+      });
+
+      await act(async () => root.unmount());
+      // The disk answers after the surface closed. Setting state here is what
+      // produces the "update on an unmounted component" class of bug.
+      await release(manifestText());
+
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+      // afterEach unmounts again; a second unmount on the same root throws.
+      root = createRoot(container);
+    }
+  });
+
+  it("does not resurrect a row that was removed while its folder was being read", async () => {
+    const { native, release } = deferredNative();
+    const store = storeWith({
+      widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+    });
+    await renderPanel({ store, native });
+
+    await click(removeButton("widgets")!);
+    await click(removeButton("widgets")!);
+    expect(rowIds()).toEqual(["showroom"]);
+
+    await release(manifestText());
+
+    // The in-flight read belongs to a plugin that is no longer installed.
+    expect(rowIds()).toEqual(["showroom"]);
   });
 });
 
