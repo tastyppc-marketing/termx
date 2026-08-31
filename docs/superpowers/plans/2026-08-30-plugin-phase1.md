@@ -266,10 +266,11 @@
 
 ### Task 9: Live verification, downgrade test, staging
 
-- [ ] **Step 1: Build** `cd /c/Dev/TermX/ui && npx tauri build --no-bundle`; fingerprint `grep -c "rustc-cfg=dev" .../termx-ui-7eeca0bc08b4a715/output` must be 0 (grep exits 1 on zero matches — do not chain with `&&`).
-- [ ] **Step 2: Stage** into `C:\Dev\TermX\dist-portable\TermX\` via rename rotation `.prev25` (TermX.exe + termx-ui.exe; daemon unchanged).
+- [x] **Step 1: Build** `cd /c/Dev/TermX/ui && npx tauri build --no-bundle`; fingerprint `grep -c "rustc-cfg=dev" .../termx-ui-7eeca0bc08b4a715/output` must be 0 (grep exits 1 on zero matches — do not chain with `&&`).
+- [x] **Step 2: Stage** into `C:\Dev\TermX\dist-portable\TermX\` via rename rotation `.prev25` (TermX.exe + termx-ui.exe; daemon unchanged).
 - [ ] **Step 3: Michael's live checks** (cannot be run against his running instance by the agent): Settings → Plugins → Add plugin folder → `C:\Users\mjfos\code\showroom` (bundled manifest kicks in; no file needed in his repo) → enable. Background menu → "New Showroom tab": Showroom renders in a tab within ~1–2 s (ensure-up spawns it if down). Tab menu → "Split with Showroom" beside a terminal. Relaunch TermX: both panes return. Kill `node server/showroom.js` from Task Manager: panes flip to the down card; Relaunch brings it back. Downgrade test: with a plugin pane in the layout, launch `TermX.exe.prev25` (the pre-plugin build): the pane shows a dismissible "session ended" DeadPane, nothing else changes; relaunch the new build: the panel is back. Dismiss a plugin pane on the new build: no daemon error notice.
-- [ ] **Step 4: Handoff delta** in `specs\handoffs\002-...md` + plan checkboxes updated as-built.
+- [x] **Step 4: Handoff delta** in `specs\handoffs\002-...md` + plan checkboxes updated as-built.
+> **As built (2026-08-31 04:45):** built HEAD d3be1ed via `scratchpad\plugin-p1\build-stage.sh` (refuses dirty tree / failed build / dev fingerprint / occupied slot); dev-fingerprint count 0; staged `TermX.exe` + `termx-ui.exe` (6,382,592 bytes), previous build → `.prev25` (Aug 28 19:59); `termx-host.exe` untouched; Michael's live TermX (pid 32724) + daemon (34684) never touched. Whole-diff pass over `366f847..HEAD`: Grok (7 findings), Codex (6), Opus with 10 executed flows + 37 mutants (4) — all addressed in 9204787 / b7fb25b / 77e3304 / db74dab / 641d17d / d3be1ed; Grok re-verification R9b PASS-WITH-MINORS (minors fixed), R9c pending at time of writing. Step 3 stays open: it is Michael's live checklist (see the morning message in the handoff).
 
 ## Self-review notes
 
