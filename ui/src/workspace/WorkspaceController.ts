@@ -3441,6 +3441,12 @@ export class WorkspaceController {
     if (observeOnce === undefined || this.windowId === MAIN_WINDOW_ID) {
       return;
     }
+    // Which runtime this look is about, stamped the same way a health probe
+    // is: the read and the probe behind it take time, and a close, a
+    // Relaunch, or the pane leaving and coming back all replace what the
+    // answer would be describing. Applying it then frames the CURRENT pane at
+    // the PREVIOUS port, and says "up" about something nobody checked.
+    const generation = this.pluginEnsureGenerations.get(pluginId) ?? 0;
     let result: EnsureUpResult;
     try {
       result = await observeOnce(pluginId);
@@ -3448,6 +3454,9 @@ export class WorkspaceController {
       return;
     }
     if (!result.ok || this.disposed) {
+      return;
+    }
+    if ((this.pluginEnsureGenerations.get(pluginId) ?? 0) !== generation) {
       return;
     }
     // Re-read: a Relaunch here may have landed while that look was in flight.

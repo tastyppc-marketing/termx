@@ -178,9 +178,10 @@ function harness(options: {
     initial: options.bindings ?? {},
     save: async () => undefined,
   });
+  const store = createLayoutStore(options.initial ?? layout());
   const controller = new WorkspaceController({
     client,
-    store: createLayoutStore(options.initial ?? layout()),
+    store,
     persistence,
     attachments,
     sessions: [session(1)],
@@ -190,7 +191,7 @@ function harness(options: {
     ...(options.windowId ? { windowId: options.windowId } : {}),
   });
   live.push(controller);
-  return { controller, ensureUp, probe, observeOnce, pluginPanes };
+  return { controller, ensureUp, probe, observeOnce, pluginPanes, store };
 }
 
 /** The reserved pane the plugin tab was opened around. */
@@ -523,6 +524,54 @@ describe("plugin health polling", () => {
 
     expect(controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID])
       .toMatchObject({ pluginHealth: "up", pluginUrl: "http://127.0.0.1:7345" });
+  });
+
+  it("lets a look from the PREVIOUS runtime change nothing once the pane is back", async () => {
+    // The heal is a file read plus a probe, and both take time. Move the panel
+    // away and back in that window and the answer describes a runtime this
+    // pane never had: applying it frames the NEW pane at the OLD port, with
+    // the health card saying "up" about something nobody checked.
+    const gate: { settle: ((result: EnsureUpResult) => void) | null } = { settle: null };
+    const { controller, store, observeOnce } = harness({
+      initial: layoutWithPanelInAux(),
+      windowId: "aux-1",
+      bindings: { [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" } },
+      ensureUp: async () => ({
+        ok: false,
+        reason: "The plugin is not running. Relaunch it from the main window.",
+        stderrTail: "",
+      }),
+      observeOnce: () => new Promise<EnsureUpResult>((resolve) => {
+        gate.settle = resolve;
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
+    expect(observeOnce).toHaveBeenCalledTimes(1);
+
+    // Main takes the panel back, then hands it over again: this window forgets
+    // the plugin and starts afresh, and the fresh start also finds it down.
+    store.replaceState(layoutWithPanelInMain());
+    await vi.advanceTimersByTimeAsync(0);
+    store.replaceState(layoutWithPanelInAux());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID]?.pluginHealth)
+      .toBe("down");
+
+    // NOW the look started for the previous runtime answers.
+    gate.settle?.({
+      ok: true,
+      runtime: {
+        port: 7345,
+        token: "t",
+        version: "1.0.0",
+        url: "http://127.0.0.1:7345",
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID])
+      .toMatchObject({ pluginHealth: "down", pluginUrl: null });
   });
 
   it("MAIN never re-asks about a plugin it believes is dead", async () => {

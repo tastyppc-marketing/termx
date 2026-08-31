@@ -208,6 +208,52 @@ describe("tauriWindowBus", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("hands back a registration that lands after the channel was released", async () => {
+    // `listen()` is async, and a workspace can be disposed before it resolves
+    // — boot-then-close is exactly that race. The unlisten arrives for a
+    // channel nobody is on any more, and without handing it straight back the
+    // window keeps a native registration nothing will ever release.
+    const handlers = new Map<string, (event: { payload: unknown }) => void>();
+    const pending: { land: (() => void) | null } = { land: null };
+    let released = 0;
+    const transport = {
+      emit: vi.fn(async (event: string, payload: unknown) => {
+        handlers.get(event)?.({ payload });
+      }),
+      listen: vi.fn(
+        async (event: string, handler: (event: { payload: unknown }) => void) =>
+          new Promise<() => void>((resolve) => {
+            handlers.set(event, handler);
+            pending.land = () => resolve(() => {
+              released += 1;
+              handlers.delete(event);
+            });
+          }),
+      ),
+    };
+    const bus = tauriWindowBus(transport);
+
+    const stop = bus.onMutation(() => undefined);
+    stop();
+    pending.land?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(released).toBe(1);
+
+    // And the channel is not deaf afterwards: the next workspace in this
+    // webview subscribes and hears its events.
+    const seen: LayoutMutation[] = [];
+    bus.onMutation((mutation) => seen.push(mutation));
+    pending.land?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    handlers.get(LAYOUT_MUTATION_EVENT)?.({
+      payload: { kind: "setLayout", layout: { tabs: {} } },
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(released).toBe(1);
+  });
+
   it("ready() waits for the transport's listen registration", async () => {
     // The boot race an aux window's sync request has to survive: until listen()
     // resolves, this window receives nothing.
