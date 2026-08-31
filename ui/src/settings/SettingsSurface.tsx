@@ -392,6 +392,7 @@ export function Toggle({
   hint,
   checked,
   disabled = false,
+  ariaLabel,
   onToggle,
 }: {
   name: string;
@@ -399,6 +400,12 @@ export function Toggle({
   hint?: string;
   checked: boolean;
   disabled?: boolean;
+  /**
+   * Overrides the visible label for assistive tech. Needed where the same
+   * word ("Enabled") repeats down a list and the row, not the label, says
+   * which thing is being switched.
+   */
+  ariaLabel?: string;
   onToggle(checked: boolean): void;
 }) {
   return (
@@ -408,6 +415,7 @@ export function Toggle({
         name={name}
         checked={checked}
         disabled={disabled}
+        {...(ariaLabel === undefined ? {} : { "aria-label": ariaLabel })}
         onChange={(event) => onToggle(event.currentTarget.checked)}
       />
       <span className="settings-radio__text">

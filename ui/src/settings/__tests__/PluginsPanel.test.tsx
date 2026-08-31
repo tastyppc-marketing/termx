@@ -11,7 +11,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginNative } from "../../plugins/native";
 import { PluginsStore, type PluginsV1 } from "../../plugins/registry";
-import { PluginsPanel } from "../PluginsPanel";
+import { PluginsPanel, shortenPath } from "../PluginsPanel";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -120,6 +120,13 @@ function action(id: string, label: string): HTMLButtonElement | null {
   );
 }
 
+/** The Remove button, found by role rather than by its two-step label. */
+function removeButton(id: string): HTMLButtonElement | null {
+  return row(id).querySelector<HTMLButtonElement>(
+    ".settings-plugins__action--danger",
+  );
+}
+
 describe("PluginsPanel rows", () => {
   it("lists every installed plugin with its folder path", async () => {
     await renderPanel({
@@ -193,9 +200,12 @@ describe("PluginsPanel rows", () => {
 
     // Showroom ships with TermX: its row is permanent, the toggle is the only
     // way to stand it down.
-    expect(action("showroom", "Remove")).toBeNull();
+    expect(removeButton("showroom")).toBeNull();
 
-    await click(action("widgets", "Remove")!);
+    // Removal is two-step (see the confirm-in-place suite); the first click
+    // only arms the button.
+    await click(removeButton("widgets")!);
+    await click(removeButton("widgets")!);
     expect(remove).toHaveBeenCalledWith("widgets");
     expect(rowIds()).toEqual(["showroom"]);
   });
@@ -222,6 +232,207 @@ describe("PluginsPanel rows", () => {
     });
 
     expect(action("showroom", "Open as tab")).toBeNull();
+  });
+});
+
+describe("PluginsPanel row hierarchy", () => {
+  it("marks a disabled row so it reads as stood down", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: false, grants: [] },
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+    });
+
+    expect(row("showroom").className).toContain("settings-plugin--disabled");
+    expect(row("widgets").className).not.toContain("settings-plugin--disabled");
+  });
+
+  it("shows the plugin id beside a name that differs from it", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+      }),
+    });
+
+    // Two plugins may both call themselves "Showroom"; the id is what the
+    // registry, the layout blob and every error message actually key on.
+    expect(text(row("showroom").querySelector(".settings-plugin__id"))).toBe(
+      "showroom",
+    );
+  });
+
+  it("omits the id when it is the only name there is", async () => {
+    // No manifest, no bundled entry: the label already *is* the id, and
+    // printing it twice is noise.
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      bundled: {},
+    });
+
+    expect(text(row("widgets").querySelector(".settings-plugin__label"))).toBe(
+      "widgets",
+    );
+    expect(row("widgets").querySelector(".settings-plugin__id")).toBeNull();
+  });
+
+  it("middle-truncates a long folder and keeps the whole path in the tooltip", async () => {
+    const long = "C:\\Users\\mjfos\\code\\vendor\\termx-plugins\\showroom\\plugin";
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: long, enabled: true, grants: [] },
+      }),
+    });
+
+    const path = row("showroom").querySelector<HTMLElement>(
+      ".settings-plugin__path",
+    )!;
+    expect(path.textContent).toBe("C:\\…\\showroom\\plugin");
+    expect(path.title).toBe(long);
+  });
+});
+
+describe("shortenPath", () => {
+  it("leaves a path that already fits alone", () => {
+    expect(shortenPath("C:\\code\\showroom")).toBe("C:\\code\\showroom");
+  });
+
+  it("keeps the drive and the last two segments of a long Windows path", () => {
+    expect(
+      shortenPath("C:\\Users\\mjfos\\code\\vendor\\termx-plugins\\showroom\\plugin"),
+    ).toBe("C:\\…\\showroom\\plugin");
+  });
+
+  it("keeps the whole \\\\server\\share head of a long UNC path", () => {
+    // Dropping either half of a UNC head names a machine that does not exist,
+    // which is worse than a longer string.
+    expect(
+      shortenPath(
+        "\\\\fileserver01\\team-share\\dev\\termx\\vendor\\plugins\\showroom-viewer",
+      ),
+    ).toBe("\\\\fileserver01\\team-share\\…\\plugins\\showroom-viewer");
+  });
+
+  it("keeps the leading slash of a long POSIX path", () => {
+    expect(
+      shortenPath("/home/mjfos/code/vendor/termx/plugins/showroom-viewer"),
+    ).toBe("/home/…/plugins/showroom-viewer");
+  });
+
+  it("returns a long but shallow path unchanged rather than lying about it", () => {
+    // Nothing to elide between the head and the last two segments: an ellipsis
+    // here would claim there are hidden folders when there are none.
+    const shallow = "C:\\a-very-long-single-folder-name-that-runs-on\\plugin";
+    expect(shortenPath(shallow)).toBe(shallow);
+  });
+});
+
+describe("PluginsPanel accessible names", () => {
+  it("names the plugin on its toggle and on both row buttons", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+      onOpen: vi.fn(),
+    });
+
+    // "Enabled" repeated down a list tells a screen-reader user nothing about
+    // which plugin the switch belongs to.
+    const toggle = row("showroom").querySelector<HTMLInputElement>(
+      "input[type='checkbox']",
+    )!;
+    expect(toggle.getAttribute("aria-label")).toContain("Showroom");
+    expect(
+      action("showroom", "Open as tab")!.getAttribute("aria-label"),
+    ).toContain("Showroom");
+    expect(removeButton("widgets")!.getAttribute("aria-label")).toContain(
+      "Widgets",
+    );
+  });
+});
+
+describe("PluginsPanel remove confirmation", () => {
+  function widgetsStore(): PluginsStore {
+    return storeWith({
+      widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+    });
+  }
+
+  async function renderWidgets(store: PluginsStore): Promise<void> {
+    await renderPanel({
+      store,
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+    });
+  }
+
+  it("arms on the first click and removes only on the second", async () => {
+    const store = widgetsStore();
+    const remove = vi.spyOn(store, "remove");
+    await renderWidgets(store);
+
+    await click(removeButton("widgets")!);
+    expect(remove).not.toHaveBeenCalled();
+    expect(removeButton("widgets")!.textContent).toBe("Confirm remove");
+
+    await click(removeButton("widgets")!);
+    expect(remove).toHaveBeenCalledWith("widgets");
+    expect(rowIds()).toEqual(["showroom"]);
+  });
+
+  it("disarms when the button loses focus", async () => {
+    const store = widgetsStore();
+    const remove = vi.spyOn(store, "remove");
+    await renderWidgets(store);
+
+    const button = removeButton("widgets")!;
+    button.focus();
+    await click(button);
+    await act(async () => {
+      button.blur();
+    });
+
+    expect(removeButton("widgets")!.textContent).toBe("Remove");
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("disarms on Escape", async () => {
+    const store = widgetsStore();
+    await renderWidgets(store);
+
+    const button = removeButton("widgets")!;
+    await click(button);
+    await act(async () => {
+      button.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+
+    expect(removeButton("widgets")!.textContent).toBe("Remove");
+  });
+
+  it("disarms itself after four seconds", async () => {
+    const store = widgetsStore();
+    await renderWidgets(store);
+
+    // The timer is scheduled by the arming click, so the clock has to be fake
+    // before it — installing it afterwards would leave a real 4 s pending.
+    vi.useFakeTimers();
+    try {
+      await click(removeButton("widgets")!);
+      expect(removeButton("widgets")!.textContent).toBe("Confirm remove");
+
+      act(() => {
+        vi.advanceTimersByTime(4000);
+      });
+      expect(removeButton("widgets")!.textContent).toBe("Remove");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

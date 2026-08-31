@@ -291,15 +291,18 @@
   list-style: none;
 }
 
+/* A list row, so the list rhythm: --row-list (28px), not the --row-chrome
+   (34px) reserved for headers and toolbars. Rows carrying both a name and a
+   folder run taller than the minimum; the token is the floor, not the target. */
 .settings-plugin {
   display: grid;
-  min-height: var(--row-chrome);
+  min-height: var(--row-list);
   align-items: center;
   /* Mark | name + path | controls. The middle column is the only one that
      grows, so a long path shortens rather than pushing the toggle off. */
-  grid-template-columns: 22px minmax(0, 1fr) auto;
+  grid-template-columns: var(--icon-button) minmax(0, 1fr) auto;
   gap: 10px;
-  padding: 5px 8px;
+  padding: 4px 8px;
 }
 
 .settings-plugin + .settings-plugin {
@@ -308,13 +311,25 @@
 
 .settings-plugin__icon {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: var(--icon-button);
+  height: var(--icon-button);
   place-items: center;
   background: var(--surface-1);
   border: 1px solid var(--border);
   font-size: 12px;
   line-height: 1;
+}
+
+/* A plugin that is switched off reads as switched off: its identity dims, but
+   its controls do not — the way back on has to stay obvious, and a row that
+   cannot work still has to be able to say why. */
+.settings-plugin--disabled .settings-plugin__icon,
+.settings-plugin--disabled .settings-plugin__main {
+  opacity: 0.62;
+}
+
+.settings-plugin--disabled .settings-plugin__status {
+  opacity: 1;
 }
 
 .settings-plugin__main {
@@ -341,6 +356,17 @@
   white-space: nowrap;
 }
 
+/* The id is machine text sitting behind a human name: same monospace as the
+   folder, one contrast step back, and it yields before the chips do. */
+.settings-plugin__id {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-hint);
+  font: 400 11px "Cascadia Mono", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The folder is machine text — set it as such, and one step back in contrast
    so the plugin's name stays the thing you read first. */
 .settings-plugin__path {
@@ -356,6 +382,8 @@
   font-size: 11px;
 }
 
+/* Chips, not overlines: 600 is the heaviest weight allowed outside the exact
+   10px/700/0.08em overline recipe, and these track at 0.06em. */
 .settings-plugin__tag,
 .settings-plugin__status {
   flex: 0 0 auto;
@@ -363,7 +391,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -401,8 +429,10 @@
   margin-top: 0;
 }
 
+/* A control inside a list row, so --icon-button (24px) — a 28px button would
+   set the row's height instead of sitting inside it. */
 .settings-plugins__action {
-  min-height: var(--row-list);
+  min-height: var(--icon-button);
   padding: 0 10px;
   color: var(--text-main);
   background: var(--surface-2);
@@ -440,6 +470,20 @@
   border-color: color-mix(in srgb, var(--error) 55%, transparent);
 }
 
+/* The armed state of the same button — filled, so it cannot be mistaken for
+   the outlined Remove it replaced, and never a second control that appears
+   somewhere else on the row. */
+.settings-plugins__action--confirm,
+.settings-plugins__action--confirm:hover:not(:disabled) {
+  color: var(--text-main);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.settings-plugins__action--confirm:hover:not(:disabled) {
+  background: var(--danger-bg-hover);
+}
+
 /* Same dashed frame as an empty pane: a place something belongs, currently
    without anything in it. */
 .settings-plugins__empty {
@@ -452,6 +496,8 @@
   text-align: center;
 }
 
+/* The exact overline recipe (10px / 700 / 0.08em / uppercase), reused
+   verbatim — 700 is correct here because this IS an overline. */
 .settings-plugins__empty-title {
   color: var(--text-sub);
   font-size: 10px;
@@ -465,14 +511,29 @@
   font-size: 12px;
 }
 
+/* The section's own toolbar row, so --row-chrome (34px) — the list's rows are
+   28 and the controls inside them 24, which is the 34/28/24 rhythm the rest of
+   Settings is built on. */
 .settings-plugins__add {
+  display: flex;
+  min-height: var(--row-chrome);
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
 
+/* The one button that is not inside a row gets the row height instead. */
+.settings-plugins__add .settings-plugins__action--primary {
+  min-height: var(--row-list);
+}
+
+/* Always its own line under the button, never squeezed alongside it. */
 .settings-plugins__error {
-  margin: 6px 0 0;
+  flex: 0 0 100%;
+  margin: 0;
   color: var(--error);
   font-size: 11px;
 }
