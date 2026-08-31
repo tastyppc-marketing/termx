@@ -625,6 +625,19 @@
   white-space: nowrap;
 }
 
+/* A plugin panel's manifest glyph, ahead of its title. Fixed width and
+   centred so a one-cell glyph and a two-cell emoji start the title in the
+   same place; the negative margin eats half the row's 8px gap, keeping the
+   mark tight against the name it belongs to. */
+.sidebar-tab__glyph {
+  width: 14px;
+  flex: 0 0 auto;
+  margin-right: -4px;
+  font-size: 11px;
+  line-height: 1;
+  text-align: center;
+}
+
 .sidebar-tab__badge {
   margin-top: 1px;
   color: var(--sidebar-muted);
@@ -934,6 +947,15 @@
 
 .context-menu button.context-menu__danger {
   color: var(--error);
+}
+
+/* A plugin's manifest glyph inside a menu item. Fixed width, so the labels of
+   a plugin group line up with each other however wide the glyphs are. */
+.context-menu__glyph {
+  width: 14px;
+  margin-right: 8px;
+  flex: 0 0 auto;
+  text-align: center;
 }
 
 /* Overline heading inside a menu (the SSH hosts group): a hairline above and

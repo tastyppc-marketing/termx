@@ -22,6 +22,7 @@ import {
   type FillStrength,
   type Item,
   type PaletteId,
+  type SplitDir,
 } from "../state/layout";
 import { useThemeId } from "../theme/ThemeProvider";
 import { resolveTabColor, themeById } from "../theme/themes";
@@ -71,6 +72,34 @@ export interface SidebarActions {
    * simply do not render. Null = the store refused the move.
    */
   moveItemToWindow?(item: Item, target: string | "new"): string | null;
+  /**
+   * Plugin panels (plugin spec §4). Both are optional and both are
+   * fire-and-forget wrappers around the controller's async methods: a menu
+   * cannot wait, and neither entry renders at all when its action is unwired,
+   * exactly as `moveItemToWindow` does.
+   */
+  openPluginTab?(pluginId: string, groupId: string | null): void;
+  openPluginSplit?(
+    tabId: string,
+    anchorSessionId: number,
+    pluginId: string,
+    dir: SplitDir,
+  ): void;
+}
+
+/**
+ * One installed plugin as the menus need it — a plain snapshot, so the sidebar
+ * never reaches into the plugin registry. `enabled` gates the menu entries; a
+ * disabled plugin is left OUT rather than greyed, because turning one on is a
+ * Settings decision and a menu that offers a dead entry teaches nothing. It
+ * still rides in the list, so a pane bound to a plugin the user has since
+ * switched off keeps its glyph on the rail.
+ */
+export interface SidebarPlugin {
+  id: string;
+  name: string;
+  icon: string;
+  enabled: boolean;
 }
 
 /**
@@ -170,6 +199,11 @@ export interface SidebarProps {
    * Omitted — or disabled in settings — leaves the sidebar exactly as it was.
    */
   hosts?: SidebarHosts;
+  /**
+   * Installed plugin panels (plugin spec §4), newest state each render. Absent
+   * — or holding nothing enabled — leaves every menu exactly as it was.
+   */
+  plugins?: readonly SidebarPlugin[];
   /**
    * Persisted sidebar width in px (polish P5), already clamped by
    * `uiState.setSidebarWidth`. Absent = the stylesheet's own width, so a
@@ -286,6 +320,7 @@ export function Sidebar({
   conversations,
   saved,
   hosts,
+  plugins,
   width,
   onResize,
   onExpandConversations,
@@ -354,6 +389,13 @@ export function Sidebar({
       right.updatedAtMs - left.updatedAtMs || left.name.localeCompare(right.name)
     );
   }, [saved?.entries]);
+
+  /// The plugins a menu may offer. Installed-but-off plugins stay in `plugins`
+  /// for the rail glyph and drop out here, so "enabled" is asked once.
+  const enabledPlugins = useMemo(
+    () => (plugins ?? []).filter((plugin) => plugin.enabled),
+    [plugins],
+  );
 
   useLayoutEffect(() => {
     if (focusedTabId && visibleTabIds.includes(focusedTabId)) {
@@ -678,11 +720,33 @@ export function Sidebar({
     }
   };
 
+  /// The pane a split hangs off: the focused one when the focus is inside this
+  /// tab, else the tab's first. A menu opened on a background tab has no
+  /// focused pane to speak of, and the controller makes the same choice.
+  const anchorPane = (tab: SidebarTabModel): number =>
+    snapshot.activeSessionId !== null && tab.sessionIds.includes(snapshot.activeSessionId)
+      ? snapshot.activeSessionId
+      : tab.primarySessionId;
+
+  /// The manifest glyph for a tab whose primary pane IS a plugin panel — how a
+  /// Showroom tab reads as Showroom in a column of terminals. Read off the pane
+  /// projection the controller already publishes, so nothing new has to ride on
+  /// the tab model. A terminal tab that merely holds a plugin split keeps its
+  /// terminal identity: the glyph marks what the tab IS, not what is in it.
+  const pluginGlyph = (tab: SidebarTabModel): string | null => {
+    const pane = snapshot.paneStates[tab.primarySessionId];
+    if (pane?.status !== "plugin" || pane.pluginId === undefined) {
+      return null;
+    }
+    return plugins?.find((plugin) => plugin.id === pane.pluginId)?.icon ?? null;
+  };
+
   /// `index` is the row's position among its container's ITEMS (tabs and
   /// subgroups alike) — the index every move/drop command speaks in — and
   /// `depth` is its nesting level, 1 at the root.
   const renderTab = (tab: SidebarTabModel, index: number, depth: number) => {
     const active = tab.id === snapshot.activeTabId;
+    const glyph = pluginGlyph(tab);
     const ended = tab.status === "dead" || tab.status === "missing";
     const renaming = renameTarget?.kind === "tab" && renameTarget.id === tab.id;
     return (
@@ -743,6 +807,9 @@ export function Sidebar({
         }}
         onKeyDown={(event) => handleTabKey(event, tab)}
       >
+        {glyph ? (
+          <span className="sidebar-tab__glyph" aria-hidden="true">{glyph}</span>
+        ) : null}
         <span className="sidebar-tab__content">
           {renaming ? (
             <InlineRename
@@ -1255,6 +1322,68 @@ export function Sidebar({
     );
   };
 
+  /// Plugin panels offered as new tabs, under their own overline: built-ins
+  /// first, contributions after, the same order the SSH hosts keep. Renders
+  /// nothing — heading included — when no plugin is enabled or the action is
+  /// unwired, so a sidebar with no plugins is the sidebar as it was.
+  const renderPluginTabEntries = (groupId: string | null) => {
+    const openPluginTab = actions.openPluginTab;
+    if (!openPluginTab || enabledPlugins.length === 0) {
+      return null;
+    }
+    return (
+      <>
+        <span className="context-menu__group" aria-hidden="true">Plugins</span>
+        {enabledPlugins.map((plugin) => (
+          <button
+            key={plugin.id}
+            type="button"
+            role="menuitem"
+            data-testid={`create-menu-plugin-${plugin.id}`}
+            onClick={() => {
+              closeMenu();
+              openPluginTab(plugin.id, groupId);
+            }}
+          >
+            <span className="context-menu__glyph" aria-hidden="true">{plugin.icon}</span>
+            New {plugin.name} tab{groupId === null ? "" : " in group"}
+          </button>
+        ))}
+      </>
+    );
+  };
+
+  /// The same panels offered beside an existing pane. Right by default: a
+  /// panel is a companion to the terminal it was opened from, and a column
+  /// split is the one the user reaches for when they want it below.
+  const renderPluginSplitEntries = (tab: SidebarTabModel) => {
+    const openPluginSplit = actions.openPluginSplit;
+    if (!openPluginSplit || enabledPlugins.length === 0) {
+      return null;
+    }
+    const anchor = anchorPane(tab);
+    return (
+      <>
+        <span className="context-menu__group" aria-hidden="true">Plugins</span>
+        {enabledPlugins.map((plugin) => (
+          <button
+            key={plugin.id}
+            type="button"
+            role="menuitem"
+            data-testid={`tab-menu-plugin-split-${plugin.id}`}
+            onClick={() => {
+              closeMenu();
+              openPluginSplit(tab.id, anchor, plugin.id, "row");
+            }}
+          >
+            <span className="context-menu__glyph" aria-hidden="true">{plugin.icon}</span>
+            Split with {plugin.name}
+          </button>
+        ))}
+      </>
+    );
+  };
+
   const renderMovePanel = (
     label: string,
     item: Item,
@@ -1374,6 +1503,7 @@ export function Sidebar({
           >
             Side-by-side with active tab
           </button>
+          {renderPluginSplitEntries(tab)}
           <button type="button" role="menuitem" className="context-menu__danger" onClick={() => {
             closeMenu();
             requestTabClose(tab, tabRefs.current.get(tab.id));
@@ -1447,6 +1577,7 @@ export function Sidebar({
             actions.toggleGroup(group.id);
             closeMenu();
           }}>{group.collapsed ? "Expand" : "Collapse"}</button>
+          {renderPluginTabEntries(group.id)}
           <button type="button" role="menuitem" className="context-menu__danger" onClick={() => {
             closeMenu();
             openConfirmation(
@@ -1475,6 +1606,7 @@ export function Sidebar({
             closeMenu();
             setCreatingGroup({ parentGroupId: null });
           }}>New group</button>
+          {renderPluginTabEntries(null)}
         </ContextMenu>
       );
     }
@@ -1499,6 +1631,7 @@ export function Sidebar({
           closeMenu();
           void createTab(null, "cmd");
         }}>Command Prompt</button>
+        {renderPluginTabEntries(null)}
         {/* SSH targets last: they are the exception, a local shell the norm. */}
         {hosts?.menuEnabled && hosts.hosts.length > 0 ? (
           <>
