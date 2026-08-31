@@ -99,6 +99,17 @@ function errorMessage(error: unknown): string {
 }
 
 /**
+ * A connect attempt either reaches the plugin, finds it down, or cannot even
+ * ask. The third case is separate because `plugin_read_runtime` answers `null`
+ * for a missing file but rejects for a non-absolute path, an oversize file or
+ * an IO error — faults that spawning and polling can never resolve.
+ */
+type ConnectOutcome =
+  | { kind: "up"; runtime: PluginRuntime }
+  | { kind: "down" }
+  | { kind: "unreadable"; reason: string };
+
+/**
  * One connect attempt: the runtime file is re-read every time because plugins
  * rotate their token per boot (spec §3.5), so a cached token is wrong by design.
  */
@@ -106,17 +117,17 @@ async function connect(
   runtimePath: string,
   manifest: PluginManifest,
   deps: EnsureUpDeps,
-): Promise<PluginRuntime | null> {
+): Promise<ConnectOutcome> {
   let text: string | null;
   try {
     text = await deps.native.readRuntime(runtimePath);
-  } catch {
-    return null;
+  } catch (error) {
+    return { kind: "unreadable", reason: errorMessage(error) };
   }
 
   const file = parseRuntimeFile(text);
   if (file === null) {
-    return null;
+    return { kind: "down" };
   }
 
   const url = `http://127.0.0.1:${file.port}`;
@@ -127,14 +138,18 @@ async function connect(
       PROBE_TIMEOUT_MS,
     );
   } catch {
-    return null;
+    // A refused or timed-out probe is the ordinary "not listening yet" answer.
+    return { kind: "down" };
   }
 
   const version = healthVersion(body);
   if (version === null) {
-    return null;
+    return { kind: "down" };
   }
-  return { port: file.port, token: file.token, version, url };
+  return {
+    kind: "up",
+    runtime: { port: file.port, token: file.token, version, url },
+  };
 }
 
 async function tailOf(native: PluginNative, pid: number): Promise<string> {
@@ -159,8 +174,14 @@ export async function ensureUp(
   const runtimePath = expandEnv(manifest.discovery.runtimeFile, deps.env);
 
   const adopted = await connect(runtimePath, manifest, deps);
-  if (adopted !== null) {
-    return { ok: true, runtime: adopted };
+  if (adopted.kind === "up") {
+    return { ok: true, runtime: adopted.runtime };
+  }
+  if (adopted.kind === "unreadable") {
+    // Fail fast: an unexpanded `%VAR%` path or a denied read cannot start
+    // working because a process was spawned, and burning the whole spawn
+    // budget on it would report "health probe never passed" for a path fault.
+    return { ok: false, reason: adopted.reason, stderrTail: "" };
   }
 
   let pid: number;
@@ -169,6 +190,9 @@ export async function ensureUp(
       manifest.start.command,
       [...manifest.start.args],
       pluginPath,
+      // Spec §2: a plugin must be able to tell that TermX started it, and as
+      // which registry id — the id is the key everything else is bound by.
+      { TERMX: "1", TERMX_PLUGIN_ID: manifest.id },
     );
   } catch (error) {
     return { ok: false, reason: errorMessage(error), stderrTail: "" };
@@ -178,10 +202,13 @@ export async function ensureUp(
     deps.now() + (deps.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS);
   while (deps.now() < deadline) {
     await deps.sleep(POLL_INTERVAL_MS);
-    const runtime = await connect(runtimePath, manifest, deps);
-    if (runtime !== null) {
-      return { ok: true, runtime };
+    const polled = await connect(runtimePath, manifest, deps);
+    if (polled.kind === "up") {
+      return { ok: true, runtime: polled.runtime };
     }
+    // A read that fails DURING the poll is not fatal the way the first one is:
+    // the plugin is writing this very file, and Windows can hand back a
+    // sharing violation mid-write on a launch that is about to succeed.
   }
 
   return {
