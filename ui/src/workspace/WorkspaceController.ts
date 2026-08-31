@@ -281,6 +281,15 @@ export interface WorkspacePluginHost {
    */
   requestEnsure?: (pluginId: string) => void;
   /**
+   * One look for a plugin that may have come back, with no waiting and no
+   * spawning — the health poll's way of letting a window that cannot start
+   * anything notice that somebody else did.
+   *
+   * Supplied only outside the main window, where the poll must stay strictly
+   * one-way: see `healObservedPlugin`.
+   */
+  observeOnce?: (pluginId: string) => Promise<EnsureUpResult>;
+  /**
    * Release whatever the host holds (registry subscriptions, timers). Called
    * from `WorkspaceController.dispose`, which is the only lifetime the host is
    * built for.
@@ -2631,6 +2640,9 @@ export class WorkspaceController {
       settle(false);
     }
     this.adoptWaiters.clear();
+    // The one plugin map teardown used to leave: each entry is a retry still
+    // chained onto an unsettled attempt.
+    this.pluginForceRuns.clear();
     for (const timer of this.pluginEnsureTimers) {
       clearTimeout(timer);
     }
@@ -3243,7 +3255,7 @@ export class WorkspaceController {
     options: { force?: boolean } = {},
   ): Promise<void> {
     const plugins = this.plugins;
-    if (plugins === null) {
+    if (plugins === null || this.disposed) {
       return Promise.resolve();
     }
     const inFlight = this.pluginEnsures.get(pluginId);
@@ -3293,6 +3305,15 @@ export class WorkspaceController {
     plugins: WorkspacePluginHost,
     pluginId: string,
   ): Promise<void> {
+    if (this.disposed) {
+      // A queued Relaunch fires when the SLOW attempt it was chained behind
+      // finally settles, which can be long after the window was torn down.
+      // On main that would be a real spawn — a detached plugin process
+      // started by a window that no longer exists — plus a fresh deadline
+      // timer in the set `dispose` has already emptied. Bumping the
+      // generation drops the answer; only this drops the attempt.
+      return Promise.resolve();
+    }
     this.setPluginRuntime(pluginId, {
       health: "starting",
       // The last known URL is kept so a relaunch does not blank a live iframe
@@ -3381,6 +3402,44 @@ export class WorkspaceController {
     });
   }
 
+  /**
+   * Look again for a plugin THIS window believes is down.
+   *
+   * Only outside main, and only through a seam that cannot spawn. The poll is
+   * deliberately one-way on main: re-probing something believed dead could
+   * only be acted on by starting it, which would resurrect a plugin the user
+   * just killed and make the offline card unreachable. An aux window has the
+   * opposite problem — it may not start anything, so that rule stops it
+   * noticing good news and nothing else. Without this an aux pane that went
+   * down (main's spawn outran the observe budget at boot, or the user pressed
+   * Relaunch in the MAIN window) shows "Relaunch it from the main window" for
+   * ever, naming a remedy it then ignores.
+   *
+   * ONE look, not an observe: a ten-second poll here would replace the down
+   * card with a spinner for most of every interval while the plugin really is
+   * down.
+   */
+  private async healObservedPlugin(pluginId: string): Promise<void> {
+    const observeOnce = this.plugins?.observeOnce;
+    if (observeOnce === undefined || this.windowId === MAIN_WINDOW_ID) {
+      return;
+    }
+    let result: EnsureUpResult;
+    try {
+      result = await observeOnce(pluginId);
+    } catch {
+      return;
+    }
+    if (!result.ok || this.disposed) {
+      return;
+    }
+    // Re-read: a Relaunch here may have landed while that look was in flight.
+    if (this.pluginRuntimes.get(pluginId)?.health !== "down") {
+      return;
+    }
+    this.setPluginRuntime(pluginId, { health: "up", url: result.runtime.url });
+  }
+
   private setPluginRuntime(pluginId: string, state: PluginRuntimeState): void {
     this.pluginRuntimes.set(pluginId, state);
     this.pluginRevision += 1;
@@ -3442,6 +3501,9 @@ export class WorkspaceController {
     }
     const framed = this.pluginRuntimes.get(pluginId);
     if (framed?.health !== "up" || framed.url === null) {
+      if (framed?.health === "down") {
+        await this.healObservedPlugin(pluginId);
+      }
       return;
     }
     this.pluginHealthProbes.add(pluginId);

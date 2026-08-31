@@ -116,6 +116,8 @@ function layoutWithPanelInAux(): Layout {
 function harness(options: {
   /** `null` builds a host with NO probe method at all (the legacy shape). */
   probe?: ((pluginId: string, origin: string) => Promise<boolean>) | null;
+  /** Aux-only seam: one look for a plugin this window believes is down. */
+  observeOnce?: (pluginId: string) => Promise<EnsureUpResult>;
   ensureUp?: (pluginId: string) => Promise<EnsureUpResult>;
   initial?: Layout;
   windowId?: string;
@@ -156,11 +158,26 @@ function harness(options: {
   };
   const ensureUp = vi.fn(options.ensureUp ?? (async () => runtimeUp()));
   const probe = vi.fn(options.probe ?? (async () => true));
+  const observeOnce = vi.fn(
+    options.observeOnce
+      ?? (async () => ({
+        ok: false as const,
+        reason: "The plugin is not running. Relaunch it from the main window.",
+        stderrTail: "",
+      })),
+  );
   const plugins: WorkspacePluginHost = {
     manifestFor: (id: string) => (id === "showroom" ? SHOWROOM : null),
     ensureUp,
     ...(options.probe === null ? {} : { probe }),
+    // Present on every harness host: whether a MAIN controller leaves it alone
+    // is one of the things under test.
+    observeOnce,
   };
+  const pluginPanes = new PaneBindingsStore({
+    initial: options.bindings ?? {},
+    save: async () => undefined,
+  });
   const controller = new WorkspaceController({
     client,
     store: createLayoutStore(options.initial ?? layout()),
@@ -168,15 +185,12 @@ function harness(options: {
     attachments,
     sessions: [session(1)],
     generateId: () => "panel-tab",
-    pluginPanes: new PaneBindingsStore({
-      initial: options.bindings ?? {},
-      save: async () => undefined,
-    }),
+    pluginPanes,
     plugins,
     ...(options.windowId ? { windowId: options.windowId } : {}),
   });
   live.push(controller);
-  return { controller, ensureUp, probe };
+  return { controller, ensureUp, probe, observeOnce, pluginPanes };
 }
 
 /** The reserved pane the plugin tab was opened around. */
@@ -448,6 +462,56 @@ describe("plugin health polling", () => {
       .toBe("down");
   });
 
+  it("an AUX window's down pane heals once the plugin is back", async () => {
+    // The poll is one-way on MAIN for a good reason: re-probing something
+    // believed dead could only be acted on by starting it, which would
+    // resurrect a plugin the user just killed. An aux window cannot start
+    // anything, so there the same rule only stops it noticing good news — and
+    // the card it is stuck on names a remedy (Relaunch in the main window)
+    // that it then ignores when the user performs it.
+    const { controller, observeOnce } = harness({
+      initial: layoutWithPanelInAux(),
+      windowId: "aux-1",
+      bindings: { [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" } },
+      ensureUp: async () => ({
+        ok: false,
+        reason: "The plugin is not running. Relaunch it from the main window.",
+        stderrTail: "",
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID]?.pluginHealth)
+      .toBe("down");
+
+    // Somebody else (main, answering a Relaunch) started it.
+    observeOnce.mockResolvedValue(runtimeUp());
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
+
+    expect(controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID])
+      .toMatchObject({ pluginHealth: "up", pluginUrl: "http://127.0.0.1:7345" });
+  });
+
+  it("MAIN never re-asks about a plugin it believes is dead", async () => {
+    // The other half of the same rule. Main is the window that can spawn, so a
+    // re-look here is the first step towards resurrecting a plugin the user
+    // killed on purpose — and the offline card would become unreachable.
+    const { controller, observeOnce } = harness({
+      ensureUp: async () => ({
+        ok: false,
+        reason: "health probe never passed",
+        stderrTail: "",
+      }),
+    });
+    await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(panelState(controller).pluginHealth).toBe("down");
+
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS * 4);
+
+    expect(observeOnce).not.toHaveBeenCalled();
+    expect(panelState(controller).pluginHealth).toBe("down");
+  });
+
   it("polls nothing when the host has no probe seam, rather than guessing", async () => {
     // `probe: null` builds a host without the optional method — every legacy
     // fixture, and any window booted before the seam existed.
@@ -459,5 +523,71 @@ describe("plugin health polling", () => {
     expect(panelState(controller).pluginHealth).toBe("up");
 
     controller.dispose();
+  });
+});
+
+/**
+ * Teardown. A window is destroyed the moment it flushes, so everything the
+ * controller armed has to be given back: timers that would wake a dead
+ * controller, and work still in flight that would act on its behalf.
+ */
+describe("teardown", () => {
+  it("gives back every health poller", async () => {
+    // Counted rather than described: `pollPluginHealth` returns early once
+    // disposed, so a test that only watched `probe` would stay green with the
+    // interval still armed and firing for the life of the process.
+    const { controller } = harness();
+    await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    controller.dispose();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("lets no ensure-up publish after the window is gone", async () => {
+    // The answer arrives on a promise nothing can cancel, so the guard has to
+    // be on the receiving side.
+    const pending: { release: ((result: EnsureUpResult) => void) | null } =
+      { release: null };
+    const { controller } = harness({
+      ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+        pending.release = resolve;
+      }),
+    });
+    await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+
+    controller.dispose();
+    // Subscribed AFTER teardown on purpose: `dispose` empties the listener
+    // set, so a listener added before it counts zero however loudly a dead
+    // controller publishes.
+    let published = 0;
+    controller.subscribe(() => {
+      published += 1;
+    });
+    pending.release?.(runtimeUp());
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(published).toBe(0);
+    expect(panelState(controller).pluginHealth).toBe("starting");
+  });
+
+  it("starts nothing for a binding that changes after the window is gone", async () => {
+    // The bindings store OUTLIVES this controller: it is main's map, shared
+    // with every window. A subscription left behind would start a plugin on
+    // behalf of a window that no longer exists.
+    const { controller, ensureUp, pluginPanes } = harness({
+      initial: layoutWithPanelInMain(),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ensureUp).not.toHaveBeenCalled();
+
+    controller.dispose();
+    pluginPanes.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ensureUp).not.toHaveBeenCalled();
   });
 });

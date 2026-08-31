@@ -3176,6 +3176,40 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
     expect(h.ensureUp).toHaveBeenCalledTimes(atBoot);
   });
 
+  it("drops a Relaunch still queued behind a slow start when the window closes", async () => {
+    // The queued retry fires when the attempt it is chained behind finally
+    // settles — which can be long after the window was torn down. On main
+    // that is a real spawn: a detached plugin process started by a window
+    // that no longer exists, plus a fresh deadline timer in the set teardown
+    // has already emptied.
+    vi.useFakeTimers();
+    try {
+      const gates: Array<(result: EnsureUpResult) => void> = [];
+      const h = harness({
+        ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+          gates.push(resolve);
+        }),
+      });
+      const tabId = await h.controller.openPluginTab("showroom");
+      const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+      // Relaunch, queued behind the start that has not answered.
+      void h.controller.relaunchPlugin(sessionId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.ensureUp).toHaveBeenCalledTimes(1);
+
+      h.controller.dispose();
+      const atDispose = h.ensureUp.mock.calls.length;
+      // The hung first attempt finally answers.
+      gates[0]?.(runtimeUp());
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(h.ensureUp).toHaveBeenCalledTimes(atDispose);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("an aux window gives up when main never acknowledges the binding", async () => {
     vi.useFakeTimers();
     try {

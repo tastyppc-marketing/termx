@@ -1263,6 +1263,44 @@ describe("bootstrapWorkspace plugin panes", () => {
     }
   });
 
+  it("ignores a manifest read that lands after the workspace is disposed", async () => {
+    // The boot read is unbounded — only the WAIT for it is bounded — so it can
+    // still answer inside a window that has already been torn down. Installing
+    // that answer would rewrite a cache nobody owns and wake listeners
+    // belonging to a dead renderer.
+    vi.useFakeTimers();
+    try {
+      let release = (): void => undefined;
+      const spy = healthyNative({
+        readManifest: () => new Promise<string | null>((resolve) => {
+          release = () => resolve(folderManifest("showroom", "Late Name"));
+        }),
+      });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+      });
+      await vi.advanceTimersByTimeAsync(PLUGIN_MANIFEST_BOOT_BUDGET_MS);
+      const workspace = await booting;
+
+      workspace.controller.dispose();
+      // Subscribed AFTER teardown on purpose: `dispose` empties the listener
+      // set, so one added before it cannot tell us anything.
+      let moved = 0;
+      const stop = workspace.subscribeManifests(() => {
+        moved += 1;
+      });
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(moved).toBe(0);
+      expect(workspace.pluginManifestFor("showroom")?.name).toBe("Showroom");
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stops watching the registry once the workspace is disposed", async () => {
     const spy = healthyNative();
     const workspace = await bootWith({

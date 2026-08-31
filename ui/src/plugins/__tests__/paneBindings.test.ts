@@ -99,6 +99,26 @@ describe("parsePluginPanes", () => {
     });
   });
 
+  it("drops a plugin id the registry could never hold", () => {
+    // `registry.ts` refuses an id that fails `isValidPluginId`, so a row naming
+    // "Showroom" binds a pane to a plugin that cannot exist: a panel that is
+    // permanently down, saying it is not installed, and no Relaunch can help.
+    // Dropping the row leaves an ordinary dead pane the user can dismiss.
+    expect(
+      parsePluginPanes(
+        JSON.stringify({
+          version: 1,
+          panes: {
+            "2147483648": { pluginId: "Showroom" },
+            "2147483649": { pluginId: "-leading-dash" },
+            "2147483650": { pluginId: "under_score" },
+            "2147483651": { pluginId: "showroom" },
+          },
+        }),
+      ),
+    ).toEqual({ "2147483651": { pluginId: "showroom" } });
+  });
+
   it("drops keys that are not the canonical spelling of a reserved id", () => {
     // "7" is a REAL daemon session — a binding there would dress a live
     // terminal up as a panel. The rest can never equal `String(sessionId)`.

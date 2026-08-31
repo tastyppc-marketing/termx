@@ -23,6 +23,8 @@
  * forwarded — main applies, persists, and broadcasts the result back.
  */
 
+import { isValidPluginId } from "./manifest";
+
 /** One pane's binding. `path` overrides the manifest's default panel path. */
 export interface PluginPaneBinding {
   pluginId: string;
@@ -140,7 +142,13 @@ export function parsePluginPanesValue(value: unknown): PluginPanesV1 {
       continue;
     }
     const { pluginId, path } = entry;
-    if (typeof pluginId !== "string" || pluginId.length === 0) {
+    // The SAME rule the registry applies to a plugin id (`registry.ts` drops
+    // an entry that fails it). An id this file accepts but the registry can
+    // never hold — "Showroom", say, from a hand-edited file — would bind a
+    // pane to a plugin that cannot exist: a panel permanently down, saying it
+    // is not installed, that no Relaunch can help. Dropping the row instead
+    // leaves an ordinary dead pane the user can dismiss.
+    if (typeof pluginId !== "string" || !isValidPluginId(pluginId)) {
       continue;
     }
     const panelPath = normalizePluginPath(path);

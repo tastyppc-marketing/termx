@@ -966,6 +966,33 @@ export async function bootstrapWorkspace(
           },
         }
         : {}),
+      ...(bootWindowId !== MAIN_WINDOW_ID
+        ? {
+          // One look, no waiting, no spawn: the health poll's way of letting
+          // this window notice that main has started the plugin again. Main
+          // deliberately has no such seam — there the poll must stay one-way.
+          observeOnce: async (pluginId: string): Promise<EnsureUpResult> => {
+            const manifest = installedManifest(pluginId);
+            if (manifest === null) {
+              return {
+                ok: false as const,
+                reason: unavailableReason(pluginId) ?? "The plugin is unavailable.",
+                stderrTail: "",
+              };
+            }
+            const outcome = await lookForRuntime(manifest);
+            return outcome.kind === "up"
+              ? { ok: true as const, runtime: outcome.runtime }
+              : {
+                ok: false as const,
+                reason: outcome.kind === "unreadable"
+                  ? outcome.reason
+                  : "The plugin is not running. Relaunch it from the main window.",
+                stderrTail: "",
+              };
+          },
+        }
+        : {}),
       ensureUp: async (pluginId: string) => {
         const refusal = unavailableReason(pluginId);
         if (refusal !== null) {
