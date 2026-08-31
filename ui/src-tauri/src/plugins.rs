@@ -293,6 +293,14 @@ fn plugin_spawn_in(
     cwd: String,
     env: Option<HashMap<String, String>>,
 ) -> Result<u32, String> {
+    // Same rule the two read commands enforce, and for a sharper reason: a
+    // relative `cwd` would resolve against termx-ui.exe's own working
+    // directory, so a hand-edited plugins_v1.json could start a plugin
+    // somewhere nobody chose. Checked before `new_log_path_in`, which creates
+    // the log directory and file — a refused spawn must leave nothing behind.
+    if !Path::new(&cwd).is_absolute() {
+        return Err("plugin cwd must be absolute".to_string());
+    }
     let log_path = new_log_path_in(log_dir)?;
     let log_file = std::fs::File::create(&log_path)
         .map_err(|error| format!("creating {}: {error}", log_path.display()))?;
@@ -754,6 +762,27 @@ mod tests {
             std::fs::read_dir(logs.path()).unwrap().count(),
             0,
             "the log file created before the failed spawn must be removed"
+        );
+    }
+
+    #[test]
+    fn a_relative_cwd_is_refused_before_anything_is_created() {
+        // A relative cwd would resolve against termx-ui.exe's own working
+        // directory. Refusing it early also means no log file (and no log
+        // directory entry) for a spawn that never happened.
+        let parent = tempfile::tempdir().unwrap();
+        // Deliberately does not exist yet: `new_log_path_in` would create it.
+        // Checking that it is STILL absent is what proves the refusal happens
+        // before any filesystem work — the failed-spawn arm also deletes its
+        // log file, so an empty directory alone would not discriminate.
+        let logs = parent.path().join("stderr-logs");
+        assert_eq!(
+            plugin_spawn_in(&logs, "node".into(), vec![], "showroom".into(), None),
+            Err("plugin cwd must be absolute".to_string())
+        );
+        assert!(
+            !logs.exists(),
+            "a refused spawn must not create the log directory, let alone a log"
         );
     }
 
