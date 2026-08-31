@@ -13,6 +13,8 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAIN_WINDOW_ID, type Layout, type SplitNode } from "../state/layout";
+import type { PluginManifest } from "../plugins/manifest";
+import { tauriPluginNative } from "../plugins/native";
 import { PluginsStore, type PluginsV1 } from "../plugins/registry";
 import type { SettingsSurfaceProps } from "../settings/SettingsSurface";
 import type { SidebarProps } from "../sidebar/Sidebar";
@@ -152,6 +154,42 @@ function twoPaneSnapshot(): WorkspaceSnapshot {
   };
 }
 
+/**
+ * A plugin that is NOT in the bundled table — the case a bundled-only lookup
+ * can never see: registered from a folder that ships its own manifest.
+ */
+const NOTES_MANIFEST: PluginManifest = {
+  manifest: 1,
+  id: "notes",
+  name: "Notes",
+  icon: "🗒",
+  start: { command: "node", args: ["server.js"] },
+  singleton: true,
+  discovery: { runtimeFile: "%APPDATA%\\Notes\\runtime.json", healthPath: "/health" },
+  panel: { path: "/" },
+};
+
+const SHOWROOM_MANIFEST: PluginManifest = {
+  manifest: 1,
+  id: "showroom",
+  name: "Showroom",
+  icon: "🖼",
+  start: { command: "node", args: ["server/showroom.js"] },
+  singleton: true,
+  discovery: { runtimeFile: "%APPDATA%\\Showroom\\runtime.json", healthPath: "/api/health" },
+  panel: { path: "/" },
+};
+
+/**
+ * Bootstrap's accessor as App sees it: ungated by `enabled`, folder manifests
+ * ahead of the bundled table, null for a plugin it cannot name.
+ */
+function manifestAccessor(
+  manifests: Record<string, PluginManifest>,
+): (pluginId: string) => PluginManifest | null {
+  return (pluginId) => manifests[pluginId] ?? null;
+}
+
 /** Showroom installed and on — the Phase 1 plugin, from the bundled table. */
 const INSTALLED: PluginsV1 = {
   plugins: { showroom: { path: "C:\\code\\showroom", enabled: true, grants: [] } },
@@ -171,6 +209,8 @@ function harness(
     windowId?: string;
     registry?: PluginsV1;
     snapshot?: WorkspaceSnapshot;
+    /** Bootstrap's ungated manifest accessor; absent = not wired yet. */
+    pluginManifestFor?: (pluginId: string) => PluginManifest | null;
   } = {},
 ): Harness {
   const current = options.snapshot ?? snapshot();
@@ -213,6 +253,9 @@ function harness(
       client: { close: vi.fn() },
       // The registry under test, so these tests watch the same store App does.
       plugins,
+      ...(options.pluginManifestFor
+        ? { pluginManifestFor: options.pluginManifestFor }
+        : {}),
     }),
     controller,
     openPluginTab,
@@ -271,6 +314,59 @@ describe("App plugin wiring — sidebar", () => {
     expect(sidebarProps().plugins).toEqual([
       { id: "showroom", name: "Showroom", icon: "🖼", enabled: false },
     ]);
+  });
+
+  it("names a non-bundled plugin through bootstrap's accessor", async () => {
+    // Registered from a folder, absent from the bundled table: before the
+    // accessor was wired this plugin appeared in no menu, ever, even though
+    // the controller would happily open and title it.
+    await renderApp(harness({
+      registry: {
+        plugins: { notes: { path: "C:\\code\\notes", enabled: true, grants: [] } },
+      },
+      pluginManifestFor: manifestAccessor({ notes: NOTES_MANIFEST }),
+    }));
+
+    expect(sidebarProps().plugins).toEqual([
+      { id: "notes", name: "Notes", icon: "🗒", enabled: true },
+      // Showroom still rides in from the bundled table, nameable but off.
+      { id: "showroom", name: "Showroom", icon: "🖼", enabled: false },
+    ]);
+  });
+
+  it("lists plugins by name, not by the order the registry file happens to hold", async () => {
+    await renderApp(harness({
+      registry: {
+        plugins: {
+          // Registry order is Showroom first; Notes must still sort ahead.
+          showroom: { path: "C:\\code\\showroom", enabled: true, grants: [] },
+          notes: { path: "C:\\code\\notes", enabled: true, grants: [] },
+        },
+      },
+      pluginManifestFor: manifestAccessor({
+        notes: NOTES_MANIFEST,
+        showroom: SHOWROOM_MANIFEST,
+      }),
+    }));
+
+    expect(sidebarProps().plugins?.map((plugin) => plugin.name)).toEqual([
+      "Notes",
+      "Showroom",
+    ]);
+  });
+
+  it("drops a registered plugin the accessor cannot name", async () => {
+    await renderApp(harness({
+      registry: {
+        plugins: { broken: { path: "C:\\code\\broken", enabled: true, grants: [] } },
+      },
+      pluginManifestFor: manifestAccessor({}),
+    }));
+
+    // A plugin TermX cannot name has nothing to put in a menu; Settings is
+    // where the malformed manifest gets explained. Showroom still rides in
+    // from the bundled table.
+    expect(sidebarProps().plugins?.map((plugin) => plugin.id)).toEqual(["showroom"]);
   });
 
   it("republishes the snapshot when the registry changes", async () => {
@@ -377,6 +473,29 @@ describe("App plugin wiring — split layout", () => {
     expect(splitProps().pluginManifestFor?.("showroom")?.name).toBe("Showroom");
   });
 
+  it("resolves a non-bundled plugin's manifest through the accessor", async () => {
+    await renderApp(harness({
+      registry: {
+        plugins: { notes: { path: "C:\\code\\notes", enabled: true, grants: [] } },
+      },
+      pluginManifestFor: manifestAccessor({ notes: NOTES_MANIFEST }),
+    }));
+
+    expect(splitProps().pluginManifestFor?.("notes")?.panel.path).toBe("/");
+    expect(splitProps().pluginManifestFor?.("notes")?.icon).toBe("🗒");
+  });
+
+  it("still refuses a plugin the accessor can name but the registry has not got", async () => {
+    await renderApp(harness({
+      registry: { plugins: {} },
+      pluginManifestFor: manifestAccessor({ notes: NOTES_MANIFEST }),
+    }));
+
+    // The presence gate outranks the accessor: a plugin the user REMOVED must
+    // not keep dressing a pane just because its folder manifest still parses.
+    expect(splitProps().pluginManifestFor?.("notes")).toBeNull();
+  });
+
   it("relaunches a plugin pane through the controller", async () => {
     const fixture = harness();
     await renderApp(fixture);
@@ -398,9 +517,9 @@ describe("App plugin wiring — settings", () => {
 
     const bundle = settingsProps().plugins;
     expect(bundle?.store).toBe(fixture.plugins);
-    // The native seam is whatever the surface declares; what matters here is
-    // that a seam is wired at all and that opening reaches the controller.
-    expect(bundle?.native).toBeTruthy();
+    // The real Tauri seam, by identity: the panel reads a plugin folder's own
+    // manifest through it, so a hand-rolled stand-in would read nothing.
+    expect(bundle?.native).toBe(tauriPluginNative);
 
     bundle?.onOpen?.("showroom");
     expect(fixture.openPluginTab).toHaveBeenCalledWith("showroom");

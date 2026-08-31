@@ -256,6 +256,19 @@ export default function App({ bootstrap = bootstrapWorkspace, windowId }: AppPro
 
 type WorkspaceConnection = NonNullable<BootstrappedWorkspace["connection"]>;
 
+/**
+ * Bootstrap's manifest resolver (plugin spec §2), seen optionally.
+ *
+ * It resolves a registered folder's own `termx-plugin.json` before the bundled
+ * table and is ungated by `enabled`, so it answers for a plugin that is merely
+ * switched off. Declared here rather than imported so App compiles both before
+ * and after the accessor lands on `BootstrappedWorkspace`, and so a window
+ * booted without one degrades to the bundled table instead of failing.
+ */
+interface PluginManifestSource {
+  pluginManifestFor?: (pluginId: string) => PluginManifest | null;
+}
+
 /** Legacy fixtures carry no reconnect machine; they are simply always up. */
 const ALWAYS_CONNECTED: ConnectionState = { phase: "connected" };
 
@@ -939,6 +952,16 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     pluginsStore.subscribe,
     pluginsStore.getSnapshot,
   );
+  // Bootstrap resolves a registered folder's own `termx-plugin.json` and falls
+  // back to the bundled table; it is ungated by `enabled`, so it answers for a
+  // plugin that is merely switched off. Read through an OPTIONAL view: this
+  // compiles both before and after that accessor lands on the workspace, and a
+  // window booted without one still names the bundled plugins.
+  const knownManifest = useMemo(() => {
+    const resolve = (workspace as PluginManifestSource).pluginManifestFor;
+    return (pluginId: string): PluginManifest | null =>
+      resolve?.(pluginId) ?? manifestFor(pluginId, null);
+  }, [workspace]);
   // Registered plugins UNION the bundled table: a first-party panel is named
   // even before anyone adds its folder, which is what keeps the right glyph on
   // a pane whose plugin has since been removed. `enabled` is the registry's
@@ -951,7 +974,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     ]);
     const listed: SidebarPlugin[] = [];
     for (const id of ids) {
-      const manifest = manifestFor(id, null);
+      const manifest = knownManifest(id);
       if (manifest === null) {
         // A plugin TermX cannot name has nothing to put in a menu. Settings is
         // where that is explained, with the field that failed.
@@ -965,7 +988,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       });
     }
     return listed.sort((left, right) => left.name.localeCompare(right.name));
-  }, [pluginsRegistry]);
+  }, [pluginsRegistry, knownManifest]);
 
   // The sidebar's actions ARE the controller, with exactly one override: which
   // pane a plugin split hangs off.
@@ -1000,19 +1023,19 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     [controller, snapshot.layout.tabs, focusByTab],
   );
 
-  // The manifest behind a bound pane. Registry PRESENCE is the gate, never the
-  // enabled flag: switching a plugin off must not turn its open panels into
-  // corpses, while REMOVING it is exactly the case SplitLayout degrades to a
-  // dismissible dead pane. The lookup is the bundled table, the same one
-  // bootstrap resolves against — when that learns to read a folder's own
-  // manifest, this is the second caller to follow.
+  // The manifest that DRESSES a bound pane. Registry presence is the gate, and
+  // deliberately not the enabled flag: switching a plugin off must not strip
+  // the name off a panel that is still on screen, while removing it should.
+  // A null answer no longer costs the user the pane — SplitLayout mounts the
+  // panel either way and falls back to the plugin's id for a name — so this
+  // decides how a pane is LABELLED, not whether it survives.
   const pluginManifestFor = useMemo(
     () =>
       (pluginId: string): PluginManifest | null =>
         pluginsRegistry.plugins[pluginId] === undefined
           ? null
-          : manifestFor(pluginId, null),
-    [pluginsRegistry],
+          : knownManifest(pluginId),
+    [pluginsRegistry, knownManifest],
   );
 
   // Plugin management WRITES `plugins_v1.json`, and the main window is its only
