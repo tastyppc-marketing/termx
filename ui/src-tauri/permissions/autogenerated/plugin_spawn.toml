@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-spawn"
+description = "Enables the plugin_spawn command without any pre-configured scope."
+commands.allow = ["plugin_spawn"]
+
+[[permission]]
+identifier = "deny-plugin-spawn"
+description = "Denies the plugin_spawn command without any pre-configured scope."
+commands.deny = ["plugin_spawn"]

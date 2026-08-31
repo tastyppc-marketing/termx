@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-probe"
+description = "Enables the plugin_probe command without any pre-configured scope."
+commands.allow = ["plugin_probe"]
+
+[[permission]]
+identifier = "deny-plugin-probe"
+description = "Denies the plugin_probe command without any pre-configured scope."
+commands.deny = ["plugin_probe"]

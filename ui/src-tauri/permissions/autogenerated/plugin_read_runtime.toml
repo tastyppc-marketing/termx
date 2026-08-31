@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plugin-read-runtime"
+description = "Enables the plugin_read_runtime command without any pre-configured scope."
+commands.allow = ["plugin_read_runtime"]
+
+[[permission]]
+identifier = "deny-plugin-read-runtime"
+description = "Denies the plugin_read_runtime command without any pre-configured scope."
+commands.deny = ["plugin_read_runtime"]
