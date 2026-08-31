@@ -18,6 +18,8 @@ import {
   parsePluginPanes,
   PLUGIN_PANE_MIN_ID,
   serializePluginPanes,
+  toJsonPluginPanes,
+  type PluginPanesRequest,
   type PluginPanesV1,
 } from "../paneBindings";
 
@@ -60,10 +62,49 @@ describe("parsePluginPanes", () => {
     });
   });
 
+  it("drops keys that are not the canonical spelling of a reserved id", () => {
+    // "7" is a REAL daemon session — a binding there would dress a live
+    // terminal up as a panel. The rest can never equal `String(sessionId)`.
+    expect(
+      parsePluginPanes(
+        JSON.stringify({
+          version: 1,
+          panes: {
+            "7": { pluginId: "showroom" },
+            "0": { pluginId: "showroom" },
+            "-2147483648": { pluginId: "showroom" },
+            "1e9": { pluginId: "showroom" },
+            "2147483648.0": { pluginId: "showroom" },
+            " 2147483648": { pluginId: "showroom" },
+            "4294967296": { pluginId: "showroom" },
+            "": { pluginId: "showroom" },
+          },
+        }),
+      ),
+    ).toEqual({});
+  });
+
   it("reads a hand-written bare record (the spec's literal file shape)", () => {
     expect(
       parsePluginPanes(JSON.stringify({ "2147483648": { pluginId: "showroom" } })),
     ).toEqual({ "2147483648": { pluginId: "showroom" } });
+  });
+});
+
+describe("toJsonPluginPanes", () => {
+  it("deep-copies and never carries an undefined field across the bus", () => {
+    const state: PluginPanesV1 = {
+      "2147483648": { pluginId: "showroom" },
+      "2147483649": { pluginId: "showroom", path: "/gallery" },
+    };
+
+    const json = toJsonPluginPanes(state);
+
+    expect(json).toEqual(state);
+    expect(json["2147483648"]).not.toBe(state["2147483648"]);
+    // `{ pluginId, path: undefined }` would survive a spread but not JSON.
+    expect(Object.keys(json["2147483648"]!)).toEqual(["pluginId"]);
+    expect(JSON.parse(JSON.stringify(json))).toEqual(state);
   });
 });
 
@@ -174,6 +215,45 @@ describe("PaneBindingsStore (main window)", () => {
     expect(broadcasts).toEqual([]);
   });
 
+  it("refuses to bind an id outside the reserved range", async () => {
+    const { store, saves, broadcasts } = mainStore();
+
+    store.bind(7, { pluginId: "showroom" });
+    store.bind(PLUGIN_PANE_MIN_ID - 1, { pluginId: "showroom" });
+    await store.flush();
+
+    // 7 is a real daemon session; binding it would dress a live terminal up
+    // as a plugin panel.
+    expect(store.getSnapshot()).toEqual({});
+    expect(saves).toEqual([]);
+    expect(broadcasts).toEqual([]);
+  });
+
+  it("prunes bindings whose pane is gone from the layout", async () => {
+    const { store, saves, broadcasts } = mainStore({
+      "2147483648": { pluginId: "showroom" },
+      "2147483649": { pluginId: "showroom" },
+    });
+
+    store.prune(new Set([PLUGIN_PANE_MIN_ID, 1, 2]));
+    await store.flush();
+
+    expect(store.getSnapshot()).toEqual({ "2147483648": { pluginId: "showroom" } });
+    expect(saves).toHaveLength(1);
+    expect(broadcasts).toHaveLength(1);
+  });
+
+  it("does not write when every binding survives the prune", async () => {
+    const { store, saves } = mainStore({ "2147483648": { pluginId: "showroom" } });
+    const before = store.getSnapshot();
+
+    store.prune(new Set([PLUGIN_PANE_MIN_ID]));
+    await store.flush();
+
+    expect(store.getSnapshot()).toBe(before);
+    expect(saves).toEqual([]);
+  });
+
   it("survives a save that rejects", async () => {
     const store = new PaneBindingsStore({
       initial: {},
@@ -190,19 +270,76 @@ describe("PaneBindingsStore (main window)", () => {
 });
 
 describe("PaneBindingsStore (aux window)", () => {
-  it("never persists, even when something binds in this window", async () => {
-    const save = vi.fn(async () => undefined);
-    const store = new PaneBindingsStore({ initial: {}, save: null });
-    const auxWithSave = new PaneBindingsStore({ initial: {}, save });
+  /// The real aux shape: no save, and a forward seam to the main window.
+  function replica(initial: PluginPanesV1 = {}) {
+    const forwarded: PluginPanesRequest[] = [];
+    const store = new PaneBindingsStore({
+      initial,
+      save: null,
+      onForward: (request) => forwarded.push(request),
+    });
+    return { store, forwarded };
+  }
 
-    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
-    store.unbind([PLUGIN_PANE_MIN_ID]);
+  it("forwards a bind to main instead of applying it locally", async () => {
+    const { store, forwarded } = replica();
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom", path: "/" });
     await store.flush();
 
+    // Nothing lands locally: main's broadcast is what makes it real, so a
+    // local edit would show a binding that then snapped back.
     expect(store.getSnapshot()).toEqual({});
-    // Sanity: the same calls DO write when a save is wired (main window).
-    auxWithSave.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
-    await auxWithSave.flush();
+    expect(listener).not.toHaveBeenCalled();
+    expect(forwarded).toEqual([
+      {
+        op: "bind",
+        sessionId: PLUGIN_PANE_MIN_ID,
+        binding: { pluginId: "showroom", path: "/" },
+      },
+    ]);
+  });
+
+  it("forwards an unbind unfiltered and drops an empty one", () => {
+    const { store, forwarded } = replica({
+      "2147483648": { pluginId: "showroom" },
+    });
+
+    store.unbind([PLUGIN_PANE_MIN_ID, 12]);
+    store.unbind([]);
+
+    // The id it cannot see (12) still travels: only main knows the whole map.
+    expect(forwarded).toEqual([
+      { op: "unbind", sessionIds: [PLUGIN_PANE_MIN_ID, 12] },
+    ]);
+    expect(store.getSnapshot()).toEqual({ "2147483648": { pluginId: "showroom" } });
+  });
+
+  it("ignores a prune — main prunes and broadcasts the result", () => {
+    const { store, forwarded } = replica({
+      "2147483648": { pluginId: "showroom" },
+    });
+
+    store.prune(new Set());
+
+    expect(store.getSnapshot()).toEqual({ "2147483648": { pluginId: "showroom" } });
+    expect(forwarded).toEqual([]);
+  });
+
+  it("cannot write the bindings file: a replica has no save at all", async () => {
+    const save = vi.fn(async () => undefined);
+    const { store } = replica();
+    const mainSanity = new PaneBindingsStore({ initial: {}, save });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await store.flush();
+
+    expect(save).not.toHaveBeenCalled();
+    // Sanity: the same call DOES write on the main-window shape.
+    mainSanity.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await mainSanity.flush();
     expect(save).toHaveBeenCalledTimes(1);
   });
 

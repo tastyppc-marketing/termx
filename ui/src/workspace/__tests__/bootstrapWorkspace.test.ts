@@ -209,7 +209,18 @@ describe("bootstrapWorkspace", () => {
   });
 
   it("restores plugin pane bindings and persists new ones to their own file", async () => {
-    const fake = fakeClient();
+    // The bound pane must be IN the layout, or boot prunes it as an orphan.
+    const state = emptyLayout();
+    state.tabs.panel = {
+      id: "panel",
+      title: null,
+      color: "magenta",
+      fill: "off",
+      split: { kind: "pane", sessionId: PLUGIN_PANE_MIN_ID },
+    };
+    state.rootItems = [{ kind: "tab", id: "panel" }];
+    state.activeTabId = "panel";
+    const fake = fakeClient({ layout: serializeLayout(state) });
     const seed: Record<string, string> = {
       "plugin_panes_v1.json": JSON.stringify({
         version: 1,
@@ -242,6 +253,70 @@ describe("bootstrapWorkspace", () => {
       "2147483648": { pluginId: "showroom" },
       "2147483649": { pluginId: "showroom" },
     });
+  });
+
+  it("prunes bindings whose pane is not in the restored layout", async () => {
+    // The crash order this exists for: `bind` writes the bindings file
+    // immediately, so a crash before the layout write leaves a binding whose
+    // pane never made it into the blob.
+    const fake = fakeClient({ layout: serializeLayout(emptyLayout()) });
+    const seed: Record<string, string> = {
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom" } },
+      }),
+    };
+    const writes: Array<[string, string]> = [];
+    const appFiles: AppFileStore = {
+      read: async (name) => seed[name] ?? null,
+      write: async (name, contents) => {
+        writes.push([name, contents]);
+      },
+    };
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+    });
+    await workspace.pluginPanes.flush();
+
+    expect(workspace.pluginPanes.getSnapshot()).toEqual({});
+    const written = writes.filter(([name]) => name === "plugin_panes_v1.json");
+    expect(written).toHaveLength(1);
+    expect(parsePluginPanes(written[0]![1])).toEqual({});
+  });
+
+  it("keeps bindings when the restored layout could not be parsed", async () => {
+    // A malformed blob is not evidence that the panes are gone — pruning
+    // against the empty fallback layout would delete every binding the user
+    // has, and the next good boot could not bring them back.
+    const fake = fakeClient({ layout: { version: 999 } });
+    const seed: Record<string, string> = {
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom" } },
+      }),
+    };
+    const writes: Array<[string, string]> = [];
+    const appFiles: AppFileStore = {
+      read: async (name) => seed[name] ?? null,
+      write: async (name, contents) => {
+        writes.push([name, contents]);
+      },
+    };
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+    });
+    await workspace.pluginPanes.flush();
+
+    expect(workspace.pluginPanes.getSnapshot()).toEqual({
+      "2147483648": { pluginId: "showroom" },
+    });
+    expect(writes.map(([name]) => name)).not.toContain("plugin_panes_v1.json");
   });
 
   it("boots with empty bindings when the bindings file is corrupt or unreadable", async () => {

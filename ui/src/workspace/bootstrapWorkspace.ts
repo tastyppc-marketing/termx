@@ -4,17 +4,24 @@ import {
   loadConversationsStore,
 } from "../conversations/store";
 import { sameFolder } from "./WorkspaceController";
+import {
+  CAPTURES_FILE,
+  capturedRecord,
+  parseCaptures,
+  type ConversationCapture,
+} from "../conversations/captures";
 import { conversationsFileIo, tauriSessionLister } from "../conversations/storage";
-import type { SessionLister } from "../conversations/types";
+import type { LlmSessionRecord, SessionLister } from "../conversations/types";
 import { HostClient, type HostClientConnectOptions } from "../host/client";
 import { HostBootstrapError, ReconnectingHostClient } from "../host/reconnect";
-import type { JsonValue, SessionInfo } from "../host/protocol";
+import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
 import {
   PaneBindingsStore,
   parsePluginPanes,
   parsePluginPanesValue,
+  toJsonPluginPanes,
 } from "../plugins/paneBindings";
 import {
   tauriProtectSecret,
@@ -30,7 +37,12 @@ import {
 } from "../saved/store";
 import { SettingsStore, loadSettingsStore } from "../settings/SettingsStore";
 import { UiStateStore, loadUiStateStore } from "./uiState";
-import { MAIN_WINDOW_ID, parseLayout, slotOf } from "../state/layout";
+import {
+  MAIN_WINDOW_ID,
+  parseLayout,
+  sessionIdsInLayout,
+  slotOf,
+} from "../state/layout";
 import { reconcile } from "../state/reconcile";
 import { createLayoutStore } from "../state/store";
 import { AttachmentHub } from "./AttachmentHub";
@@ -286,6 +298,18 @@ export async function bootstrapWorkspace(
     } catch {
       pluginPanesText = null;
     }
+    // Conversation captures: written by the Claude Code SessionStart hook, so
+    // TermX only ever reads them, and a read that fails (no hook installed, an
+    // older host without the file in its allowlist) simply means "no captures"
+    // and the folder-based resume fallback stands.
+    const readCaptures = async (): Promise<Map<number, ConversationCapture>> => {
+      try {
+        return parseCaptures(await appFiles.read(CAPTURES_FILE));
+      } catch {
+        return new Map();
+      }
+    };
+    let captures = await readCaptures();
     const conversationsIo = conversationsFileIo(appFiles);
     const conversations = await loadConversationsStore({
       read: () => conversationsIo.read(),
@@ -373,32 +397,89 @@ export async function bootstrapWorkspace(
       }
     }
     // Same single-writer rule as the layout, applied to the bindings file: the
-    // MAIN window persists every change and fans it out; an aux window is a
-    // read-only replica that adopts broadcasts and never writes. Both windows
-    // seed from the file, so an aux window has its bindings from the first
-    // frame instead of waiting for main's next change.
+    // MAIN window persists every change and fans it out; any other window is a
+    // replica that adopts broadcasts, forwards its own binding changes to main,
+    // and never writes. Both windows seed from the file, so an aux window has
+    // its bindings from the first frame instead of waiting for main's next
+    // change.
     const pluginPanes = bootWindowId === MAIN_WINDOW_ID
       ? new PaneBindingsStore({
           initial: parsePluginPanes(pluginPanesText),
           save: (text) => appFiles.write("plugin_panes_v1.json", text),
           ...(bus !== null
-            ? {
-                // Structurally JSON already — the cast only tells TS that an
-                // OPTIONAL `path` (i.e. `string | undefined`) never actually
-                // holds `undefined`; the store builds bindings by spread.
-                onBroadcast: (state) =>
-                  void bus.broadcastPluginPanes(state as unknown as JsonValue),
-              }
+            ? { onBroadcast: (state) => void bus.broadcastPluginPanes(toJsonPluginPanes(state)) }
             : {}),
         })
       : new PaneBindingsStore({
           initial: parsePluginPanes(pluginPanesText),
           save: null,
+          ...(bus !== null
+            ? {
+                onForward: (request) =>
+                  void bus.forwardPluginPanes(
+                    request.op === "bind"
+                      ? {
+                          kind: "pluginPanes",
+                          op: "bind",
+                          sessionId: request.sessionId,
+                          pluginId: request.binding.pluginId,
+                          ...(request.binding.path !== undefined
+                            ? { path: request.binding.path }
+                            : {}),
+                        }
+                      : {
+                          kind: "pluginPanes",
+                          op: "unbind",
+                          sessionIds: [...request.sessionIds],
+                        },
+                  ),
+              }
+            : {}),
         });
-    if (bus !== null && bootWindowId !== MAIN_WINDOW_ID) {
-      // A broadcast is untrusted input from another window: parse it like a
-      // file read and adopt only what survives.
-      bus.onPluginPanes((state) => pluginPanes.adopt(parsePluginPanesValue(state)));
+    if (bus !== null) {
+      if (bootWindowId === MAIN_WINDOW_ID) {
+        bus.onPluginPanesMutation((mutation) => {
+          if (mutation.op === "bind") {
+            pluginPanes.bind(mutation.sessionId, {
+              pluginId: mutation.pluginId,
+              ...(mutation.path !== undefined ? { path: mutation.path } : {}),
+            });
+          } else if (mutation.op === "unbind") {
+            pluginPanes.unbind(mutation.sessionIds);
+          } else {
+            // Catch-up for a window that booted after our last broadcast: it
+            // asked because its file read may already be stale.
+            void bus.broadcastPluginPanes(
+              toJsonPluginPanes(pluginPanes.getSnapshot()),
+            );
+          }
+        });
+      } else {
+        // A broadcast is untrusted input from another window: parse it like a
+        // file read and adopt only what survives.
+        bus.onPluginPanes((state) => pluginPanes.adopt(parsePluginPanesValue(state)));
+        // Only once the subscription is REALLY live (the transport's listen is
+        // async) do we ask main for the truth — otherwise the answer could
+        // arrive before we are listening and be lost. The file read above is
+        // the fallback if main never answers: aux windows are opened by main,
+        // so in practice main is always listening by this point.
+        await bus.ready();
+        void bus.forwardPluginPanes({ kind: "pluginPanes", op: "sync" });
+      }
+    }
+    if (bootWindowId === MAIN_WINDOW_ID && restored !== null) {
+      // Orphan sweep (spec §4). `bind` writes the bindings file immediately and
+      // independently of LayoutPersistence, so a crash between the two leaves a
+      // binding whose pane never reached the blob; boot is where that is
+      // cheapest to notice. Gated on a layout that actually PARSED — pruning
+      // against the empty fallback would delete every binding the user has.
+      //
+      // T5 note (the other crash order): a layout write that lands before its
+      // binding leaves a reserved pane with no binding — a dismissible dead
+      // pane, and the panel identity is gone. Whatever binds a pane must
+      // `await pluginPanes.flush()` BEFORE persisting the layout that
+      // references it.
+      pluginPanes.prune(new Set(sessionIdsInLayout(reconciled.layout)));
     }
     const attachments = new AttachmentHub(client);
     const controllerOptions = {
@@ -426,6 +507,23 @@ export async function bootstrapWorkspace(
           return best;
         },
       },
+      // Exact dead-pane resume: the conversation THIS pane ran. Joined against
+      // the index for a real title when the scan has already seen it, and
+      // synthesized from the capture alone when it has not — the resume needs
+      // only provider + id, so it must not wait on a background scan.
+      capturedConversationFor: (sessionId: number): LlmSessionRecord | null => {
+        const capture = captures.get(sessionId);
+        if (capture === undefined) {
+          return null;
+        }
+        const indexed = conversations
+          .getSnapshot()
+          .records.find(
+            (candidate) =>
+              candidate.provider === capture.provider && candidate.id === capture.id,
+          ) ?? null;
+        return capturedRecord(capture, indexed);
+      },
       savedSessions: saved,
       sshPasswords: { passwordFor: (alias: string) => sshCredentials.passwordFor(alias) },
       sshHosts: { byAlias: (alias: string) => sshHosts.find((host) => host.aliases.includes(alias)) ?? null },
@@ -434,6 +532,18 @@ export async function bootstrapWorkspace(
       ...(options.windowId ? { windowId: options.windowId } : {}),
     };
     controller = new WorkspaceController(controllerOptions);
+
+    // A session exiting is exactly when a dead pane appears and its Resume
+    // button asks who it should resume — and the pane may have run `claude`
+    // long after boot, so the boot-time read alone would miss it. One small
+    // file read at that moment; a failed read leaves the last good map in
+    // place. Fire-and-forget: nothing waits on the refresh, the pane simply
+    // has its capture by the time the user reaches for the button.
+    client.onSessionExited(() => {
+      void readCaptures().then((next) => {
+        captures = next;
+      });
+    });
 
     const windowId = bootWindowId;
     const slot = slotOf(reconciled.layout, windowId);

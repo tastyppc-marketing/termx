@@ -15,6 +15,28 @@ import type { JsonValue } from "../host/protocol";
 
 export type LayoutMutation = { kind: "setLayout"; layout: JsonValue };
 
+/**
+ * Aux → main for the plugin pane bindings (plugin spec §4), the same shape of
+ * plumbing as `LayoutMutation` and for the same reason: `plugin_panes_v1.json`
+ * has one writer, so a window that is not main asks rather than writes.
+ *
+ * `sync` is the boot catch-up. An aux window seeds itself from the bindings
+ * file, but the file it reads can already be stale (main binds during aux
+ * startup, and a Tauri `listen()` that has not resolved yet drops the
+ * broadcast). Asking main to re-broadcast once, after the listener exists,
+ * closes that window without any promise plumbing in the bus.
+ */
+export type PluginPanesMutation =
+  | {
+      kind: "pluginPanes";
+      op: "bind";
+      sessionId: number;
+      pluginId: string;
+      path?: string;
+    }
+  | { kind: "pluginPanes"; op: "unbind"; sessionIds: number[] }
+  | { kind: "pluginPanes"; op: "sync" };
+
 export interface WindowBus {
   /** Aux → main: apply this mutation to the shared layout. The promise
    * resolves once the runtime has taken the event — a closing aux window
@@ -30,14 +52,75 @@ export interface WindowBus {
    * and there is deliberately no aux → main binding mutation.
    */
   broadcastPluginPanes(state: JsonValue): Promise<void>;
+  /** Aux → main: apply this binding change, or (`sync`) re-send the truth. */
+  forwardPluginPanes(mutation: PluginPanesMutation): Promise<void>;
   onMutation(handler: (mutation: LayoutMutation) => void): () => void;
   onLayout(handler: (layout: JsonValue) => void): () => void;
   onPluginPanes(handler: (state: JsonValue) => void): () => void;
+  onPluginPanesMutation(handler: (mutation: PluginPanesMutation) => void): () => void;
+  /**
+   * Resolves once every subscription registered so far is really receiving
+   * events. Subscribing is fire-and-forget (the transport's `listen` is
+   * async), so a window that subscribes and IMMEDIATELY asks another window to
+   * send it something can miss the answer. Await this in between.
+   */
+  ready(): Promise<void>;
 }
 
 export const LAYOUT_MUTATION_EVENT = "termx:layout-mutation";
 export const LAYOUT_STATE_EVENT = "termx:layout-state";
 export const PLUGIN_PANES_EVENT = "termx:plugin-panes";
+export const PLUGIN_PANES_MUTATION_EVENT = "termx:plugin-panes-mutation";
+
+/**
+ * Forwarded bindings are untrusted input from another window, so the payload
+ * is validated field by field before any of it reaches the store — the same
+ * discipline `onMutation` applies to a forwarded layout blob.
+ */
+function parsePluginPanesMutation(payload: unknown): PluginPanesMutation | null {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    (payload as { kind?: unknown }).kind !== "pluginPanes"
+  ) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  if (record.op === "sync") {
+    return { kind: "pluginPanes", op: "sync" };
+  }
+  if (record.op === "bind") {
+    const { sessionId, pluginId, path } = record;
+    if (
+      typeof sessionId !== "number" ||
+      !Number.isInteger(sessionId) ||
+      typeof pluginId !== "string" ||
+      pluginId.length === 0
+    ) {
+      return null;
+    }
+    return {
+      kind: "pluginPanes",
+      op: "bind",
+      sessionId,
+      pluginId,
+      ...(typeof path === "string" && path.length > 0 ? { path } : {}),
+    };
+  }
+  if (record.op === "unbind") {
+    if (!Array.isArray(record.sessionIds)) {
+      return null;
+    }
+    return {
+      kind: "pluginPanes",
+      op: "unbind",
+      sessionIds: record.sessionIds.filter(
+        (id): id is number => typeof id === "number" && Number.isInteger(id),
+      ),
+    };
+  }
+  return null;
+}
 
 interface EmitListen {
   emit(event: string, payload: unknown): Promise<void>;
@@ -58,9 +141,13 @@ export function tauriWindowBus(
   ): {
     send(payload: unknown): Promise<void>;
     subscribe(handler: (payload: unknown) => void): () => void;
+    ready(): Promise<void>;
   } => {
     const handlers = new Set<(payload: unknown) => void>();
-    let listening = false;
+    // The in-flight `listen()` registration. Until it settles this window is
+    // NOT yet receiving the event, so anything emitted meanwhile is lost —
+    // which is why `ready()` exists.
+    let listening: Promise<void> | null = null;
     return {
       send(payload) {
         // A failed emit means the receiving window is gone, and the next
@@ -69,9 +156,8 @@ export function tauriWindowBus(
       },
       subscribe(handler) {
         handlers.add(handler);
-        if (!listening) {
-          listening = true;
-          void transport
+        if (listening === null) {
+          listening = transport
             .listen(event, ({ payload }) => {
               for (const registered of [...handlers]) {
                 try {
@@ -81,19 +167,36 @@ export function tauriWindowBus(
                 }
               }
             })
+            .then(() => undefined)
             .catch(() => undefined);
         }
         return () => handlers.delete(handler);
+      },
+      ready() {
+        return listening ?? Promise.resolve();
       },
     };
   };
   const mutations = channel(LAYOUT_MUTATION_EVENT);
   const layouts = channel(LAYOUT_STATE_EVENT);
   const pluginPanes = channel(PLUGIN_PANES_EVENT);
+  const pluginPaneMutations = channel(PLUGIN_PANES_MUTATION_EVENT);
+  const channels = [mutations, layouts, pluginPanes, pluginPaneMutations];
   return {
+    ready: async () => {
+      await Promise.all(channels.map((entry) => entry.ready()));
+    },
     forwardMutation: (mutation) => mutations.send(mutation),
     broadcastLayout: (layout) => layouts.send(layout),
     broadcastPluginPanes: (state) => pluginPanes.send(state),
+    forwardPluginPanes: (mutation) => pluginPaneMutations.send(mutation),
+    onPluginPanesMutation: (handler) =>
+      pluginPaneMutations.subscribe((payload) => {
+        const mutation = parsePluginPanesMutation(payload);
+        if (mutation !== null) {
+          handler(mutation);
+        }
+      }),
     onPluginPanes: (handler) =>
       pluginPanes.subscribe((payload) => {
         // The bindings map is always a JSON object; anything else on this
@@ -125,7 +228,13 @@ export function loopbackBus(): WindowBus {
   const mutationHandlers = new Set<(mutation: LayoutMutation) => void>();
   const layoutHandlers = new Set<(layout: JsonValue) => void>();
   const pluginPaneHandlers = new Set<(state: JsonValue) => void>();
+  const pluginPaneMutationHandlers = new Set<
+    (mutation: PluginPanesMutation) => void
+  >();
   return {
+    // Delivery is synchronous here, so a subscriber is live the moment it
+    // subscribes; there is nothing to wait for.
+    ready: async () => undefined,
     async forwardMutation(mutation) {
       for (const handler of [...mutationHandlers]) {
         try {
@@ -161,9 +270,22 @@ export function loopbackBus(): WindowBus {
       layoutHandlers.add(handler);
       return () => layoutHandlers.delete(handler);
     },
+    async forwardPluginPanes(mutation) {
+      for (const handler of [...pluginPaneMutationHandlers]) {
+        try {
+          handler(mutation);
+        } catch {
+          // One bad subscriber must not silence the others.
+        }
+      }
+    },
     onPluginPanes(handler) {
       pluginPaneHandlers.add(handler);
       return () => pluginPaneHandlers.delete(handler);
+    },
+    onPluginPanesMutation(handler) {
+      pluginPaneMutationHandlers.add(handler);
+      return () => pluginPaneMutationHandlers.delete(handler);
     },
   };
 }
