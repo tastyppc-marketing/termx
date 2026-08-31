@@ -1590,3 +1590,11 @@ Routing: Wave 1 = T1 Codex, T2 Codex (Rust), T4 Opus → reviews: T1→Grok, T2�
 **Plan:** all boxes checked as-built except T9 Step 3 (Michael's live checks). **Hook timeout** raised to 15 s in `%USERPROFILE%\.claude\settings.json` (backup `settings.json.bak-2026-08-31-hook-timeout`).
 
 **NEXT SESSION:** (1) read Michael's live-check results; (2) Phase C — aux registry replica (main→aux `plugins` channel, save:null) so Settings changes reach aux windows without a reboot; (3) the queued feature batch (Sleep/Rest sessions; quick-launch claude/codex buttons; pane hover popup + rename; status bar cwd + folder browser) — full planning, never one-shot; (4) deferred list from the morning message (TERMX_DATA_DIR stamping, Showroom WS client, stderr byte cap, manifest cache refresh, sessionDims/paneTitles churn).
+
+## Delta 2026-08-31 (later 32) — 05:10 local: **FINAL — BUILD STAGED at aa713d0**; overnight plugin Phase 1 build complete
+
+**STAGED (final):** `C:\Dev\TermX\dist-portable\TermX\TermX.exe` + `termx-ui.exe` = HEAD **aa713d0** (Aug 31 05:05, 6,382,592 bytes), dev-fingerprint 0. Rotation: `.prev26` = tonight's first stage (d3be1ed, 04:45), `.prev25` = the pre-plugin build (Aug 28 19:59) — **the downgrade test uses `.prev25`**, not `.prev26`. `termx-host.exe` untouched. Michael's live TermX (pid 32724) + daemon (34684) never touched. Gate at aa713d0: non-incremental tsc clean, vitest **2020/2020**, cargo 216.
+
+**Since later-31:** aa713d0 (Grok R9c minors: aux heal success generation-stamped; bus epoch hand-back pinned by a gated-listen test) · 726e39a docs. Grok R9c on d3be1ed: all claims VERIFIED, PASS-WITH-MINORS → both minors fixed → re-staged. **Every review lane is closed; all agents idle** (impl-t5, impl-t8, fix-t7 — resumable by name, no work assigned).
+
+**Morning message** delivered in chat (content also in `scratchpad\plugin-p1\morning-message.md`). Michael's live checklist = plan T9 Step 3 (the only open box). Next session per later-31: read his results → Phase C aux registry replica → the queued feature batch (full planning) → deferred list.
