@@ -226,3 +226,45 @@ describe("plugin panes in the split layout", () => {
     expect(panel()?.querySelector(".dead-pane")).toBeNull();
   });
 });
+
+/**
+ * The other half of the reserved-id rule, and the reason the branch keys off
+ * `status` rather than the id's numeric range: a reserved id WITHOUT a binding
+ * is not a panel. That is what an older build leaves behind (it cannot read
+ * `plugin_panes_v1.json`), and what a lost bindings file produces — the
+ * controller projects it as "missing", and the only thing the user should be
+ * offered is a way to make the empty rectangle go away.
+ */
+describe("a reserved pane with no binding", () => {
+  const MISSING: PaneSessionState = { status: "missing", exitCode: null };
+
+  it("renders the dead pane, not a panel", async () => {
+    await renderLayout({ panelState: MISSING });
+
+    expect(panel()?.querySelector(".dead-pane")).not.toBeNull();
+    expect(panel()?.querySelector(".plugin-pane")).toBeNull();
+    expect(panel()?.querySelector("iframe")).toBeNull();
+    expect(panel()?.querySelector(".dead-pane__dismiss")).not.toBeNull();
+  });
+
+  it(
+    "dismisses on Dismiss and nothing else — no restart of a reserved id, and " +
+      "no CloseSession for a session the daemon never had",
+    async () => {
+      const layoutActions = actions({ relaunchPlugin: vi.fn(async () => undefined) });
+      await renderLayout({ panelState: MISSING, actions: layoutActions });
+
+      await act(async () =>
+        panel()?.querySelector<HTMLButtonElement>(".dead-pane__dismiss")?.click()
+      );
+
+      expect(layoutActions.dismissPane).toHaveBeenCalledWith(PANEL_ID);
+      expect(layoutActions.dismissPane).toHaveBeenCalledTimes(1);
+      expect(layoutActions.restartPane).not.toHaveBeenCalled();
+      expect(layoutActions.closePane).not.toHaveBeenCalled();
+      expect(layoutActions.relaunchPlugin).not.toHaveBeenCalled();
+      // Dismiss is direct: an empty rectangle needs no "end its shell?" prompt.
+      expect(container.querySelector(".split-dialog")).toBeNull();
+    },
+  );
+});

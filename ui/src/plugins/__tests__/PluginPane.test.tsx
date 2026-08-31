@@ -100,12 +100,17 @@ describe("plugin pane — up", () => {
   });
 
   it(
-    "grants the frame no Permissions-Policy features — P1 ships an empty " +
-      "allow list, so camera/microphone/geolocation are delegated to nothing",
+    "delegates clipboard-write and nothing else — the panel is cross-origin " +
+      "to the app, so without the grant a copy button fails silently; " +
+      "clipboard-READ, camera, microphone and geolocation stay denied",
     async () => {
       await renderPane();
 
-      expect(frame()?.getAttribute("allow")).toBe("");
+      const allow = frame()?.getAttribute("allow");
+      expect(allow).toBe("clipboard-write");
+      for (const denied of ["clipboard-read", "camera", "microphone", "geolocation"]) {
+        expect(allow).not.toContain(denied);
+      }
     },
   );
 

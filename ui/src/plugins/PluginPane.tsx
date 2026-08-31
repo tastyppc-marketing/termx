@@ -76,15 +76,25 @@ function splitError(error: string | undefined): { reason: string | null; tail: s
 /// only — is the boundary instead (`src/__tests__/csp.test.ts` pins it), and
 /// `src` is additionally refused here unless the origin really is loopback.
 ///
+/// `allow` delegates ONE Permissions-Policy feature, `clipboard-write`, and
+/// nothing else: camera, microphone, geolocation, display-capture, payment and
+/// the rest stay denied by omission, and `clipboard-read` is denied too — a
+/// panel may put something on the clipboard, never read what is already there.
+/// The grant is load-bearing rather than generous: the panel is cross-origin to
+/// the app (TermX runs from `tauri://localhost`, a plugin from
+/// `http://127.0.0.1:<port>`), and in a cross-origin frame `clipboard-write` is
+/// policy-gated, so without it `navigator.clipboard.writeText` rejects and
+/// Showroom's copy buttons fail SILENTLY — the worst failure shape there is.
+///
 /// What that leaves, stated rather than hidden: without `sandbox` the framed
 /// page can still navigate the TOP window (`window.top.location = …`, which
 /// would replace the whole TermX webview) and open popups — `allow-top-
 /// navigation` is a sandbox flag, so there is no way to withhold it while
-/// keeping same-origin scripts and storage, and `allow=""` (an empty
-/// Permissions-Policy list, no camera/microphone/geolocation delegated) does
-/// not cover navigation. In P1 the only plugin is Showroom, running from a
-/// folder the user chose themselves, so the residual is accepted and recorded;
-/// it is the thing to revisit before a third-party plugin ships.
+/// keeping same-origin scripts and storage, and `allow` is a Permissions-Policy
+/// list, which does not cover navigation at all. In P1 the only plugin is
+/// Showroom, running from a folder the user chose themselves, so the residual
+/// is accepted and recorded; it is the thing to revisit before a third-party
+/// plugin ships.
 ///
 /// `credentialless` is deliberately absent too: it would strip the plugin
 /// origin's own cookies, which is exactly the state a panel needs to keep.
@@ -128,7 +138,7 @@ export function PluginPane({
             src={src ?? undefined}
             title={name}
             referrerPolicy="no-referrer"
-            allow=""
+            allow="clipboard-write"
           />
         ) : health === "starting" ? (
           <div className="plugin-pane__wait" role="status">
