@@ -569,6 +569,8 @@ export class WorkspaceController {
   /// Equal to the plugin's generation while that attempt still speaks for it;
   /// different once a forget (or a deadline) has superseded it.
   private readonly pluginEnsureRuns = new Map<string, number>();
+  /// Live ensure-up deadline timers, so teardown can drop them.
+  private readonly pluginEnsureTimers = new Set<ReturnType<typeof setTimeout>>();
   /// One queued retry per plugin: every Relaunch pressed during a slow start
   /// joins it, so N clicks are one extra attempt rather than N serialized ones.
   private readonly pluginForceRuns = new Map<string, Promise<void>>();
@@ -873,7 +875,13 @@ export class WorkspaceController {
     this.syncPluginScope();
     this.pluginSweepChain = this.pluginSweepChain
       .then(() => this.settleDepartedPanes(before, after))
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        // The chain must survive — a rejection here would stop every LATER
+        // sweep — but it must not vanish: a failure means a binding row
+        // outlived its pane, which is only visible at the next boot as a
+        // dead pane where a panel was.
+        console.error("TermX: plugin pane sweep failed", error);
+      });
   }
 
   /**
@@ -2592,6 +2600,18 @@ export class WorkspaceController {
       settle(false);
     }
     this.adoptWaiters.clear();
+    for (const timer of this.pluginEnsureTimers) {
+      clearTimeout(timer);
+    }
+    this.pluginEnsureTimers.clear();
+    for (const pluginId of [...this.pluginEnsureGenerations.keys()]) {
+      // Nothing in flight may still speak for this window: an ensure-up that
+      // answers after teardown would publish from a disposed controller.
+      this.pluginEnsureGenerations.set(
+        pluginId,
+        (this.pluginEnsureGenerations.get(pluginId) ?? 0) + 1,
+      );
+    }
     try {
       this.plugins?.dispose?.();
     } catch {
@@ -3266,8 +3286,17 @@ export class WorkspaceController {
     const deadline = new Promise<"expired">((resolve) => {
       expire = setTimeout(() => resolve("expired"), PLUGIN_ENSURE_DEADLINE_MS);
     });
+    if (expire !== undefined) {
+      // Held so `dispose` can drop it: an aux window is destroyed the moment
+      // it flushes, and a fifteen-second timer outliving it would wake a dead
+      // controller to publish a verdict nothing can render.
+      this.pluginEnsureTimers.add(expire);
+    }
     const run = Promise.race([ensuring, deadline])
       .then((outcome) => {
+        if (this.disposed) {
+          return;
+        }
         // Superseded: a Relaunch (or a close that forgot the runtime) has
         // already spoken for this plugin, and its answer is the fresher one.
         if (this.pluginEnsureGenerations.get(pluginId) !== generation) {
@@ -3292,6 +3321,9 @@ export class WorkspaceController {
       })
       .finally(() => {
         clearTimeout(expire);
+        if (expire !== undefined) {
+          this.pluginEnsureTimers.delete(expire);
+        }
         if (this.pluginEnsures.get(pluginId) === run) {
           this.pluginEnsures.delete(pluginId);
           this.pluginEnsureRuns.delete(pluginId);
@@ -3526,9 +3558,13 @@ export class WorkspaceController {
    * binding, which is a dead pane where a working panel used to be. The other
    * way round leaves a row with no pane, which the next boot prunes.
    *
-   * The first await is deliberate: callers mutate the store and THEN record
+   * The first await is deliberate, and is NOT an artifact of when `lastLayout`
+   * is seeded. Two things need it: callers mutate the store and THEN record
    * the write (main's remote-layout adoption does exactly that), so this must
-   * yield before it asks persistence whether anything is pending.
+   * yield before asking persistence whether anything is pending; and an OPEN
+   * in progress is mid-sequence (bindings written, layout write issued), so a
+   * flush injected into that window reorders the very writes whose order this
+   * whole mechanism exists to guarantee.
    */
   private async settleDepartedPanes(before: Layout, after: Layout): Promise<void> {
     await Promise.resolve();

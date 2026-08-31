@@ -1319,6 +1319,25 @@ describe("bootstrapWorkspace plugin panes", () => {
     expect(spy.spawn).not.toHaveBeenCalled();
   });
 
+  it("MAIN spawns in exactly the situation an aux window refuses to", async () => {
+    // The half that makes the two aux assertions mean something. With no
+    // runtime file there is nothing to adopt, and this window DOES try to
+    // start the plugin — so "never spawns" next door is a statement about the
+    // window, not about the fixture being healthy enough that nobody would.
+    const spy = healthyNative({ readRuntime: async () => null });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    const result = await workspace.pluginHost.ensureUp("showroom");
+
+    expect(spy.spawn).toHaveBeenCalled();
+    // The spy's spawn throws, so the attempt is reported as a failure rather
+    // than pretending a process appeared.
+    expect(result.ok).toBe(false);
+  });
+
   it("an aux window waits, then points at the main window", async () => {
     vi.useFakeTimers();
     try {

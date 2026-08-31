@@ -751,12 +751,17 @@ export async function bootstrapWorkspace(
       }
     };
     // Bounded (see the constant): the boot must not hang on a folder read.
+    let bootBudget: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       refreshFolderManifests(),
       new Promise<void>((resolve) => {
-        setTimeout(resolve, PLUGIN_MANIFEST_BOOT_BUDGET_MS);
+        bootBudget = setTimeout(resolve, PLUGIN_MANIFEST_BOOT_BUDGET_MS);
       }),
     ]);
+    // The usual case is a read that beat the budget, leaving a 1.5 s timer
+    // holding the event loop (and, under fake timers, a pending tick every
+    // later assertion has to step over).
+    clearTimeout(bootBudget);
     // Enabling, adding, or re-pathing a plugin changes which file to read, and
     // the answer must not stay stale until the next boot. Debounced, because
     // the store notifies synchronously on every mutation. Asynchronous by

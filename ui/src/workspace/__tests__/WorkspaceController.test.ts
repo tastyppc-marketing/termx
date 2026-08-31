@@ -3045,6 +3045,83 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
     expect(h.pluginPanes.getSnapshot()).toEqual({});
   });
 
+  it("contains a throw mid-SPLIT instead of leaking an orphan binding", async () => {
+    // The split path binds first too, so an escaping error there leaves the
+    // same orphan row — and `openPluginSplit` is a `void`-ed menu seam, so the
+    // rejection would be unhandled and the menu entry would do nothing.
+    const h = harness();
+    // `splitPane` runs `validateSplit`, which throws on a layout it would not
+    // accept — the one thing on this path that can fail AFTER the binding is
+    // already on disk.
+    vi.spyOn(h.store, "splitPane").mockImplementation(() => {
+      throw new Error("layout invariant");
+    });
+
+    expect(await h.controller.openPluginSplit("tab-1", 1, "showroom", "row"))
+      .toBeNull();
+    expect(h.controller.getSnapshot().notice).toBe("The pane could not be split.");
+    expect(h.pluginPanes.getSnapshot()).toEqual({});
+    expect(h.controller.getSnapshot().layout.tabs["tab-1"]?.split)
+      .toEqual({ kind: "pane", sessionId: 1 });
+  });
+
+  it("drops an ensure-up deadline when the window is disposed", async () => {
+    // Fifteen seconds is long enough for an aux window to be closed twice
+    // over. A timer that outlives it wakes a dead controller to publish a
+    // verdict nothing can render.
+    vi.useFakeTimers();
+    try {
+      const pending: { release: ((result: EnsureUpResult) => void) | null } =
+        { release: null };
+      const h = harness({
+        ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+          pending.release = resolve;
+        }),
+      });
+      const tabId = await h.controller.openPluginTab("showroom");
+      const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      // Disposed mid-start, with the deadline still to come.
+      h.controller.dispose();
+
+      expect(vi.getTimerCount()).toBe(0);
+      // Subscribed AFTER teardown on purpose: `dispose` clears the listener
+      // set, so a listener added before it would count zero however loudly a
+      // dead controller published.
+      let published = 0;
+      h.controller.subscribe(() => {
+        published += 1;
+      });
+      await vi.advanceTimersByTimeAsync(PLUGIN_ENSURE_DEADLINE_MS + 1_000);
+      // And the call itself, which no timer can cancel, is disowned too: its
+      // answer must not publish a runtime from a controller that is gone.
+      pending.release?.(runtimeUp());
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(published).toBe(0);
+      expect(h.controller.getSnapshot().paneStates[sessionId]?.pluginHealth)
+        .toBe("starting");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("unbinds a RESTORED panel closed as the first act after boot", async () => {
+    // The first layout change of the session has no PREVIOUS layout to diff
+    // against unless one was captured at construction. Without that seed the
+    // sweep throws inside its own chain, and a swallowed rejection there means
+    // the row outlives its pane — a dead pane where a panel was at the next
+    // boot, in every window.
+    const h = harness({ initial: layoutWithPanel(), pluginBindings: BOUND_PANEL });
+
+    await h.controller.closePane("tab-3", PLUGIN_PANE_MIN_ID);
+
+    expect(h.pluginPanes.getSnapshot()).toEqual({});
+    expect(h.controller.getSnapshot().layout.tabs["tab-3"]).toBeUndefined();
+  });
+
   it("an aux window gives up when main never acknowledges the binding", async () => {
     vi.useFakeTimers();
     try {
