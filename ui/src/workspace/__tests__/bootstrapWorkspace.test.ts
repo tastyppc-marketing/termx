@@ -5,6 +5,8 @@ import type {
   SessionAttachmentCallbacks,
 } from "../../host/client";
 import type { JsonValue, SessionInfo } from "../../host/protocol";
+import type { AppFileStore } from "../../native/appFiles";
+import { PLUGIN_PANE_MIN_ID, parsePluginPanes } from "../../plugins/paneBindings";
 import { emptyLayout, serializeLayout } from "../../state/layout";
 import {
   bootstrapWorkspace,
@@ -204,6 +206,63 @@ describe("bootstrapWorkspace", () => {
       version: 3,
       rootItems: [{ kind: "tab", id: "orphan" }],
     });
+  });
+
+  it("restores plugin pane bindings and persists new ones to their own file", async () => {
+    const fake = fakeClient();
+    const seed: Record<string, string> = {
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom" } },
+      }),
+    };
+    const writes: Array<[string, string]> = [];
+    const appFiles: AppFileStore = {
+      read: async (name) => seed[name] ?? null,
+      write: async (name, contents) => {
+        writes.push([name, contents]);
+      },
+    };
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+    });
+    expect(workspace.pluginPanes.getSnapshot()).toEqual({
+      "2147483648": { pluginId: "showroom" },
+    });
+
+    workspace.pluginPanes.bind(PLUGIN_PANE_MIN_ID + 1, { pluginId: "showroom" });
+    await workspace.pluginPanes.flush();
+
+    const written = writes.filter(([name]) => name === "plugin_panes_v1.json");
+    expect(written).toHaveLength(1);
+    expect(parsePluginPanes(written[0]![1])).toEqual({
+      "2147483648": { pluginId: "showroom" },
+      "2147483649": { pluginId: "showroom" },
+    });
+  });
+
+  it("boots with empty bindings when the bindings file is corrupt or unreadable", async () => {
+    const fake = fakeClient();
+    const appFiles: AppFileStore = {
+      read: async (name) => {
+        if (name === "plugin_panes_v1.json") {
+          throw new Error("storage command unavailable");
+        }
+        return null;
+      },
+      write: async () => undefined,
+    };
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+    });
+
+    expect(workspace.pluginPanes.getSnapshot()).toEqual({});
   });
 
   it("closes a connected client and returns a bounded error on later failure", async () => {

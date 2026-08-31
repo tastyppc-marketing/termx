@@ -9,9 +9,12 @@ import {
   bootstrapWorkspace,
   type BootstrapWorkspaceClient,
 } from "../bootstrapWorkspace";
+import type { AppFileName, AppFileStore } from "../../native/appFiles";
+import { PLUGIN_PANE_MIN_ID } from "../../plugins/paneBindings";
 import {
   LAYOUT_MUTATION_EVENT,
   LAYOUT_STATE_EVENT,
+  PLUGIN_PANES_EVENT,
   loopbackBus,
   tauriWindowBus,
   type LayoutMutation,
@@ -30,6 +33,21 @@ describe("loopbackBus", () => {
 
     expect(mutations).toEqual([{ kind: "setLayout", layout: { a: 1 } }]);
     expect(layouts).toEqual([{ b: 2 }]);
+  });
+
+  it("delivers plugin-pane bindings on their own channel", () => {
+    const bus = loopbackBus();
+    const layouts: JsonValue[] = [];
+    const bindings: JsonValue[] = [];
+    bus.onLayout((layout) => layouts.push(layout));
+    const stop = bus.onPluginPanes((state) => bindings.push(state));
+
+    bus.broadcastPluginPanes({ "2147483648": { pluginId: "showroom" } });
+    stop();
+    bus.broadcastPluginPanes({});
+
+    expect(bindings).toEqual([{ "2147483648": { pluginId: "showroom" } }]);
+    expect(layouts).toEqual([]);
   });
 
   it("unsubscribes cleanly and survives a throwing subscriber", () => {
@@ -103,6 +121,23 @@ describe("tauriWindowBus", () => {
     listeners.get(LAYOUT_MUTATION_EVENT)?.({ payload: { kind: "other" } });
     expect(mutations).toEqual([]);
   });
+
+  it("sends plugin-pane bindings on their own event and drops junk payloads", async () => {
+    const { transport, emitted, listeners } = fakeTransport();
+    const bus = tauriWindowBus(transport);
+    const bindings: JsonValue[] = [];
+    bus.onPluginPanes((state) => bindings.push(state));
+    await Promise.resolve();
+
+    bus.broadcastPluginPanes({ "2147483648": { pluginId: "showroom" } });
+    await Promise.resolve();
+    listeners.get(PLUGIN_PANES_EVENT)?.({ payload: "garbage" });
+    listeners.get(PLUGIN_PANES_EVENT)?.({ payload: [1, 2] });
+    listeners.get(PLUGIN_PANES_EVENT)?.({ payload: null });
+
+    expect(emitted.map((entry) => entry.event)).toEqual([PLUGIN_PANES_EVENT]);
+    expect(bindings).toEqual([{ "2147483648": { pluginId: "showroom" } }]);
+  });
 });
 
 /// Main slot: tab-1 (session 1). aux-1 slot: tab-2 (session 2).
@@ -172,23 +207,41 @@ function fakeClient(layout: Layout) {
   return { client, setLayout };
 }
 
+/// In-memory app-data files, one set per window: the bindings file is
+/// main-owned, so the test needs to see WHICH window wrote it.
+function fakeAppFiles(seed: Partial<Record<AppFileName, string>> = {}) {
+  const files = new Map<string, string>(Object.entries(seed));
+  const write = vi.fn(async (name: AppFileName, contents: string) => {
+    files.set(name, contents);
+  });
+  const store: AppFileStore = {
+    read: async (name) => files.get(name) ?? null,
+    write,
+  };
+  return { store, files, write };
+}
+
 describe("single-writer wiring over the bus", () => {
-  async function pair() {
+  async function pair(seed: Partial<Record<AppFileName, string>> = {}) {
     const bus = loopbackBus();
     const mainFake = fakeClient(tornLayout());
     const auxFake = fakeClient(tornLayout());
+    const mainFiles = fakeAppFiles(seed);
+    const auxFiles = fakeAppFiles(seed);
     const main = await bootstrapWorkspace({
       invokeBootstrap: async () => ({ port: 1234, token: "token" }),
       connect: async () => mainFake.client,
+      appFiles: mainFiles.store,
       windowBus: bus,
     });
     const aux = await bootstrapWorkspace({
       invokeBootstrap: async () => ({ port: 1234, token: "token" }),
       connect: async () => auxFake.client,
+      appFiles: auxFiles.store,
       windowId: "aux-1",
       windowBus: bus,
     });
-    return { bus, main, aux, mainFake, auxFake };
+    return { bus, main, aux, mainFake, auxFake, mainFiles, auxFiles };
   }
 
   it("an aux mutation reaches main, which persists exactly once", async () => {
@@ -230,6 +283,52 @@ describe("single-writer wiring over the bus", () => {
 
     expect(main.controller.getSnapshot().layout).toBe(before);
     expect(mainFake.setLayout).not.toHaveBeenCalled();
+  });
+
+  it("a main plugin binding is persisted once and adopted by aux", async () => {
+    const { main, aux, mainFiles, auxFiles } = await pair();
+
+    main.pluginPanes.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await main.pluginPanes.flush();
+    await aux.pluginPanes.flush();
+
+    const expected = { "2147483648": { pluginId: "showroom" } };
+    expect(main.pluginPanes.getSnapshot()).toEqual(expected);
+    expect(aux.pluginPanes.getSnapshot()).toEqual(expected);
+    expect(
+      mainFiles.write.mock.calls.filter(
+        (call) => call[0] === "plugin_panes_v1.json",
+      ),
+    ).toHaveLength(1);
+    expect(
+      auxFiles.write.mock.calls.map((call) => call[0]),
+    ).not.toContain("plugin_panes_v1.json");
+  });
+
+  it("an aux window never writes the bindings file, whatever it is told to bind", async () => {
+    const { main, aux, auxFiles } = await pair();
+
+    aux.pluginPanes.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await aux.pluginPanes.flush();
+
+    expect(
+      auxFiles.write.mock.calls.map((call) => call[0]),
+    ).not.toContain("plugin_panes_v1.json");
+    // Aux is a read-only replica: its local bind never reaches main.
+    expect(main.pluginPanes.getSnapshot()).toEqual({});
+  });
+
+  it("both windows adopt the persisted bindings file at boot", async () => {
+    const { main, aux } = await pair({
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom", path: "/" } },
+      }),
+    });
+
+    const expected = { "2147483648": { pluginId: "showroom", path: "/" } };
+    expect(main.pluginPanes.getSnapshot()).toEqual(expected);
+    expect(aux.pluginPanes.getSnapshot()).toEqual(expected);
   });
 
   it("an aux boot attaches only its own slot's sessions", async () => {

@@ -8,9 +8,14 @@ import { conversationsFileIo, tauriSessionLister } from "../conversations/storag
 import type { SessionLister } from "../conversations/types";
 import { HostClient, type HostClientConnectOptions } from "../host/client";
 import { HostBootstrapError, ReconnectingHostClient } from "../host/reconnect";
-import type { SessionInfo } from "../host/protocol";
+import type { JsonValue, SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
+import {
+  PaneBindingsStore,
+  parsePluginPanes,
+  parsePluginPanesValue,
+} from "../plugins/paneBindings";
 import {
   tauriProtectSecret,
   tauriReadSshConfig,
@@ -209,6 +214,12 @@ export interface BootstrappedWorkspace {
    */
   sshHosts?: readonly SshHost[];
   sshCredentials?: SshCredentialsStore;
+  /**
+   * Plugin pane bindings (plugin spec §4). Always present: a window with no
+   * plugins simply holds an empty map. Only the MAIN window's store persists —
+   * an aux window's is a read-only replica fed by the bus.
+   */
+  pluginPanes: PaneBindingsStore;
 }
 
 export function parseBootstrapHostResult(value: unknown): HostClientConnectOptions {
@@ -265,6 +276,16 @@ export async function bootstrapWorkspace(
     await sshCredentials.ready();
     // Same optional-field contract as settings/ui-state: a read failure yields
     // empty state and never blocks the workspace.
+    // Plugin pane bindings (spec §4). Read like every other user-data file:
+    // a missing, corrupt, or unreadable file yields no bindings, which renders
+    // any reserved-id pane as a dismissible dead pane rather than blocking the
+    // boot.
+    let pluginPanesText: string | null = null;
+    try {
+      pluginPanesText = await appFiles.read("plugin_panes_v1.json");
+    } catch {
+      pluginPanesText = null;
+    }
     const conversationsIo = conversationsFileIo(appFiles);
     const conversations = await loadConversationsStore({
       read: () => conversationsIo.read(),
@@ -350,6 +371,34 @@ export async function bootstrapWorkspace(
           }
         });
       }
+    }
+    // Same single-writer rule as the layout, applied to the bindings file: the
+    // MAIN window persists every change and fans it out; an aux window is a
+    // read-only replica that adopts broadcasts and never writes. Both windows
+    // seed from the file, so an aux window has its bindings from the first
+    // frame instead of waiting for main's next change.
+    const pluginPanes = bootWindowId === MAIN_WINDOW_ID
+      ? new PaneBindingsStore({
+          initial: parsePluginPanes(pluginPanesText),
+          save: (text) => appFiles.write("plugin_panes_v1.json", text),
+          ...(bus !== null
+            ? {
+                // Structurally JSON already — the cast only tells TS that an
+                // OPTIONAL `path` (i.e. `string | undefined`) never actually
+                // holds `undefined`; the store builds bindings by spread.
+                onBroadcast: (state) =>
+                  void bus.broadcastPluginPanes(state as unknown as JsonValue),
+              }
+            : {}),
+        })
+      : new PaneBindingsStore({
+          initial: parsePluginPanes(pluginPanesText),
+          save: null,
+        });
+    if (bus !== null && bootWindowId !== MAIN_WINDOW_ID) {
+      // A broadcast is untrusted input from another window: parse it like a
+      // file read and adopt only what survives.
+      bus.onPluginPanes((state) => pluginPanes.adopt(parsePluginPanesValue(state)));
     }
     const attachments = new AttachmentHub(client);
     const controllerOptions = {
@@ -468,6 +517,7 @@ export async function bootstrapWorkspace(
       saved,
       sshHosts,
       sshCredentials,
+      pluginPanes,
     };
   } catch {
     try {

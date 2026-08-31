@@ -23,12 +23,21 @@ export interface WindowBus {
   forwardMutation(mutation: LayoutMutation): Promise<void>;
   /** Main → all: the layout changed; here is the new blob. */
   broadcastLayout(layout: JsonValue): Promise<void>;
+  /**
+   * Main → all: the plugin pane bindings changed; here is the whole map
+   * (plugin spec §4). One-directional by design — `plugin_panes_v1.json` has
+   * the layout's single-writer discipline, so an aux window only ever adopts,
+   * and there is deliberately no aux → main binding mutation.
+   */
+  broadcastPluginPanes(state: JsonValue): Promise<void>;
   onMutation(handler: (mutation: LayoutMutation) => void): () => void;
   onLayout(handler: (layout: JsonValue) => void): () => void;
+  onPluginPanes(handler: (state: JsonValue) => void): () => void;
 }
 
 export const LAYOUT_MUTATION_EVENT = "termx:layout-mutation";
 export const LAYOUT_STATE_EVENT = "termx:layout-state";
+export const PLUGIN_PANES_EVENT = "termx:plugin-panes";
 
 interface EmitListen {
   emit(event: string, payload: unknown): Promise<void>;
@@ -80,9 +89,21 @@ export function tauriWindowBus(
   };
   const mutations = channel(LAYOUT_MUTATION_EVENT);
   const layouts = channel(LAYOUT_STATE_EVENT);
+  const pluginPanes = channel(PLUGIN_PANES_EVENT);
   return {
     forwardMutation: (mutation) => mutations.send(mutation),
     broadcastLayout: (layout) => layouts.send(layout),
+    broadcastPluginPanes: (state) => pluginPanes.send(state),
+    onPluginPanes: (handler) =>
+      pluginPanes.subscribe((payload) => {
+        // The bindings map is always a JSON object; anything else on this
+        // channel is not ours, and adopting it would blank every binding.
+        if (
+          typeof payload === "object" && payload !== null && !Array.isArray(payload)
+        ) {
+          handler(payload as JsonValue);
+        }
+      }),
     onMutation: (handler) =>
       mutations.subscribe((payload) => {
         if (
@@ -103,6 +124,7 @@ export function tauriWindowBus(
 export function loopbackBus(): WindowBus {
   const mutationHandlers = new Set<(mutation: LayoutMutation) => void>();
   const layoutHandlers = new Set<(layout: JsonValue) => void>();
+  const pluginPaneHandlers = new Set<(state: JsonValue) => void>();
   return {
     async forwardMutation(mutation) {
       for (const handler of [...mutationHandlers]) {
@@ -122,6 +144,15 @@ export function loopbackBus(): WindowBus {
         }
       }
     },
+    async broadcastPluginPanes(state) {
+      for (const handler of [...pluginPaneHandlers]) {
+        try {
+          handler(state);
+        } catch {
+          // One bad subscriber must not silence the others.
+        }
+      }
+    },
     onMutation(handler) {
       mutationHandlers.add(handler);
       return () => mutationHandlers.delete(handler);
@@ -129,6 +160,10 @@ export function loopbackBus(): WindowBus {
     onLayout(handler) {
       layoutHandlers.add(handler);
       return () => layoutHandlers.delete(handler);
+    },
+    onPluginPanes(handler) {
+      pluginPaneHandlers.add(handler);
+      return () => pluginPaneHandlers.delete(handler);
     },
   };
 }
