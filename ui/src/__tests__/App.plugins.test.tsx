@@ -20,6 +20,7 @@ import type { SettingsSurfaceProps } from "../settings/SettingsSurface";
 import type { SidebarProps } from "../sidebar/Sidebar";
 import type { SplitLayoutProps } from "../split/SplitLayout";
 import type {
+  PaneSessionState,
   SidebarTabModel,
   WorkspaceSnapshot,
 } from "../workspace/WorkspaceController";
@@ -152,6 +153,27 @@ function twoPaneSnapshot(): WorkspaceSnapshot {
     },
     activeSessionId: 1,
   };
+}
+
+/**
+ * A snapshot whose panes are Showroom panels at the given healths. One entry
+ * per pane, so a plugin with two panes that disagree can be built.
+ */
+function pluginPaneSnapshot(
+  ...healths: ReadonlyArray<"starting" | "up" | "down">
+): WorkspaceSnapshot {
+  const base = snapshot();
+  const paneStates: Record<number, PaneSessionState> = {};
+  healths.forEach((health, index) => {
+    paneStates[0x8000_0000 + index] = {
+      status: "plugin",
+      exitCode: null,
+      pluginId: "showroom",
+      pluginUrl: null,
+      pluginHealth: health,
+    };
+  });
+  return { ...base, paneStates };
 }
 
 /**
@@ -523,6 +545,34 @@ describe("App plugin wiring — settings", () => {
 
     bundle?.onOpen?.("showroom");
     expect(fixture.openPluginTab).toHaveBeenCalledWith("showroom");
+  });
+
+  it("reports the health of a plugin that has a panel open", async () => {
+    const fixture = harness({ snapshot: pluginPaneSnapshot("up") });
+    await renderApp(fixture);
+    await act(async () => sidebarProps().onOpenSettings?.());
+
+    expect(settingsProps().plugins?.health).toEqual({ showroom: "up" });
+  });
+
+  it("reports the worst state when a plugin's panels disagree", async () => {
+    // One panel answering and one not is a broken plugin, and the down mark is
+    // the reading the user has to see; the healthy pane must not mask it.
+    const fixture = harness({ snapshot: pluginPaneSnapshot("up", "down") });
+    await renderApp(fixture);
+    await act(async () => sidebarProps().onOpenSettings?.());
+
+    expect(settingsProps().plugins?.health?.["showroom"]).toBe("down");
+  });
+
+  it("reports no health for a plugin with nothing on screen", async () => {
+    const fixture = harness();
+    await renderApp(fixture);
+    await act(async () => sidebarProps().onOpenSettings?.());
+
+    // Installed but never opened: the panel draws no mark rather than claiming
+    // a state nothing has observed.
+    expect(Object.keys(settingsProps().plugins?.health ?? {})).toEqual([]);
   });
 
   it("withholds the bundle in an aux window, where the registry is not writable", async () => {

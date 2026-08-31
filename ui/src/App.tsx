@@ -52,6 +52,7 @@ import type {
 import { probeRemoteTitle } from "./native/sshProbe";
 import { SetPasswordDialog } from "./ssh/SetPasswordDialog";
 import type { SshHost } from "./ssh/types";
+import type { PluginHealth } from "./settings/PluginsPanel";
 import {
   SettingsSurface,
   type SettingsPlugins,
@@ -255,6 +256,19 @@ export default function App({ bootstrap = bootstrapWorkspace, windowId }: AppPro
 }
 
 type WorkspaceConnection = NonNullable<BootstrappedWorkspace["connection"]>;
+
+/**
+ * Which reading wins when one plugin's panes disagree: a failure outranks a
+ * wait, a wait outranks a success, and "nothing observed yet" never masks a
+ * real answer. A plugin is one process, so its panes are reporting on the same
+ * thing — the worst of them is the true state of it.
+ */
+const PLUGIN_HEALTH_RANK: Record<PluginHealth, number> = {
+  down: 3,
+  starting: 2,
+  up: 1,
+  unknown: 0,
+};
 
 /**
  * Bootstrap's manifest resolver (plugin spec §2), seen optionally.
@@ -1038,6 +1052,26 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     [pluginsRegistry, knownManifest],
   );
 
+  // Live health per plugin for the Settings rows, read off the panes that are
+  // actually on screen: the plugin's own process has no other observer here.
+  // A plugin with NO open panel is left out of the record entirely, so the
+  // panel draws no mark rather than claiming a state nothing has watched.
+  const pluginHealth = useMemo<Record<string, PluginHealth>>(() => {
+    const worst: Record<string, PluginHealth> = {};
+    for (const state of Object.values(snapshot.paneStates)) {
+      if (state.status !== "plugin" || state.pluginId === undefined) {
+        continue;
+      }
+      // A bound pane with no reading yet is "unknown", not healthy.
+      const reading = state.pluginHealth ?? "unknown";
+      const held = worst[state.pluginId];
+      if (held === undefined || PLUGIN_HEALTH_RANK[reading] > PLUGIN_HEALTH_RANK[held]) {
+        worst[state.pluginId] = reading;
+      }
+    }
+    return worst;
+  }, [snapshot.paneStates]);
+
   // Plugin management WRITES `plugins_v1.json`, and the main window is its only
   // writer (spec §2) — bootstrap hands every window a read-write store, so the
   // single-writer rule is kept here. An aux window is handed no bundle and
@@ -1051,9 +1085,10 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       // The panel reads a registered folder's own `termx-plugin.json` through
       // this seam; a folder without one falls back to the bundled table.
       native: tauriPluginNative,
+      health: pluginHealth,
       onOpen: (pluginId: string) => void controller.openPluginTab(pluginId),
     };
-  }, [controller, pluginsStore]);
+  }, [controller, pluginsStore, pluginHealth]);
 
   // Flipping the "encrypt stored passwords" setting rewrites every stored
   // secret to match (spec §6). Skip the first render — the setting did not
