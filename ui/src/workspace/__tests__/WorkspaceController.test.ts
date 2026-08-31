@@ -2825,9 +2825,14 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
     pending.release?.(runtimeUp());
     await tick();
 
-    await h.controller.openPluginTab("showroom");
+    const reopened = await h.controller.openPluginTab("showroom");
+    const nextId = panelId(h.controller.getSnapshot().layout, reopened!);
     await tick();
     expect(h.ensureUp).toHaveBeenCalledTimes(2);
+    // And the new pane is genuinely waiting on the new probe, not wearing the
+    // late answer's "up".
+    expect(h.controller.getSnapshot().paneStates[nextId]?.pluginHealth)
+      .toBe("starting");
   });
 
   it("coalesces Relaunch clicks during a slow start into one retry", async () => {
@@ -2871,12 +2876,22 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
       pluginPanesStore: replica,
     });
 
-    const opened = controller.openPluginTab("showroom");
-    await tick();
-    controller.dispose();
+    vi.useFakeTimers();
+    try {
+      const opened = controller.openPluginTab("showroom");
+      await vi.advanceTimersByTimeAsync(0);
+      // The adopt wait, ticking. Counted rather than described: a timer the
+      // teardown does not know about is exactly the leak.
+      expect(vi.getTimerCount()).toBe(1);
 
-    expect(await opened).toBeNull();
-    expect(events).toEqual([]);
+      controller.dispose();
+
+      expect(vi.getTimerCount()).toBe(0);
+      expect(await opened).toBeNull();
+      expect(events).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("disowns a binding main acknowledges after the open gave up", async () => {
@@ -2926,6 +2941,108 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
     expect(await h.controller.restartPane("tab-3", PLUGIN_PANE_MIN_ID, "restart"))
       .toBeNull();
     expect(h.controller.getSnapshot().notice).not.toBeNull();
+  });
+
+  it("lets go of a plugin whose only remaining binding names no pane", async () => {
+    // A crash between the two writes leaves a row with no pane. Counting that
+    // row as a reason to keep the runtime made `forgetPluginRuntime`
+    // unreachable for the plugin for the rest of the session, so the next open
+    // framed a port nobody had re-probed since.
+    const h = harness();
+    const tabId = await h.controller.openPluginTab("showroom");
+    const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+    // The orphan: a row main accepts (exactly as it accepts an aux window's
+    // forwarded bind) whose pane never arrives in any layout.
+    h.pluginPanes.bind(PLUGIN_PANE_MIN_ID + 21, { pluginId: "showroom" });
+    await tick();
+
+    await h.controller.closePane(tabId!, sessionId);
+    await tick();
+
+    await h.controller.openPluginTab("showroom");
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-runs a start that a close abandoned while it was still in flight", async () => {
+    // The forget stamps the attempt as superseded so its answer is dropped —
+    // and the pane that wants the plugin again must not JOIN that attempt, or
+    // it waits on a result nobody will ever apply.
+    const gates: Array<(result: EnsureUpResult) => void> = [];
+    const h = harness({
+      ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+        gates.push(resolve);
+      }),
+    });
+    const tabId = await h.controller.openPluginTab("showroom");
+    const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+
+    // Closed mid-start: the first attempt is still running and now speaks for
+    // nobody.
+    await h.controller.closePane(tabId!, sessionId);
+    await tick();
+    const reopened = await h.controller.openPluginTab("showroom");
+    const nextId = panelId(h.controller.getSnapshot().layout, reopened!);
+    expect(h.controller.getSnapshot().paneStates[nextId]?.pluginHealth)
+      .toBe("starting");
+
+    gates[0]?.(runtimeUp());
+    await tick();
+    gates[1]?.(runtimeUp());
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(2);
+    expect(h.controller.getSnapshot().paneStates[nextId]?.pluginHealth).toBe("up");
+  });
+
+  it("starts observing when the binding for a pane it already renders arrives", async () => {
+    // An aux window learns its bindings from main's broadcast, and its layout
+    // was restored before that landed. This is the moment a restored panel in
+    // THIS window's slot first becomes startable; without it the pane renders
+    // a spinner with no Relaunch until something else changes.
+    const replica = new PaneBindingsStore({
+      initial: {},
+      save: null,
+      onForward: () => undefined,
+    });
+    const h = harness({
+      initial: panelInAux(),
+      windowId: "aux-1",
+      pluginPanesStore: replica,
+    });
+    await tick();
+    expect(h.ensureUp).not.toHaveBeenCalled();
+
+    replica.adopt({ ...BOUND_PANEL });
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledWith("showroom");
+  });
+
+  it("closes a group over a panel without asking the daemon about it", async () => {
+    // "Close tabs" walks a whole subtree into `closeSessions`; a reserved id
+    // reaching the daemon there would be the one close path that still could.
+    const initial = layoutWithPanel();
+    initial.rootItems = initial.rootItems.filter(
+      (item) => !(item.kind === "tab" && item.id === "tab-3"),
+    );
+    const group = initial.groups["group"]!;
+    group.items = [...group.items, { kind: "tab", id: "tab-3" }];
+    const h = harness({
+      initial,
+      // The pathological case the guard exists for: the daemon happens to know
+      // a session with this id, so "is it known?" alone would close it.
+      sessions: [session(1), session(2), session(PLUGIN_PANE_MIN_ID)],
+      pluginBindings: BOUND_PANEL,
+    });
+
+    await h.controller.deleteGroup("group", "close-tabs");
+
+    expect(h.closeSession.mock.calls.map(([id]) => id))
+      .not.toContain(PLUGIN_PANE_MIN_ID);
+    expect(h.controller.getSnapshot().layout.tabs["tab-3"]).toBeUndefined();
+    expect(h.pluginPanes.getSnapshot()).toEqual({});
   });
 
   it("an aux window gives up when main never acknowledges the binding", async () => {

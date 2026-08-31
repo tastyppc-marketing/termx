@@ -565,6 +565,10 @@ export class WorkspaceController {
    * publish its late answer over the newer one.
    */
   private readonly pluginEnsureGenerations = new Map<string, number>();
+  /// The generation the attempt currently in `pluginEnsures` was stamped with.
+  /// Equal to the plugin's generation while that attempt still speaks for it;
+  /// different once a forget (or a deadline) has superseded it.
+  private readonly pluginEnsureRuns = new Map<string, number>();
   /// One queued retry per plugin: every Relaunch pressed during a slow start
   /// joins it, so N clicks are one extra attempt rather than N serialized ones.
   private readonly pluginForceRuns = new Map<string, Promise<void>>();
@@ -825,39 +829,30 @@ export class WorkspaceController {
     if (this.plugins === null || this.disposed) {
       return;
     }
-    const rendered = this.pluginsRenderedHere();
-    // What may KEEP a runtime is wider than what renders one, and only on
-    // main: it holds the binding of a pane an aux window is still placing, and
-    // forgetting between the bind and the layout write would throw away the
-    // very start that bind triggered. Main therefore forgets a plugin when its
-    // last BINDING goes — which the departed-pane sweep does after the layout
-    // write, so it is strictly later than the pane going. An aux window has no
-    // such window to protect: it forgets what it no longer renders, which is
-    // how it drops a stale "up" for a pane main just closed.
-    const keep = this.windowId === MAIN_WINDOW_ID
-      ? new Set([...rendered, ...Object.values(bindings).map((b) => b.pluginId)])
-      : rendered;
-    for (const pluginId of [...this.pluginRuntimes.keys()]) {
-      if (!keep.has(pluginId)) {
-        this.forgetPluginRuntime(pluginId);
-      }
-    }
-    const start = new Set(rendered);
+    const scope = this.pluginsRenderedHere();
     if (this.windowId === MAIN_WINDOW_ID) {
       // A binding main has just ACCEPTED, whose pane is not in the blob yet:
       // that is an aux window's open, and main starting the plugin here is
       // what makes it work at all — the aux window may not spawn, and its
-      // layout write is still on its way. Only rows that ARRIVE count, so a
-      // binding sitting in the file at boot with no pane (an orphan the prune
-      // could not reach) never launches anything.
+      // layout write is still on its way. Only rows that ARRIVE count, and
+      // only until the next layout: a row that has still not been placed by
+      // then is an orphan (a crash between the two writes), and keeping it in
+      // scope for ever would make this plugin's runtime unforgettable for the
+      // rest of the session — the next open would then frame whatever that
+      // stale answer said without re-probing.
       for (const key of accepted) {
-        start.add(bindings[key]!.pluginId);
+        scope.add(bindings[key]!.pluginId);
       }
     }
-    for (const pluginId of start) {
-      if (this.pluginRuntimes.has(pluginId) || this.pluginEnsures.has(pluginId)) {
-        continue;
+    for (const pluginId of [...this.pluginRuntimes.keys()]) {
+      if (!scope.has(pluginId)) {
+        this.forgetPluginRuntime(pluginId);
       }
+    }
+    for (const pluginId of scope) {
+      // Unconditional: `ensurePluginUp` is the one place that knows whether an
+      // answer already stands, an attempt is in flight, or that attempt has
+      // been superseded and a fresh one is owed.
       void this.ensurePluginUp(pluginId);
     }
   }
@@ -881,15 +876,6 @@ export class WorkspaceController {
       .catch(() => undefined);
   }
 
-  /**
-   * Start every plugin that a pane in the CURRENT layout is bound to, once
-   * each. Bindings whose pane is not in the layout are skipped deliberately:
-   * those are orphans for the boot prune to clear, and starting a process for
-   * a pane nobody can see would launch a plugin the user never asked for.
-   *
-   * Idempotent — `ensurePluginUp` skips a plugin it has already answered for —
-   * so it can run again whenever the bindings change.
-   */
   /**
    * Take back a binding this window already gave up on.
    *
@@ -3211,7 +3197,14 @@ export class WorkspaceController {
     }
     const inFlight = this.pluginEnsures.get(pluginId);
     if (inFlight) {
-      if (!options.force) {
+      // An attempt that a forget has superseded will have its answer dropped
+      // on arrival, so joining it is joining silence: the pane that wants the
+      // plugin now would spin for ever. It is retried exactly like a Relaunch
+      // — ONE fresh attempt queued behind the abandoned one, never a second
+      // concurrent spawn of the same plugin.
+      const superseded = this.pluginEnsureRuns.get(pluginId)
+        !== this.pluginEnsureGenerations.get(pluginId);
+      if (!options.force && !superseded) {
         // Two panes opened in one breath join the probe already running
         // instead of spawning a second copy.
         return inFlight;
@@ -3253,6 +3246,7 @@ export class WorkspaceController {
     });
     const generation = (this.pluginEnsureGenerations.get(pluginId) ?? 0) + 1;
     this.pluginEnsureGenerations.set(pluginId, generation);
+    this.pluginEnsureRuns.set(pluginId, generation);
     // Folded into a value so the race below can never see a rejection, and so
     // a late answer that lost the race is simply dropped on the floor.
     const ensuring = plugins.ensureUp(pluginId).then(
@@ -3300,6 +3294,7 @@ export class WorkspaceController {
         clearTimeout(expire);
         if (this.pluginEnsures.get(pluginId) === run) {
           this.pluginEnsures.delete(pluginId);
+          this.pluginEnsureRuns.delete(pluginId);
         }
       });
     this.pluginEnsures.set(pluginId, run);

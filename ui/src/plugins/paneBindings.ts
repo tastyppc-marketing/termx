@@ -101,7 +101,21 @@ function isBindingKey(key: string): boolean {
  * and `sameBinding` counts those as different (a spurious rebroadcast).
  */
 export function normalizePluginPath(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  // Root-relative or nothing. The renderer composes `${origin}${path}` for the
+  // panel iframe, so a value from a hand-edited (or corrupt) bindings file
+  // that does not start at the root is not a path at all: "@example.com" makes
+  // `http://127.0.0.1:7788@example.com`, whose origin is example.com, and
+  // "//evil.com/" is protocol-relative. Both are refused here rather than
+  // trusted to the shell's frame-src, which turns them into a blank panel with
+  // no explanation. A leading "//" would also read as an authority, so it goes
+  // too.
+  if (!value.startsWith("/") || value.startsWith("//")) {
+    return undefined;
+  }
+  return value;
 }
 
 /**

@@ -300,13 +300,13 @@ export interface BootstrappedWorkspace {
  * all is a far worse answer than a plugin briefly named by its bundled entry —
  * the read keeps going and the cache answers as soon as it lands.
  */
-const PLUGIN_MANIFEST_BOOT_BUDGET_MS = 1_500;
+export const PLUGIN_MANIFEST_BOOT_BUDGET_MS = 1_500;
 
 /**
  * How long the registry-driven re-read waits for the toggling to stop. Three
  * flicks of a Settings switch would otherwise be 3 × N native reads.
  */
-const PLUGIN_MANIFEST_REFRESH_DEBOUNCE_MS = 100;
+export const PLUGIN_MANIFEST_REFRESH_DEBOUNCE_MS = 100;
 
 /**
  * The environment a manifest's `%VAR%` discovery path is expanded against
@@ -713,6 +713,9 @@ export async function bootstrapWorkspace(
     const folderManifests = new Map<string, PluginManifest | null>();
     const manifestListeners = new Set<() => void>();
     let manifestEpoch = 0;
+    // The boot read is unbounded (only the WAIT for it is bounded), so it can
+    // still land in a window that has already been torn down.
+    let manifestsReleased = false;
     const refreshFolderManifests = async (): Promise<void> => {
       const epoch = (manifestEpoch += 1);
       const next = new Map<string, PluginManifest | null>();
@@ -733,8 +736,10 @@ export async function bootstrapWorkspace(
           next.set(id, resolveManifest(id, text));
         }),
       );
-      // A refresh that started earlier must not overwrite a newer one's answers.
-      if (epoch !== manifestEpoch) {
+      // A refresh that started earlier must not overwrite a newer one's
+      // answers — and one that lands after the host was released must not
+      // wake listeners belonging to a window that is gone.
+      if (epoch !== manifestEpoch || manifestsReleased) {
         return;
       }
       folderManifests.clear();
@@ -876,6 +881,7 @@ export async function bootstrapWorkspace(
       manifestFor: installedManifest,
       unavailableReason,
       dispose: () => {
+        manifestsReleased = true;
         stopWatchingRegistry();
         manifestListeners.clear();
         if (refreshTimer !== null) {

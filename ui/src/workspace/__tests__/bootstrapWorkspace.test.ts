@@ -13,6 +13,8 @@ import { emptyLayout, serializeLayout } from "../../state/layout";
 import {
   bootstrapWorkspace,
   parseBootstrapHostResult,
+  PLUGIN_MANIFEST_BOOT_BUDGET_MS,
+  PLUGIN_MANIFEST_REFRESH_DEBOUNCE_MS,
   type BootstrapWorkspaceClient,
 } from "../bootstrapWorkspace";
 
@@ -1170,6 +1172,94 @@ describe("bootstrapWorkspace plugin panes", () => {
     workspace.plugins.add("toolbox", "C:\\code\\toolbox-again");
     await new Promise<void>((resolve) => setTimeout(resolve, 250));
     expect(moved).toBe(after);
+  });
+
+  it("pins the two budgets a manifest re-read is bounded by", () => {
+    // Both are promises made in prose (a boot that never hangs, one read for a
+    // burst of clicks); advancing by the constant itself would pass at any
+    // value.
+    expect(PLUGIN_MANIFEST_BOOT_BUDGET_MS).toBe(1_500);
+    expect(PLUGIN_MANIFEST_REFRESH_DEBOUNCE_MS).toBe(100);
+  });
+
+  it("tells the renderer about a boot read that lands after the budget", async () => {
+    // The boot only bounds the WAIT: the read keeps going, and the answer it
+    // finally brings back changes what `pluginManifestFor` says. Nothing in
+    // React would notice, so every panel and rail entry would wear the bundled
+    // name until some unrelated render.
+    vi.useFakeTimers();
+    try {
+      let release = (): void => undefined;
+      const spy = healthyNative({
+        readManifest: () => new Promise<string | null>((resolve) => {
+          release = () => resolve(folderManifest("showroom", "Showroom Folder"));
+        }),
+      });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+      });
+      await vi.advanceTimersByTimeAsync(PLUGIN_MANIFEST_BOOT_BUDGET_MS);
+      const workspace = await booting;
+      let moved = 0;
+      const stop = workspace.subscribeManifests(() => {
+        moved += 1;
+      });
+      // Booted on the bundled table, as the budget promises.
+      expect(workspace.pluginManifestFor("showroom")?.name).toBe("Showroom");
+
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(moved).toBe(1);
+      expect(workspace.pluginManifestFor("showroom")?.name).toBe("Showroom Folder");
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says nothing for a read a newer one has already superseded", async () => {
+    // The epoch guard drops the stale answer; announcing it anyway would make
+    // React re-read a cache that did not change — and, worse, would teach the
+    // renderer to expect a notification per read rather than per landing.
+    vi.useFakeTimers();
+    try {
+      let releaseOld = (): void => undefined;
+      const oldRead = new Promise<string | null>((resolve) => {
+        releaseOld = () => resolve(folderManifest("toolbox", "Old"));
+      });
+      const spy = healthyNative({
+        readManifest: (path) =>
+          path.endsWith("one")
+            ? oldRead
+            : Promise.resolve(folderManifest("toolbox", "New")),
+      });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registryOf({ toolbox: {} }) },
+        native: spy.native,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const workspace = await booting;
+
+      workspace.plugins.add("toolbox", "C:\\code\\one");
+      await vi.advanceTimersByTimeAsync(200);
+      workspace.plugins.add("toolbox", "C:\\code\\two");
+      await vi.advanceTimersByTimeAsync(200);
+
+      let moved = 0;
+      const stop = workspace.subscribeManifests(() => {
+        moved += 1;
+      });
+      releaseOld();
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(moved).toBe(0);
+      expect(workspace.pluginManifestFor("toolbox")?.name).toBe("New");
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops watching the registry once the workspace is disposed", async () => {

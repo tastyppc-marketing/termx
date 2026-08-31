@@ -16,6 +16,7 @@ import {
   isPluginPaneId,
   PaneBindingsStore,
   parsePluginPanes,
+  normalizePluginPath,
   PLUGIN_PANE_MIN_ID,
   serializePluginPanes,
   toJsonPluginPanes,
@@ -59,6 +60,42 @@ describe("parsePluginPanes", () => {
     expect(parsed).toEqual({
       "2147483648": { pluginId: "showroom", path: "/" },
       "2147483652": { pluginId: "showroom" },
+    });
+  });
+
+  it("keeps only a root-relative panel path", () => {
+    // The renderer composes `${origin}${path}` for the panel iframe, so a path
+    // that does not start at the root is not a path at all: "@example.com"
+    // makes `http://127.0.0.1:7788@example.com`, whose parsed origin is
+    // example.com, and "//evil.com/" reads as an authority. This file is
+    // hand-editable and survives a downgrade, so the shape is checked here
+    // rather than trusted to the shell's frame-src.
+    expect(normalizePluginPath("/gallery")).toBe("/gallery");
+    expect(normalizePluginPath("/")).toBe("/");
+    expect(normalizePluginPath("@example.com")).toBeUndefined();
+    expect(normalizePluginPath("//evil.com/")).toBeUndefined();
+    expect(normalizePluginPath("gallery")).toBeUndefined();
+    expect(normalizePluginPath("http://evil.com/")).toBeUndefined();
+    expect(normalizePluginPath("   ")).toBeUndefined();
+    expect(normalizePluginPath(7)).toBeUndefined();
+  });
+
+  it("drops a path the file supplies that is not root-relative", () => {
+    // The binding itself survives: the panel opens at the plugin's own root,
+    // which is a working panel rather than a blank frame.
+    expect(
+      parsePluginPanes(
+        JSON.stringify({
+          version: 1,
+          panes: {
+            "2147483648": { pluginId: "showroom", path: "@example.com" },
+            "2147483649": { pluginId: "showroom", path: "//evil.com/" },
+          },
+        }),
+      ),
+    ).toEqual({
+      "2147483648": { pluginId: "showroom" },
+      "2147483649": { pluginId: "showroom" },
     });
   });
 
@@ -595,25 +632,31 @@ describe("PaneBindingsStore failure reporting", () => {
   });
 
   it("clears the record once a later write succeeds", async () => {
-    // The exact sequence a failed open leaves behind: the rollback's own save
-    // failed, nobody flushed it, and the NEXT open binds successfully. Without
-    // clearing, that open's flush throws about a write that already worked,
-    // and a healthy panel is rolled back for nothing.
-    let failNext = true;
+    // The exact sequence a failed open leaves behind: the bind's write failed,
+    // the rollback's write failed too, nobody flushed either, and the NEXT
+    // open binds successfully. Without clearing, that open's flush throws
+    // about somebody else's write and a healthy panel is rolled back.
+    //
+    // Counted, not flagged: `bind` is synchronous and the save runs a
+    // microtask later, so a `failNext = false` between two binds disarms the
+    // FIRST write as well and the test proves nothing.
+    let calls = 0;
     const store = new PaneBindingsStore({
       initial: {},
       save: async () => {
-        if (failNext) {
+        calls += 1;
+        if (calls <= 2) {
           throw new Error("disk full");
         }
       },
     });
 
     store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
-    failNext = false;
+    store.unbind([PLUGIN_PANE_MIN_ID]);
     store.bind(PLUGIN_PANE_MIN_ID + 1, { pluginId: "showroom" });
 
     await expect(store.flush()).resolves.toBeUndefined();
+    expect(calls).toBe(3);
   });
 
   it("reports the FIRST failure of a batch, not the last", async () => {
