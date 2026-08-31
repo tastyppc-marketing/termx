@@ -8,3 +8,6 @@ target-*/
 dist-portable/
 *.tsbuildinfo
 .superpowers/
+
+# Python bytecode from tools/claude-hooks
+__pycache__/
