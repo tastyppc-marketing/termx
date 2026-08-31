@@ -6,6 +6,7 @@ mod folders;
 mod llm_sessions;
 mod outputs;
 mod paths;
+mod plugins;
 mod power;
 mod ssh;
 mod storage;
@@ -31,6 +32,10 @@ pub fn run() {
             bootstrap::bootstrap_host,
             storage::read_app_file,
             storage::write_app_file,
+            plugins::plugin_read_runtime,
+            plugins::plugin_probe,
+            plugins::plugin_spawn,
+            plugins::plugin_stderr_tail,
             ssh::read_ssh_config,
             ssh::protect_secret,
             ssh::unprotect_secret,

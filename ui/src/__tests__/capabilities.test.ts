@@ -62,3 +62,12 @@ describe("multi-window capability (Phase 1)", () => {
     },
   );
 });
+
+describe("plugin native commands (Phase 1)", () => {
+  it("grants the plugin lifecycle commands to every capable window", () => {
+    expect(capability.permissions).toContain("allow-plugin-spawn");
+    expect(capability.permissions).toContain("allow-plugin-read-runtime");
+    expect(capability.permissions).toContain("allow-plugin-probe");
+    expect(capability.permissions).toContain("allow-plugin-stderr-tail");
+  });
+});

@@ -30,6 +30,7 @@ tauri = { version = "2.11.5", features = [] }
 tauri-plugin-dialog = "2.7.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "2", default-features = false }
 # Transcript search's regex mode (src/transcript.rs). Already in the lock file
 # as a transitive tauri dependency, so this adds no new build cost.
 regex = "1.13"
