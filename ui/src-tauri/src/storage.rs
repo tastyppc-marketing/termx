@@ -17,13 +17,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// than growing a second storage API. The ssh file holds secrets, but it needs
 /// no special handling HERE — encryption happens renderer-side (src/ssh.rs's
 /// DPAPI commands) before the bytes ever reach this module.
-pub const ALLOWED_FILES: [&str; 6] = [
+pub const ALLOWED_FILES: [&str; 8] = [
     "settings_v1.json",
     "ui_state_v1.json",
     "sessions_index_v1.json",
     "conversations_v1.json",
     "saved_sessions_v1.json",
     "ssh_credentials_v1.json",
+    // Plugin system (Phase 1): the registry and the main-window-owned pane
+    // bindings. Both are TermX-owned user data, never plugin-writable.
+    "plugins_v1.json",
+    "plugin_panes_v1.json",
 ];
 
 /// Keeps concurrent temp files distinct within one process (two debounced
@@ -108,7 +112,7 @@ mod tests {
     const SETTINGS: &str = "settings_v1.json";
 
     #[test]
-    fn allowlist_is_exactly_the_six_app_files() {
+    fn allowlist_is_exactly_the_eight_app_files() {
         assert_eq!(
             ALLOWED_FILES,
             [
@@ -118,6 +122,8 @@ mod tests {
                 "conversations_v1.json",
                 "saved_sessions_v1.json",
                 "ssh_credentials_v1.json",
+                "plugins_v1.json",
+                "plugin_panes_v1.json",
             ]
         );
     }
@@ -189,7 +195,10 @@ mod tests {
         let body = "{\"newTabPolicy\":\"group-active\",\"note\":\"café ✓\"}";
         write_file_in(&base, SETTINGS, body).unwrap();
         assert!(base.is_dir(), "write must create the data dir");
-        assert_eq!(read_file_in(&base, SETTINGS).unwrap().as_deref(), Some(body));
+        assert_eq!(
+            read_file_in(&base, SETTINGS).unwrap().as_deref(),
+            Some(body)
+        );
     }
 
     #[test]
@@ -199,7 +208,10 @@ mod tests {
         write_file_in(tmp.path(), SETTINGS, "second").unwrap();
         write_file_in(tmp.path(), "ui_state_v1.json", "state").unwrap();
 
-        assert_eq!(read_file_in(tmp.path(), SETTINGS).unwrap().unwrap(), "second");
+        assert_eq!(
+            read_file_in(tmp.path(), SETTINGS).unwrap().unwrap(),
+            "second"
+        );
 
         let mut names: Vec<String> = std::fs::read_dir(tmp.path())
             .unwrap()
@@ -208,7 +220,10 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            vec!["settings_v1.json".to_string(), "ui_state_v1.json".to_string()],
+            vec![
+                "settings_v1.json".to_string(),
+                "ui_state_v1.json".to_string()
+            ],
             "temp files must not survive a successful write"
         );
     }
@@ -223,7 +238,9 @@ mod tests {
             "settings body"
         );
         assert_eq!(
-            read_file_in(tmp.path(), "ui_state_v1.json").unwrap().unwrap(),
+            read_file_in(tmp.path(), "ui_state_v1.json")
+                .unwrap()
+                .unwrap(),
             "state body"
         );
     }
