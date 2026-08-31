@@ -382,6 +382,32 @@
   font-size: 11px;
 }
 
+/* The same 6px square mark `.plugin-pane__health` draws on a pane title bar,
+   in the same tokens, so one glance means the same thing in both places.
+   Deliberately WITHOUT the pane's blink: a settings list is a page you read,
+   not a process you are watching, and a row of blinking squares in a list is
+   noise. Square, like everything else that is not a control. */
+.settings-plugin__health {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 0;
+}
+
+.settings-plugin__health--up {
+  background: var(--ok);
+}
+
+.settings-plugin__health--down {
+  background: var(--error);
+}
+
+/* Hollow — outlined, not filled: nothing is running yet. */
+.settings-plugin__health--starting {
+  background: transparent;
+  border: 1px solid var(--warn);
+}
+
 /* Chips, not overlines: 600 is the heaviest weight allowed outside the exact
    10px/700/0.08em overline recipe, and these track at 0.06em. */
 .settings-plugin__tag,

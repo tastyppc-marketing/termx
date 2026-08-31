@@ -11,7 +11,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginNative } from "../../plugins/native";
 import { PluginsStore, type PluginsV1 } from "../../plugins/registry";
-import { PluginsPanel, shortenPath } from "../PluginsPanel";
+import {
+  PluginsPanel,
+  shortenPath,
+  type PluginHealth,
+} from "../PluginsPanel";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -68,6 +72,7 @@ function fakeNative(manifests: Record<string, string> = {}): PluginNative {
 interface PanelOptions {
   store: PluginsStore;
   native?: PluginNative;
+  health?: Record<string, PluginHealth>;
   onOpen?: (pluginId: string) => void;
   pickFolder?: () => Promise<string | null>;
   bundled?: Parameters<typeof PluginsPanel>[0]["bundled"];
@@ -79,6 +84,7 @@ async function renderPanel(options: PanelOptions): Promise<void> {
       <PluginsPanel
         store={options.store}
         native={options.native ?? fakeNative()}
+        {...(options.health ? { health: options.health } : {})}
         {...(options.onOpen ? { onOpen: options.onOpen } : {})}
         {...(options.pickFolder ? { pickFolder: options.pickFolder } : {})}
         {...(options.bundled ? { bundled: options.bundled } : {})}
@@ -295,6 +301,67 @@ describe("PluginsPanel row hierarchy", () => {
   });
 });
 
+describe("PluginsPanel health marks", () => {
+  function health(id: string): HTMLElement | null {
+    return row(id).querySelector<HTMLElement>(".settings-plugin__health");
+  }
+
+  async function renderWithHealth(
+    reported: Record<string, PluginHealth>,
+  ): Promise<void> {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+      health: reported,
+    });
+  }
+
+  it("draws a distinct mark for up, down and starting", async () => {
+    await renderWithHealth({ showroom: "up", widgets: "down" });
+    expect(health("showroom")!.className).toContain(
+      "settings-plugin__health--up",
+    );
+    expect(health("widgets")!.className).toContain(
+      "settings-plugin__health--down",
+    );
+
+    await renderWithHealth({ showroom: "starting", widgets: "up" });
+    expect(health("showroom")!.className).toContain(
+      "settings-plugin__health--starting",
+    );
+  });
+
+  it("names each mark for a screen reader", async () => {
+    await renderWithHealth({ showroom: "up", widgets: "down" });
+    expect(health("showroom")!.getAttribute("aria-label")).toBe("Running");
+    expect(health("widgets")!.getAttribute("aria-label")).toBe("Not answering");
+  });
+
+  it("draws no mark for a plugin nothing is reporting on", async () => {
+    // No workspace wired, or never opened in this window. A mark here would
+    // read as a state the process is in.
+    await renderWithHealth({ showroom: "up" });
+    expect(health("widgets")).toBeNull();
+  });
+
+  it("draws no mark for a reported unknown either", async () => {
+    await renderWithHealth({ showroom: "unknown", widgets: "up" });
+    expect(health("showroom")).toBeNull();
+  });
+
+  it("draws no marks at all when no health is passed", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+      }),
+    });
+    expect(health("showroom")).toBeNull();
+  });
+});
+
 describe("shortenPath", () => {
   it("leaves a path that already fits alone", () => {
     expect(shortenPath("C:\\code\\showroom")).toBe("C:\\code\\showroom");
@@ -478,6 +545,23 @@ describe("PluginsPanel manifest problems", () => {
     );
   });
 
+  it("flags a folder that cannot be read, apart from one with no manifest", async () => {
+    const native = fakeNative();
+    native.readManifest = vi.fn().mockRejectedValue(new Error("EACCES"));
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native,
+    });
+
+    // A deleted or permission-denied folder is not the same as an ordinary
+    // folder that simply carries no termx-plugin.json.
+    expect(text(row("widgets").querySelector(".settings-plugin__status"))).toBe(
+      "Folder unavailable",
+    );
+  });
+
   it("uses the bundled manifest when the bundled plugin's folder has no file", async () => {
     // Showroom's repository carries no termx-plugin.json by design (spec §9);
     // its bundled manifest is the answer, not a problem chip.
@@ -579,6 +663,38 @@ describe("PluginsPanel add flow", () => {
     expect(store.getSnapshot().plugins.widgets!.path).toBe("D:\\old\\widgets");
   });
 
+  it("reads the manifest for the id, not the folder's name", async () => {
+    // The folder is `my-widgets`; the manifest says `widgets`. If the panel
+    // ever fell back to the basename this would install under the wrong key.
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    const renamed = "D:\\plugins\\my-widgets";
+    await renderPanel({
+      store,
+      native: fakeNative({ [renamed]: manifestText() }),
+      pickFolder: async () => renamed,
+    });
+
+    await click(addButton());
+
+    expect(add).toHaveBeenCalledWith("widgets", renamed);
+    expect(error()).toBe("");
+  });
+
+  it("says so when the folder cannot be read at all", async () => {
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    const native = fakeNative();
+    native.readManifest = vi.fn().mockRejectedValue(new Error("EACCES"));
+    await renderPanel({ store, native, pickFolder: async () => WIDGETS_PATH });
+
+    await click(addButton());
+
+    expect(add).not.toHaveBeenCalled();
+    // Never the raw errno — unreadable is a different fact from unmanifested.
+    expect(error()).toBe("That folder could not be read.");
+  });
+
   it("treats a cancelled picker as nothing happening", async () => {
     const store = storeWith({});
     const add = vi.spyOn(store, "add");
@@ -605,6 +721,95 @@ describe("PluginsPanel add flow", () => {
     picked = SHOWROOM_PATH;
     await click(addButton());
     expect(error()).toBe("");
+  });
+});
+
+describe("PluginsPanel row-scoped folder actions", () => {
+  function error(): string {
+    return text(container.querySelector(".settings-plugins__error"));
+  }
+
+  it("repoints a bundled plugin at a new folder", async () => {
+    // Showroom has no Remove, so without this a wrong path can only be fixed
+    // by hand-editing plugins_v1.json.
+    const store = storeWith({
+      showroom: { path: "C:\\old\\showroom", enabled: true, grants: [] },
+    });
+    const add = vi.spyOn(store, "add");
+    await renderPanel({ store, pickFolder: async () => SHOWROOM_PATH });
+
+    await click(action("showroom", "Change folder…")!);
+
+    expect(add).toHaveBeenCalledWith("showroom", SHOWROOM_PATH);
+    expect(store.getSnapshot().plugins.showroom!.path).toBe(SHOWROOM_PATH);
+    expect(error()).toBe("");
+  });
+
+  it("offers no Change folder on a plugin that can just be removed", async () => {
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+    });
+
+    expect(action("widgets", "Change folder…")).toBeNull();
+    expect(removeButton("widgets")).not.toBeNull();
+  });
+
+  it("refuses a folder that holds a different plugin than the row", async () => {
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    await renderPanel({
+      store,
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+      pickFolder: async () => WIDGETS_PATH,
+    });
+
+    // Showroom's own row, pointed at the widgets folder: installing widgets
+    // here would leave Showroom still empty and say nothing about it.
+    await click(action("showroom", "Add folder…")!);
+
+    expect(add).not.toHaveBeenCalled();
+    expect(error()).toBe("That folder holds widgets, not showroom.");
+  });
+
+  it("accepts the right folder from a row's own button", async () => {
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    await renderPanel({ store, pickFolder: async () => SHOWROOM_PATH });
+
+    await click(action("showroom", "Add folder…")!);
+
+    expect(add).toHaveBeenCalledWith("showroom", SHOWROOM_PATH);
+    expect(error()).toBe("");
+  });
+
+  it("runs one picker even when the button is clicked twice in a frame", async () => {
+    const store = storeWith({});
+    const add = vi.spyOn(store, "add");
+    let picks = 0;
+    await renderPanel({
+      store,
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+      pickFolder: async () => {
+        picks += 1;
+        return WIDGETS_PATH;
+      },
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      "[data-testid='plugins-add']",
+    )!;
+    // Both clicks land before React can repaint the disabled state, so the
+    // `picking` state alone would let two pickers through.
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+
+    expect(picks).toBe(1);
+    expect(add).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -30,11 +30,30 @@ import {
 } from "../plugins/manifest";
 import type { PluginNative } from "../plugins/native";
 import type { PluginsStore } from "../plugins/registry";
-import { Toggle } from "./SettingsSurface";
+import { Toggle } from "./Toggle";
+
+/**
+ * What the workspace last observed about a plugin's process, mirroring the
+ * pane's own four states (spec §7). A plugin with no entry has never been
+ * opened in this window, which is not the same as one reporting `unknown`.
+ */
+export type PluginHealth = "starting" | "up" | "down" | "unknown";
+
+/** What each health mark means, for the tooltip and the screen reader. */
+const HEALTH_LABEL: Record<"starting" | "up" | "down", string> = {
+  starting: "Starting",
+  up: "Running",
+  down: "Not answering",
+};
 
 export interface PluginsPanelProps {
   store: PluginsStore;
   native: PluginNative;
+  /**
+   * Live process health by plugin id, as the workspace sees it. Absent
+   * entirely where no workspace is wired, so every row falls back to no mark.
+   */
+  health?: Record<string, PluginHealth>;
   /** Opens the plugin in a new tab. Absent where no workspace is wired. */
   onOpen?(pluginId: string): void;
   /** Injected by tests; production uses the OS folder dialog. */
@@ -58,6 +77,12 @@ interface PluginRow {
   enabled: boolean;
   bundled: boolean;
   problem: string | null;
+  /**
+   * null = nothing to show. Both an absent entry (no workspace wired, or the
+   * plugin was never opened here) and a reported `unknown` land here: neither
+   * is a state of the process, so neither earns a mark.
+   */
+  health: "starting" | "up" | "down" | null;
 }
 
 /** A plugin with no manifest at all still needs a mark in its row. */
@@ -157,6 +182,7 @@ function folderName(folder: string): string {
 export function PluginsPanel({
   store,
   native,
+  health,
   onOpen,
   pickFolder = pickFolderDialog,
   bundled = BUNDLED_MANIFESTS,
@@ -170,6 +196,9 @@ export function PluginsPanel({
 
   const confirmingRef = useRef<string | null>(null);
   confirmingRef.current = confirming;
+
+  /** Guards the picker synchronously; `picking` only disables the buttons. */
+  const pickingRef = useRef(false);
 
   useEffect(() => {
     if (confirming === null) {
@@ -200,9 +229,14 @@ export function PluginsPanel({
 
   // Re-read folders when an id or its path changes, never when `enabled` flips:
   // a toggle is instant and a disk read behind it would make it feel otherwise.
-  const folderKey = Object.entries(state.plugins)
-    .map(([id, entry]) => `${id}\u0000${entry.path}`)
-    .join("\u0001");
+  //
+  // JSON does the quoting, so there is no separator character to pick that a
+  // path could not itself contain. The committed version used raw U+0000 and
+  // U+0001 bytes for that job, which made the whole module binary to git, to
+  // diffs and to any editor that strips control characters on save.
+  const folderKey = JSON.stringify(
+    Object.entries(state.plugins).map(([id, entry]) => [id, entry.path]),
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -232,6 +266,7 @@ export function PluginsPanel({
       .map((id) => {
         const entry = state.plugins[id];
         const manifest = details[id]?.manifest ?? bundled[id] ?? null;
+        const reported = health?.[id];
         return {
           id,
           name: manifest?.name ?? id,
@@ -241,6 +276,8 @@ export function PluginsPanel({
           bundled: bundled[id] !== undefined,
           // A folder that was never added has nothing to be wrong with it.
           problem: entry ? details[id]?.problem ?? null : null,
+          health:
+            reported === undefined || reported === "unknown" ? null : reported,
         };
       })
       .sort((a, b) =>
@@ -250,61 +287,85 @@ export function PluginsPanel({
             ? -1
             : 1,
       );
-  }, [state, details, bundled]);
+  }, [state, details, bundled, health]);
 
-  const addFolder = useCallback(async (): Promise<void> => {
-    setPicking(true);
-    try {
-      const folder = await pickFolder({ title: "Choose a plugin folder" });
-      if (folder === null) {
-        // Cancelling is not a failure; leave whatever is on screen alone.
+  /**
+   * Pick a folder and install it. `expectedId` scopes the pick to one row: a
+   * row's own "Add folder…" / "Change folder…" must not quietly install some
+   * other plugin and leave the row it was clicked on still empty.
+   */
+  const addFolder = useCallback(
+    async (expectedId?: string): Promise<void> => {
+      // A ref, not the `picking` state: two clicks in one frame both read the
+      // pre-paint `false`, both open a picker, and the second `add` retargets
+      // what the first just installed.
+      if (pickingRef.current) {
         return;
       }
-
-      let text: string | null;
+      pickingRef.current = true;
+      setPicking(true);
       try {
-        text = await native.readManifest(folder);
-      } catch {
-        setError("That folder could not be read.");
-        return;
-      }
-
-      let id: string;
-      if (text === null) {
-        const fallback = bundled[folderName(folder)];
-        if (!fallback) {
-          setError("No termx-plugin.json found in that folder.");
+        const folder = await pickFolder({ title: "Choose a plugin folder" });
+        if (folder === null) {
+          // Cancelling is not a failure; leave whatever is on screen alone.
           return;
         }
-        id = fallback.id;
-      } else {
-        let raw: unknown;
+
+        let text: string | null;
         try {
-          raw = JSON.parse(text);
+          text = await native.readManifest(folder);
         } catch {
-          setError("That termx-plugin.json is not valid JSON.");
+          setError("That folder could not be read.");
           return;
         }
-        const manifest = parseManifest(raw);
-        if (!manifest) {
-          setError(`Manifest invalid: ${parseManifestErrors(raw).join(", ")}`);
-          return;
-        }
-        id = manifest.id;
-      }
 
-      // Ids are the registry's keys: adding a second folder under one id would
-      // silently repoint the first, so say so instead.
-      if (store.getSnapshot().plugins[id]) {
-        setError("That plugin id is already installed.");
-        return;
+        let id: string;
+        if (text === null) {
+          const fallback = bundled[folderName(folder)];
+          if (!fallback) {
+            setError("No termx-plugin.json found in that folder.");
+            return;
+          }
+          id = fallback.id;
+        } else {
+          let raw: unknown;
+          try {
+            raw = JSON.parse(text);
+          } catch {
+            setError("That termx-plugin.json is not valid JSON.");
+            return;
+          }
+          const manifest = parseManifest(raw);
+          if (!manifest) {
+            setError(`Manifest invalid: ${parseManifestErrors(raw).join(", ")}`);
+            return;
+          }
+          id = manifest.id;
+        }
+
+        // The manifest, never the folder name, decides the id — so a row's own
+        // button can check that the user pointed it at the right plugin.
+        if (expectedId !== undefined && id !== expectedId) {
+          setError(`That folder holds ${id}, not ${expectedId}.`);
+          return;
+        }
+
+        // Ids are the registry's keys: an unscoped add of an id already there
+        // would silently repoint it, so say so instead. A scoped add is the
+        // one case where repointing is the whole intent.
+        if (expectedId === undefined && store.getSnapshot().plugins[id]) {
+          setError("That plugin id is already installed.");
+          return;
+        }
+        setError(null);
+        store.add(id, folder);
+      } finally {
+        pickingRef.current = false;
+        setPicking(false);
       }
-      setError(null);
-      store.add(id, folder);
-    } finally {
-      setPicking(false);
-    }
-  }, [bundled, native, pickFolder, store]);
+    },
+    [bundled, native, pickFolder, store],
+  );
 
   return (
     <div className="settings-plugins">
@@ -346,6 +407,18 @@ export function PluginsPanel({
                   {row.problem === null ? null : (
                     <span className="settings-plugin__status">{row.problem}</span>
                   )}
+                  {/* Only a plugin the workspace is actually running has health
+                      to report. No entry — no workspace wired, or never opened
+                      in this window — draws nothing rather than an "unknown"
+                      mark that would read as a state the plugin is in. */}
+                  {row.health === null ? null : (
+                    <span
+                      className={`settings-plugin__health settings-plugin__health--${row.health}`}
+                      role="img"
+                      title={HEALTH_LABEL[row.health]}
+                      aria-label={HEALTH_LABEL[row.health]}
+                    />
+                  )}
                 </span>
                 {row.path === null ? (
                   <span className="settings-plugin__hint">
@@ -384,15 +457,36 @@ export function PluginsPanel({
                     className="settings-plugins__action"
                     aria-label={`Add a folder for ${row.name}`}
                     disabled={picking}
-                    onClick={() => void addFolder()}
+                    onClick={() => void addFolder(row.id)}
                   >
                     Add folder…
+                  </button>
+                ) : null}
+                {/* A bundled row has no Remove, so repointing is its only way
+                    out of a wrong or moved folder — otherwise the fix is to
+                    hand-edit plugins_v1.json. A folder plugin can just be
+                    removed and added again. */}
+                {row.bundled && row.path !== null ? (
+                  <button
+                    type="button"
+                    className="settings-plugins__action"
+                    aria-label={`Change the folder for ${row.name}`}
+                    disabled={picking}
+                    onClick={() => void addFolder(row.id)}
+                  >
+                    Change folder…
                   </button>
                 ) : null}
                 {row.bundled ? null : (
                   // Confirm in place rather than in a dialog: the row being
                   // removed stays on screen and under the pointer, and one
                   // stray click can no longer drop a plugin.
+                  //
+                  // Removing leaves any open pane bound on purpose: the pane's
+                  // next ensure-up refuses with "not installed" and shows its
+                  // down card, which is the honest picture. Unbinding reserved
+                  // session ids is the workspace controller's job, not a
+                  // settings panel's.
                   <button
                     type="button"
                     className={`settings-plugins__action settings-plugins__action--danger${

@@ -15,7 +15,8 @@ import type { PluginNative } from "../plugins/native";
 import type { PluginsStore } from "../plugins/registry";
 import { deriveTokens } from "../theme/deriveTokens";
 import { THEME_IDS, THEMES } from "../theme/themes";
-import { PluginsPanel } from "./PluginsPanel";
+import { PluginsPanel, type PluginHealth } from "./PluginsPanel";
+import { Toggle } from "./Toggle";
 import { SETTINGS_SECTIONS, type SettingsSectionId } from "./sections";
 import type { SettingsStore } from "./SettingsStore";
 import {
@@ -45,6 +46,8 @@ import "./SettingsSurface.css";
 export interface SettingsPlugins {
   store: PluginsStore;
   native: PluginNative;
+  /** Live process health by plugin id; omitted where nothing is watching. */
+  health?: Record<string, PluginHealth>;
   onOpen?(pluginId: string): void;
 }
 
@@ -321,6 +324,7 @@ export function SettingsSurface({
               <PluginsPanel
                 store={plugins.store}
                 native={plugins.native}
+                {...(plugins.health ? { health: plugins.health } : {})}
                 {...(plugins.onOpen ? { onOpen: plugins.onOpen } : {})}
               />
             ) : (
@@ -377,54 +381,6 @@ function RadioLadder<T extends string | number>({
         </label>
       ))}
     </div>
-  );
-}
-
-/**
- * Exported because the Plugins panel switches plugins on with the same control
- * every other on/off setting uses. `hint` is optional there and only there: in
- * a dense plugin row the label carries the meaning and a second line would push
- * the row off its rhythm.
- */
-export function Toggle({
-  name,
-  label,
-  hint,
-  checked,
-  disabled = false,
-  ariaLabel,
-  onToggle,
-}: {
-  name: string;
-  label: string;
-  hint?: string;
-  checked: boolean;
-  disabled?: boolean;
-  /**
-   * Overrides the visible label for assistive tech. Needed where the same
-   * word ("Enabled") repeats down a list and the row, not the label, says
-   * which thing is being switched.
-   */
-  ariaLabel?: string;
-  onToggle(checked: boolean): void;
-}) {
-  return (
-    <label className="settings-check">
-      <input
-        type="checkbox"
-        name={name}
-        checked={checked}
-        disabled={disabled}
-        {...(ariaLabel === undefined ? {} : { "aria-label": ariaLabel })}
-        onChange={(event) => onToggle(event.currentTarget.checked)}
-      />
-      <span className="settings-radio__text">
-        <span className="settings-radio__label">{label}</span>
-        {hint === undefined ? null : (
-          <span className="settings-radio__hint">{hint}</span>
-        )}
-      </span>
-    </label>
   );
 }
 

@@ -203,6 +203,17 @@ fn read_manifest_in(folder: &Path) -> Result<Option<String>, String> {
     if !folder.is_absolute() {
         return Err("plugin folder path must be absolute".to_string());
     }
+    // A folder that is gone is a different fact from a folder that simply has
+    // no manifest, and only the second one is ordinary (Showroom's repository
+    // has none and answers from the bundled manifest). Without this check both
+    // arrive as NotFound on the joined file, so a plugin whose install was
+    // deleted or moved would be reported as "Manifest missing" — the panel
+    // would tell the user to add a file to a folder that is not there.
+    match std::fs::metadata(folder) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err("plugin folder is not a folder".to_string()),
+        Err(_) => return Err("plugin folder is missing".to_string()),
+    }
     read_bounded(
         &folder.join(MANIFEST_FILE_NAME),
         MANIFEST_MAX_BYTES,
@@ -556,6 +567,28 @@ mod tests {
             read_manifest_in(dir.path()).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn read_manifest_missing_folder_is_err() {
+        // Distinct from `read_manifest_missing_is_none`: there the folder is
+        // real and only the file is absent, which is a supported install.
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("deleted-plugin");
+        assert_eq!(
+            read_manifest_in(&gone),
+            Err("plugin folder is missing".to_string())
+        );
+    }
+
+    #[test]
+    fn read_manifest_rejects_a_file_posing_as_a_folder() {
+        // Joining the manifest name onto a FILE also yields NotFound, so
+        // without the metadata check this would read as "no manifest".
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-folder");
+        std::fs::write(&file, "{}").unwrap();
+        assert!(read_manifest_in(&file).is_err());
     }
 
     #[test]
