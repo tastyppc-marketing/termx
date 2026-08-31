@@ -17,6 +17,22 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+const PLUGIN_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * Plugin ids double as registry keys, file-name fragments and menu identities,
+ * so they stay lowercase-and-hyphens: that keeps "Showroom" and "showroom" from
+ * ever coexisting as two entries for one plugin on a case-insensitive OS.
+ */
+export function isValidPluginId(id: string): boolean {
+  return PLUGIN_ID_PATTERN.test(id);
+}
+
+/** Panel and health paths are joined onto an origin, so they must be rooted. */
+function isRootedPath(value: unknown): value is string {
+  return isNonEmptyString(value) && value.startsWith("/");
+}
+
 /**
  * Return stable field paths so Settings can explain malformed manifests without
  * coupling callers to parser wording.
@@ -30,7 +46,7 @@ export function parseManifestErrors(value: unknown): string[] {
   if (value.manifest !== 1) {
     errors.push("manifest");
   }
-  if (!isNonEmptyString(value.id)) {
+  if (!isNonEmptyString(value.id) || !isValidPluginId(value.id)) {
     errors.push("id");
   }
   if (!isNonEmptyString(value.name)) {
@@ -59,12 +75,12 @@ export function parseManifestErrors(value: unknown): string[] {
   if (!isNonEmptyString(discovery.runtimeFile)) {
     errors.push("discovery.runtimeFile");
   }
-  if (!isNonEmptyString(discovery.healthPath)) {
+  if (!isRootedPath(discovery.healthPath)) {
     errors.push("discovery.healthPath");
   }
 
   const panel = isRecord(value.panel) ? value.panel : {};
-  if (!isNonEmptyString(panel.path)) {
+  if (!isRootedPath(panel.path)) {
     errors.push("panel.path");
   }
 
@@ -103,7 +119,16 @@ export function expandEnv(
   path: string,
   env: Record<string, string | undefined>,
 ): string {
+  // Windows environment variable names are case-insensitive, so a manifest
+  // writing %appdata% must resolve against the APPDATA key exactly as cmd would.
+  const byLowerName = new Map<string, string>();
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) {
+      byLowerName.set(key.toLowerCase(), value);
+    }
+  }
+
   return path.replace(/%([^%]+)%/g, (placeholder, name: string) => {
-    return env[name] ?? placeholder;
+    return env[name] ?? byLowerName.get(name.toLowerCase()) ?? placeholder;
   });
 }

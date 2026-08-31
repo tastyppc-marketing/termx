@@ -36,6 +36,23 @@ describe("plugin registry file", () => {
     expect(parsePluginsFile(serializePluginsFile(state))).toEqual(state);
   });
 
+  it("skips entries whose id is not a valid plugin id", () => {
+    const text = JSON.stringify({
+      plugins: {
+        showroom: { path: "C:\\Plugins\\Showroom", enabled: true, grants: [] },
+        Showroom: { path: "C:\\Plugins\\Other", enabled: true, grants: [] },
+        "": { path: "C:\\Plugins\\Empty", enabled: true, grants: [] },
+        "bad id": { path: "C:\\Plugins\\Bad", enabled: true, grants: [] },
+      },
+    });
+
+    expect(parsePluginsFile(text)).toEqual({
+      plugins: {
+        showroom: { path: "C:\\Plugins\\Showroom", enabled: true, grants: [] },
+      },
+    });
+  });
+
   it("falls back to the bundled Showroom manifest", () => {
     expect(manifestFor("showroom", null)).toBe(BUNDLED_MANIFESTS.showroom);
   });
@@ -100,6 +117,54 @@ describe("PluginsStore", () => {
         },
       },
     });
+  });
+
+  it("flushes the pending debounced save without advancing timers", async () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const store = new PluginsStore({
+      initial: {
+        plugins: {
+          showroom: {
+            path: "C:\\Plugins\\Showroom",
+            enabled: true,
+            grants: [],
+          },
+        },
+      },
+      save: async (text) => {
+        writes.push(text);
+      },
+      debounceMs: 800,
+    });
+
+    store.setEnabled("showroom", false);
+    await store.flush();
+
+    expect(writes).toHaveLength(1);
+    expect(parsePluginsFile(writes[0]!)).toEqual({
+      plugins: {
+        showroom: {
+          path: "C:\\Plugins\\Showroom",
+          enabled: false,
+          grants: [],
+        },
+      },
+    });
+
+    // The cancelled debounce must not fire a second write later.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(writes).toHaveLength(1);
+  });
+
+  it("ignores an add with an invalid plugin id", () => {
+    const store = new PluginsStore();
+
+    store.add("Showroom", "C:\\Plugins\\Showroom");
+    store.add("bad id", "C:\\Plugins\\Bad");
+    store.add("", "C:\\Plugins\\Empty");
+
+    expect(store.getSnapshot()).toEqual({ plugins: {} });
   });
 
   it("adds and removes a plugin round-trip", () => {

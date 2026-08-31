@@ -1,5 +1,9 @@
 import { BUNDLED_MANIFESTS } from "./bundled";
-import { parseManifest, type PluginManifest } from "./manifest";
+import {
+  isValidPluginId,
+  parseManifest,
+  type PluginManifest,
+} from "./manifest";
 
 export interface PluginEntry {
   path: string;
@@ -33,8 +37,10 @@ export function parsePluginsFile(text: string | null): PluginsV1 {
 
   const entries: [string, PluginEntry][] = [];
   for (const [id, value] of Object.entries(raw.plugins)) {
+    // An id outside the manifest's alphabet can never match a manifest, and a
+    // case variant would shadow the real entry, so drop it rather than keep it.
     if (
-      id.length === 0 ||
+      !isValidPluginId(id) ||
       !isRecord(value) ||
       typeof value.path !== "string" ||
       value.path.length === 0
@@ -131,7 +137,7 @@ export class PluginsStore {
   };
 
   add = (id: string, path: string): void => {
-    if (id.length === 0 || path.length === 0) {
+    if (!isValidPluginId(id) || path.length === 0) {
       return;
     }
     const existing = this.current.plugins[id];
@@ -157,7 +163,11 @@ export class PluginsStore {
     );
   };
 
-  /** Runs a pending persistence callback immediately and awaits queued writes. */
+  /**
+   * Runs a pending persistence callback immediately and awaits queued writes.
+   * It resolves even when a write failed: save failures reach callers through
+   * `onSaveError`, so a shutdown flush is never blocked by a rejected promise.
+   */
   flush = async (): Promise<void> => {
     if (this.timer !== null) {
       clearTimeout(this.timer);
