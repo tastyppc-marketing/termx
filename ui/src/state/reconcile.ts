@@ -35,6 +35,19 @@ export interface ReconcileResult {
 export interface ReconcileOptions {
   /// Id source for adopted tabs — injectable so tests are deterministic.
   generateId?: () => string;
+  /// Reserved pane ids (>= 0x8000_0000) that currently hold a plugin panel
+  /// (plugin spec §4). The daemon knows nothing about them — they are panels,
+  /// not sessions — so without this set the dead sweep would report every one
+  /// of them and the panes would render as corpses on every boot.
+  ///
+  /// Membership is the BINDING, not the range: a reserved id whose binding was
+  /// lost is deliberately left in `deadSessionIds`, which is what makes it the
+  /// dismissible dead pane the spec requires (and exactly what an older build
+  /// without this option sees).
+  ///
+  /// Orphan adoption needs no equivalent guard: orphans come from the host's
+  /// own session list, which can never contain a reserved id.
+  pluginPaneIds?: ReadonlySet<number>;
 }
 
 function defaultGenerateId(): string {
@@ -110,7 +123,10 @@ export function reconcile(
     hostSessions.filter((s) => s.alive).map((s) => s.id),
   );
 
-  const deadSessionIds = [...referenced].filter((id) => !alive.has(id));
+  const pluginPaneIds = opts?.pluginPaneIds;
+  const deadSessionIds = [...referenced].filter(
+    (id) => !alive.has(id) && pluginPaneIds?.has(id) !== true,
+  );
   const orphans = hostSessions.filter((s) => s.alive && !referenced.has(s.id));
   const unreferencedDeadSessionIds = hostSessions
     .filter((s) => !s.alive && !referenced.has(s.id))

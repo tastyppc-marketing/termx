@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { PLUGIN_PANE_MIN_ID } from "../../plugins/paneBindings";
 import { validateInvariants } from "../layout";
 import { reconcile } from "../reconcile";
 import type { SessionLike } from "../reconcile";
-import { baseLayout, groupItem, tabItem } from "./helpers";
+import { baseLayout, groupItem, tab, tabItem } from "./helpers";
 
 function ids(prefix: string): () => string {
   let n = 0;
@@ -93,6 +94,49 @@ describe("reconcile rule 3 — malformed or absent layout", () => {
     expect(result.layout.activeTabId).toBeNull();
     expect(result.deadSessionIds).toEqual([]);
     expect(result.orphanAdoptedIds).toEqual([]);
+  });
+});
+
+describe("reconcile — plugin panes (plugin spec §4)", () => {
+  /// A reserved-id pane holding a plugin panel. The daemon never reports one,
+  /// so only `pluginPaneIds` can tell reconcile it is alive by design.
+  function layoutWithPanel(): ReturnType<typeof baseLayout> {
+    const layout = baseLayout();
+    layout.tabs.panel = tab("panel", PLUGIN_PANE_MIN_ID, { color: "magenta" });
+    layout.rootItems = [...layout.rootItems, tabItem("panel")];
+    return layout;
+  }
+
+  it("keeps a bound reserved pane out of the dead sweep", () => {
+    const layout = layoutWithPanel();
+    const result = reconcile(layout, [session(1), session(2), session(3)], {
+      pluginPaneIds: new Set([PLUGIN_PANE_MIN_ID]),
+    });
+
+    expect(result.deadSessionIds).toEqual([]);
+    // Nothing to adopt and nothing to prune, so the layout comes back by
+    // identity — a plugin pane must never cost the workspace a rewrite.
+    expect(result.layout).toBe(layout);
+    expect(result.orphanAdoptedIds).toEqual([]);
+  });
+
+  it("reports a reserved pane with no binding as dead (the downgrade path)", () => {
+    // This is exactly what an OLD build sees, and what THIS build sees when the
+    // bindings file was lost: an ordinary dismissible dead pane, never a ghost.
+    const layout = layoutWithPanel();
+    const result = reconcile(layout, [session(1), session(2), session(3)]);
+
+    expect(result.deadSessionIds).toEqual([PLUGIN_PANE_MIN_ID]);
+  });
+
+  it("still flags dead terminals while sparing the plugin pane", () => {
+    const layout = layoutWithPanel();
+    const result = reconcile(layout, [session(1), session(2, false)], {
+      pluginPaneIds: new Set([PLUGIN_PANE_MIN_ID]),
+    });
+
+    expect(result.deadSessionIds.sort()).toEqual([2, 3]);
+    expect(result.unreferencedDeadSessionIds).toEqual([]);
   });
 });
 

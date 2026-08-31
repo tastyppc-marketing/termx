@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { dataDir } from "@tauri-apps/api/path";
 import {
   ConversationsStore,
   loadConversationsStore,
@@ -17,12 +18,16 @@ import { HostBootstrapError, ReconnectingHostClient } from "../host/reconnect";
 import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
+import { ensureUp } from "../plugins/lifecycle";
+import { tauriPluginNative, type PluginNative } from "../plugins/native";
 import {
+  clonePluginPanes,
   PaneBindingsStore,
   parsePluginPanes,
   parsePluginPanesValue,
   toJsonPluginPanes,
 } from "../plugins/paneBindings";
+import { manifestFor, parsePluginsFile, PluginsStore } from "../plugins/registry";
 import {
   tauriProtectSecret,
   tauriReadSshConfig,
@@ -92,6 +97,17 @@ export interface BootstrapWorkspaceOptions {
    * an aux window's mutations go nowhere.
    */
   windowBus?: WindowBus;
+  /**
+   * Plugin process/probe seam (plugin spec §3); defaults to the Tauri commands.
+   * Injected in tests so a unit run never reaches a native command.
+   */
+  pluginNative?: PluginNative;
+  /**
+   * Environment used to expand `%VAR%` in a manifest's runtime-file path.
+   *
+   * Defaults to `{ APPDATA: <Tauri's data dir> }` — see `defaultPluginEnv`.
+   */
+  pluginEnv?: Record<string, string | undefined>;
 }
 
 /**
@@ -232,6 +248,34 @@ export interface BootstrappedWorkspace {
    * an aux window's is a read-only replica fed by the bus.
    */
   pluginPanes: PaneBindingsStore;
+  /**
+   * The installed-plugin registry (plugin spec §2), for the Settings section.
+   * Always present; an empty registry is simply a workspace with no plugins.
+   */
+  plugins: PluginsStore;
+}
+
+/**
+ * The environment a manifest's `%VAR%` discovery path is expanded against
+ * (plugin spec §3.1). Only `APPDATA`, because that is where a plugin keeps its
+ * own runtime file — Showroom's is `%APPDATA%\Showroom\runtime.json` — and the
+ * renderer has no environment of its own to offer.
+ *
+ * DERIVED at runtime from Tauri's data dir rather than written down: the same
+ * build has to work from any folder, on any machine, for any user. Every
+ * failure (an older host, a denied permission, a platform where the notion
+ * does not apply) yields an empty environment, which leaves the placeholder
+ * intact — the plugin then reads as down, with a Relaunch button, rather than
+ * taking the boot with it.
+ */
+async function defaultPluginEnv(): Promise<Record<string, string | undefined>> {
+  try {
+    // On Windows this is `%APPDATA%` itself (the roaming data dir).
+    const roaming = (await dataDir()).replace(/[\\/]+$/, "");
+    return roaming.length > 0 ? { APPDATA: roaming } : {};
+  } catch {
+    return {};
+  }
 }
 
 export function parseBootstrapHostResult(value: unknown): HostClientConnectOptions {
@@ -298,6 +342,25 @@ export async function bootstrapWorkspace(
     } catch {
       pluginPanesText = null;
     }
+    // Parsed once, up here, because reconcile needs the bound ids BEFORE the
+    // stores are built: without them the boot sweep would report every plugin
+    // pane as a dead session.
+    const restoredPluginPanes = parsePluginPanes(pluginPanesText);
+    const pluginPaneIds = new Set(
+      Object.keys(restoredPluginPanes).map((key) => Number(key)),
+    );
+    // The installed-plugin registry, read with the same tolerance: an
+    // unreadable or corrupt file is a workspace with no plugins.
+    let pluginsText: string | null = null;
+    try {
+      pluginsText = await appFiles.read("plugins_v1.json");
+    } catch {
+      pluginsText = null;
+    }
+    const plugins = new PluginsStore({
+      initial: parsePluginsFile(pluginsText),
+      save: (text) => appFiles.write("plugins_v1.json", text),
+    });
     // Conversation captures: written by the Claude Code SessionStart hook, so
     // TermX only ever reads them, and a read that fails (no hook installed, an
     // older host without the file in its allowlist) simply means "no captures"
@@ -341,11 +404,10 @@ export async function bootstrapWorkspace(
     client = new ReconnectingWorkspaceClient(connection);
     const state = await client.getState();
     const restored = parseLayout(state.layout);
-    const reconciled = reconcile(
-      restored,
-      state.sessions,
-      options.generateId ? { generateId: options.generateId } : undefined,
-    );
+    const reconciled = reconcile(restored, state.sessions, {
+      ...(options.generateId ? { generateId: options.generateId } : {}),
+      pluginPaneIds,
+    });
     const store = createLayoutStore(reconciled.layout);
     // Single-writer rule (multi-window spec): only the MAIN window's
     // persistence reaches the daemon. With a bus, every main write also
@@ -404,19 +466,24 @@ export async function bootstrapWorkspace(
     // change.
     const pluginPanes = bootWindowId === MAIN_WINDOW_ID
       ? new PaneBindingsStore({
-          initial: parsePluginPanes(pluginPanesText),
+          initial: clonePluginPanes(restoredPluginPanes),
           save: (text) => appFiles.write("plugin_panes_v1.json", text),
           ...(bus !== null
             ? { onBroadcast: (state) => void bus.broadcastPluginPanes(toJsonPluginPanes(state)) }
             : {}),
         })
       : new PaneBindingsStore({
-          initial: parsePluginPanes(pluginPanesText),
+          initial: clonePluginPanes(restoredPluginPanes),
           save: null,
           ...(bus !== null
             ? {
+                // The promise is RETURNED, not voided: the store chains it into
+                // the same queue `flush()` awaits, and an aux window's binding
+                // only really exists once main has been told. Voiding it would
+                // make "flush the binding, then persist the layout" a no-op in
+                // every window but main — the exact crash order T5 closes.
                 onForward: (request) =>
-                  void bus.forwardPluginPanes(
+                  bus.forwardPluginPanes(
                     request.op === "bind"
                       ? {
                           kind: "pluginPanes",
@@ -481,6 +548,48 @@ export async function bootstrapWorkspace(
       // references it.
       pluginPanes.prune(new Set(sessionIdsInLayout(reconciled.layout)));
     }
+    // The plugin lifecycle seam the controller opens panels through (spec §3).
+    // Ensure-up adopts a healthy instance and only spawns when there is none,
+    // so TermX never owns — or kills — a plugin's process.
+    //
+    // The manifest comes from the BUNDLED table for now: reading a plugin
+    // folder's own `termx-plugin.json` needs a native read this build does not
+    // have yet, and Phase 1's only plugin (Showroom) is bundled precisely so
+    // its repository needs no file. A plugin with no bundled manifest reads as
+    // "not installed" rather than half-opening.
+    const pluginNative = options.pluginNative ?? tauriPluginNative;
+    // Resolved lazily and once: a workspace with no plugins never pays for it,
+    // and two panes opened together share the one lookup.
+    const injectedEnv = options.pluginEnv;
+    let pluginEnvOnce: Promise<Record<string, string | undefined>> | null = null;
+    const pluginEnv = (): Promise<Record<string, string | undefined>> => {
+      pluginEnvOnce ??= injectedEnv ? Promise.resolve(injectedEnv) : defaultPluginEnv();
+      return pluginEnvOnce;
+    };
+    const installedManifest = (pluginId: string) =>
+      plugins.getSnapshot().plugins[pluginId] === undefined
+        ? null
+        : manifestFor(pluginId, null);
+    const pluginHost = {
+      manifestFor: installedManifest,
+      ensureUp: async (pluginId: string) => {
+        const entry = plugins.getSnapshot().plugins[pluginId];
+        const manifest = installedManifest(pluginId);
+        if (entry === undefined || manifest === null) {
+          return {
+            ok: false as const,
+            reason: `The plugin "${pluginId}" is not installed.`,
+            stderrTail: "",
+          };
+        }
+        return ensureUp(manifest, entry.path, {
+          native: pluginNative,
+          env: await pluginEnv(),
+          now: () => Date.now(),
+          sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+        });
+      },
+    };
     const attachments = new AttachmentHub(client);
     const controllerOptions = {
       client,
@@ -525,6 +634,8 @@ export async function bootstrapWorkspace(
         return capturedRecord(capture, indexed);
       },
       savedSessions: saved,
+      pluginPanes,
+      plugins: pluginHost,
       sshPasswords: { passwordFor: (alias: string) => sshCredentials.passwordFor(alias) },
       sshHosts: { byAlias: (alias: string) => sshHosts.find((host) => host.aliases.includes(alias)) ?? null },
       ...(options.generateId ? { generateId: options.generateId } : {}),
@@ -628,6 +739,7 @@ export async function bootstrapWorkspace(
       sshHosts,
       sshCredentials,
       pluginPanes,
+      plugins,
     };
   } catch {
     try {

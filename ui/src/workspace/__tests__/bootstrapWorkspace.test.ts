@@ -353,3 +353,188 @@ describe("bootstrapWorkspace", () => {
     expect(fake.close).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("bootstrapWorkspace plugin panes", () => {
+  /// A restored layout whose only tab holds a reserved plugin pane.
+  function panelLayout(): JsonValue {
+    const state = emptyLayout();
+    state.tabs.panel = {
+      id: "panel",
+      title: "Showroom",
+      color: "magenta",
+      fill: "off",
+      split: { kind: "pane", sessionId: PLUGIN_PANE_MIN_ID },
+    };
+    state.rootItems = [{ kind: "tab", id: "panel" }];
+    state.activeTabId = "panel";
+    return serializeLayout(state);
+  }
+
+  function files(seed: Record<string, string>) {
+    const writes: Array<[string, string]> = [];
+    const appFiles: AppFileStore = {
+      read: async (name) => seed[name] ?? null,
+      write: async (name, contents) => {
+        writes.push([name, contents]);
+      },
+    };
+    return { appFiles, writes };
+  }
+
+  it("boots a bound reserved pane as a plugin pane, not a corpse", async () => {
+    // Two things at once: reconcile was told the id is live by design (or the
+    // dead sweep would claim it), and the controller was handed the bindings
+    // store (or it could not tell a panel from a forgotten session).
+    const fake = fakeClient({ layout: panelLayout() });
+    const { appFiles } = files({
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom" } },
+      }),
+      "plugins_v1.json": JSON.stringify({
+        plugins: { showroom: { path: "C:\\code\\showroom", enabled: true, grants: [] } },
+      }),
+    });
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+    });
+
+    expect(workspace.controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID])
+      .toMatchObject({ status: "plugin", pluginId: "showroom" });
+    // A plugin pane costs the workspace no layout rewrite at boot.
+    expect(fake.setLayout).not.toHaveBeenCalled();
+  });
+
+  it("boots an unbound reserved pane as a dismissible dead pane", async () => {
+    // The downgrade path: an old build wrote this layout, or the bindings file
+    // was lost. Degraded and visible, never a ghost.
+    const fake = fakeClient({ layout: panelLayout() });
+    const { appFiles } = files({});
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+    });
+
+    expect(workspace.controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID])
+      .toEqual({ status: "missing", exitCode: null });
+  });
+
+  it("exposes the plugin registry it loaded", async () => {
+    const fake = fakeClient();
+    const { appFiles } = files({
+      "plugins_v1.json": JSON.stringify({
+        plugins: { showroom: { path: "C:\\code\\showroom", enabled: true, grants: [] } },
+      }),
+    });
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+    });
+
+    expect(workspace.plugins.getSnapshot().plugins.showroom).toEqual({
+      path: "C:\\code\\showroom",
+      enabled: true,
+      grants: [],
+    });
+  });
+
+  it("expands %VAR% in a manifest discovery path before reading it", async () => {
+    // Showroom's manifest points at `%APPDATA%\Showroom\runtime.json`. Left
+    // unexpanded that read can never succeed, so the panel would report down
+    // forever however healthy the plugin actually is.
+    const fake = fakeClient({ layout: serializeLayout(emptyLayout()) });
+    const { appFiles } = files({
+      "plugins_v1.json": JSON.stringify({
+        plugins: { showroom: { path: "C:\\code\\showroom", enabled: true, grants: [] } },
+      }),
+    });
+    const runtimeReads: string[] = [];
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      generateId: () => "panel-tab",
+      pluginEnv: { APPDATA: "C:\\data" },
+      pluginNative: {
+        readRuntime: async (path) => {
+          runtimeReads.push(path);
+          return null;
+        },
+        probe: async () => "",
+        spawn: async () => {
+          throw new Error("spawn refused");
+        },
+        stderrTail: async () => "",
+      },
+    });
+
+    await workspace.controller.openPluginTab("showroom");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(runtimeReads).toEqual(["C:\\data\\Showroom\\runtime.json"]);
+  });
+
+  it("persists a new binding BEFORE the layout that references it", async () => {
+    // End to end through the real store and the real persistence: a crash
+    // between these two writes must leave a binding with no pane (pruned at the
+    // next boot), never a pane with no binding (a dead panel forever).
+    const order: string[] = [];
+    const fake = fakeClient({
+      layout: serializeLayout(emptyLayout()),
+      setLayout: async () => {
+        order.push("layout");
+      },
+    });
+    const appFiles: AppFileStore = {
+      read: async (name) => (name === "plugins_v1.json"
+        ? JSON.stringify({
+            plugins: { showroom: { path: "C:\\code\\showroom", enabled: true, grants: [] } },
+          })
+        : null),
+      write: async (name) => {
+        if (name === "plugin_panes_v1.json") {
+          order.push("bindings");
+        }
+      },
+    };
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      generateId: () => "panel-tab",
+      // Nothing may reach the real Tauri commands from a unit test.
+      pluginNative: {
+        readRuntime: async () => null,
+        probe: async () => "",
+        spawn: async () => {
+          throw new Error("spawn refused");
+        },
+        stderrTail: async () => "",
+      },
+    });
+
+    const tabId = await workspace.controller.openPluginTab("showroom");
+    await workspace.controller.flush();
+    // Ensure-up is fire-and-forget by design (the tab appears immediately);
+    // one turn of the loop is enough for its verdict to land.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(tabId).toBe("panel-tab");
+    expect(order).toEqual(["bindings", "layout"]);
+    const split = workspace.controller.getSnapshot().layout.tabs["panel-tab"]?.split;
+    expect(split?.kind === "pane" && split.sessionId >= PLUGIN_PANE_MIN_ID).toBe(true);
+    // The spawn failed, so the pane offers Relaunch rather than an empty frame.
+    expect(Object.values(workspace.controller.getSnapshot().paneStates)).toContainEqual(
+      expect.objectContaining({ status: "plugin", pluginHealth: "down" }),
+    );
+  });
+});
