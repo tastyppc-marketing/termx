@@ -72,6 +72,7 @@ import {
   canSplitPane,
   extractSessionToTab,
   firstSessionId,
+  flattenTabIds,
   mergeTabIntoTab,
   nextTabColor,
   pathToPaneNode,
@@ -257,7 +258,23 @@ export interface WorkspacePluginHost {
    * polling, which is every legacy fixture and any window booted before the
    * seam existed (an open panel then keeps whatever ensure-up last said).
    */
-  probe?(pluginId: string): Promise<boolean>;
+  probe?(pluginId: string, origin: string): Promise<boolean>;
+  /**
+   * Why this plugin cannot be opened right now — not installed, switched off
+   * in Settings, or missing a readable manifest — or null when it can.
+   *
+   * The host owns this text because the host is what knows which of the three
+   * it is; the controller only knows that `manifestFor` said no, and a single
+   * "not installed" for all three would send someone hunting for a folder
+   * they never removed.
+   */
+  unavailableReason?: (pluginId: string) => string | null;
+  /**
+   * Release whatever the host holds (registry subscriptions, timers). Called
+   * from `WorkspaceController.dispose`, which is the only lifetime the host is
+   * built for.
+   */
+  dispose?: () => void;
 }
 
 /**
@@ -399,6 +416,19 @@ export const PLUGIN_HEALTH_INTERVAL_MS = 15_000;
  */
 export const PLUGIN_BIND_ADOPT_TIMEOUT_MS = 5_000;
 
+/**
+ * How long one ensure-up may take before the pane is told the plugin did not
+ * answer.
+ *
+ * The lifecycle has its own spawn budget, but a native call that never settles
+ * at all (a hung invoke, a wedged disk) is outside it: without a deadline here
+ * the pane sits on "starting" for ever, and T6's starting card has no Relaunch
+ * button — so the one affordance that could recover it is the one the state
+ * hides. Longer than the 10 s spawn budget so a genuinely slow launch still
+ * reports its own result rather than being cut off by this.
+ */
+export const PLUGIN_ENSURE_DEADLINE_MS = 15_000;
+
 /** How long a connect watches its pane for a password prompt (spec §2). */
 export const SSH_PASSWORD_WATCH_MS = 60_000;
 
@@ -529,6 +559,28 @@ export class WorkspaceController {
   /// Bumped whenever a binding or a plugin's health changes — neither lives in
   /// the layout, so without it the snapshot memo would hand back a stale frame.
   private pluginRevision = 0;
+  /**
+   * Per plugin, the number of the newest ensure-up. A run whose number is no
+   * longer current has been superseded (a Relaunch, a deadline) and must not
+   * publish its late answer over the newer one.
+   */
+  private readonly pluginEnsureGenerations = new Map<string, number>();
+  /// One queued retry per plugin: every Relaunch pressed during a slow start
+  /// joins it, so N clicks are one extra attempt rather than N serialized ones.
+  private readonly pluginForceRuns = new Map<string, Promise<void>>();
+  /// Reserved ids this window gave up waiting for main to acknowledge. A late
+  /// broadcast for one of them is an orphan, not a panel.
+  private readonly abandonedBindings = new Set<string>();
+  /// Pending adopt waits, so `dispose` can settle them instead of leaving a
+  /// 5 s timer holding a controller nobody can see any more.
+  private readonly adoptWaiters = new Set<(adopted: boolean) => void>();
+  /// The layout this controller has already reacted to. Every change — local
+  /// mutation, a remote window's blob, a returned aux window — is compared
+  /// against it exactly once.
+  private lastLayout: Layout;
+  /// Departed-pane sweeps in flight, so a close path can wait for the unbind
+  /// its own layout write earned.
+  private pluginSweepChain: Promise<void> = Promise.resolve();
   private cachedPluginRevision = -1;
   /// Tracked ssh panes by session id (spec §2), mirrored into ui state so a
   /// restart still knows which panes are remote.
@@ -651,16 +703,18 @@ export class WorkspaceController {
     );
 
     this.cleanups.push(
-      this.store.subscribe(() => this.publish()),
+      this.store.subscribe(() => {
+        this.onLayoutChanged();
+        this.publish();
+      }),
       this.persistence.subscribe(() => this.publish()),
       this.attachments.subscribe(() => this.publish()),
       // A binding can change without this window doing anything: in an aux
       // window every binding arrives as a broadcast from main.
       this.pluginPanes.subscribe(() => {
         this.pluginRevision += 1;
-        // An aux window learns its bindings from main's broadcast, so this is
-        // where a restored panel in THIS window first becomes startable.
-        this.kickBoundPlugins();
+        this.disownLateAdoptions();
+        this.syncPluginScope();
         this.publish();
       }),
       this.client.onSessionExited(({ sessionId, exitCode }) => {
@@ -706,7 +760,93 @@ export class WorkspaceController {
     // every restored panel as a spinner for ever — and T6's starting card has
     // no Relaunch button, so there is no way out but dismissing the pane.
     // Fire-and-forget: each pane shows "starting" until its answer lands.
-    this.kickBoundPlugins();
+    this.syncPluginScope();
+  }
+
+  /**
+   * The plugins THIS window is responsible for keeping alive.
+   *
+   * Main answers with every plugin it holds a binding for, whatever window the
+   * pane ends up in: main is the only window allowed to spawn (spec §3's
+   * singleton is process-wide, and two windows both finding a plugin down
+   * would both start it), and a binding it has accepted is a pane about to
+   * exist. That also means a panel opened in an aux window, or moved into one,
+   * gets its process from main without waiting for a layout round trip.
+   *
+   * An aux window answers with the panes in ITS OWN slot only. Its ensure-up
+   * observes rather than spawns, so a wider set would just be a window polling
+   * for panels it does not render.
+   */
+  private pluginsInScope(): Set<string> {
+    const bindings = this.pluginPanes.getSnapshot();
+    if (this.windowId === MAIN_WINDOW_ID) {
+      return new Set(Object.values(bindings).map((binding) => binding.pluginId));
+    }
+    const layout = this.store.getState();
+    const mine = flattenTabIds(layout, this.windowId).flatMap((tabId) => {
+      const tab = layout.tabs[tabId];
+      return tab ? sessionIdsInTab(tab) : [];
+    });
+    const scope = new Set<string>();
+    for (const sessionId of mine) {
+      const pluginId = bindings[String(sessionId)]?.pluginId;
+      if (pluginId !== undefined) {
+        scope.add(pluginId);
+      }
+    }
+    return scope;
+  }
+
+  /**
+   * Bring the runtime map back in line with what this window is responsible
+   * for: start what has no answer yet, and forget what nothing renders any
+   * more.
+   *
+   * ONE function for both directions, called from every path that can change
+   * either input (a layout change from any source, a binding change from any
+   * source, the constructor). The alternative — a bespoke kick at each call
+   * site — is what left `replaceState` paths (a remote window's blob, a
+   * returned aux window) with a pane stuck on "starting" and no Relaunch.
+   *
+   * Forgetting matters as much as starting: a plugin can die while no pane is
+   * watching, so a runtime kept past its last pane would let the next open
+   * skip the probe and frame a dead port.
+   */
+  private syncPluginScope(): void {
+    if (this.plugins === null || this.disposed) {
+      return;
+    }
+    const scope = this.pluginsInScope();
+    for (const pluginId of [...this.pluginRuntimes.keys()]) {
+      if (!scope.has(pluginId)) {
+        this.forgetPluginRuntime(pluginId);
+      }
+    }
+    for (const pluginId of scope) {
+      if (this.pluginRuntimes.has(pluginId) || this.pluginEnsures.has(pluginId)) {
+        continue;
+      }
+      void this.ensurePluginUp(pluginId);
+    }
+  }
+
+  /**
+   * A layout arrived — from this window's own mutation, from another window's
+   * broadcast, or from an aux window handing its tabs back. Everything that
+   * depends on WHICH panes exist is decided here, once, so no path can adopt a
+   * layout and skip half of it.
+   */
+  private onLayoutChanged(): void {
+    const before = this.lastLayout;
+    const after = this.store.getState();
+    if (after === before) {
+      return;
+    }
+    this.lastLayout = after;
+    this.syncPluginScope();
+    this.pluginSweepChain = this.pluginSweepChain
+      .then(() => this.settleDepartedPanes(before, after))
+      .catch(() => undefined);
   }
 
   /**
@@ -718,23 +858,29 @@ export class WorkspaceController {
    * Idempotent — `ensurePluginUp` skips a plugin it has already answered for —
    * so it can run again whenever the bindings change.
    */
-  private kickBoundPlugins(): void {
-    if (this.plugins === null) {
+  /**
+   * Take back a binding this window already gave up on.
+   *
+   * The adopt-wait is bounded, so a slow main can answer AFTER the open has
+   * rolled the pane back. That broadcast would otherwise re-add a row for a
+   * pane that exists in no layout — an orphan nothing clears until the next
+   * boot, and one that would start a plugin nobody asked for.
+   */
+  private disownLateAdoptions(): void {
+    if (this.abandonedBindings.size === 0) {
       return;
     }
     const bindings = this.pluginPanes.getSnapshot();
-    if (Object.keys(bindings).length === 0) {
+    const returned = [...this.abandonedBindings].filter(
+      (key) => bindings[key] !== undefined,
+    );
+    if (returned.length === 0) {
       return;
     }
-    const inLayout = new Set(sessionIdsInLayout(this.store.getState()));
-    const started = new Set<string>();
-    for (const [key, binding] of Object.entries(bindings)) {
-      if (!inLayout.has(Number(key)) || started.has(binding.pluginId)) {
-        continue;
-      }
-      started.add(binding.pluginId);
-      void this.ensurePluginUp(binding.pluginId);
+    for (const key of returned) {
+      this.abandonedBindings.delete(key);
     }
+    this.pluginPanes.unbind(returned.map(Number));
   }
 
   getSnapshot = (): WorkspaceSnapshot => {
@@ -2169,43 +2315,55 @@ export class WorkspaceController {
       return null;
     }
     this.setNotice(null);
-    const sessionId = this.freshPluginPaneId();
-    if (sessionId === null) {
-      this.setNotice("The plugin panel could not be opened.");
-      return null;
-    }
-    if (!await this.commitPluginBinding(sessionId, pluginId)) {
-      this.setNotice("The plugin panel could not be opened.");
-      return null;
-    }
+    // Held outside the try so a throw anywhere below can take the binding
+    // back: the callers are `void controller.openPluginTab(...)` seams, where
+    // an escaping error is an unhandled rejection and a silently broken menu.
+    let sessionId: number | null = null;
+    try {
+      sessionId = this.freshPluginPaneId();
+      if (sessionId === null) {
+        this.setNotice("The plugin panel could not be opened.");
+        return null;
+      }
+      if (!await this.commitPluginBinding(sessionId, pluginId)) {
+        this.setNotice("The plugin panel could not be opened.");
+        return null;
+      }
 
-    const layout = this.store.getState();
-    const targetGroupId = groupId !== null && layout.groups[groupId] ? groupId : null;
-    const tabId = this.generateId();
-    this.mutate("structural", () => this.store.createTab({
-      id: tabId,
-      sessionId,
-      // Named from the manifest: with no session behind it, `derivedTitle`
-      // would call a working panel "Terminal ended".
-      title: manifest.name,
-      color: nextTabColor(layout),
-      groupId: targetGroupId,
-      // Ungrouped tabs land on THIS window's rail; a group names its own.
-      windowId: this.windowId,
-    }));
-    if (this.store.getState() === layout) {
-      // The layout refused it (an id clash, a bad target). Take the binding
-      // back rather than leave an orphan in the bindings file — and see it all
-      // the way to disk, since the row is already there and a window that dies
-      // now would restore a pane the layout never got.
-      this.pluginPanes.unbind([sessionId]);
-      await this.pluginPanes.flush().catch(() => undefined);
+      const layout = this.store.getState();
+      const targetGroupId = groupId !== null && layout.groups[groupId] ? groupId : null;
+      const tabId = this.generateId();
+      this.mutate("structural", () => this.store.createTab({
+        id: tabId,
+        sessionId: sessionId as number,
+        // Named from the manifest: with no session behind it, `derivedTitle`
+        // would call a working panel "Terminal ended".
+        title: manifest.name,
+        color: nextTabColor(layout),
+        groupId: targetGroupId,
+        // Ungrouped tabs land on THIS window's rail; a group names its own.
+        windowId: this.windowId,
+      }));
+      if (this.store.getState() === layout) {
+        // The layout refused it (an id clash, a bad target). Take the binding
+        // back rather than leave an orphan in the bindings file — and see it
+        // all the way to disk, since the row is already there and a window
+        // that dies now would restore a pane the layout never got.
+        await this.releasePluginBinding(sessionId);
+        this.setNotice("The plugin panel could not be opened.");
+        return null;
+      }
+      void this.ensurePluginUp(pluginId);
+      this.publish();
+      return tabId;
+    } catch {
+      if (sessionId !== null) {
+        await this.releasePluginBinding(sessionId);
+      }
       this.setNotice("The plugin panel could not be opened.");
+      this.publish();
       return null;
     }
-    void this.ensurePluginUp(pluginId);
-    this.publish();
-    return tabId;
   };
 
   /// The same, as a split beside an existing pane: any pane may be a plugin
@@ -2230,29 +2388,38 @@ export class WorkspaceController {
       return null;
     }
     this.setNotice(null);
-    const sessionId = this.freshPluginPaneId();
-    if (sessionId === null) {
-      this.setNotice("The pane could not be split.");
-      return null;
-    }
-    if (!await this.commitPluginBinding(sessionId, pluginId)) {
-      this.setNotice("The pane could not be split.");
-      return null;
-    }
+    let sessionId: number | null = null;
+    try {
+      sessionId = this.freshPluginPaneId();
+      if (sessionId === null) {
+        this.setNotice("The pane could not be split.");
+        return null;
+      }
+      if (!await this.commitPluginBinding(sessionId, pluginId)) {
+        this.setNotice("The pane could not be split.");
+        return null;
+      }
 
-    const before = this.store.getState();
-    const after = this.store.splitPane(tabId, anchorSessionId, dir, sessionId);
-    if (after === before) {
-      this.pluginPanes.unbind([sessionId]);
-      await this.pluginPanes.flush().catch(() => undefined);
+      const before = this.store.getState();
+      const after = this.store.splitPane(tabId, anchorSessionId, dir, sessionId);
+      if (after === before) {
+        await this.releasePluginBinding(sessionId);
+        this.setNotice("The pane could not be split.");
+        this.publish();
+        return null;
+      }
+      this.persistence.record(after, "structural");
+      void this.ensurePluginUp(pluginId);
+      this.publish();
+      return sessionId;
+    } catch {
+      if (sessionId !== null) {
+        await this.releasePluginBinding(sessionId);
+      }
       this.setNotice("The pane could not be split.");
       this.publish();
       return null;
     }
-    this.persistence.record(after, "structural");
-    void this.ensurePluginUp(pluginId);
-    this.publish();
-    return sessionId;
   };
 
   /**
@@ -2295,6 +2462,15 @@ export class WorkspaceController {
     this.pluginPanes.unbind([sessionId]);
     await this.pluginPanes.flush().catch(() => undefined);
     return false;
+  }
+
+  /// Take a binding back and see the removal to disk (or to main). Used by
+  /// every open path that got as far as binding and then could not place the
+  /// pane — the row must not outlive the attempt, or the next boot restores a
+  /// pane the layout never had.
+  private async releasePluginBinding(sessionId: number): Promise<void> {
+    this.pluginPanes.unbind([sessionId]);
+    await this.pluginPanes.flush().catch(() => undefined);
   }
 
   /// True once this window's own bindings map holds `sessionId`. On main that
@@ -2376,6 +2552,12 @@ export class WorkspaceController {
       return;
     }
     this.disposed = true;
+    try {
+      this.plugins?.dispose?.();
+    } catch {
+      // A host that fails to release its own subscriptions must not stop the
+      // rest of this teardown.
+    }
     for (const timer of this.pluginHealthTimers.values()) {
       clearInterval(timer);
     }
@@ -2922,7 +3104,10 @@ export class WorkspaceController {
   private pluginManifest(pluginId: string): PluginManifest | null {
     const manifest = this.plugins?.manifestFor(pluginId) ?? null;
     if (manifest === null) {
-      this.setNotice(`The plugin "${pluginId}" is not installed.`);
+      this.setNotice(
+        this.plugins?.unavailableReason?.(pluginId)
+          ?? `The plugin "${pluginId}" is not installed.`,
+      );
       return null;
     }
     return manifest;
@@ -2992,21 +3177,56 @@ export class WorkspaceController {
       // before the probe has said anything is wrong.
       url: this.pluginRuntimes.get(pluginId)?.url ?? null,
     });
-    const run = plugins
-      .ensureUp(pluginId)
-      .then((result) => this.applyEnsureUpResult(pluginId, result))
-      .catch((error: unknown) => {
+    const generation = (this.pluginEnsureGenerations.get(pluginId) ?? 0) + 1;
+    this.pluginEnsureGenerations.set(pluginId, generation);
+    // Folded into a value so the race below can never see a rejection, and so
+    // a late answer that lost the race is simply dropped on the floor.
+    const ensuring = plugins.ensureUp(pluginId).then(
+      (result) => ({ result }),
+      (error: unknown) => ({
         // A rejection is the lifecycle itself failing (a missing native
         // command, say). Same user-visible outcome as a failed probe: a down
         // card with a reason and a Relaunch button.
-        this.applyEnsureUpResult(pluginId, {
-          ok: false,
+        result: {
+          ok: false as const,
           reason: error instanceof Error ? error.message : String(error),
           stderrTail: "",
-        });
+        },
+      }),
+    );
+    let expire: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"expired">((resolve) => {
+      expire = setTimeout(() => resolve("expired"), PLUGIN_ENSURE_DEADLINE_MS);
+    });
+    const run = Promise.race([ensuring, deadline])
+      .then((outcome) => {
+        // Superseded: a Relaunch (or a close that forgot the runtime) has
+        // already spoken for this plugin, and its answer is the fresher one.
+        if (this.pluginEnsureGenerations.get(pluginId) !== generation) {
+          return;
+        }
+        this.applyEnsureUpResult(
+          pluginId,
+          outcome === "expired"
+            ? {
+              ok: false,
+              reason: "The plugin did not answer in time.",
+              stderrTail: "",
+            }
+            : outcome.result,
+        );
+        if (outcome === "expired") {
+          // Nothing may overwrite the deadline's verdict with the hung call's
+          // eventual answer: bumping the generation makes any later run the
+          // only one that can speak.
+          this.pluginEnsureGenerations.set(pluginId, generation + 1);
+        }
       })
       .finally(() => {
-        this.pluginEnsures.delete(pluginId);
+        clearTimeout(expire);
+        if (this.pluginEnsures.get(pluginId) === run) {
+          this.pluginEnsures.delete(pluginId);
+        }
       });
     this.pluginEnsures.set(pluginId, run);
     return run;
@@ -3034,10 +3254,21 @@ export class WorkspaceController {
   /// Every plugin with at least one pane in this window's layout. A pane counts
   /// only WITH a binding, exactly as the snapshot counts it — an orphaned
   /// reserved id is a dead pane, and polling for it would poll for nothing.
+  /**
+   * The plugins rendered by a pane in THIS window. Deliberately not the whole
+   * layout: every window builds its own controller from the same blob, so a
+   * layout-wide answer would have three windows all polling the health of one
+   * pane that only one of them shows.
+   */
   private openPluginIds(): Set<string> {
     const open = new Set<string>();
     const bindings = this.pluginPanes.getSnapshot();
-    for (const sessionId of sessionIdsInLayout(this.store.getState())) {
+    const layout = this.store.getState();
+    const mine = flattenTabIds(layout, this.windowId).flatMap((tabId) => {
+      const tab = layout.tabs[tabId];
+      return tab ? sessionIdsInTab(tab) : [];
+    });
+    for (const sessionId of mine) {
       if (!isPluginPaneId(sessionId)) {
         continue;
       }
@@ -3095,13 +3326,18 @@ export class WorkspaceController {
     if (this.pluginHealthProbes.has(pluginId) || this.pluginEnsures.has(pluginId)) {
       return;
     }
-    if (this.pluginRuntimes.get(pluginId)?.health !== "up") {
+    const framed = this.pluginRuntimes.get(pluginId);
+    if (framed?.health !== "up" || framed.url === null) {
       return;
     }
     this.pluginHealthProbes.add(pluginId);
     let alive = false;
     try {
-      alive = await probe(pluginId);
+      // The origin the iframe is ACTUALLY pointed at, not whatever the runtime
+      // file says now. A plugin that died and came back on another port is
+      // down as far as this pane is concerned: the answer must be "down", so
+      // the user's Relaunch re-reads the file and re-frames the new port.
+      alive = await probe(pluginId, framed.url);
     } catch {
       // A probe that could not even be asked is the same news as a refused
       // one: the panel is not reachable from here.
@@ -3140,7 +3376,11 @@ export class WorkspaceController {
     // with no plugin behind it. `unbindDepartedPanes`, driven by the layout
     // that actually landed, is the only place a binding is dropped.
     for (const sessionId of sessionIds) {
-      const known = this.sessions.has(sessionId);
+      // A reserved id is skipped even when the session map knows it: an id
+      // collision between a bound pane and a real daemon session must never
+      // resolve in the daemon's favour, because closing that session would
+      // kill somebody's shell to dismiss a panel.
+      const known = this.sessions.has(sessionId) && !isPluginPaneId(sessionId);
       if (!known) {
         // Load-bearing early success (spec §4's downgrade audit): a reserved
         // plugin pane — and any pane the host has forgotten — is dismissed
@@ -3183,7 +3423,11 @@ export class WorkspaceController {
       // source tab away — flows through here, so one generic sweep catches
       // all of them instead of a bespoke call at each site.
       this.purgeResumedTabsNotIn(after);
-      this.unbindDepartedPanes(before, after);
+      // The departed-pane sweep is NOT here: it belongs to every layout
+      // change, including the ones that never pass through `mutate` (a remote
+      // window's blob, an aux window handing its tabs back), and it has to
+      // wait for the layout write this call just started. `onLayoutChanged`,
+      // driven by the store subscription, owns both.
     }
   }
 
@@ -3203,6 +3447,37 @@ export class WorkspaceController {
    * no pane is watching it, so the next pane to open must probe afresh instead
    * of inheriting a remembered "up" and framing a dead port.
    */
+  /**
+   * Drop the bindings of panes this layout change removed — but only once the
+   * layout write that removed them has actually LANDED.
+   *
+   * Order is the whole point. The binding must outlive the pane until the
+   * blob that no longer mentions it is safely stored: unbind first and a
+   * crash (or a refused write) restores a layout naming a pane with no
+   * binding, which is a dead pane where a working panel used to be. The other
+   * way round leaves a row with no pane, which the next boot prunes.
+   *
+   * The first await is deliberate: callers mutate the store and THEN record
+   * the write (main's remote-layout adoption does exactly that), so this must
+   * yield before it asks persistence whether anything is pending.
+   */
+  private async settleDepartedPanes(before: Layout, after: Layout): Promise<void> {
+    await Promise.resolve();
+    if (this.disposed) {
+      return;
+    }
+    try {
+      await this.persistence.flush();
+    } catch {
+      return;
+    }
+    if (this.persistence.getSnapshot().error !== null) {
+      // The layout is not safely stored, so the panes may yet come back.
+      return;
+    }
+    this.unbindDepartedPanes(before, after);
+  }
+
   private unbindDepartedPanes(before: Layout, after: Layout): void {
     const bindings = this.pluginPanes.getSnapshot();
     const keys = Object.keys(bindings);
@@ -3224,24 +3499,22 @@ export class WorkspaceController {
       return;
     }
     this.pluginPanes.unbind(departed.map(Number));
-    // Computed from the map as it was, minus what just left: on a replica
-    // `unbind` only forwards, so re-reading the snapshot would still show the
-    // departed rows and no runtime would ever be released.
-    const stillUsed = new Set(
-      keys.filter((key) => !departed.includes(key))
-        .map((key) => bindings[key]!.pluginId),
-    );
-    for (const key of departed) {
-      const pluginId = bindings[key]!.pluginId;
-      if (!stillUsed.has(pluginId)) {
-        this.forgetPluginRuntime(pluginId);
-      }
-    }
+    // The runtime is NOT released here: `syncPluginScope` does it from the
+    // binding change this unbind causes, which is also the path that catches a
+    // window whose panes went away without it mutating anything.
   }
 
   /// Forget what we knew about a plugin's process. The health poll prunes its
   /// own timer on the next publish, since no pane names this plugin any more.
   private forgetPluginRuntime(pluginId: string): void {
+    // Bumped even when there was no entry: an ensure-up may be in flight for a
+    // plugin whose last pane has just gone, and its answer must not land in an
+    // empty map — the next open would then skip the probe and frame whatever
+    // that stale answer said.
+    this.pluginEnsureGenerations.set(
+      pluginId,
+      (this.pluginEnsureGenerations.get(pluginId) ?? 0) + 1,
+    );
     if (!this.pluginRuntimes.delete(pluginId)) {
       return;
     }

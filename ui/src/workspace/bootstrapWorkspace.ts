@@ -19,7 +19,16 @@ import { HostBootstrapError, ReconnectingHostClient } from "../host/reconnect";
 import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
-import { ensureUp, isHealthy, parseRuntimeFile } from "../plugins/lifecycle";
+import {
+  DEFAULT_SPAWN_TIMEOUT_MS,
+  ensureUp,
+  isHealthy,
+  parseRuntimeFile,
+  POLL_INTERVAL_MS,
+  PROBE_TIMEOUT_MS,
+  type EnsureUpResult,
+  type PluginRuntime,
+} from "../plugins/lifecycle";
 import { expandEnv, type PluginManifest } from "../plugins/manifest";
 import { tauriPluginNative, type PluginNative } from "../plugins/native";
 import {
@@ -261,7 +270,32 @@ export interface BootstrappedWorkspace {
    * questions the controller does without reaching into it.
    */
   pluginHost: WorkspacePluginHost;
+  /**
+   * A plugin's manifest ignoring the enabled gate: the folder file when it has
+   * one, else the bundled table, else null.
+   *
+   * Separate from `pluginHost.manifestFor`, which refuses a disabled plugin
+   * because opening one must refuse. Naming one must NOT: a switched-off
+   * plugin still needs its name and icon in Settings and in the sidebar, and a
+   * plugin that exists only as a folder manifest must be nameable at all.
+   */
+  pluginManifestFor: (pluginId: string) => PluginManifest | null;
 }
+
+/**
+ * How long the workspace boot waits for plugins' own manifest files before it
+ * carries on with the bundled table. A folder path is user-chosen and may be a
+ * UNC share, a disconnected mapped drive or a spun-down disk, and no window at
+ * all is a far worse answer than a plugin briefly named by its bundled entry —
+ * the read keeps going and the cache answers as soon as it lands.
+ */
+const PLUGIN_MANIFEST_BOOT_BUDGET_MS = 1_500;
+
+/**
+ * How long the registry-driven re-read waits for the toggling to stop. Three
+ * flicks of a Settings switch would otherwise be 3 × N native reads.
+ */
+const PLUGIN_MANIFEST_REFRESH_DEBOUNCE_MS = 100;
 
 /**
  * The environment a manifest's `%VAR%` discovery path is expanded against
@@ -276,9 +310,6 @@ export interface BootstrappedWorkspace {
  * intact — the plugin then reads as down, with a Relaunch button, rather than
  * taking the boot with it.
  */
-/** A loopback health check either answers at once or is not serving us. */
-const PLUGIN_PROBE_TIMEOUT_MS = 1_000;
-
 async function defaultPluginEnv(): Promise<Record<string, string | undefined>> {
   try {
     // On Windows this is `%APPDATA%` itself (the roaming data dir).
@@ -653,19 +684,35 @@ export async function bootstrapWorkspace(
       }
       return manifestFor(pluginId, null);
     };
+    /**
+     * Every registry entry's manifest, ENABLED OR NOT.
+     *
+     * Disabled entries are cached deliberately: a switched-off plugin still
+     * has a name, and that name is what its refusal and its Settings row must
+     * say — dropping it from the cache would print the raw registry id and
+     * would leave a just-re-enabled plugin unopenable until the async re-read
+     * landed. The gate lives in `installedManifest` alone.
+     *
+     * LIMITATION (P1): the cache is refreshed at boot and whenever the
+     * registry snapshot changes. Editing a `termx-plugin.json` in place while
+     * TermX runs is not noticed until the next boot or the next registry
+     * change; re-picking the same folder in Settings is a no-op by design
+     * (`registry.add` returns early on an unchanged path).
+     */
     const folderManifests = new Map<string, PluginManifest | null>();
     let manifestEpoch = 0;
     const refreshFolderManifests = async (): Promise<void> => {
       const epoch = (manifestEpoch += 1);
       const next = new Map<string, PluginManifest | null>();
+      const env = await pluginEnv();
       await Promise.all(
         Object.entries(plugins.getSnapshot().plugins).map(async ([id, entry]) => {
-          if (entry.enabled !== true) {
-            return;
-          }
           let text: string | null = null;
           try {
-            text = await pluginNative.readManifest(entry.path);
+            // Expanded like every other path from this file: a hand-edited
+            // registry may hold `%APPDATA%\\Showroom`, and an unexpanded
+            // literal would read as "no manifest" for ever.
+            text = await pluginNative.readManifest(expandEnv(entry.path, env));
           } catch {
             // No folder file, an unreadable one, or an older host without the
             // command: the bundled table answers, exactly as before.
@@ -683,12 +730,28 @@ export async function bootstrapWorkspace(
         folderManifests.set(id, manifest);
       }
     };
-    await refreshFolderManifests();
+    // Bounded (see the constant): the boot must not hang on a folder read.
+    await Promise.race([
+      refreshFolderManifests(),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, PLUGIN_MANIFEST_BOOT_BUDGET_MS);
+      }),
+    ]);
     // Enabling, adding, or re-pathing a plugin changes which file to read, and
-    // the answer must not stay stale until the next boot. Asynchronous by
+    // the answer must not stay stale until the next boot. Debounced, because
+    // the store notifies synchronously on every mutation. Asynchronous by
     // nature: until it lands, the previous cache entry (or the bundled table)
     // answers, which is never worse than what came before.
-    plugins.subscribe(() => void refreshFolderManifests());
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const stopWatchingRegistry = plugins.subscribe(() => {
+      if (refreshTimer !== null) {
+        clearTimeout(refreshTimer);
+      }
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void refreshFolderManifests();
+      }, PLUGIN_MANIFEST_REFRESH_DEBOUNCE_MS);
+    });
     /// The manifest ignoring the enabled gate — for messages that need a NAME.
     const knownManifest = (pluginId: string): PluginManifest | null =>
       folderManifests.get(pluginId) ?? manifestFor(pluginId, null);
@@ -703,39 +766,118 @@ export async function bootstrapWorkspace(
       const cached = folderManifests.get(pluginId);
       return cached !== undefined ? cached : manifestFor(pluginId, null);
     };
+    /**
+     * Why this plugin cannot be opened, or null when it can.
+     *
+     * Each refusal says which of the three things is wrong, because this text
+     * is what a refused menu entry and a restored pane's down card show.
+     * "Not installed" on a plugin the user only switched off would send them
+     * hunting for a folder they never removed.
+     */
+    const unavailableReason = (pluginId: string): string | null => {
+      const entry = plugins.getSnapshot().plugins[pluginId];
+      if (entry === undefined) {
+        // Named without the gate too: a plugin that was just removed from the
+        // registry may still be nameable from the bundled table.
+        return `The plugin "${knownManifest(pluginId)?.name ?? pluginId}" is not installed.`;
+      }
+      if (entry.enabled !== true) {
+        // Named WITHOUT the enabled gate: a disabled plugin still has a name,
+        // and its card should use it.
+        return `${knownManifest(pluginId)?.name ?? pluginId} is disabled in Settings.`;
+      }
+      if (installedManifest(pluginId) === null) {
+        return `TermX cannot read a manifest for the plugin "${pluginId}".`;
+      }
+      return null;
+    };
+    /**
+     * One runtime look, no spawn: the runtime file as it stands, probed for
+     * this plugin's own health response.
+     */
+    const lookForRuntime = async (
+      manifest: PluginManifest,
+      runtimePath: string,
+    ): Promise<PluginRuntime | null> => {
+      let text: string | null;
+      try {
+        text = await pluginNative.readRuntime(runtimePath);
+      } catch {
+        return null;
+      }
+      const file = parseRuntimeFile(text);
+      if (file === null) {
+        return null;
+      }
+      const url = `http://127.0.0.1:${file.port}`;
+      let body: string;
+      try {
+        body = await pluginNative.probe(
+          `${url}${manifest.discovery.healthPath}`,
+          PROBE_TIMEOUT_MS,
+        );
+      } catch {
+        return null;
+      }
+      if (!isHealthy(body)) {
+        return null;
+      }
+      return { port: file.port, token: file.token, version: "", url };
+    };
+    /**
+     * An aux window's ensure-up: WAIT for the plugin, never start it.
+     *
+     * Lifecycle ownership is the main window's alone. Every window builds its
+     * own controller and its own host, so two windows opening a panel at the
+     * same moment would otherwise both find the plugin down and both spawn it
+     * — and a plugin that walks ports (spec §9) answers that with two live
+     * processes and one of them orphaned. Main starts the plugin as soon as it
+     * adopts the forwarded binding, so the ordinary outcome here is that the
+     * plugin appears within a poll or two.
+     */
+    const observePluginUp = async (
+      manifest: PluginManifest,
+    ): Promise<EnsureUpResult> => {
+      const runtimePath = expandEnv(manifest.discovery.runtimeFile, await pluginEnv());
+      const deadline = Date.now() + DEFAULT_SPAWN_TIMEOUT_MS;
+      for (;;) {
+        const runtime = await lookForRuntime(manifest, runtimePath);
+        if (runtime !== null) {
+          return { ok: true, runtime };
+        }
+        if (Date.now() >= deadline) {
+          return {
+            ok: false,
+            reason: "The plugin is not running. Relaunch it from the main window.",
+            stderrTail: "",
+          };
+        }
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, POLL_INTERVAL_MS);
+        });
+      }
+    };
     const pluginHost: WorkspacePluginHost = {
       manifestFor: installedManifest,
+      unavailableReason,
+      dispose: () => {
+        stopWatchingRegistry();
+        if (refreshTimer !== null) {
+          clearTimeout(refreshTimer);
+          refreshTimer = null;
+        }
+      },
       ensureUp: async (pluginId: string) => {
-        // Each refusal says which of the three things is wrong, because this
-        // text is what a restored pane shows on its down card. "Not installed"
-        // on a plugin the user only switched off would send them hunting for a
-        // folder they never removed.
-        const entry = plugins.getSnapshot().plugins[pluginId];
-        if (entry === undefined) {
-          return {
-            ok: false as const,
-            reason: `The plugin "${pluginId}" is not installed.`,
-            stderrTail: "",
-          };
+        const refusal = unavailableReason(pluginId);
+        if (refusal !== null) {
+          return { ok: false as const, reason: refusal, stderrTail: "" };
         }
-        if (entry.enabled !== true) {
-          return {
-            ok: false as const,
-            // Named WITHOUT the enabled gate: a disabled plugin still has a
-            // name, and its card should use it.
-            reason: `${knownManifest(pluginId)?.name ?? pluginId} is disabled in Settings.`,
-            stderrTail: "",
-          };
+        const entry = plugins.getSnapshot().plugins[pluginId]!;
+        const manifest = installedManifest(pluginId)!;
+        if (bootWindowId !== MAIN_WINDOW_ID) {
+          return observePluginUp(manifest);
         }
-        const manifest = installedManifest(pluginId);
-        if (manifest === null) {
-          return {
-            ok: false as const,
-            reason: `TermX cannot read a manifest for the plugin "${pluginId}".`,
-            stderrTail: "",
-          };
-        }
-        return ensureUp(manifest, entry.path, {
+        return ensureUp(manifest, expandEnv(entry.path, await pluginEnv()), {
           native: pluginNative,
           env: await pluginEnv(),
           now: () => Date.now(),
@@ -743,41 +885,33 @@ export async function bootstrapWorkspace(
         });
       },
       /**
-       * The 15-second poll's question, and a pure OBSERVATION: it re-reads the
-       * runtime file and asks the health route, and that is all. It must NEVER
-       * become an ensure-up — a spawn here would resurrect a plugin the user
-       * just killed, so the down card could never appear and Relaunch would
-       * have nothing left to do. It also flips health to "starting" on every
-       * tick, remounting the iframe.
+       * The 15-second poll's question, and a pure OBSERVATION: it asks the
+       * health route of the origin the pane is CURRENTLY framing, and that is
+       * all. It must NEVER become an ensure-up — a spawn here would resurrect
+       * a plugin the user just killed, so the down card could never appear and
+       * Relaunch would have nothing left to do.
+       *
+       * The origin comes from the caller rather than from a fresh read of the
+       * runtime file, and that is the point: a plugin that died and came back
+       * on another port (Showroom walks ports, spec §9) is NOT up as far as
+       * this pane is concerned — the iframe is still pointed at the old one.
+       * Answering "down" is what sends the user to Relaunch, which re-reads
+       * the file and re-frames the new port.
        *
        * Every failure is the same answer, "not healthy": a disabled or
-       * uninstalled plugin (no manifest), no runtime file, a refused
-       * connection, or a body that is not this plugin's own health response.
+       * uninstalled plugin (no manifest), a refused connection, or a body that
+       * is not this plugin's own health response.
        */
-      probe: async (pluginId: string): Promise<boolean> => {
+      probe: async (pluginId: string, origin: string): Promise<boolean> => {
         const manifest = installedManifest(pluginId);
         if (manifest === null) {
-          return false;
-        }
-        const runtimePath = expandEnv(
-          manifest.discovery.runtimeFile,
-          await pluginEnv(),
-        );
-        let text: string | null;
-        try {
-          text = await pluginNative.readRuntime(runtimePath);
-        } catch {
-          return false;
-        }
-        const file = parseRuntimeFile(text);
-        if (file === null) {
           return false;
         }
         try {
           return isHealthy(
             await pluginNative.probe(
-              `http://127.0.0.1:${file.port}${manifest.discovery.healthPath}`,
-              PLUGIN_PROBE_TIMEOUT_MS,
+              `${origin}${manifest.discovery.healthPath}`,
+              PROBE_TIMEOUT_MS,
             ),
           );
         } catch {
@@ -934,6 +1068,7 @@ export async function bootstrapWorkspace(
       pluginPanes,
       plugins,
       pluginHost,
+      pluginManifestFor: knownManifest,
     };
   } catch {
     try {

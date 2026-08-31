@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PLUGIN_PANE_MIN_ID } from "../../plugins/paneBindings";
-import { validateInvariants } from "../layout";
+import { sessionIdsInLayout, validateInvariants } from "../layout";
 import { reconcile } from "../reconcile";
 import type { SessionLike } from "../reconcile";
 import { baseLayout, groupItem, tab, tabItem } from "./helpers";
@@ -139,7 +139,33 @@ describe("reconcile — plugin panes (plugin spec §4)", () => {
       pluginPaneIds: new Set([2, 3]),
     });
 
-    expect(result.deadSessionIds.sort()).toEqual([2, 3]);
+    expect(result.deadSessionIds.sort((a, b) => a - b)).toEqual([2, 3]);
+  });
+
+  it("never adopts a live session whose id collides with a bound pane", () => {
+    // Pathological but not impossible: a daemon that ever handed out an id in
+    // the reserved range, or a bindings file carried over from one. Adopting
+    // it would put a terminal tab on top of a panel — and its Dismiss would
+    // reach the daemon for a session the panel knows nothing about. The
+    // binding wins; the boot prune clears it if no pane holds it.
+    const result = reconcile(null, [session(PLUGIN_PANE_MIN_ID), session(1)], {
+      pluginPaneIds: new Set([PLUGIN_PANE_MIN_ID]),
+    });
+
+    expect(result.orphanAdoptedIds).toEqual([1]);
+    expect(sessionIdsInLayout(result.layout)).toEqual([1]);
+  });
+
+  it("never adopts a colliding live session into a restored layout either", () => {
+    const layout = baseLayout();
+    const result = reconcile(layout, [session(PLUGIN_PANE_MIN_ID)], {
+      pluginPaneIds: new Set([PLUGIN_PANE_MIN_ID]),
+    });
+
+    expect(result.orphanAdoptedIds).toEqual([]);
+    // Unchanged by identity: nothing was adopted, so nothing was rebuilt.
+    expect(result.layout).toBe(layout);
+    expect(sessionIdsInLayout(result.layout)).not.toContain(PLUGIN_PANE_MIN_ID);
   });
 
   it("still flags dead terminals while sparing the plugin pane", () => {

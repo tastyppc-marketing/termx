@@ -73,7 +73,14 @@ export function serializePluginsFile(state: PluginsV1): string {
   return `${JSON.stringify({ plugins: state.plugins }, null, 2)}\n`;
 }
 
-/** A present plugin-root file is authoritative, including when malformed. */
+/**
+ * The manifest for `id`: the plugin's own file when `fileText` is given, else
+ * the bundled table. A malformed file yields null — this function does NOT
+ * fall back to the bundled entry, because "the file is authoritative" is only
+ * one possible policy and the CALLER owns that choice. Bootstrap, for one,
+ * deliberately falls back so a first-party plugin whose repository grew a
+ * broken file keeps working.
+ */
 export function manifestFor(
   id: string,
   fileText: string | null,

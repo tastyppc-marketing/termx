@@ -764,13 +764,14 @@ describe("bootstrapWorkspace plugin panes", () => {
   function healthyNative(overrides: {
     readRuntime?: () => Promise<string | null>;
     probe?: (url: string) => Promise<string>;
-    readManifest?: () => Promise<string | null>;
+    readManifest?: (path: string) => Promise<string | null>;
   } = {}) {
     const spawn = vi.fn(async (): Promise<number> => {
       throw new Error("a probe must never spawn");
     });
     const probeUrls: string[] = [];
     const runtimeReads: string[] = [];
+    const manifestReads: string[] = [];
     const native = {
       readRuntime: async (path: string) => {
         runtimeReads.push(path);
@@ -786,15 +787,19 @@ describe("bootstrapWorkspace plugin panes", () => {
       },
       spawn,
       stderrTail: async () => "",
-      readManifest: overrides.readManifest ?? (async () => null),
+      readManifest: async (path: string) => {
+        manifestReads.push(path);
+        return overrides.readManifest ? await overrides.readManifest(path) : null;
+      },
     };
-    return { native, spawn, probeUrls, runtimeReads };
+    return { native, spawn, probeUrls, runtimeReads, manifestReads };
   }
 
   async function bootWith(options: {
     seed: Record<string, string>;
     native: ReturnType<typeof healthyNative>["native"];
     layout?: JsonValue;
+    windowId?: string;
   }) {
     const fake = fakeClient(
       options.layout === undefined ? {} : { layout: options.layout },
@@ -807,35 +812,40 @@ describe("bootstrapWorkspace plugin panes", () => {
       generateId: () => "panel-tab",
       pluginEnv: { APPDATA: "C:\\data" },
       pluginNative: options.native,
+      ...(options.windowId ? { windowId: options.windowId } : {}),
     });
   }
 
-  it("probes a running plugin without ever spawning it", async () => {
-    // The poller asks this every 15 s. It must stay a pure OBSERVATION: an
-    // ensure-up here would respawn a plugin the user just killed, so the down
-    // card could never appear and Relaunch would have nothing to do.
+  /// The origin a pane would be framing after a successful ensure-up.
+  const FRAMED = "http://127.0.0.1:7788";
+
+  it("carries a probe on the production host at all", async () => {
+    // The 15 s poll does nothing at all when the host has no probe, and every
+    // controller-side test injects one — so without this assertion the whole
+    // health feature could be missing from the real app and stay green.
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: healthyNative().native,
+    });
+
+    expect(typeof workspace.pluginHost.probe).toBe("function");
+  });
+
+  it("probes the origin the pane is framing, and never spawns", async () => {
+    // A pure OBSERVATION of the CURRENT frame: an ensure-up here would respawn
+    // a plugin the user just killed, and re-reading the runtime file would
+    // report a plugin that came back on a new port as healthy while the iframe
+    // still points at the old one.
     const spy = healthyNative();
     const workspace = await bootWith({
       seed: { "plugins_v1.json": registry(true) },
       native: spy.native,
     });
 
-    expect(await workspace.pluginHost.probe?.("showroom")).toBe(true);
-    expect(spy.runtimeReads).toEqual(["C:\\data\\Showroom\\runtime.json"]);
-    expect(spy.probeUrls).toEqual(["http://127.0.0.1:7788/api/health"]);
+    expect(await workspace.pluginHost.probe?.("showroom", FRAMED)).toBe(true);
+    expect(spy.probeUrls).toEqual([`${FRAMED}/api/health`]);
+    expect(spy.runtimeReads).toEqual([]);
     expect(spy.spawn).not.toHaveBeenCalled();
-  });
-
-  it("reports a plugin with no runtime file as not healthy", async () => {
-    const spy = healthyNative({ readRuntime: async () => null });
-    const workspace = await bootWith({
-      seed: { "plugins_v1.json": registry(true) },
-      native: spy.native,
-    });
-
-    expect(await workspace.pluginHost.probe?.("showroom")).toBe(false);
-    // Nothing to probe: a missing runtime file IS the answer.
-    expect(spy.probeUrls).toEqual([]);
   });
 
   it("treats a probe that throws as not healthy", async () => {
@@ -849,7 +859,7 @@ describe("bootstrapWorkspace plugin panes", () => {
       native: spy.native,
     });
 
-    expect(await workspace.pluginHost.probe?.("showroom")).toBe(false);
+    expect(await workspace.pluginHost.probe?.("showroom", FRAMED)).toBe(false);
   });
 
   it("reports an unhealthy body as not healthy", async () => {
@@ -861,7 +871,19 @@ describe("bootstrapWorkspace plugin panes", () => {
       native: spy.native,
     });
 
-    expect(await workspace.pluginHost.probe?.("showroom")).toBe(false);
+    expect(await workspace.pluginHost.probe?.("showroom", FRAMED)).toBe(false);
+  });
+
+  it("reports a 200 without a version as not healthy", async () => {
+    // Spec §3.1's identity rule: `{ok:true}` alone is any web server saying
+    // yes. Only the version pair proves it is this plugin.
+    const spy = healthyNative({ probe: async () => JSON.stringify({ ok: true }) });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    expect(await workspace.pluginHost.probe?.("showroom", FRAMED)).toBe(false);
   });
 
   it("never probes a disabled plugin", async () => {
@@ -871,8 +893,8 @@ describe("bootstrapWorkspace plugin panes", () => {
       native: spy.native,
     });
 
-    expect(await workspace.pluginHost.probe?.("showroom")).toBe(false);
-    expect(spy.runtimeReads).toEqual([]);
+    expect(await workspace.pluginHost.probe?.("showroom", FRAMED)).toBe(false);
+    expect(spy.probeUrls).toEqual([]);
   });
 
   it("prefers a plugin's own folder manifest over the bundled one", async () => {
@@ -963,6 +985,243 @@ describe("bootstrapWorkspace plugin panes", () => {
     await vi.waitFor(() => {
       expect(workspace.pluginHost.manifestFor("toolbox")?.name).toBe("Toolbox");
     });
+  });
+
+  it("expands %VAR% in a registry path before reading its manifest", async () => {
+    // plugins_v1.json is a hand-editable file; a literal `%APPDATA%\\Toolbox`
+    // would otherwise read as "no manifest" for ever.
+    const spy = healthyNative({
+      readManifest: async () => folderManifest("toolbox", "Toolbox"),
+    });
+    const workspace = await bootWith({
+      seed: {
+        "plugins_v1.json": registryOf({ toolbox: { path: "%APPDATA%\\Toolbox" } }),
+      },
+      native: spy.native,
+    });
+
+    expect(spy.manifestReads).toEqual(["C:\\data\\Toolbox"]);
+    expect(workspace.pluginHost.manifestFor("toolbox")?.name).toBe("Toolbox");
+  });
+
+  it("names a DISABLED non-bundled plugin by its own manifest", async () => {
+    // The refusal is what the down card shows. A plugin the user switched off
+    // still has a name, and "toolbox is disabled" (the raw registry key) reads
+    // like a different, unknown thing.
+    const spy = healthyNative({
+      readManifest: async () => folderManifest("toolbox", "Toolbox"),
+    });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registryOf({ toolbox: { enabled: false } }) },
+      native: spy.native,
+    });
+
+    expect(await workspace.controller.openPluginTab("toolbox")).toBeNull();
+    expect(workspace.controller.getSnapshot().notice)
+      .toBe("Toolbox is disabled in Settings.");
+  });
+
+  it("opens a re-enabled plugin at once, without waiting for a re-read", async () => {
+    // The cache holds disabled entries too, so flipping the switch is instant.
+    // Dropping them made a re-enable produce "cannot read a manifest" until an
+    // async refresh landed — and that text then sat on the card.
+    const spy = healthyNative({
+      readManifest: async () => folderManifest("toolbox", "Toolbox"),
+    });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registryOf({ toolbox: { enabled: false } }) },
+      native: spy.native,
+    });
+
+    workspace.plugins.setEnabled("toolbox", true);
+
+    expect(await workspace.controller.openPluginTab("toolbox")).toBe("panel-tab");
+    expect(workspace.controller.getSnapshot().ungroupedTabs.at(-1)?.title)
+      .toBe("Toolbox");
+  });
+
+  it("names a plugin the enabled gate refuses, for the UI that lists it", async () => {
+    // `pluginHost.manifestFor` refuses a disabled plugin because OPENING one
+    // must refuse; naming one must not, or Settings and the sidebar show a
+    // raw id.
+    const spy = healthyNative({
+      readManifest: async () => folderManifest("toolbox", "Toolbox"),
+    });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registryOf({ toolbox: { enabled: false } }) },
+      native: spy.native,
+    });
+
+    expect(workspace.pluginHost.manifestFor("toolbox")).toBeNull();
+    expect(workspace.pluginManifestFor("toolbox")?.name).toBe("Toolbox");
+  });
+
+  it("does not hang the whole boot on an unresponsive manifest read", async () => {
+    // A plugin folder is a user-chosen path: a UNC share, a disconnected
+    // mapped drive, a spun-down disk. No window at all is a far worse answer
+    // than a plugin briefly named from the bundled table.
+    vi.useFakeTimers();
+    try {
+      const spy = healthyNative({
+        readManifest: () => new Promise<string | null>(() => undefined),
+      });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      const workspace = await booting;
+
+      // Booted, and the bundled table answered while the read hung.
+      expect(workspace.pluginHost.manifestFor("showroom")?.name).toBe("Showroom");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-reads once for a burst of registry changes", async () => {
+    vi.useFakeTimers();
+    try {
+      const spy = healthyNative();
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const workspace = await booting;
+      const atBoot = spy.manifestReads.length;
+
+      // Three flicks of a Settings switch.
+      workspace.plugins.setEnabled("showroom", false);
+      workspace.plugins.setEnabled("showroom", true);
+      workspace.plugins.setEnabled("showroom", false);
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(spy.manifestReads.length).toBe(atBoot + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets the newest registry state win when an older read is slower", async () => {
+    // Last started wins: a read of the OLD folder that lands after the new
+    // one would otherwise reinstate a manifest for a path the user replaced.
+    vi.useFakeTimers();
+    try {
+      let releaseOld = (): void => undefined;
+      const oldRead = new Promise<string | null>((resolve) => {
+        releaseOld = () => resolve(folderManifest("toolbox", "Old"));
+      });
+      const spy = healthyNative({
+        readManifest: (path) =>
+          path.endsWith("one")
+            ? oldRead
+            : Promise.resolve(folderManifest("toolbox", "New")),
+      });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registryOf({ toolbox: {} }) },
+        native: spy.native,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const workspace = await booting;
+
+      workspace.plugins.add("toolbox", "C:\\code\\one");
+      await vi.advanceTimersByTimeAsync(200);
+      workspace.plugins.add("toolbox", "C:\\code\\two");
+      await vi.advanceTimersByTimeAsync(200);
+      expect(workspace.pluginManifestFor("toolbox")?.name).toBe("New");
+
+      releaseOld();
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(workspace.pluginManifestFor("toolbox")?.name).toBe("New");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops watching the registry once the workspace is disposed", async () => {
+    const spy = healthyNative();
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+    const atBoot = spy.manifestReads.length;
+
+    workspace.controller.dispose();
+    workspace.plugins.setEnabled("showroom", false);
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+
+    expect(spy.manifestReads.length).toBe(atBoot);
+  });
+
+  it("starts a restored panel's plugin at boot, with no user action", async () => {
+    // The second launch of TermX. Nothing else would ever call ensure-up for
+    // a pane that is simply already there, and T6's "starting" card has no
+    // Relaunch button — so without this the panel is unrecoverable.
+    const spy = healthyNative();
+    const workspace = await bootWith({
+      layout: panelLayout(),
+      seed: {
+        "plugin_panes_v1.json": JSON.stringify({
+          version: 1,
+          panes: { "2147483648": { pluginId: "showroom" } },
+        }),
+        "plugins_v1.json": registry(true),
+      },
+      native: spy.native,
+    });
+
+    await vi.waitFor(() => {
+      expect(workspace.controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID])
+        .toMatchObject({ status: "plugin", pluginHealth: "up" });
+    });
+    // Adopted, never spawned: the plugin was already running.
+    expect(spy.spawn).not.toHaveBeenCalled();
+  });
+
+  it("an aux window adopts a running plugin but never spawns one", async () => {
+    // Lifecycle ownership is the main window's alone (spec §3): two windows
+    // both finding the plugin down would otherwise both spawn the singleton,
+    // and a plugin that walks ports answers that with two live processes.
+    const spy = healthyNative();
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+      windowId: "aux-1",
+    });
+
+    const result = await workspace.pluginHost.ensureUp("showroom");
+
+    expect(result.ok).toBe(true);
+    expect(spy.spawn).not.toHaveBeenCalled();
+  });
+
+  it("an aux window waits, then points at the main window", async () => {
+    vi.useFakeTimers();
+    try {
+      const spy = healthyNative({ readRuntime: async () => null });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+        windowId: "aux-1",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const workspace = await booting;
+
+      const pending = workspace.pluginHost.ensureUp("showroom");
+      await vi.advanceTimersByTimeAsync(11_000);
+      const result = await pending;
+
+      expect(result).toEqual({
+        ok: false,
+        reason: "The plugin is not running. Relaunch it from the main window.",
+        stderrTail: "",
+      });
+      expect(spy.spawn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

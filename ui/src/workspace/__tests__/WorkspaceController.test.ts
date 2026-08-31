@@ -13,6 +13,7 @@ import { createLayoutStore } from "../../state/store";
 import type { Item, Layout } from "../../state/layout";
 import {
   PLUGIN_BIND_ADOPT_TIMEOUT_MS,
+  PLUGIN_ENSURE_DEADLINE_MS,
   WorkspaceController,
   type WorkspaceAttachmentHub,
   type WorkspaceHostClient,
@@ -135,6 +136,10 @@ function harness(options: {
   /** Manifests the workspace can open; the default knows Showroom only. */
   pluginManifests?: Record<string, PluginManifest>;
   ensureUp?: (pluginId: string) => Promise<EnsureUpResult>;
+  /** Why a plugin cannot be opened; the host owns this text. */
+  unavailableReason?: (pluginId: string) => string | null;
+  /** Tab/group id source; a throwing one proves the open paths stay contained. */
+  generateId?: () => string;
 } = {}) {
   const exitListeners = new Set<(event: { sessionId: number; exitCode: number | null }) => void>();
   const closeListeners = new Set<(event: { sessionId: number }) => void>();
@@ -202,6 +207,9 @@ function harness(options: {
   const plugins: WorkspacePluginHost = {
     manifestFor: (id: string) => manifests[id] ?? null,
     ensureUp,
+    ...(options.unavailableReason
+      ? { unavailableReason: options.unavailableReason }
+      : {}),
   };
   let attachmentSnapshot = { sessions: {} };
   const writes: Array<[number, string | Uint8Array]> = [];
@@ -236,7 +244,7 @@ function harness(options: {
     persistence,
     attachments,
     sessions: options.sessions ?? [session(1), session(2), session(3)],
-    generateId: () => ids.shift() ?? "fallback-id",
+    generateId: options.generateId ?? (() => ids.shift() ?? "fallback-id"),
     pickFolder: options.pickFolder,
     settings: { getSnapshot: () => settingsValue },
     uiState,
@@ -2546,6 +2554,124 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
     acknowledge();
     expect(await opened).toBe("new-tab");
     expect(events).toEqual(["layout:structural"]);
+  });
+
+  it("says what the HOST says when a plugin cannot be opened", async () => {
+    // Three different things refuse an open — not installed, switched off, no
+    // readable manifest — and only the host knows which. A single "not
+    // installed" for all three sends the user hunting for a folder they never
+    // removed.
+    const h = harness({
+      pluginManifests: {},
+      unavailableReason: () => "Showroom is disabled in Settings.",
+    });
+
+    expect(await h.controller.openPluginTab("showroom")).toBeNull();
+    expect(h.controller.getSnapshot().notice)
+      .toBe("Showroom is disabled in Settings.");
+  });
+
+  it("falls back to a plain refusal when the host offers no reason", async () => {
+    const h = harness({ pluginManifests: {} });
+
+    expect(await h.controller.openPluginTab("ghost")).toBeNull();
+    expect(h.controller.getSnapshot().notice)
+      .toBe('The plugin "ghost" is not installed.');
+  });
+
+  it("gives up on an ensure-up that never answers, and ignores it after", async () => {
+    // A native call that hangs (a wedged disk, a lost invoke) is outside the
+    // lifecycle's own spawn budget. Without a deadline the pane sits on
+    // "starting" for ever — and T6's starting card has no Relaunch button, so
+    // the state hides the only affordance that could recover it.
+    vi.useFakeTimers();
+    try {
+      const pending: { release: ((result: EnsureUpResult) => void) | null } =
+        { release: null };
+      const h = harness({
+        ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+          pending.release = resolve;
+        }),
+      });
+      const opened = h.controller.openPluginTab("showroom");
+      await vi.advanceTimersByTimeAsync(0);
+
+      await vi.advanceTimersByTimeAsync(PLUGIN_ENSURE_DEADLINE_MS + 10);
+      const tabId = await opened;
+      const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+      expect(h.controller.getSnapshot().paneStates[sessionId]).toMatchObject({
+        pluginHealth: "down",
+        pluginError: "The plugin did not answer in time.",
+      });
+
+      // The hung call finally answers. Its news is stale by definition: the
+      // pane has already been told, and a silent flip back to "up" would frame
+      // a plugin nobody has heard from.
+      pending.release?.(runtimeUp());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.controller.getSnapshot().paneStates[sessionId]?.pluginHealth)
+        .toBe("down");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts the plugin when MAIN adopts a binding forwarded by another window", async () => {
+    // Lifecycle ownership is main's alone, so an aux window's open cannot
+    // spawn. Main adopting the forwarded bind is the moment the plugin can be
+    // started — and it happens before that window's layout write arrives, so
+    // the layout cannot be what triggers it.
+    const h = harness();
+
+    h.pluginPanes.bind(PLUGIN_PANE_MIN_ID + 7, { pluginId: "showroom" });
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(1);
+    expect(h.ensureUp).toHaveBeenCalledWith("showroom");
+  });
+
+  it("does not start a plugin twice when a second pane binds to it", async () => {
+    const h = harness();
+    h.pluginPanes.bind(PLUGIN_PANE_MIN_ID + 7, { pluginId: "showroom" });
+    await tick();
+
+    h.pluginPanes.bind(PLUGIN_PANE_MIN_ID + 8, { pluginId: "showroom" });
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("never closes a daemon session that shares a reserved id", async () => {
+    // Pathological, and deliberately non-destructive: if a real session ever
+    // carries a reserved id, dismissing the PANEL must not kill the shell.
+    const h = harness({
+      initial: layoutWithPanel(),
+      sessions: [session(1), session(2), session(PLUGIN_PANE_MIN_ID)],
+      pluginBindings: { [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" } },
+    });
+
+    await h.controller.closePane("tab-3", PLUGIN_PANE_MIN_ID);
+
+    expect(h.closeSession).not.toHaveBeenCalled();
+    expect(h.controller.getSnapshot().layout.tabs["tab-3"]).toBeUndefined();
+    expect(h.pluginPanes.getSnapshot()).toEqual({});
+  });
+
+  it("contains a throw mid-open instead of leaking an orphan binding", async () => {
+    // The callers are `void controller.openPluginTab(...)` seams: an escaping
+    // error is an unhandled rejection and a menu entry that silently does
+    // nothing, with a bindings row left behind for the next boot to restore.
+    const h = harness({
+      generateId: () => {
+        throw new Error("no ids left");
+      },
+    });
+
+    expect(await h.controller.openPluginTab("showroom")).toBeNull();
+    expect(h.controller.getSnapshot().notice)
+      .toBe("The plugin panel could not be opened.");
+    expect(h.pluginPanes.getSnapshot()).toEqual({});
+    expect(h.controller.getSnapshot().layout.tabs["new-tab"]).toBeUndefined();
   });
 
   it("an aux window gives up when main never acknowledges the binding", async () => {

@@ -15,7 +15,7 @@ import type { SessionAttachment, SessionAttachmentCallbacks } from "../../host/c
 import type { SessionInfo } from "../../host/protocol";
 import type { EnsureUpResult } from "../../plugins/lifecycle";
 import type { PluginManifest } from "../../plugins/manifest";
-import { PaneBindingsStore } from "../../plugins/paneBindings";
+import { PaneBindingsStore, PLUGIN_PANE_MIN_ID } from "../../plugins/paneBindings";
 import { createLayoutStore } from "../../state/store";
 import type { Layout } from "../../state/layout";
 import {
@@ -77,10 +77,31 @@ function runtimeUp(): EnsureUpResult {
   };
 }
 
+/** Every controller a test builds, disposed in `afterEach`. */
+const live: WorkspaceController[] = [];
+
+/** A layout whose plugin pane sits in the MAIN window's rail. */
+function layoutWithPanelInMain(): Layout {
+  const state = layout();
+  state.auxWindows["aux-1"] = { rootItems: [], activeTabId: null, bounds: null };
+  state.tabs.panel = {
+    id: "panel",
+    title: "Showroom",
+    color: "magenta",
+    fill: "off",
+    split: { kind: "pane", sessionId: PLUGIN_PANE_MIN_ID },
+  };
+  state.rootItems.push({ kind: "tab", id: "panel" });
+  return state;
+}
+
 function harness(options: {
   /** `null` builds a host with NO probe method at all (the legacy shape). */
-  probe?: ((pluginId: string) => Promise<boolean>) | null;
+  probe?: ((pluginId: string, origin: string) => Promise<boolean>) | null;
   ensureUp?: (pluginId: string) => Promise<EnsureUpResult>;
+  initial?: Layout;
+  windowId?: string;
+  bindings?: Record<string, { pluginId: string }>;
 } = {}) {
   const client: WorkspaceHostClient = {
     createSession: vi.fn(async () => session(50)),
@@ -124,14 +145,19 @@ function harness(options: {
   };
   const controller = new WorkspaceController({
     client,
-    store: createLayoutStore(layout()),
+    store: createLayoutStore(options.initial ?? layout()),
     persistence,
     attachments,
     sessions: [session(1)],
     generateId: () => "panel-tab",
-    pluginPanes: new PaneBindingsStore({ initial: {}, save: async () => undefined }),
+    pluginPanes: new PaneBindingsStore({
+      initial: options.bindings ?? {},
+      save: async () => undefined,
+    }),
     plugins,
+    ...(options.windowId ? { windowId: options.windowId } : {}),
   });
+  live.push(controller);
   return { controller, ensureUp, probe };
 }
 
@@ -155,6 +181,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Disposed HERE, not at the end of each test body: a failed expect skips
+  // the rest of the body, and a leaked 15 s interval then fires inside the
+  // next test with that test's fake clock.
+  for (const controller of live.splice(0)) {
+    controller.dispose();
+  }
   vi.useRealTimers();
 });
 
@@ -169,7 +201,7 @@ describe("plugin health polling", () => {
 
     await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
     expect(probe).toHaveBeenCalledTimes(1);
-    expect(probe).toHaveBeenCalledWith("showroom");
+    expect(probe).toHaveBeenCalledWith("showroom", "http://127.0.0.1:7345");
 
     await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
     expect(probe).toHaveBeenCalledTimes(2);
@@ -271,6 +303,105 @@ describe("plugin health polling", () => {
 
     controller.dispose();
     await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS * 4);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("asks every 15 seconds, not merely on some interval", async () => {
+    // The other cases advance by the constant itself, so they would pass at
+    // any value. This is the only place the actual cadence is pinned.
+    expect(PLUGIN_HEALTH_INTERVAL_MS).toBe(15_000);
+  });
+
+  it("treats a probe that throws as the panel being gone", async () => {
+    const { controller } = harness({
+      probe: async () => {
+        throw new Error("connection refused");
+      },
+    });
+    await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
+
+    expect(panelState(controller).pluginHealth).toBe("down");
+  });
+
+  it("re-frames the new port when a relaunched plugin moves", async () => {
+    // Showroom walks ports (spec §9). The poll asks the origin the pane is
+    // FRAMING, so a plugin that came back elsewhere reads as down — and the
+    // Relaunch that follows is what re-reads the runtime file.
+    let port = 7345;
+    const { controller, probe } = harness({
+      ensureUp: async () => ({
+        ok: true,
+        runtime: {
+          port,
+          token: "t",
+          version: "1.0.0",
+          url: `http://127.0.0.1:${port}`,
+        },
+      }),
+      probe: async (_pluginId, origin) => origin.endsWith("7999"),
+    });
+    await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(panelState(controller).pluginUrl).toBe("http://127.0.0.1:7345");
+
+    // The plugin died and came back on another port; the old frame is dead.
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
+    expect(probe).toHaveBeenCalledWith("showroom", "http://127.0.0.1:7345");
+    expect(panelState(controller).pluginHealth).toBe("down");
+
+    port = 7999;
+    await controller.relaunchPlugin(panelId(controller));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(panelState(controller).pluginUrl).toBe("http://127.0.0.1:7999");
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
+    expect(probe).toHaveBeenLastCalledWith("showroom", "http://127.0.0.1:7999");
+    expect(panelState(controller).pluginHealth).toBe("up");
+  });
+
+  it("lets a probe that lands after the last pane closed change nothing", async () => {
+    // Otherwise the late answer re-creates a runtime entry for a plugin no
+    // pane renders, and the NEXT open short-circuits on it: a panel that
+    // opens straight into "down" without anything having been asked.
+    const pending: { settle: ((alive: boolean) => void) | null } = { settle: null };
+    const { controller, ensureUp } = harness({
+      probe: () => new Promise<boolean>((resolve) => {
+        pending.settle = resolve;
+      }),
+    });
+    const tabId = await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+    const sessionId = panelId(controller);
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
+
+    await controller.closePane(tabId!, sessionId);
+    pending.settle?.(false);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // A fresh panel asks the plugin again rather than inheriting that answer.
+    await controller.openPluginTab("showroom");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ensureUp).toHaveBeenCalledTimes(2);
+    expect(panelState(controller).pluginHealth).toBe("up");
+  });
+
+  it("polls only for panes in THIS window", async () => {
+    // Every window builds its own controller from the same blob. A
+    // layout-wide answer would have three windows polling one pane's plugin,
+    // three times a quarter minute, and three iframes' worth of state for a
+    // panel only one of them shows.
+    const { probe } = harness({
+      initial: layoutWithPanelInMain(),
+      windowId: "aux-1",
+      bindings: { [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" } },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS * 4);
+
     expect(probe).not.toHaveBeenCalled();
   });
 

@@ -28,10 +28,16 @@ export interface RuntimeFile {
   version?: string;
 }
 
-const DEFAULT_SPAWN_TIMEOUT_MS = 10_000;
-const POLL_INTERVAL_MS = 250;
+/**
+ * How long a plugin gets to answer its health route after a spawn — and, for
+ * a window that is not allowed to spawn, how long it waits for the window
+ * that is. Exported so the two cannot drift apart.
+ */
+export const DEFAULT_SPAWN_TIMEOUT_MS = 10_000;
+/** Exported for the same reason: an observer polls on the same beat. */
+export const POLL_INTERVAL_MS = 250;
 /** Loopback probes either answer at once or the port is not serving us. */
-const PROBE_TIMEOUT_MS = 1_000;
+export const PROBE_TIMEOUT_MS = 1_000;
 const MAX_PORT = 65_535;
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -88,13 +88,20 @@ export function reconcile(
 ): ReconcileResult {
   const generateId = opts?.generateId ?? defaultGenerateId;
 
+  // A bound plugin pane is never a daemon session, so a live host session
+  // whose id collides with one must not be adopted into a tab: doing so would
+  // put a terminal where the panel is and hand its Dismiss a real CloseSession.
+  // Membership AND range, for the same reason as `isLivePluginPane` below.
+  const isBoundPluginId = (id: number): boolean =>
+    opts?.pluginPaneIds?.has(id) === true && isPluginPaneId(id);
+
   if (layout === null) {
     const taken = new Set<string>();
     const tabs: Record<string, Tab> = {};
     const rootItems: Item[] = [];
     const orphanAdoptedIds: number[] = [];
     for (const session of hostSessions) {
-      if (!session.alive) {
+      if (!session.alive || isBoundPluginId(session.id)) {
         continue;
       }
       const id = freshTabId(generateId, taken);
@@ -125,18 +132,18 @@ export function reconcile(
     hostSessions.filter((s) => s.alive).map((s) => s.id),
   );
 
-  const pluginPaneIds = opts?.pluginPaneIds;
   // The RANGE is checked as well as the membership. A caller that put a real
   // daemon id in the set would otherwise take a genuinely dead session out of
   // `deadSessionIds`, and since Dismiss works off that list its pane would
   // render as a corpse nobody can clear. A plugin pane is by definition a
   // reserved id, so the two conditions cost nothing together.
-  const isLivePluginPane = (id: number): boolean =>
-    pluginPaneIds?.has(id) === true && isPluginPaneId(id);
+  const isLivePluginPane = isBoundPluginId;
   const deadSessionIds = [...referenced].filter(
     (id) => !alive.has(id) && !isLivePluginPane(id),
   );
-  const orphans = hostSessions.filter((s) => s.alive && !referenced.has(s.id));
+  const orphans = hostSessions.filter(
+    (s) => s.alive && !referenced.has(s.id) && !isBoundPluginId(s.id),
+  );
   const unreferencedDeadSessionIds = hostSessions
     .filter((s) => !s.alive && !referenced.has(s.id))
     .map((s) => s.id);
