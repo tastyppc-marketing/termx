@@ -12,7 +12,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MAIN_WINDOW_ID, type Layout } from "../state/layout";
+import { MAIN_WINDOW_ID, type Layout, type SplitNode } from "../state/layout";
 import { PluginsStore, type PluginsV1 } from "../plugins/registry";
 import type { SettingsSurfaceProps } from "../settings/SettingsSurface";
 import type { SidebarProps } from "../sidebar/Sidebar";
@@ -119,6 +119,39 @@ function snapshot(): WorkspaceSnapshot {
   };
 }
 
+/**
+ * One tab holding two panes side by side. The snapshot's `activeSessionId` is
+ * the LEFTMOST leaf — that is what the controller publishes — so this fixture
+ * is what separates "the pane the user is in" from "the first pane in the tab".
+ */
+function twoPaneSnapshot(): WorkspaceSnapshot {
+  const base = snapshot();
+  const active: SidebarTabModel = { ...tab(), sessionIds: [1, 5] };
+  const split = {
+    kind: "split" as const,
+    dir: "row" as const,
+    sizes: [0.5, 0.5] as [number, number],
+    children: [
+      { kind: "pane" as const, sessionId: 1 },
+      { kind: "pane" as const, sessionId: 5 },
+    ] as [SplitNode, SplitNode],
+  };
+  return {
+    ...base,
+    layout: {
+      ...base.layout,
+      tabs: { "tab-1": { ...base.layout.tabs["tab-1"]!, split } },
+    },
+    rootItems: [{ kind: "tab", tab: active }],
+    ungroupedTabs: [active],
+    paneStates: {
+      1: { status: "live", exitCode: null },
+      5: { status: "live", exitCode: null },
+    },
+    activeSessionId: 1,
+  };
+}
+
 /** Showroom installed and on — the Phase 1 plugin, from the bundled table. */
 const INSTALLED: PluginsV1 = {
   plugins: { showroom: { path: "C:\\code\\showroom", enabled: true, grants: [] } },
@@ -126,6 +159,7 @@ const INSTALLED: PluginsV1 = {
 
 interface Harness {
   workspace: BootstrappedWorkspace;
+  controller: { activateTab: unknown; moveItem: unknown };
   openPluginTab: ReturnType<typeof vi.fn>;
   openPluginSplit: ReturnType<typeof vi.fn>;
   relaunchPlugin: ReturnType<typeof vi.fn>;
@@ -133,15 +167,21 @@ interface Harness {
 }
 
 function harness(
-  options: { windowId?: string; registry?: PluginsV1 } = {},
+  options: {
+    windowId?: string;
+    registry?: PluginsV1;
+    snapshot?: WorkspaceSnapshot;
+  } = {},
 ): Harness {
-  const current = snapshot();
+  const current = options.snapshot ?? snapshot();
   const openPluginTab = vi.fn(async () => "tab-2");
   const openPluginSplit = vi.fn(async () => 0x8000_0000);
   const relaunchPlugin = vi.fn(async () => undefined);
   const plugins = new PluginsStore({ initial: options.registry ?? INSTALLED });
   const controller = {
     windowId: options.windowId ?? MAIN_WINDOW_ID,
+    activateTab: vi.fn(),
+    moveItem: vi.fn(() => true),
     attachments: {
       attach: vi.fn(),
       onError: vi.fn(() => () => undefined),
@@ -174,6 +214,7 @@ function harness(
       // The registry under test, so these tests watch the same store App does.
       plugins,
     }),
+    controller,
     openPluginTab,
     openPluginSplit,
     relaunchPlugin,
@@ -241,20 +282,70 @@ describe("App plugin wiring — sidebar", () => {
     expect(sidebarProps().plugins?.[0]?.enabled).toBe(false);
   });
 
-  // App passes `actions={controller}` with no adapter, so the sidebar holds the
-  // controller's own methods — identity is the whole claim, and calling them
-  // through `actions` to assert they were called would only be testing the
-  // mock. DEVIATION from the plan's Task 8 wording ("openPluginSplit in App
-  // adapts … using the tab's focused pane"): anchor resolution lives in the
-  // Sidebar instead (`anchorPane`), which is where the workspace snapshot is;
-  // App never sees a pane. The real click-to-anchor path is covered in
+  // Opening as a TAB needs nothing from App, so the sidebar holds the
+  // controller's own method — identity is the whole claim, and calling it
+  // through `actions` to assert it was called would only be testing the mock.
+  // Splitting is the opposite: App adapts it, per the plan's Task 8 wording,
+  // because only App knows which pane holds focus. That one is a behaviour
+  // test, below; the click path that reaches it is covered in
   // sidebar/__tests__/SidebarPlugins.test.tsx.
-  it("hands the sidebar the controller's own plugin entry points", async () => {
+  it("hands the sidebar the controller's own open-as-tab entry point", async () => {
     const fixture = harness();
     await renderApp(fixture);
 
     expect(sidebarProps().actions.openPluginTab).toBe(fixture.openPluginTab);
-    expect(sidebarProps().actions.openPluginSplit).toBe(fixture.openPluginSplit);
+  });
+
+  // The split anchor CANNOT come from the snapshot: the controller publishes
+  // `activeSessionId` as `firstSessionId(activeTab.split)`, the leftmost leaf,
+  // while the pane the user is actually in lives in App's `focusByTab` — the
+  // same source SplitLayout draws its focus ring from. Reading the snapshot
+  // instead would split the leftmost pane of every multi-pane tab.
+  it("anchors a plugin split on the focused pane, not the tab's first", async () => {
+    const fixture = harness({ snapshot: twoPaneSnapshot() });
+    await renderApp(fixture);
+
+    // The user clicks into the second pane; SplitLayout reports it.
+    await act(async () => splitProps().onFocusPane(5));
+    // The sidebar still passes the anchor IT can see (the snapshot's leftmost).
+    await act(async () =>
+      sidebarProps().actions.openPluginSplit?.("tab-1", 1, "showroom", "row")
+    );
+
+    expect(fixture.openPluginSplit).toHaveBeenCalledWith("tab-1", 5, "showroom", "row");
+  });
+
+  it("falls back to the tab's first pane when no focus has been recorded", async () => {
+    const fixture = harness({ snapshot: twoPaneSnapshot() });
+    await renderApp(fixture);
+
+    await act(async () =>
+      sidebarProps().actions.openPluginSplit?.("tab-1", 1, "showroom", "row")
+    );
+
+    expect(fixture.openPluginSplit).toHaveBeenCalledWith("tab-1", 1, "showroom", "row");
+  });
+
+  it("passes the sidebar's own anchor through when the tab is already gone", async () => {
+    const fixture = harness({ snapshot: twoPaneSnapshot() });
+    await renderApp(fixture);
+
+    // The layout moved under an open menu: App has no split to resolve against,
+    // so the sidebar's guess is the best information left.
+    await act(async () =>
+      sidebarProps().actions.openPluginSplit?.("tab-gone", 7, "showroom", "row")
+    );
+
+    expect(fixture.openPluginSplit).toHaveBeenCalledWith("tab-gone", 7, "showroom", "row");
+  });
+
+  it("keeps every other sidebar action pointing at the controller", async () => {
+    const fixture = harness();
+    await renderApp(fixture);
+
+    // The adapter overrides ONE member; nothing else may be dropped or rebound.
+    expect(sidebarProps().actions.activateTab).toBe(fixture.controller.activateTab);
+    expect(sidebarProps().actions.moveItem).toBe(fixture.controller.moveItem);
   });
 });
 

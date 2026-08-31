@@ -720,9 +720,11 @@ export function Sidebar({
     }
   };
 
-  /// The pane a split hangs off: the focused one when the focus is inside this
-  /// tab, else the tab's first. A menu opened on a background tab has no
-  /// focused pane to speak of, and the controller makes the same choice.
+  /// The sidebar's best guess at the pane a split should hang off, and only a
+  /// guess: `snapshot.activeSessionId` is the active tab's FIRST pane, not the
+  /// one holding focus — that lives in the App, which overrides this anchor
+  /// with the real focused pane before the controller sees it. What is left
+  /// here is the honest fallback for a tab the layout no longer has.
   const anchorPane = (tab: SidebarTabModel): number =>
     snapshot.activeSessionId !== null && tab.sessionIds.includes(snapshot.activeSessionId)
       ? snapshot.activeSessionId

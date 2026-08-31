@@ -65,6 +65,7 @@ import { useSettings } from "./settings/useSettings";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import {
   Sidebar,
+  type SidebarActions,
   type SidebarConversations,
   type SidebarHosts,
   type SidebarPlugin,
@@ -966,6 +967,39 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     return listed.sort((left, right) => left.name.localeCompare(right.name));
   }, [pluginsRegistry]);
 
+  // The sidebar's actions ARE the controller, with exactly one override: which
+  // pane a plugin split hangs off.
+  //
+  // The sidebar cannot work that out for itself. `snapshot.activeSessionId` is
+  // `firstSessionId(activeTab.split)` — the LEFTMOST leaf of the active tab,
+  // not the pane the user is in — so anchoring on it would split the first
+  // pane of every multi-pane tab. The pane that actually holds focus lives in
+  // `focusByTab`, which is App's, and is the same source SplitLayout draws its
+  // focus ring from.
+  //
+  // Spreading the controller is safe because every action on it is a bound
+  // arrow-function field; turning one into a prototype method would silently
+  // drop it here, which is why the sidebar tests pin the pass-throughs.
+  const sidebarActions = useMemo<SidebarActions>(
+    () => ({
+      ...controller,
+      openPluginSplit: (tabId, anchorSessionId, pluginId, dir) => {
+        const target = snapshot.layout.tabs[tabId];
+        void controller.openPluginSplit(
+          tabId,
+          // No such tab means the layout moved under the open menu; the
+          // sidebar's own guess is then the best information left.
+          target
+            ? resolveFocusedSession(target.split, focusByTab[tabId])
+            : anchorSessionId,
+          pluginId,
+          dir,
+        );
+      },
+    }),
+    [controller, snapshot.layout.tabs, focusByTab],
+  );
+
   // The manifest behind a bound pane. Registry PRESENCE is the gate, never the
   // enabled flag: switching a plugin off must not turn its open panels into
   // corpses, while REMOVING it is exactly the case SplitLayout degrades to a
@@ -1192,7 +1226,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       <div className="app-workspace">
         <Sidebar
           snapshot={snapshot}
-          actions={controller}
+          actions={sidebarActions}
           windowId={controller.windowId}
           hostConnected={connectionState.phase === "connected"}
           onOpenSettings={() => setSettingsOpen(true)}
