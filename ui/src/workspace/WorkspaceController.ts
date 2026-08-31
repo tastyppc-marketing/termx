@@ -243,6 +243,14 @@ export interface WorkspacePluginHost {
   manifestFor(pluginId: string): PluginManifest | null;
   /** Adopt a running instance or spawn one; never kills what it did not start. */
   ensureUp(pluginId: string): Promise<EnsureUpResult>;
+  /**
+   * Is this plugin still answering? A pure OBSERVATION — unlike `ensureUp` it
+   * must never spawn, because a plugin the user killed has to stay dead until
+   * they press Relaunch. Optional: a host without it simply gets no health
+   * polling, which is every legacy fixture and any window booted before the
+   * seam existed (an open panel then keeps whatever ensure-up last said).
+   */
+  probe?(pluginId: string): Promise<boolean>;
 }
 
 /**
@@ -364,6 +372,15 @@ export interface WorkspaceControllerOptions {
   plugins?: WorkspacePluginHost;
 }
 
+/**
+ * How often an on-screen panel re-asks whether its plugin is still there.
+ * A plugin is a process TermX does not own — it can be killed from Task
+ * Manager and nothing would tell the workspace — so the panel has to ask.
+ * 15 s is a loopback round trip per plugin per quarter minute: cheap enough to
+ * be free, quick enough that a dead panel is not still pretending minutes later.
+ */
+export const PLUGIN_HEALTH_INTERVAL_MS = 15_000;
+
 /** How long a connect watches its pane for a password prompt (spec §2). */
 export const SSH_PASSWORD_WATCH_MS = 60_000;
 
@@ -484,6 +501,13 @@ export class WorkspaceController {
   /// In-flight ensure-up per plugin, so two panes opened in the same breath
   /// join one probe instead of racing two.
   private readonly pluginEnsures = new Map<string, Promise<void>>();
+  /// One health poller per plugin with a pane open — never one per pane, or a
+  /// four-way split would probe the same process four times a quarter minute.
+  private readonly pluginHealthTimers = new Map<string, ReturnType<typeof setInterval>>();
+  /// Plugins with a health probe in flight. A slow plugin must not accumulate
+  /// probes: the next tick skips rather than queues, so a plugin that takes a
+  /// minute to answer is asked once, not four times.
+  private readonly pluginHealthProbes = new Set<string>();
   /// Bumped whenever a binding or a plugin's health changes — neither lives in
   /// the layout, so without it the snapshot memo would hand back a stale frame.
   private pluginRevision = 0;
@@ -2157,6 +2181,10 @@ export class WorkspaceController {
       return;
     }
     this.disposed = true;
+    for (const timer of this.pluginHealthTimers.values()) {
+      clearInterval(timer);
+    }
+    this.pluginHealthTimers.clear();
     for (const sessionId of [...this.resumeWaiters.keys()]) {
       this.settleResumeWait(sessionId, "gone");
     }
@@ -2792,6 +2820,99 @@ export class WorkspaceController {
     this.publish();
   }
 
+  /// Every plugin with at least one pane in this window's layout. A pane counts
+  /// only WITH a binding, exactly as the snapshot counts it — an orphaned
+  /// reserved id is a dead pane, and polling for it would poll for nothing.
+  private openPluginIds(): Set<string> {
+    const open = new Set<string>();
+    const bindings = this.pluginPanes.getSnapshot();
+    for (const sessionId of sessionIdsInLayout(this.store.getState())) {
+      if (!isPluginPaneId(sessionId)) {
+        continue;
+      }
+      const pluginId = bindings[String(sessionId)]?.pluginId;
+      if (pluginId !== undefined) {
+        open.add(pluginId);
+      }
+    }
+    return open;
+  }
+
+  /// Match the pollers to the panes on screen. Runs from `publish` — the one
+  /// place every binding change, layout mutation and health update already
+  /// funnels through — so a panel opened, closed, or moved out of the layout
+  /// starts and stops its poller without any caller having to remember to.
+  private syncPluginHealthPolls(): void {
+    if (this.pluginHealthTimers.size === 0
+      && (this.disposed || this.plugins?.probe === undefined)) {
+      // The overwhelmingly common case (no plugins wired at all): free.
+      return;
+    }
+    const open = this.disposed ? new Set<string>() : this.openPluginIds();
+    for (const [pluginId, timer] of [...this.pluginHealthTimers]) {
+      if (!open.has(pluginId)) {
+        clearInterval(timer);
+        this.pluginHealthTimers.delete(pluginId);
+      }
+    }
+    if (this.disposed || this.plugins?.probe === undefined) {
+      return;
+    }
+    for (const pluginId of open) {
+      if (this.pluginHealthTimers.has(pluginId)) {
+        continue;
+      }
+      this.pluginHealthTimers.set(
+        pluginId,
+        setInterval(
+          () => void this.pollPluginHealth(pluginId),
+          PLUGIN_HEALTH_INTERVAL_MS,
+        ),
+      );
+    }
+  }
+
+  /// One health tick. Only a plugin believed UP is asked: "starting" belongs to
+  /// the ensure-up already running, and "down" is a verdict the user answers
+  /// with Relaunch — re-probing it would either do nothing or, if the probe
+  /// were ever allowed to spawn, resurrect a plugin they just killed.
+  private async pollPluginHealth(pluginId: string): Promise<void> {
+    const probe = this.plugins?.probe;
+    if (probe === undefined || this.disposed) {
+      return;
+    }
+    if (this.pluginHealthProbes.has(pluginId) || this.pluginEnsures.has(pluginId)) {
+      return;
+    }
+    if (this.pluginRuntimes.get(pluginId)?.health !== "up") {
+      return;
+    }
+    this.pluginHealthProbes.add(pluginId);
+    let alive = false;
+    try {
+      alive = await probe(pluginId);
+    } catch {
+      // A probe that could not even be asked is the same news as a refused
+      // one: the panel is not reachable from here.
+      alive = false;
+    } finally {
+      this.pluginHealthProbes.delete(pluginId);
+    }
+    if (alive || this.disposed) {
+      return;
+    }
+    // Re-read: a Relaunch (or a close) may have landed while the probe was in
+    // flight, and its answer is fresher than this one.
+    if (this.pluginRuntimes.get(pluginId)?.health !== "up") {
+      return;
+    }
+    this.setPluginRuntime(pluginId, {
+      health: "down",
+      url: null,
+      error: "The panel stopped answering.",
+    });
+  }
+
   private async closeSessions(sessionIds: readonly number[]): Promise<{
     successful: Set<number>;
     failed: boolean;
@@ -2918,6 +3039,8 @@ export class WorkspaceController {
 
   private publish(): void {
     this.cachedSnapshot = null;
+    // Panels come and go with the layout, so the pollers follow the layout.
+    this.syncPluginHealthPolls();
     for (const listener of [...this.listeners]) {
       try {
         listener();

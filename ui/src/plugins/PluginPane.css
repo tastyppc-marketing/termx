@@ -1,0 +1,246 @@
+/* Plugin panes (plugin spec §4). A panel occupies a pane slot, so it obeys the
+   pane rules: square corners, 1px hairlines, the same 23px title bar a terminal
+   pane draws, and no shadow. Every colour comes from a theme token — `paper-light`
+   is a shipped theme and a hardcoded dark value would break it. */
+
+/* The bar is the terminal pane's bar with three things laid out in it, so the
+   focused-pane accent border and the 23px rhythm carry over untouched: the
+   children inherit `line-height`, which is what keeps the row the same height. */
+.plugin-pane__title {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.plugin-pane__icon {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.plugin-pane__name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Health reads at a glance in a four-pane split: a 6px square, right-aligned,
+   in the token that already means this in the app. */
+.plugin-pane__health {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  /* It marks a pane, so it is square like the pane. */
+  border-radius: 0;
+}
+
+.plugin-pane__health--up {
+  background: var(--ok);
+}
+
+.plugin-pane__health--down {
+  background: var(--error);
+}
+
+/* Starting is hollow — outlined, not filled: nothing is running yet. */
+.plugin-pane__health--starting {
+  background: transparent;
+  border: 1px solid var(--warn);
+  animation: plugin-pane-blink 1200ms steps(1, end) infinite;
+}
+
+@keyframes plugin-pane-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.plugin-pane {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-items: center;
+  align-content: center;
+  padding: 20px;
+  overflow: hidden;
+  color: var(--text-sub);
+  text-align: center;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  /* The title bar's own bottom hairline closes the top of this box. */
+  border-top: 0;
+  /* Occupies a pane slot: square. */
+  border-radius: 0;
+}
+
+/* Framed, the panel gets the whole box — chrome is the title bar and nothing
+   else, so a dashboard is not looking at the app's padding. */
+.plugin-pane--up {
+  display: block;
+  padding: 0;
+}
+
+.plugin-pane__frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  border: 0;
+}
+
+/* Section headers everywhere in TermX are this exact treatment. */
+.plugin-pane__overline {
+  color: var(--text-sub);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.plugin-pane__wait {
+  display: grid;
+  justify-items: center;
+}
+
+/* A hairline that sweeps rather than a spinner: it is the same 1px rule the
+   rest of the UI separates things with, and there is no spinner in this app.
+   The 1100ms is the duration of WORK, not of a state change — the 120ms motion
+   rule governs transitions, and a 120ms sweep would read as a flicker. */
+.plugin-pane__progress {
+  position: relative;
+  width: 140px;
+  height: 1px;
+  margin-top: 10px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+.plugin-pane__progress::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38%;
+  background: var(--accent);
+  animation: plugin-pane-sweep 1100ms linear infinite;
+}
+
+@keyframes plugin-pane-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(300%);
+  }
+}
+
+.plugin-pane__card {
+  display: grid;
+  min-width: 0;
+  max-width: 100%;
+  gap: 6px;
+  justify-items: center;
+}
+
+.plugin-pane__mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 4px;
+  place-items: center;
+  color: var(--text-sub);
+  background: var(--surface-1);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+
+.plugin-pane__name-large {
+  color: var(--text-main);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* One line, whatever ensure-up handed back; the full text is on hover, and the
+   evidence is in the block below. */
+.plugin-pane__reason {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* What the process printed, verbatim: monospaced, boxed, capped at about eight
+   lines and scrolled beyond that. It wraps rather than scrolling sideways, so a
+   long stack line can never widen the pane it is sitting in. */
+.plugin-pane__stderr {
+  width: min(100%, 420px);
+  max-height: 128px;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  overflow: auto;
+  color: var(--text-hint);
+  text-align: left;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.plugin-pane__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+/* Same control as the dead pane's: one shape for "this pane is empty, here is
+   what you can do about it". */
+.plugin-pane__action {
+  min-height: 30px;
+  padding: 0 14px;
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.plugin-pane__action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.plugin-pane__action--primary {
+  background: var(--accent-25);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.plugin-pane__action--primary:hover:not(:disabled) {
+  background: var(--accent-40);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-pane__health--starting,
+  .plugin-pane__progress::after {
+    animation: none;
+  }
+
+  /* Still says "work in progress" without moving: a filled, quieter rule. */
+  .plugin-pane__progress::after {
+    width: 100%;
+    opacity: 0.5;
+  }
+
+  .plugin-pane__action {
+    transition: none;
+  }
+}

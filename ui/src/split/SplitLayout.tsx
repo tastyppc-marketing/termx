@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type { PluginManifest } from "../plugins/manifest";
+import { PluginPane } from "../plugins/PluginPane";
 import type { SplitDir, SplitNode } from "../state/layout";
 import { SleepingPane } from "../terminal/SleepingPane";
 import { useSleepingSessions, type SleepController } from "../terminal/sleep";
@@ -43,6 +45,13 @@ export interface SplitLayoutActions {
    * is how the `savedPaneButton` setting turns the surface off.
    */
   savePane?(paneSessionId: number): void;
+  /**
+   * A plugin pane's Relaunch: re-run the plugin's ensure-up, keeping the pane
+   * and its binding. Deliberately NOT `restartPane`, which would create a host
+   * session and swap the reserved id out of the layout — the panel would
+   * become a terminal. Optional so every pre-plugin fixture type-checks.
+   */
+  relaunchPlugin?(paneSessionId: number): void | Promise<void>;
 }
 
 export interface SplitLayoutProps {
@@ -90,6 +99,13 @@ export interface SplitLayoutProps {
    * no bar.
    */
   paneTitles?: Readonly<Record<number, string>>;
+  /**
+   * Manifest lookup for plugin panes — their name, icon and panel path all come
+   * from it. Absent (or null for an id) renders the pane as the dismissible
+   * dead pane instead: a binding whose plugin is no longer installed degrades
+   * exactly the way an older build's unreadable binding does (spec §4).
+   */
+  pluginManifestFor?: (pluginId: string) => PluginManifest | null;
   /** Terminal text size in px for every pane (settings.terminalFontSize). */
   fontSize?: number;
   /** Ctrl+wheel zoom from any pane: +1 in, -1 out (App clamps and persists). */
@@ -137,6 +153,7 @@ export function SplitLayout({
   sessionDims,
   onLoadEarlier,
   paneTitles,
+  pluginManifestFor,
   fontSize,
   onFontSizeWheel,
 }: SplitLayoutProps) {
@@ -347,6 +364,13 @@ export function SplitLayout({
         const state = paneStates[sessionId] ?? MISSING_PANE;
         const focused = sessionId === focusedSessionId;
         const splittable = state.status === "live" && canSplitPane(root, sessionId);
+        // A bound plugin pane renders as a panel only while its plugin is still
+        // installed; without a manifest there is no name, no icon and no page
+        // to frame, so it falls through to the dismissible dead pane.
+        const manifest =
+          state.status === "plugin" && state.pluginId !== undefined
+            ? pluginManifestFor?.(state.pluginId) ?? null
+            : null;
         return (
           <section
             key={sessionId}
@@ -354,7 +378,7 @@ export function SplitLayout({
             style={boxStyle(box)}
             data-testid={`split-pane-${sessionId}`}
             data-session-id={sessionId}
-            aria-label={`Terminal pane ${sessionId}`}
+            aria-label={manifest ? `${manifest.name} pane` : `Terminal pane ${sessionId}`}
             onFocusCapture={() => onFocusPane(sessionId)}
             onPointerDownCapture={() => onFocusPane(sessionId)}
           >
@@ -432,6 +456,28 @@ export function SplitLayout({
                       onClick={() => actions.savePane?.(sessionId)}
                     >⚑</button>
                   ) : null}
+                  <button
+                    type="button"
+                    aria-label="Close pane"
+                    title="Close pane (Ctrl+Shift+W)"
+                    onClick={() => requestClose(sessionId)}
+                  >✕</button>
+                </div>
+              </>
+            ) : manifest !== null ? (
+              <>
+                <PluginPane
+                  state={state}
+                  name={manifest.name}
+                  icon={manifest.icon}
+                  panelPath={manifest.panel.path}
+                  onRelaunch={() => void actions.relaunchPlugin?.(sessionId)}
+                  onDismiss={() => void actions.dismissPane(sessionId)}
+                />
+                {/* A panel has no shell to end and cannot be split, so its
+                    toolbar is the close button alone — `requestClose` routes a
+                    non-live pane straight to dismiss, with no dialog. */}
+                <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
                   <button
                     type="button"
                     aria-label="Close pane"
