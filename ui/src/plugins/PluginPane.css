@@ -56,8 +56,16 @@
   }
 }
 
+/* Geometry copied from `.terminal-pane` deliberately, hairline included: a
+   panel and a terminal sitting side by side in one split must be the same
+   object with different contents. `width/height: 100%` are inert inside
+   `.split-pane` (SplitLayout.css overrides height to `auto` and lets flex size
+   it — the documented title-bar trap) and are what stops the box collapsing in
+   any other mounting context. */
 .plugin-pane {
   display: grid;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   place-items: center;
@@ -68,8 +76,6 @@
   text-align: center;
   background: var(--bg);
   border: 1px solid var(--border);
-  /* The title bar's own bottom hairline closes the top of this box. */
-  border-top: 0;
   /* Occupies a pane slot: square. */
   border-radius: 0;
 }
@@ -217,6 +223,14 @@
 
 .plugin-pane__action:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Inert while a relaunch is in flight: dimmed, never recoloured — a disabled
+   control that changes hue reads as a different control. Matches
+   `.dead-pane__action:disabled` exactly. */
+.plugin-pane__action:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .plugin-pane__action--primary {

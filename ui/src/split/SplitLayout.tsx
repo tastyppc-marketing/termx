@@ -364,11 +364,18 @@ export function SplitLayout({
         const state = paneStates[sessionId] ?? MISSING_PANE;
         const focused = sessionId === focusedSessionId;
         const splittable = state.status === "live" && canSplitPane(root, sessionId);
-        // A bound plugin pane renders as a panel only while its plugin is still
-        // installed; without a manifest there is no name, no icon and no page
-        // to frame, so it falls through to the dismissible dead pane.
+        // A bound plugin pane is ALWAYS a panel, manifest or no manifest. The
+        // manifest only dresses it: without one there is no display name, icon
+        // or panel path, and the pane falls back to its plugin id and its
+        // origin's root. It must never fall through to DeadPane — DeadPane
+        // offers Restart / New session, and `restartPane` creates a host
+        // session and swaps the reserved id out of the layout, which destroys
+        // the binding and turns the panel into a terminal (spec §4). The
+        // dead-pane path is for a reserved id with NO binding, which the
+        // controller already projects as "missing".
+        const plugin = state.status === "plugin";
         const manifest =
-          state.status === "plugin" && state.pluginId !== undefined
+          plugin && state.pluginId !== undefined
             ? pluginManifestFor?.(state.pluginId) ?? null
             : null;
         return (
@@ -378,7 +385,11 @@ export function SplitLayout({
             style={boxStyle(box)}
             data-testid={`split-pane-${sessionId}`}
             data-session-id={sessionId}
-            aria-label={manifest ? `${manifest.name} pane` : `Terminal pane ${sessionId}`}
+            aria-label={
+              plugin
+                ? `${manifest?.name ?? state.pluginId ?? "Plugin"} pane`
+                : `Terminal pane ${sessionId}`
+            }
             onFocusCapture={() => onFocusPane(sessionId)}
             onPointerDownCapture={() => onFocusPane(sessionId)}
           >
@@ -464,13 +475,13 @@ export function SplitLayout({
                   >✕</button>
                 </div>
               </>
-            ) : manifest !== null ? (
+            ) : plugin ? (
               <>
                 <PluginPane
                   state={state}
-                  name={manifest.name}
-                  icon={manifest.icon}
-                  panelPath={manifest.panel.path}
+                  name={manifest?.name ?? state.pluginId ?? "Plugin"}
+                  icon={manifest?.icon ?? "?"}
+                  panelPath={manifest?.panel.path ?? "/"}
                   onRelaunch={() => void actions.relaunchPlugin?.(sessionId)}
                   onDismiss={() => void actions.dismissPane(sessionId)}
                 />

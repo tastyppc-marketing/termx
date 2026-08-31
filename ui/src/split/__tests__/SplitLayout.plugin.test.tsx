@@ -73,6 +73,8 @@ function actions(overrides: Partial<SplitLayoutActions> = {}): SplitLayoutAction
 
 async function renderLayout(options: {
   panel?: Partial<PaneSessionState>;
+  /** Replaces the reserved pane's state outright (for the no-binding case). */
+  panelState?: PaneSessionState;
   actions?: SplitLayoutActions;
   manifests?: Record<string, PluginManifest> | null;
 }) {
@@ -85,7 +87,7 @@ async function renderLayout(options: {
         client={{} as PaneHostClient}
         paneStates={{
           1: { status: "live", exitCode: null },
-          [PANEL_ID]: {
+          [PANEL_ID]: options.panelState ?? {
             status: "plugin",
             exitCode: null,
             pluginId: "showroom",
@@ -176,14 +178,51 @@ describe("plugin panes in the split layout", () => {
   });
 
   it(
-    "degrades to the dismissible dead pane when the plugin is no longer " +
-      "installed — the same shape an older build shows for a binding it " +
-      "cannot read",
+    "still renders a PANEL when the manifest cannot be resolved — a bound " +
+      "reserved id must never be offered Restart / Resume / New session, " +
+      "because restartPane creates a host session and swaps the reserved id " +
+      "out of the layout, destroying the binding (spec §4)",
     async () => {
-      await renderLayout({ manifests: null });
+      const layoutActions = actions();
+      await renderLayout({ manifests: null, actions: layoutActions });
 
-      expect(panel()?.querySelector(".dead-pane")).not.toBeNull();
-      expect(panel()?.querySelector("iframe")).toBeNull();
+      expect(panel()?.querySelector(".plugin-pane")).not.toBeNull();
+      expect(panel()?.querySelector(".dead-pane")).toBeNull();
+      // Named by the only identity that survives a missing manifest.
+      expect(panel()?.querySelector(".plugin-pane__name")?.textContent).toBe("showroom");
+      const labels = [...panel()!.querySelectorAll("button")].map((button) => button.textContent);
+      expect(labels).not.toContain("Restart session");
+      expect(labels).not.toContain("New session");
+      expect(labels).not.toContain("Resume conversation");
+      expect(layoutActions.restartPane).not.toHaveBeenCalled();
     },
   );
+
+  it("offers Relaunch and Dismiss even with no manifest, and they still work", async () => {
+    const layoutActions = actions({ relaunchPlugin: vi.fn(async () => undefined) });
+    await renderLayout({
+      manifests: null,
+      panel: { pluginHealth: "down", pluginUrl: null },
+      actions: layoutActions,
+    });
+
+    await act(async () =>
+      panel()?.querySelector<HTMLButtonElement>(".plugin-pane__relaunch")?.click()
+    );
+    await act(async () =>
+      panel()?.querySelector<HTMLButtonElement>(".plugin-pane__dismiss")?.click()
+    );
+
+    expect(layoutActions.relaunchPlugin).toHaveBeenCalledWith(PANEL_ID);
+    expect(layoutActions.dismissPane).toHaveBeenCalledWith(PANEL_ID);
+    expect(layoutActions.restartPane).not.toHaveBeenCalled();
+  });
+
+  it("keeps DeadPane for panes that really are dead, not for panels", async () => {
+    await renderLayout({});
+
+    const terminal = container.querySelector("[data-testid='split-pane-1']");
+    expect(terminal?.querySelector(".plugin-pane")).toBeNull();
+    expect(panel()?.querySelector(".dead-pane")).toBeNull();
+  });
 });

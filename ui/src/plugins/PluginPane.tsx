@@ -20,6 +20,20 @@ export interface PluginPaneProps {
   onDismiss(): void;
 }
 
+/**
+ * The only origins a panel may be framed from: this machine's loopback, any
+ * port. Anchored at both ends, so `http://127.0.0.1.evil.test` (a subdomain of
+ * someone else's zone) and `http://127.0.0.1:7345@evil.test` (userinfo, where
+ * the real host is what follows the `@`) are both refused rather than read as
+ * loopback. The CSP's `frame-src` says the same thing at the webview level;
+ * this is the half that can explain itself to the user instead of rendering an
+ * empty rectangle.
+ */
+const LOOPBACK_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
+
+/** Shown instead of a frame when the plugin hands back an address we refuse. */
+const NON_LOCAL_REASON = "The plugin reported a non-local address.";
+
 /** What the health mark on the title bar means, for the screen reader. */
 const HEALTH_LABEL: Record<"starting" | "up" | "down", string> = {
   starting: "Starting",
@@ -59,7 +73,21 @@ function splitError(error: string | undefined): { reason: string | null; tail: s
 /// The iframe carries NO `sandbox` attribute. A plugin serves its own scripts
 /// and its own storage from its loopback origin, and every sandbox flag strong
 /// enough to matter breaks one of them; the CSP's `frame-src` — loopback hosts
-/// only — is the boundary instead (`src/__tests__/csp.test.ts` pins it).
+/// only — is the boundary instead (`src/__tests__/csp.test.ts` pins it), and
+/// `src` is additionally refused here unless the origin really is loopback.
+///
+/// What that leaves, stated rather than hidden: without `sandbox` the framed
+/// page can still navigate the TOP window (`window.top.location = …`, which
+/// would replace the whole TermX webview) and open popups — `allow-top-
+/// navigation` is a sandbox flag, so there is no way to withhold it while
+/// keeping same-origin scripts and storage, and `allow=""` (an empty
+/// Permissions-Policy list, no camera/microphone/geolocation delegated) does
+/// not cover navigation. In P1 the only plugin is Showroom, running from a
+/// folder the user chose themselves, so the residual is accepted and recorded;
+/// it is the thing to revisit before a third-party plugin ships.
+///
+/// `credentialless` is deliberately absent too: it would strip the plugin
+/// origin's own cookies, which is exactly the state a panel needs to keep.
 export function PluginPane({
   state,
   name,
@@ -70,11 +98,17 @@ export function PluginPane({
 }: PluginPaneProps) {
   const reported = state.pluginHealth ?? "starting";
   const origin = state.pluginUrl ?? null;
-  const src = reported === "up" && origin !== null ? `${origin}${panelPath}` : null;
-  // A health of "up" with no origin cannot be framed, so it is still a wait:
+  // A reported-up plugin that names an address off this machine is a refusal,
+  // not a wait: nothing further is coming, and the user is told why.
+  const foreign = reported === "up" && origin !== null && !LOOPBACK_ORIGIN.test(origin);
+  const src =
+    reported === "up" && origin !== null && !foreign ? `${origin}${panelPath}` : null;
+  // "up" with no origin at all cannot be framed either, but that one IS a wait:
   // what the pane shows follows what it can actually draw, never a label.
-  const health = src !== null ? "up" : reported === "down" ? "down" : "starting";
-  const { reason, tail } = splitError(state.pluginError);
+  const health = src !== null ? "up" : foreign || reported === "down" ? "down" : "starting";
+  const { reason, tail } = foreign
+    ? { reason: NON_LOCAL_REASON, tail: null }
+    : splitError(state.pluginError);
 
   return (
     <>
@@ -94,6 +128,7 @@ export function PluginPane({
             src={src ?? undefined}
             title={name}
             referrerPolicy="no-referrer"
+            allow=""
           />
         ) : health === "starting" ? (
           <div className="plugin-pane__wait" role="status">

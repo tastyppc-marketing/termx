@@ -100,6 +100,22 @@ describe("plugin pane — up", () => {
   });
 
   it(
+    "grants the frame no Permissions-Policy features — P1 ships an empty " +
+      "allow list, so camera/microphone/geolocation are delegated to nothing",
+    async () => {
+      await renderPane();
+
+      expect(frame()?.getAttribute("allow")).toBe("");
+    },
+  );
+
+  it("frames localhost as readily as the dotted-quad loopback", async () => {
+    await renderPane({ state: pluginState({ pluginUrl: "http://localhost:7345" }) });
+
+    expect(frame()?.getAttribute("src")).toBe("http://localhost:7345/");
+  });
+
+  it(
     "carries NO sandbox attribute — Showroom's own scripts and storage are " +
       "same-origin, and the CSP frame-src is what bounds the panel",
     async () => {
@@ -116,6 +132,49 @@ describe("plugin pane — up", () => {
     expect(container.querySelector(".plugin-pane__wait")).toBeNull();
     expect(container.querySelector(".plugin-pane__card")).toBeNull();
   });
+});
+
+describe("plugin pane — origin refusal", () => {
+  /** Anything that is not this machine's loopback. */
+  const FOREIGN = [
+    "http://192.168.1.10:7345",
+    "https://showroom.example.com",
+    "http://127.0.0.1.evil.test:7345",
+    "http://127.0.0.1:7345@evil.test",
+  ];
+
+  it.each(FOREIGN)("refuses to frame %s, and says so", async (url) => {
+    await renderPane({ state: pluginState({ pluginUrl: url }) });
+
+    expect(frame()).toBeNull();
+    expect(container.querySelector(".plugin-pane__reason")?.textContent)
+      .toBe("The plugin reported a non-local address.");
+    // It is an offline card, not a wait: nothing is coming.
+    expect(container.querySelector(".plugin-pane__relaunch")).not.toBeNull();
+    expect(container.querySelector(".plugin-pane__wait")).toBeNull();
+  });
+});
+
+describe("plugin pane — state changes", () => {
+  it(
+    "unmounts the frame when the plugin goes down and builds a NEW one when " +
+      "it comes back, so a dead panel cannot keep running in a hidden frame",
+    async () => {
+      await renderPane();
+      const first = frame();
+      expect(first).not.toBeNull();
+
+      await renderPane({ state: pluginState({ pluginHealth: "down", pluginUrl: null }) });
+      expect(frame()).toBeNull();
+      expect(first?.isConnected).toBe(false);
+      expect(container.querySelector(".plugin-pane__relaunch")).not.toBeNull();
+
+      await renderPane();
+      const third = frame();
+      expect(third).not.toBeNull();
+      expect(third).not.toBe(first);
+    },
+  );
 });
 
 describe("plugin pane — starting", () => {
