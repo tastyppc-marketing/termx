@@ -120,6 +120,59 @@ export function parseCaptures(text: string | null): Map<number, ConversationCapt
 }
 
 /**
+ * Past this the boot read starts costing visible milliseconds, and the file is
+ * re-read on every session exit. A capture line is ~130 ASCII bytes, so this is
+ * roughly four thousand `claude` starts — years of normal use, or one runaway
+ * script. Below it the log is cheaper to keep whole than to rewrite.
+ */
+const COMPACT_THRESHOLD_BYTES = 512 * 1024;
+
+/**
+ * Bound the append-only log: keep the newest line per TermX pane, drop the
+ * rest. Returns the JSONL to write back, or null when there is nothing worth
+ * writing — the log is small enough, or it is already compact. Null is the
+ * common answer and means DO NOT WRITE: rewriting a file the hook may be
+ * appending to at that instant is a race worth losing only when it buys
+ * something.
+ *
+ * The winning line is carried across VERBATIM rather than re-serialized. A
+ * capture this build understands must survive a round trip byte-for-byte, and
+ * re-encoding would quietly rewrite anything `parseCaptureLine` normalized.
+ *
+ * Lines this build cannot parse are dropped, INCLUDING a future `v` it does not
+ * know. That is the deliberate trade: an old build compacting a newer build's
+ * log loses captures it was already ignoring, and the alternative — carrying
+ * unreadable lines forever — is the unbounded growth this exists to stop.
+ */
+export function compactCaptures(text: string): string | null {
+  // A UTF-8 encoding is never SHORTER than the string's UTF-16 length, so a
+  // short string is guaranteed to be a small file. Cheap, and never early.
+  if (text.length <= COMPACT_THRESHOLD_BYTES) {
+    return null;
+  }
+  const winners = new Map<number, { atMs: number; line: string }>();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.length === 0) {
+      continue;
+    }
+    const capture = parseCaptureLine(line);
+    if (capture === null) {
+      continue;
+    }
+    const previous = winners.get(capture.termxSessionId);
+    // `>=` matches parseCaptures: on a tie the later line is the later run.
+    if (previous === undefined || capture.atMs >= previous.atMs) {
+      winners.set(capture.termxSessionId, { atMs: capture.atMs, line });
+    }
+  }
+  const kept = [...winners.values()].sort((left, right) => left.atMs - right.atMs);
+  const compacted = kept.map((entry) => entry.line).join("\n");
+  const next = kept.length === 0 ? "" : `${compacted}\n`;
+  return next === text ? null : next;
+}
+
+/**
  * The record a captured pane resumes: the indexed conversation when the scan
  * has found it (its real title feeds the button's tooltip), otherwise a
  * synthesized one — the resume needs only provider + id, and refusing to

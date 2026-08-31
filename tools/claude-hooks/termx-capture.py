@@ -9,8 +9,11 @@ Claude Code starts inside a TermX pane, one line says which conversation that
 pane is running.
 
 CONTRACT. Claude Code runs this on SessionStart (matcher
-"startup|resume|clear|compact") with the hook payload as JSON on stdin:
-`{ session_id, cwd, transcript_path, hook_event_name, source }`. If
+"startup|resume|clear") with the hook payload as JSON on stdin:
+`{ session_id, cwd, transcript_path, hook_event_name, source }`. The
+`compact` source is deliberately NOT matched: compaction continues the same
+conversation under the same session id, so its line would repeat the one
+`startup` (or `resume`) already wrote and only grow the log. If
 TERMX_SESSION_ID is absent, Claude is not running in a TermX pane and there is
 nothing to pair -- exit silently. Otherwise append ONE line to
 `<data dir>\\conversation_captures_v1.jsonl`:
@@ -22,8 +25,14 @@ RULES this file will not break:
   * It NEVER prints. stdout from a SessionStart hook is injected into Claude's
     context; stderr is noise in the user's face. Silence is the interface.
   * It NEVER raises. A hook that fails must not colour a session's startup, so
-    every failure path -- unreadable stdin, unset APPDATA, a locked file --
-    ends in exit code 0 with nothing written.
+    every failure path -- unreadable stdin, bytes that are not UTF-8, unset
+    APPDATA, a locked file -- ends in exit code 0 with nothing written.
+  * It reads stdin as BYTES and decodes UTF-8 itself. Text mode would decode
+    with the console's locale encoding, which on Windows is cp1252, and Claude
+    Code (Node's JSON.stringify) writes raw UTF-8: a cwd holding CJK or an
+    accent would be stored mojibaked, and the pane would later restart in a
+    folder that does not exist. This source stays pure ASCII for the same
+    reason -- a hook that must never fail does not gamble on source encoding.
   * It validates `session_id` against ^[A-Za-z0-9-]+$ before writing, the same
     rule ui/src/conversations/resume.ts enforces, because that id is later
     typed onto a command line as `claude --resume <id>`. An id that could not
@@ -38,7 +47,7 @@ INSTALLATION (the orchestrator does this, not this script): add to
 
     "hooks": {
       "SessionStart": [
-        { "matcher": "startup|resume|clear|compact",
+        { "matcher": "startup|resume|clear",
           "hooks": [ { "type": "command",
                        "command": "python \\"<TermX repo>\\\\tools\\\\claude-hooks\\\\termx-capture.py\\"" } ] }
       ]
@@ -116,9 +125,18 @@ def main():
     directory = data_dir()
     if directory is None:
         return
+    # BYTES, not text: `sys.stdin.read()` would decode with the console's
+    # locale encoding (cp1252 on a default Windows box) while Claude Code
+    # writes UTF-8, silently mojibaking every non-ASCII cwd. Decoding strictly
+    # here means a payload that is not UTF-8 is not ours to guess at -- write
+    # nothing rather than a wrong path.
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
-    except (ValueError, OSError):
+        raw = sys.stdin.buffer.read()
+    except (AttributeError, ValueError, OSError):
+        return
+    try:
+        payload = json.loads(raw.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, ValueError):
         return
     if not isinstance(payload, dict):
         return
