@@ -355,6 +355,13 @@ export async function bootstrapWorkspace(
   const connect = options.connect ?? ((connectOptions) => HostClient.connect(connectOptions));
   let client: BootstrapWorkspaceClient | null = null;
   let controller: WorkspaceController | null = null;
+  /// Relaunch requests from another window that arrived before this window had
+  /// a controller to honour them with. Main registers its bus handler and
+  /// `await bus.ready()`s well before construction — the manifest budget alone
+  /// is 1.5 s — so an aux window that outlives a main remount can land an
+  /// `ensure` in that gap. Dropping it would leave the user's Relaunch doing
+  /// nothing, with nothing to retry it.
+  const pendingEnsures = new Set<string>();
   /// Everything this workspace subscribed to that outlives a single call:
   /// window-bus listeners and the host client's exit hook. Released by
   /// `pluginHost.dispose()`, which `WorkspaceController.dispose()` runs — so a
@@ -631,7 +638,11 @@ export async function bootstrapWorkspace(
             // the only place that click can be honoured — and it must be a
             // FORCE: the plugin the user is relaunching is usually one main
             // still has cached as "up".
-            void controller?.forcePluginRestart(mutation.pluginId);
+            if (controller === null) {
+              pendingEnsures.add(mutation.pluginId);
+            } else {
+              void controller.forcePluginRestart(mutation.pluginId);
+            }
           } else {
             // Catch-up for a window that booted after our last broadcast: it
             // asked because its file read may already be stale.
@@ -1098,6 +1109,14 @@ export async function bootstrapWorkspace(
       ...(options.windowId ? { windowId: options.windowId } : {}),
     };
     controller = new WorkspaceController(controllerOptions);
+    // Whatever asked while there was nobody to ask. Deduplicated by the set:
+    // three impatient clicks are one spawn, which is what a force ensure would
+    // have coalesced them into had the controller existed.
+    const started = controller;
+    for (const pluginId of pendingEnsures) {
+      void started.forcePluginRestart(pluginId);
+    }
+    pendingEnsures.clear();
 
     // A session exiting is exactly when a dead pane appears and its Resume
     // button asks who it should resume — and the pane may have run `claude`

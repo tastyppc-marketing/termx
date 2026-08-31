@@ -21,6 +21,7 @@ import {
   tauriWindowBus,
   type LayoutMutation,
   type PluginPanesMutation,
+  type WindowBus,
 } from "../windowBus";
 
 describe("loopbackBus", () => {
@@ -241,6 +242,10 @@ describe("tauriWindowBus", () => {
     deliver?.({ payload: { kind: "pluginPanes", op: "nope" } });
     deliver?.({ payload: { kind: "pluginPanes", op: "bind", sessionId: 1.5, pluginId: "x" } });
     deliver?.({ payload: { kind: "pluginPanes", op: "bind", sessionId: 7 } });
+    // An id the registry could never hold, on the op that main WRITES TO DISK.
+    deliver?.({
+      payload: { kind: "pluginPanes", op: "bind", sessionId: 7, pluginId: "Showroom" },
+    });
     deliver?.({ payload: { kind: "pluginPanes", op: "unbind", sessionIds: "all" } });
     // A partly-junk id list keeps the ids that are real.
     deliver?.({
@@ -261,6 +266,39 @@ describe("tauriWindowBus", () => {
       },
       { kind: "pluginPanes", op: "sync" },
       { kind: "pluginPanes", op: "unbind", sessionIds: [7] },
+    ]);
+  });
+
+  it("carries a Relaunch request and drops an id the registry could never hold", async () => {
+    // The op that makes an aux window's Relaunch work at all. Every other test
+    // of it runs over `loopbackBus`, which hands objects through UNPARSED — so
+    // without this the parse branch could be deleted, the suite would stay
+    // green, and Relaunch would be dead in the shipped app.
+    const { transport, emitted, listeners } = fakeTransport();
+    const bus = tauriWindowBus(transport);
+    const seen: PluginPanesMutation[] = [];
+    bus.onPluginPanesMutation((mutation) => seen.push(mutation));
+    await Promise.resolve();
+
+    bus.forwardPluginPanes({
+      kind: "pluginPanes",
+      op: "ensure",
+      pluginId: "showroom",
+    });
+    await Promise.resolve();
+    const deliver = listeners.get(PLUGIN_PANES_MUTATION_EVENT);
+    // A spawn request is the most privileged thing that crosses this bus, so
+    // the id is held to the registry's rule rather than "is a string".
+    deliver?.({ payload: { kind: "pluginPanes", op: "ensure", pluginId: "Showroom" } });
+    deliver?.({ payload: { kind: "pluginPanes", op: "ensure", pluginId: "" } });
+    deliver?.({ payload: { kind: "pluginPanes", op: "ensure", pluginId: 7 } });
+    deliver?.({ payload: { kind: "pluginPanes", op: "ensure" } });
+
+    expect(emitted.map((entry) => entry.event)).toEqual([
+      PLUGIN_PANES_MUTATION_EVENT,
+    ]);
+    expect(seen).toEqual([
+      { kind: "pluginPanes", op: "ensure", pluginId: "showroom" },
     ]);
   });
 });
@@ -657,6 +695,49 @@ describe("single-writer wiring over the bus", () => {
 
     main.controller.dispose();
     aux.controller.dispose();
+  });
+
+  it("a Relaunch that lands while MAIN is still booting is honoured, once", async () => {
+    // Main registers this handler and awaits `bus.ready()` long before it
+    // builds a controller — the manifest budget alone is 1.5 s. An aux window
+    // that outlived a main remount presses Relaunch in that window and the
+    // request finds `controller === null`. Dropped, nothing retries it: the
+    // pane sits on a card naming a button the user just pressed.
+    const bus = loopbackBus();
+    const plugin = { alive: false };
+    const mainPlugin = killablePlugin(plugin);
+    // Delivered at the moment main subscribes, which IS the gap: the handler
+    // exists, the controller does not.
+    let delivered = false;
+    const gapBus: WindowBus = {
+      ...bus,
+      onPluginPanesMutation: (handler) => {
+        const stop = bus.onPluginPanesMutation(handler);
+        if (!delivered) {
+          delivered = true;
+          // Twice: an impatient user, and one spawn is still the right answer.
+          handler({ kind: "pluginPanes", op: "ensure", pluginId: "showroom" });
+          handler({ kind: "pluginPanes", op: "ensure", pluginId: "showroom" });
+        }
+        return stop;
+      },
+    };
+
+    const main = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fakeClient(tornLayout()).client,
+      appFiles: fakeAppFiles({ "plugins_v1.json": SHOWROOM_REGISTRY }).store,
+      pluginEnv: { APPDATA: "C:\data" },
+      pluginNative: mainPlugin.native,
+      windowBus: gapBus,
+    });
+    expect(delivered).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(mainPlugin.spawn).toHaveBeenCalledTimes(1);
+    });
+
+    main.controller.dispose();
   });
 
   it("an aux boot attaches only its own slot's sessions", async () => {

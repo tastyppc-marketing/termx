@@ -1,5 +1,6 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import type { JsonValue } from "../host/protocol";
+import { isValidPluginId } from "../plugins/manifest";
 
 /// Cross-window layout plumbing for the single-writer rule (multi-window
 /// spec): the MAIN window is the only `SetLayout` writer. An aux window never
@@ -116,7 +117,7 @@ function parsePluginPanesMutation(payload: unknown): PluginPanesMutation | null 
   }
   if (record.op === "ensure") {
     const { pluginId } = record;
-    if (typeof pluginId !== "string" || pluginId.length === 0) {
+    if (typeof pluginId !== "string" || !isValidPluginId(pluginId)) {
       return null;
     }
     return { kind: "pluginPanes", op: "ensure", pluginId };
@@ -127,7 +128,9 @@ function parsePluginPanesMutation(payload: unknown): PluginPanesMutation | null 
       typeof sessionId !== "number" ||
       !Number.isInteger(sessionId) ||
       typeof pluginId !== "string" ||
-      pluginId.length === 0
+      // The same rule the registry enforces: an id it could never hold has no
+      // business entering the bindings map — which main WRITES TO DISK.
+      !isValidPluginId(pluginId)
     ) {
       return null;
     }
