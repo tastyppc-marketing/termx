@@ -11,8 +11,11 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import type { PluginNative } from "../plugins/native";
+import type { PluginsStore } from "../plugins/registry";
 import { deriveTokens } from "../theme/deriveTokens";
 import { THEME_IDS, THEMES } from "../theme/themes";
+import { PluginsPanel } from "./PluginsPanel";
 import { SETTINGS_SECTIONS, type SettingsSectionId } from "./sections";
 import type { SettingsStore } from "./SettingsStore";
 import {
@@ -34,9 +37,21 @@ import {
 import { useSettings } from "./useSettings";
 import "./SettingsSurface.css";
 
+/**
+ * Everything the Plugins section needs, in one optional bundle: the surface
+ * itself owns no plugin state, and a window that never wired a registry simply
+ * omits it rather than passing three half-connected props.
+ */
+export interface SettingsPlugins {
+  store: PluginsStore;
+  native: PluginNative;
+  onOpen?(pluginId: string): void;
+}
+
 export interface SettingsSurfaceProps {
   store: SettingsStore;
   onClose(): void;
+  plugins?: SettingsPlugins;
 }
 
 interface LadderOption<T> {
@@ -203,7 +218,11 @@ const SSH_PASSWORD_POLICY_OPTIONS: ReadonlyArray<
   },
 ];
 
-export function SettingsSurface({ store, onClose }: SettingsSurfaceProps) {
+export function SettingsSurface({
+  store,
+  onClose,
+  plugins,
+}: SettingsSurfaceProps) {
   const settings = useSettings(store);
   const rootRef = useRef<HTMLElement | null>(null);
   const [activeId, setActiveId] = useState<SettingsSectionId>(
@@ -295,15 +314,31 @@ export function SettingsSurface({ store, onClose }: SettingsSurfaceProps) {
           aria-label={active.label}
         >
           <h3 className="settings-surface__panel-title">{active.label}</h3>
-          {active.fields.map((field) => (
-            <div className="settings-field" data-field={field} key={field}>
-              <SettingsControl
-                field={field}
-                settings={settings}
-                onChange={store.update}
+          {active.panel === "plugins" ? (
+            // A custom-panel section carries no fields; branching here keeps
+            // the panel chrome above identical so it reads as one surface.
+            plugins ? (
+              <PluginsPanel
+                store={plugins.store}
+                native={plugins.native}
+                {...(plugins.onOpen ? { onOpen: plugins.onOpen } : {})}
               />
-            </div>
-          ))}
+            ) : (
+              <p className="settings-section__note">
+                Plugin management is unavailable in this window.
+              </p>
+            )
+          ) : (
+            active.fields.map((field) => (
+              <div className="settings-field" data-field={field} key={field}>
+                <SettingsControl
+                  field={field}
+                  settings={settings}
+                  onChange={store.update}
+                />
+              </div>
+            ))
+          )}
         </div>
       </div>
     </section>
@@ -345,17 +380,25 @@ function RadioLadder<T extends string | number>({
   );
 }
 
-function Toggle({
+/**
+ * Exported because the Plugins panel switches plugins on with the same control
+ * every other on/off setting uses. `hint` is optional there and only there: in
+ * a dense plugin row the label carries the meaning and a second line would push
+ * the row off its rhythm.
+ */
+export function Toggle({
   name,
   label,
   hint,
   checked,
+  disabled = false,
   onToggle,
 }: {
   name: string;
   label: string;
-  hint: string;
+  hint?: string;
   checked: boolean;
+  disabled?: boolean;
   onToggle(checked: boolean): void;
 }) {
   return (
@@ -364,11 +407,14 @@ function Toggle({
         type="checkbox"
         name={name}
         checked={checked}
+        disabled={disabled}
         onChange={(event) => onToggle(event.currentTarget.checked)}
       />
       <span className="settings-radio__text">
         <span className="settings-radio__label">{label}</span>
-        <span className="settings-radio__hint">{hint}</span>
+        {hint === undefined ? null : (
+          <span className="settings-radio__hint">{hint}</span>
+        )}
       </span>
     </label>
   );

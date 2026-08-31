@@ -17,6 +17,13 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RUNTIME_MAX_BYTES: u64 = 64 * 1024;
+/// A manifest is a few dozen lines by contract; the same 64 KiB bound as the
+/// runtime file keeps a wrong folder pick (a repository full of large JSON)
+/// from being read into the webview.
+const MANIFEST_MAX_BYTES: u64 = 64 * 1024;
+/// The manifest file name is TermX's, not the plugin ecosystem's — spec §2
+/// deliberately does not reuse Showroom's own `plugin.json`.
+const MANIFEST_FILE_NAME: &str = "termx-plugin.json";
 /// The probe body is bounded to the same 64 KiB as the runtime file: both are
 /// tiny JSON documents by contract, and ureq's own `into_string` cap is 10 MiB
 /// — enough for a buggy plugin to make T6's 15 s health poller buffer 10 MiB
@@ -146,6 +153,41 @@ pub fn plugin_read_runtime(path: String) -> Result<Option<String>, String> {
     if bytes.len() as u64 > RUNTIME_MAX_BYTES {
         return Err(format!(
             "reading {}: plugin runtime file exceeds 64 KiB",
+            path.display()
+        ));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| format!("reading {} as UTF-8: {error}", path.display()))
+}
+
+/// Read a plugin folder's `termx-plugin.json`, or `None` when it has none.
+///
+/// A missing manifest is a normal answer, not an error: Settings falls back to
+/// the bundled manifest for a first-party plugin (spec §9), so a first-party
+/// repository never needs a TermX file. The command takes the FOLDER the user
+/// picked and joins the file name here, so the "which path is this" question
+/// has one answer on both sides of the IPC boundary.
+#[tauri::command]
+pub fn plugin_read_manifest(folder: String) -> Result<Option<String>, String> {
+    let folder = PathBuf::from(folder);
+    if !folder.is_absolute() {
+        return Err("plugin folder path must be absolute".to_string());
+    }
+    let path = folder.join(MANIFEST_FILE_NAME);
+
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("reading {}: {error}", path.display())),
+    };
+    let mut bytes = Vec::new();
+    file.take(MANIFEST_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    if bytes.len() as u64 > MANIFEST_MAX_BYTES {
+        return Err(format!(
+            "reading {}: plugin manifest exceeds 64 KiB",
             path.display()
         ));
     }
@@ -459,6 +501,44 @@ mod tests {
             plugin_read_runtime(p.to_string_lossy().into()).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn read_manifest_requires_absolute() {
+        assert!(plugin_read_manifest("showroom".into()).is_err());
+    }
+
+    #[test]
+    fn read_manifest_missing_is_none() {
+        // A plugin folder without a manifest is ordinary — Showroom's own
+        // repository has none and answers from the bundled manifest instead.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            plugin_read_manifest(dir.path().to_string_lossy().into()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn read_manifest_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "{\n  \"manifest\": 1,\n  \"id\": \"showroom\"\n}\n";
+        std::fs::write(dir.path().join(MANIFEST_FILE_NAME), text).unwrap();
+        assert_eq!(
+            plugin_read_manifest(dir.path().to_string_lossy().into()).unwrap(),
+            Some(text.to_string())
+        );
+    }
+
+    #[test]
+    fn read_manifest_rejects_oversize() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(MANIFEST_FILE_NAME),
+            vec![b'x'; MANIFEST_MAX_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(plugin_read_manifest(dir.path().to_string_lossy().into()).is_err());
     }
 
     #[test]

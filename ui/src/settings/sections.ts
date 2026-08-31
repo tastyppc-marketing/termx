@@ -14,13 +14,21 @@ export type SettingsSectionId =
   | "conversations"
   | "chat"
   | "saved"
-  | "ssh";
+  | "ssh"
+  | "plugins";
 
 export interface SettingsSection {
   readonly id: SettingsSectionId;
   readonly label: string;
   /** Fields this section owns, in the order the panel renders them. */
   readonly fields: readonly (keyof TermxSettings)[];
+  /**
+   * A section whose state is NOT in `TermxSettings` renders a component of its
+   * own instead of the field list. Per-plugin enable/paths live in
+   * `plugins_v1.json` (spec §7), which the flat settings interface cannot hold,
+   * so the surface branches on this marker before mapping `fields`.
+   */
+  readonly panel?: "plugins";
 }
 
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
@@ -67,4 +75,5 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       "sshEncryptPasswords",
     ],
   },
+  { id: "plugins", label: "Plugins", fields: [], panel: "plugins" },
 ];

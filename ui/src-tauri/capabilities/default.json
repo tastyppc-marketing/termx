@@ -17,6 +17,7 @@
     "allow-write-app-file",
     "allow-plugin-spawn",
     "allow-plugin-read-runtime",
+    "allow-plugin-read-manifest",
     "allow-plugin-probe",
     "allow-plugin-stderr-tail",
     "allow-read-ssh-config",

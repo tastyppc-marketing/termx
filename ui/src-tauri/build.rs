@@ -26,6 +26,7 @@ fn main() {
                 "chat_feed_close",
                 // Plugin system (Phase 1, spec §3a): ensure-up lifecycle.
                 "plugin_read_runtime",
+                "plugin_read_manifest",
                 "plugin_probe",
                 "plugin_spawn",
                 "plugin_stderr_tail",

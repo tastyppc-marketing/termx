@@ -7,11 +7,23 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PluginNative } from "../../plugins/native";
+import { PluginsStore } from "../../plugins/registry";
 import { THEME_IDS, THEMES } from "../../theme/themes";
 import { SETTINGS_SECTIONS } from "../sections";
 import { SettingsStore } from "../SettingsStore";
 import { SettingsSurface } from "../SettingsSurface";
 import { DEFAULT_SETTINGS } from "../settings";
+
+// The panel itself is covered by PluginsPanel.test.tsx; here the only question
+// is whether a section carrying `panel: "plugins"` reaches it at all.
+const { pluginsPanelProps } = vi.hoisted(() => ({ pluginsPanelProps: vi.fn() }));
+vi.mock("../PluginsPanel", () => ({
+  PluginsPanel: (props: Record<string, unknown>) => {
+    pluginsPanelProps(props);
+    return <div data-testid="plugins-panel-stub" />;
+  },
+}));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -93,6 +105,50 @@ describe("SettingsSurface", () => {
       await selectSection(section.id);
       expect(panelFields(), `fields of ${section.id}`).toEqual([...section.fields]);
     }
+  });
+
+  it("routes the Plugins section to the plugins panel", async () => {
+    const plugins = {
+      store: new PluginsStore(),
+      native: {} as PluginNative,
+      onOpen: vi.fn(),
+    };
+    pluginsPanelProps.mockClear();
+    await act(async () => {
+      root.render(
+        <SettingsSurface
+          store={new SettingsStore()}
+          onClose={() => undefined}
+          plugins={plugins}
+        />,
+      );
+    });
+    await selectSection("plugins");
+
+    expect(
+      container.querySelector("[data-testid='plugins-panel-stub']"),
+    ).not.toBeNull();
+    expect(pluginsPanelProps).toHaveBeenCalledWith(
+      expect.objectContaining({
+        store: plugins.store,
+        native: plugins.native,
+        onOpen: plugins.onOpen,
+      }),
+    );
+  });
+
+  it("explains the Plugins section when no registry is wired", async () => {
+    await renderSurface(new SettingsStore());
+    await selectSection("plugins");
+
+    // Never an empty panel: a section that renders nothing reads as a bug.
+    expect(
+      container.querySelector("[data-testid='plugins-panel-stub']"),
+    ).toBeNull();
+    expect(
+      container.querySelector(".settings-surface__panel .settings-section__note")
+        ?.textContent,
+    ).toBe("Plugin management is unavailable in this window.");
   });
 
   it("closes on Esc and from the back control", async () => {

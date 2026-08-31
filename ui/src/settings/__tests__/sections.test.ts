@@ -9,7 +9,7 @@ import { SETTINGS_SECTIONS } from "../sections";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings";
 
 describe("SETTINGS_SECTIONS", () => {
-  it("lists the eight sections in spec order with their labels", () => {
+  it("lists the nine sections in spec order with their labels", () => {
     expect(SETTINGS_SECTIONS.map((section) => [section.id, section.label])).toEqual([
       ["general", "General"],
       ["appearance", "Appearance"],
@@ -19,6 +19,7 @@ describe("SETTINGS_SECTIONS", () => {
       ["chat", "Chat View"],
       ["saved", "Saved sessions"],
       ["ssh", "SSH"],
+      ["plugins", "Plugins"],
     ]);
   });
 
@@ -69,6 +70,18 @@ describe("SETTINGS_SECTIONS", () => {
       "sshHostsMenu",
       "sshPasswordPolicy",
       "sshEncryptPasswords",
+    ]);
+    // Plugins is per-plugin state in plugins_v1.json, not TermxSettings, so it
+    // owns no fields — the completeness guard above stays satisfied.
+    expect(byId.plugins).toEqual([]);
+  });
+
+  it("marks Plugins as the one custom-panel section", () => {
+    // `panel` is what makes SettingsSurface render a component instead of the
+    // field list; a section carrying it by accident would render nothing.
+    const custom = SETTINGS_SECTIONS.filter((section) => section.panel !== undefined);
+    expect(custom.map((section) => [section.id, section.panel])).toEqual([
+      ["plugins", "plugins"],
     ]);
   });
 });

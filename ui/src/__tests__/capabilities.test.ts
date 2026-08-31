@@ -70,4 +70,13 @@ describe("plugin native commands (Phase 1)", () => {
     expect(capability.permissions).toContain("allow-plugin-probe");
     expect(capability.permissions).toContain("allow-plugin-stderr-tail");
   });
+
+  it(
+    "grants read-manifest — Settings resolves a picked folder's " +
+      "termx-plugin.json through it, and without the grant every folder reads " +
+      "as 'no manifest found' with no way to tell that apart from a real one",
+    () => {
+      expect(capability.permissions).toContain("allow-plugin-read-manifest");
+    },
+  );
 });

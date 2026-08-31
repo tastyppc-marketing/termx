@@ -33,6 +33,7 @@ pub fn run() {
             storage::read_app_file,
             storage::write_app_file,
             plugins::plugin_read_runtime,
+            plugins::plugin_read_manifest,
             plugins::plugin_probe,
             plugins::plugin_spawn,
             plugins::plugin_stderr_tail,

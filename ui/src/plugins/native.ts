@@ -15,6 +15,13 @@ export interface PluginNative {
     env?: Record<string, string>,
   ): Promise<number>;
   stderrTail(pid: number): Promise<string>;
+  /**
+   * Read `<folder>\termx-plugin.json`, or null when the folder has none — that
+   * is not an error: a first-party plugin answers from `BUNDLED_MANIFESTS`
+   * instead, so its repository needs no TermX file (spec §9). Takes the FOLDER,
+   * not the file: the join happens in Rust so one convention holds everywhere.
+   */
+  readManifest(folder: string): Promise<string | null>;
 }
 
 export const tauriPluginNative: PluginNative = {
@@ -29,5 +36,8 @@ export const tauriPluginNative: PluginNative = {
   },
   stderrTail(pid) {
     return invoke<string>("plugin_stderr_tail", { pid });
+  },
+  readManifest(folder) {
+    return invoke<string | null>("plugin_read_manifest", { folder });
   },
 };

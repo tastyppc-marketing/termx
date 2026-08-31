@@ -90,19 +90,43 @@ describe("tauriPluginNative invoke wrappers", () => {
     expect(invoke).toHaveBeenCalledWith("plugin_stderr_tail", { pid: 4242 });
   });
 
-  it("uses exactly these four command names", async () => {
+  it("reads a folder's manifest under the folder key", async () => {
+    // The Rust side joins `termx-plugin.json` itself, so Settings passes the
+    // FOLDER the user picked — sending a file path would read
+    // `<…>\termx-plugin.json\termx-plugin.json` and always report "missing".
+    invoke.mockResolvedValue('{"manifest":1}');
+
+    await expect(
+      tauriPluginNative.readManifest("C:\\plugins\\showroom"),
+    ).resolves.toBe('{"manifest":1}');
+    expect(invoke).toHaveBeenCalledWith("plugin_read_manifest", {
+      folder: "C:\\plugins\\showroom",
+    });
+  });
+
+  it("passes a folder without a manifest through as null", async () => {
+    invoke.mockResolvedValue(null);
+
+    await expect(
+      tauriPluginNative.readManifest("C:\\plugins\\showroom"),
+    ).resolves.toBeNull();
+  });
+
+  it("uses exactly these five command names", async () => {
     invoke.mockResolvedValue("");
 
     await tauriPluginNative.readRuntime("C:\\r.json");
     await tauriPluginNative.probe("http://127.0.0.1:1/", 200);
     await tauriPluginNative.spawn("node", [], "C:\\p");
     await tauriPluginNative.stderrTail(1);
+    await tauriPluginNative.readManifest("C:\\p");
 
     expect(invoke.mock.calls.map(([name]) => name)).toEqual([
       "plugin_read_runtime",
       "plugin_probe",
       "plugin_spawn",
       "plugin_stderr_tail",
+      "plugin_read_manifest",
     ]);
   });
 });

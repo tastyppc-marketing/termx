@@ -277,3 +277,208 @@
   color: var(--text-hint);
   font-size: 11px;
 }
+
+/* ── Plugins panel ─────────────────────────────────────────────────────────
+   A drawn list, not a stack of cards: one hairline frame, square corners, rows
+   divided by a single rule. Radius belongs to the controls inside the rows
+   (buttons, chips), never to the rows or the list itself. */
+
+.settings-plugins__list {
+  margin: 4px 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  list-style: none;
+}
+
+.settings-plugin {
+  display: grid;
+  min-height: var(--row-chrome);
+  align-items: center;
+  /* Mark | name + path | controls. The middle column is the only one that
+     grows, so a long path shortens rather than pushing the toggle off. */
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 5px 8px;
+}
+
+.settings-plugin + .settings-plugin {
+  border-top: 1px solid var(--border);
+}
+
+.settings-plugin__icon {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.settings-plugin__main {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.settings-plugin__name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* The name yields before the chips do: a plugin called something long must not
+   push its own status off the row. */
+.settings-plugin__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The folder is machine text — set it as such, and one step back in contrast
+   so the plugin's name stays the thing you read first. */
+.settings-plugin__path {
+  overflow: hidden;
+  color: var(--text-hint);
+  font: 11px "Cascadia Mono", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-plugin__hint {
+  color: var(--text-hint);
+  font-size: 11px;
+}
+
+.settings-plugin__tag,
+.settings-plugin__status {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.settings-plugin__tag {
+  color: var(--text-hint);
+}
+
+/* A row that cannot work says so in the error colour — the same signal the
+   rest of the app uses for a destructive or broken state. */
+.settings-plugin__status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-plugin__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The shared toggle is built for a stacked label + hint; in a row it centres
+   on the label and loses the descender space. */
+.settings-plugin .settings-check {
+  padding: 3px 6px;
+  align-items: center;
+}
+
+.settings-plugin .settings-check input {
+  margin-top: 0;
+}
+
+.settings-plugins__action {
+  min-height: var(--row-list);
+  padding: 0 10px;
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.settings-plugins__action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.settings-plugins__action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.settings-plugins__action--primary {
+  background: var(--accent-25);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.settings-plugins__action--primary:hover:not(:disabled) {
+  background: var(--accent-40);
+}
+
+.settings-plugins__action--danger {
+  color: var(--error);
+}
+
+.settings-plugins__action--danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--error) 55%, transparent);
+}
+
+/* Same dashed frame as an empty pane: a place something belongs, currently
+   without anything in it. */
+.settings-plugins__empty {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 16px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 0;
+  text-align: center;
+}
+
+.settings-plugins__empty-title {
+  color: var(--text-sub);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-plugins__empty-detail {
+  color: var(--text-sub);
+  font-size: 12px;
+}
+
+.settings-plugins__add {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-plugins__error {
+  margin: 6px 0 0;
+  color: var(--error);
+  font-size: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-plugins__action {
+    transition: none;
+  }
+}
