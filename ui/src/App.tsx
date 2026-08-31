@@ -656,7 +656,35 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const anyAliveRef = useRef(anyAlive);
   anyAliveRef.current = anyAlive;
   const bypassCloseGuardRef = useRef(false);
+  /**
+   * Every debounced disk write, emptied before the webview dies. Nothing on
+   * this path used to flush at all, so a Settings change (enable, disable, Add
+   * folder, Remove) or a layout edit made inside its debounce window was
+   * simply lost on quit.
+   *
+   * Registry first, then the controller: `plugins_v1.json` is what the layout
+   * and the pane bindings REFER to. A half-done shutdown that saved only the
+   * registry just forgets a pane; one that saved only the layout names a
+   * plugin with no entry — "not installed" on the next boot, with the folder
+   * path gone. Both are best-effort: a failed save reaches the user through
+   * `onSaveError`, and neither may strand a window that is trying to close.
+   */
+  const flushBeforeClose = async (): Promise<void> => {
+    try {
+      await workspace.plugins.flush();
+    } catch {
+      // Never hold a closing window open on a rejected write.
+    }
+    try {
+      await controller.flush();
+    } catch {
+      // Same: the layout/bindings flush is best-effort too.
+    }
+  };
   const closeWindow = async (stopAll: boolean): Promise<void> => {
+    // Strictly BEFORE the shutdown below: the layout half of `flush()` writes
+    // through the daemon client, which `shutdown()` takes away.
+    await flushBeforeClose();
     if (stopAll) {
       try {
         workspace.client.shutdown?.();
@@ -693,7 +721,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
             settingsStore.getSnapshot().onWindowClose,
             anyAliveRef.current,
           );
+          // Nothing to ask the user, but the debounced writes still have to
+          // land, so this close is held as well: flush, then close explicitly.
           if (decision === "silent" || decision === "keep-running") {
+            event.preventDefault();
+            void closeWindowRef.current(false);
             return;
           }
           event.preventDefault();

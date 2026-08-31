@@ -138,6 +138,8 @@ function harness(options: {
   ensureUp?: (pluginId: string) => Promise<EnsureUpResult>;
   /** Why a plugin cannot be opened; the host owns this text. */
   unavailableReason?: (pluginId: string) => string | null;
+  /** Aux-only seam: ask main to start a plugin this window may not spawn. */
+  requestEnsure?: (pluginId: string) => void;
   /** Tab/group id source; a throwing one proves the open paths stay contained. */
   generateId?: () => string;
 } = {}) {
@@ -212,12 +214,16 @@ function harness(options: {
   });
   const manifests = options.pluginManifests ?? { showroom: SHOWROOM };
   const ensureUp = vi.fn(options.ensureUp ?? (async () => runtimeUp()));
+  const requestEnsure = vi.fn(options.requestEnsure ?? (() => undefined));
   const plugins: WorkspacePluginHost = {
     manifestFor: (id: string) => manifests[id] ?? null,
     ensureUp,
     ...(options.unavailableReason
       ? { unavailableReason: options.unavailableReason }
       : {}),
+    // Present on every harness host: a controller that never calls it is the
+    // thing under test in the main-window cases.
+    requestEnsure,
   };
   let attachmentSnapshot = { sessions: {} };
   const writes: Array<[number, string | Uint8Array]> = [];
@@ -269,6 +275,7 @@ function harness(options: {
   });
   return {
     controller,
+    requestEnsure,
     store,
     layoutWrites,
     client,
@@ -3120,6 +3127,53 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
 
     expect(h.pluginPanes.getSnapshot()).toEqual({});
     expect(h.controller.getSnapshot().layout.tabs["tab-3"]).toBeUndefined();
+  });
+
+  it("an aux window's Relaunch asks main to start the plugin", async () => {
+    // Spawning is main's alone, so this window's own ensure-up can only
+    // WATCH. Without the request there is nothing behind the button: the pane
+    // spins for the ten-second observe budget and returns to the same down
+    // card telling the user to go to the main window.
+    const h = harness({
+      initial: panelInAux(),
+      windowId: "aux-1",
+      pluginBindings: BOUND_PANEL,
+    });
+    await tick();
+
+    await h.controller.relaunchPlugin(PLUGIN_PANE_MIN_ID);
+
+    expect(h.requestEnsure).toHaveBeenCalledTimes(1);
+    expect(h.requestEnsure).toHaveBeenCalledWith("showroom");
+  });
+
+  it("MAIN answers another window's Relaunch with a forced ensure-up", async () => {
+    // The receiving half of the same click. It must be a FORCE: the plugin
+    // being relaunched is usually one main still has cached as "up", so a
+    // plain ensure-up would return without asking anything.
+    const h = harness({ initial: layoutWithPanel(), pluginBindings: BOUND_PANEL });
+    await tick();
+    expect(h.ensureUp).toHaveBeenCalledTimes(1);
+
+    await h.controller.forcePluginRestart("showroom");
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(2);
+  });
+
+  it("an aux window ignores a Relaunch request meant for main", async () => {
+    // Every window receives the broadcast; only main may act on it, or the
+    // singleton gets started once per open window.
+    const h = harness({
+      initial: panelInAux(),
+      windowId: "aux-1",
+      pluginBindings: BOUND_PANEL,
+    });
+    await tick();
+    const atBoot = h.ensureUp.mock.calls.length;
+
+    await h.controller.forcePluginRestart("showroom");
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(atBoot);
   });
 
   it("an aux window gives up when main never acknowledges the binding", async () => {

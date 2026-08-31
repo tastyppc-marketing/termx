@@ -10,6 +10,7 @@ import { CAPTURES_FILE, compactCaptures } from "../../conversations/captures";
 import type { LlmSessionRecord } from "../../conversations/types";
 import { PLUGIN_PANE_MIN_ID, parsePluginPanes } from "../../plugins/paneBindings";
 import { emptyLayout, serializeLayout } from "../../state/layout";
+import { loopbackBus } from "../windowBus";
 import {
   bootstrapWorkspace,
   parseBootstrapHostResult,
@@ -1336,6 +1337,153 @@ describe("bootstrapWorkspace plugin panes", () => {
     // The spy's spawn throws, so the attempt is reported as a failure rather
     // than pretending a process appeared.
     expect(result.ok).toBe(false);
+  });
+
+  it("writes a pending registry change when the window closes", async () => {
+    // `PluginsStore` debounces its disk write, and closing a window is exactly
+    // when that debounce is still pending: add the folder, open the panel,
+    // quit. The layout and the bindings file would then name a plugin
+    // `plugins_v1.json` had never heard of, and the next boot says it is not
+    // installed with the folder path gone.
+    const spy = healthyNative();
+    const { appFiles, writes } = files({ "plugins_v1.json": registry(true) });
+    const fake = fakeClient({});
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      generateId: () => "panel-tab",
+      pluginEnv: { APPDATA: "C:\\data" },
+      pluginNative: spy.native,
+    });
+    // Fake timers from HERE: the 800 ms debounce must never get the chance to
+    // fire, or the test passes on time elapsing rather than on the close
+    // flushing — which is the whole point.
+    vi.useFakeTimers();
+    try {
+      workspace.plugins.add("toolbox", "C:\\code\\toolbox");
+      expect(writes.filter(([name]) => name === "plugins_v1.json")).toHaveLength(0);
+
+      workspace.controller.dispose();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const registryWrites = writes.filter(([name]) => name === "plugins_v1.json");
+      expect(registryWrites).toHaveLength(1);
+      expect(JSON.parse(registryWrites[0]![1]).plugins.toolbox.path)
+        .toBe("C:\\code\\toolbox");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("MAIN waits for its own bus listeners before booting", async () => {
+    // An aux window's `sync` — or a bind forwarded the moment it opened — that
+    // wins the race against an unresolved `listen()` is dropped, and nothing
+    // re-sends it. Main has to be listening before it can open a window that
+    // talks to it.
+    let releaseListeners = (): void => undefined;
+    const listening = new Promise<void>((resolve) => {
+      releaseListeners = resolve;
+    });
+    const bus = loopbackBus();
+    const slowBus = { ...bus, ready: () => listening };
+    const spy = healthyNative();
+    const { appFiles } = files({ "plugins_v1.json": registry(true) });
+    const fake = fakeClient({});
+    let booted = false;
+    const booting = bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      generateId: () => "panel-tab",
+      pluginEnv: { APPDATA: "C:\\data" },
+      pluginNative: spy.native,
+      windowBus: slowBus,
+    }).then((workspace) => {
+      booted = true;
+      return workspace;
+    });
+
+    // A whole macrotask turn, not a couple of microtasks: every other await on
+    // the boot path (file reads, the host handshake, the manifest budget)
+    // settles inside it, so a boot still pending here is pending on `ready()`
+    // and nothing else.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 50);
+    });
+    expect(booted).toBe(false);
+
+    releaseListeners();
+    const workspace = await booting;
+
+    expect(booted).toBe(true);
+    workspace.controller.dispose();
+  });
+
+  it("an aux window fails fast on a path fault instead of waiting ten seconds", async () => {
+    // `plugin_read_runtime` answers null for a missing file but REJECTS for an
+    // unexpanded `%VAR%`, a relative path or a denied read. Those cannot start
+    // working because time passed, and reporting "relaunch it from the main
+    // window" for a path fault sends the user to a button that cannot help.
+    vi.useFakeTimers();
+    try {
+      const spy = healthyNative({
+        readRuntime: async () => {
+          throw new Error("runtime path must be absolute");
+        },
+      });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+        windowId: "aux-1",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const workspace = await booting;
+
+      const pending = workspace.pluginHost.ensureUp("showroom");
+      // No clock advance at all: the answer is already there.
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(await pending).toEqual({
+        ok: false,
+        reason: "runtime path must be absolute",
+        stderrTail: "",
+      });
+      expect(spy.spawn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops an in-flight observe when the window is disposed", async () => {
+    // The observe budget is ten seconds and a torn-out window can be closed
+    // well inside it. A loop that keeps reading files and probing ports for a
+    // window that is gone is a leak the user pays for on every close.
+    vi.useFakeTimers();
+    try {
+      const spy = healthyNative({ readRuntime: async () => null });
+      const booting = bootWith({
+        seed: { "plugins_v1.json": registry(true) },
+        native: spy.native,
+        windowId: "aux-1",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const workspace = await booting;
+
+      const pending = workspace.pluginHost.ensureUp("showroom");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(spy.runtimeReads.length).toBeGreaterThan(1);
+
+      workspace.controller.dispose();
+      const atDispose = spy.runtimeReads.length;
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(spy.runtimeReads.length).toBe(atDispose);
+      // And the caller is answered rather than left hanging on a dead loop.
+      expect((await pending).ok).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("an aux window waits, then points at the main window", async () => {

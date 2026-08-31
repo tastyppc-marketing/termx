@@ -270,6 +270,17 @@ export interface WorkspacePluginHost {
    */
   unavailableReason?: (pluginId: string) => string | null;
   /**
+   * Ask whoever owns the lifecycle to (re)start this plugin — Relaunch, from a
+   * window that may not spawn.
+   *
+   * Only an aux window's host supplies this: spawning is main's alone (spec
+   * §3), so without it an aux window's Relaunch button has nothing to press —
+   * it observes for ten seconds and returns to the same down card. Fire and
+   * forget by design: the answer arrives as the plugin coming up, which this
+   * window is already watching for.
+   */
+  requestEnsure?: (pluginId: string) => void;
+  /**
    * Release whatever the host holds (registry subscriptions, timers). Called
    * from `WorkspaceController.dispose`, which is the only lifetime the host is
    * built for.
@@ -2562,7 +2573,27 @@ export class WorkspaceController {
       return;
     }
     this.setNotice(null);
+    // In an aux window this is the whole of the restart: the local ensure-up
+    // below can only WATCH. Sent before it, so main is already spawning while
+    // this window starts looking.
+    try {
+      this.plugins?.requestEnsure?.(binding.pluginId);
+    } catch {
+      // A dead bus must not stop this window from observing.
+    }
     await this.ensurePluginUp(binding.pluginId, { force: true });
+  };
+
+  /**
+   * Another window has asked for a plugin to be started (its Relaunch, over
+   * the window bus). Main-only, because that is the whole point: the asking
+   * window may not spawn.
+   */
+  forcePluginRestart = async (pluginId: string): Promise<void> => {
+    if (this.windowId !== MAIN_WINDOW_ID || this.disposed) {
+      return;
+    }
+    await this.ensurePluginUp(pluginId, { force: true });
   };
 
   /**
@@ -3246,6 +3277,10 @@ export class WorkspaceController {
       return chained;
     }
     if (!options.force && this.pluginRuntimes.has(pluginId)) {
+      // Any answer counts, including "down": a plugin the user killed stays
+      // killed until they press Relaunch, which is what makes the offline
+      // card reachable at all. Main's poll is what keeps this cache honest —
+      // see `syncPluginHealthPolls`.
       return Promise.resolve();
     }
     return this.startPluginEnsure(plugins, pluginId);
@@ -3352,35 +3387,6 @@ export class WorkspaceController {
     this.publish();
   }
 
-  /// Every plugin with at least one pane in this window's layout. A pane counts
-  /// only WITH a binding, exactly as the snapshot counts it — an orphaned
-  /// reserved id is a dead pane, and polling for it would poll for nothing.
-  /**
-   * The plugins rendered by a pane in THIS window. Deliberately not the whole
-   * layout: every window builds its own controller from the same blob, so a
-   * layout-wide answer would have three windows all polling the health of one
-   * pane that only one of them shows.
-   */
-  private openPluginIds(): Set<string> {
-    const open = new Set<string>();
-    const bindings = this.pluginPanes.getSnapshot();
-    const layout = this.store.getState();
-    const mine = flattenTabIds(layout, this.windowId).flatMap((tabId) => {
-      const tab = layout.tabs[tabId];
-      return tab ? sessionIdsInTab(tab) : [];
-    });
-    for (const sessionId of mine) {
-      if (!isPluginPaneId(sessionId)) {
-        continue;
-      }
-      const pluginId = bindings[String(sessionId)]?.pluginId;
-      if (pluginId !== undefined) {
-        open.add(pluginId);
-      }
-    }
-    return open;
-  }
-
   /// Match the pollers to the panes on screen. Runs from `publish` — the one
   /// place every binding change, layout mutation and health update already
   /// funnels through — so a panel opened, closed, or moved out of the layout
@@ -3391,7 +3397,14 @@ export class WorkspaceController {
       // The overwhelmingly common case (no plugins wired at all): free.
       return;
     }
-    const open = this.disposed ? new Set<string>() : this.openPluginIds();
+    // The same set this window keeps runtimes for, which on MAIN is every
+    // pane in the blob. Main is the only window allowed to start a plugin, so
+    // it is the only window whose cached "up" can send the next open at a
+    // dead port — and a panel living in an aux window is exactly the case
+    // where main would otherwise never look again. An aux window polls its own
+    // slot. A plugin shown in an aux window is therefore polled twice, by that
+    // window and by main; that is the price of main's cache being true.
+    const open = this.disposed ? new Set<string>() : this.pluginsRenderedHere();
     for (const [pluginId, timer] of [...this.pluginHealthTimers]) {
       if (!open.has(pluginId)) {
         clearInterval(timer);

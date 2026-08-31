@@ -25,6 +25,14 @@ export type LayoutMutation = { kind: "setLayout"; layout: JsonValue };
  * startup, and a Tauri `listen()` that has not resolved yet drops the
  * broadcast). Asking main to re-broadcast once, after the listener exists,
  * closes that window without any promise plumbing in the bus.
+ *
+ * `ensure` is Relaunch from an aux window. It is on this channel rather than a
+ * new one for the same reason the binds are: it is a window asking main to do
+ * the one thing only main may do. Spawning is main's alone (spec §3 — two
+ * windows both finding a plugin down would both start the singleton), so an
+ * aux window's Relaunch has nothing to press without this. It carries no
+ * reply: the asking window goes on observing, and sees the plugin come up the
+ * same way it would if main had started it for any other reason.
  */
 export type PluginPanesMutation =
   | {
@@ -35,7 +43,8 @@ export type PluginPanesMutation =
       path?: string;
     }
   | { kind: "pluginPanes"; op: "unbind"; sessionIds: number[] }
-  | { kind: "pluginPanes"; op: "sync" };
+  | { kind: "pluginPanes"; op: "sync" }
+  | { kind: "pluginPanes"; op: "ensure"; pluginId: string };
 
 export interface WindowBus {
   /** Aux → main: apply this mutation to the shared layout. The promise
@@ -53,7 +62,10 @@ export interface WindowBus {
    * other way, over `forwardPluginPanes`.
    */
   broadcastPluginPanes(state: JsonValue): Promise<void>;
-  /** Aux → main: apply this binding change, or (`sync`) re-send the truth. */
+  /**
+   * Aux → main: apply this binding change, (`sync`) re-send the truth, or
+   * (`ensure`) start the plugin, which only main may do.
+   */
   forwardPluginPanes(mutation: PluginPanesMutation): Promise<void>;
   onMutation(handler: (mutation: LayoutMutation) => void): () => void;
   onLayout(handler: (layout: JsonValue) => void): () => void;
@@ -101,6 +113,13 @@ function parsePluginPanesMutation(payload: unknown): PluginPanesMutation | null 
   const record = payload as Record<string, unknown>;
   if (record.op === "sync") {
     return { kind: "pluginPanes", op: "sync" };
+  }
+  if (record.op === "ensure") {
+    const { pluginId } = record;
+    if (typeof pluginId !== "string" || pluginId.length === 0) {
+      return null;
+    }
+    return { kind: "pluginPanes", op: "ensure", pluginId };
   }
   if (record.op === "bind") {
     const { sessionId, pluginId, path } = record;

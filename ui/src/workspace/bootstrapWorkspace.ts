@@ -20,14 +20,14 @@ import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
 import {
+  connect as connectPlugin,
   DEFAULT_SPAWN_TIMEOUT_MS,
   ensureUp,
   isHealthy,
-  parseRuntimeFile,
   POLL_INTERVAL_MS,
   PROBE_TIMEOUT_MS,
+  type ConnectOutcome,
   type EnsureUpResult,
-  type PluginRuntime,
 } from "../plugins/lifecycle";
 import { expandEnv, type PluginManifest } from "../plugins/manifest";
 import { tauriPluginNative, type PluginNative } from "../plugins/native";
@@ -355,6 +355,11 @@ export async function bootstrapWorkspace(
   const connect = options.connect ?? ((connectOptions) => HostClient.connect(connectOptions));
   let client: BootstrapWorkspaceClient | null = null;
   let controller: WorkspaceController | null = null;
+  /// Everything this workspace subscribed to that outlives a single call:
+  /// window-bus listeners and the host client's exit hook. Released by
+  /// `pluginHost.dispose()`, which `WorkspaceController.dispose()` runs — so a
+  /// closed window stops adopting layouts and re-reading capture files.
+  const releaseOnDispose: Array<() => void> = [];
   let connection: ReconnectingHostClient<BootstrapWorkspaceClient> | null = null;
 
   try {
@@ -547,7 +552,7 @@ export async function bootstrapWorkspace(
         // A forwarded blob is untrusted input from another window: parse it
         // like any GetState blob and drop it on any violation — main keeps
         // its own model, which the next broadcast re-asserts.
-        bus.onMutation((mutation) => {
+        releaseOnDispose.push(bus.onMutation((mutation) => {
           const proposed = parseLayout(mutation.layout);
           if (proposed === null) {
             return;
@@ -556,14 +561,14 @@ export async function bootstrapWorkspace(
           if (adopted === proposed) {
             persistence.record(adopted, "structural");
           }
-        });
+        }));
       } else {
-        bus.onLayout((layout) => {
+        releaseOnDispose.push(bus.onLayout((layout) => {
           const truth = parseLayout(layout);
           if (truth !== null) {
             store.replaceState(truth);
           }
-        });
+        }));
       }
     }
     // Same single-writer rule as the layout, applied to the bindings file: the
@@ -613,7 +618,7 @@ export async function bootstrapWorkspace(
         });
     if (bus !== null) {
       if (bootWindowId === MAIN_WINDOW_ID) {
-        bus.onPluginPanesMutation((mutation) => {
+        releaseOnDispose.push(bus.onPluginPanesMutation((mutation) => {
           if (mutation.op === "bind") {
             pluginPanes.bind(mutation.sessionId, {
               pluginId: mutation.pluginId,
@@ -621,6 +626,12 @@ export async function bootstrapWorkspace(
             });
           } else if (mutation.op === "unbind") {
             pluginPanes.unbind(mutation.sessionIds);
+          } else if (mutation.op === "ensure") {
+            // Another window's Relaunch. Spawning is main's alone, so this is
+            // the only place that click can be honoured — and it must be a
+            // FORCE: the plugin the user is relaunching is usually one main
+            // still has cached as "up".
+            void controller?.forcePluginRestart(mutation.pluginId);
           } else {
             // Catch-up for a window that booted after our last broadcast: it
             // asked because its file read may already be stale.
@@ -628,11 +639,18 @@ export async function bootstrapWorkspace(
               toJsonPluginPanes(pluginPanes.getSnapshot()),
             );
           }
-        });
+        }));
+        // Main waits for its own registration too. An aux window's `sync` (or
+        // a bind forwarded the instant it opened) that wins the race against
+        // an unresolved `listen()` is dropped, and nothing re-sends it — so
+        // this has to settle before any aux window can be opened.
+        await bus.ready();
       } else {
         // A broadcast is untrusted input from another window: parse it like a
         // file read and adopt only what survives.
-        bus.onPluginPanes((state) => pluginPanes.adopt(parsePluginPanesValue(state)));
+        releaseOnDispose.push(
+          bus.onPluginPanes((state) => pluginPanes.adopt(parsePluginPanesValue(state))),
+        );
         // Only once the subscription is REALLY live (the transport's listen is
         // async) do we ask main for the truth — otherwise the answer could
         // arrive before we are listening and be lost. The file read above is
@@ -710,6 +728,38 @@ export async function bootstrapWorkspace(
      * change; re-picking the same folder in Settings is a no-op by design
      * (`registry.add` returns early on an unchanged path).
      */
+    // The host's own lifetime. A spawn poll runs for ten seconds and an aux
+    // window's observe for ten more, so both can easily outlive the window
+    // that started them - and a loop that keeps reading files and probing
+    // ports after its window is gone is a leak the user pays for on every
+    // tear-out and close.
+    let hostReleased = false;
+    const pendingSleeps = new Set<{
+      timer: ReturnType<typeof setTimeout>;
+      wake: () => void;
+    }>();
+    const hostSleep = (ms: number): Promise<void> =>
+      new Promise<void>((resolve) => {
+        if (hostReleased) {
+          resolve();
+          return;
+        }
+        const entry = {
+          timer: setTimeout(() => {
+            pendingSleeps.delete(entry);
+            resolve();
+          }, ms),
+          wake: resolve,
+        };
+        pendingSleeps.add(entry);
+      });
+    /**
+     * `Infinity` once released, so the spawn poll's `while (now() < deadline)`
+     * ends at its next check instead of running out the whole budget inside a
+     * window that has closed.
+     */
+    const hostNow = (): number =>
+      (hostReleased ? Number.POSITIVE_INFINITY : Date.now());
     const folderManifests = new Map<string, PluginManifest | null>();
     const manifestListeners = new Set<() => void>();
     let manifestEpoch = 0;
@@ -822,32 +872,14 @@ export async function bootstrapWorkspace(
      */
     const lookForRuntime = async (
       manifest: PluginManifest,
-      runtimePath: string,
-    ): Promise<PluginRuntime | null> => {
-      let text: string | null;
-      try {
-        text = await pluginNative.readRuntime(runtimePath);
-      } catch {
-        return null;
-      }
-      const file = parseRuntimeFile(text);
-      if (file === null) {
-        return null;
-      }
-      const url = `http://127.0.0.1:${file.port}`;
-      let body: string;
-      try {
-        body = await pluginNative.probe(
-          `${url}${manifest.discovery.healthPath}`,
-          PROBE_TIMEOUT_MS,
-        );
-      } catch {
-        return null;
-      }
-      if (!isHealthy(body)) {
-        return null;
-      }
-      return { port: file.port, token: file.token, version: "", url };
+    ): Promise<ConnectOutcome> => {
+      const env = await pluginEnv();
+      return connectPlugin(expandEnv(manifest.discovery.runtimeFile, env), manifest, {
+        native: pluginNative,
+        env,
+        now: hostNow,
+        sleep: hostSleep,
+      });
     };
     /**
      * An aux window's ensure-up: WAIT for the plugin, never start it.
@@ -863,37 +895,77 @@ export async function bootstrapWorkspace(
     const observePluginUp = async (
       manifest: PluginManifest,
     ): Promise<EnsureUpResult> => {
-      const runtimePath = expandEnv(manifest.discovery.runtimeFile, await pluginEnv());
       const deadline = Date.now() + DEFAULT_SPAWN_TIMEOUT_MS;
-      for (;;) {
-        const runtime = await lookForRuntime(manifest, runtimePath);
-        if (runtime !== null) {
-          return { ok: true, runtime };
+      // The released check is the LOOP condition, so the wake `dispose` gives
+      // a sleeping poll ends it rather than buying one more read and probe.
+      while (!hostReleased) {
+        const outcome = await lookForRuntime(manifest);
+        if (outcome.kind === "up") {
+          return { ok: true, runtime: outcome.runtime };
+        }
+        if (outcome.kind === "unreadable") {
+          // The same fail-fast main gets: an unexpanded `%VAR%`, a relative
+          // path, a denied read. Spending the whole ten seconds on a path
+          // fault and then blaming the main window is the wrong answer twice.
+          return { ok: false, reason: outcome.reason, stderrTail: "" };
         }
         if (Date.now() >= deadline) {
-          return {
-            ok: false,
-            reason: "The plugin is not running. Relaunch it from the main window.",
-            stderrTail: "",
-          };
+          break;
         }
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, POLL_INTERVAL_MS);
-        });
+        await hostSleep(POLL_INTERVAL_MS);
       }
+      return {
+        ok: false,
+        reason: "The plugin is not running. Relaunch it from the main window.",
+        stderrTail: "",
+      };
     };
     const pluginHost: WorkspacePluginHost = {
       manifestFor: installedManifest,
       unavailableReason,
       dispose: () => {
         manifestsReleased = true;
+        hostReleased = true;
         stopWatchingRegistry();
         manifestListeners.clear();
         if (refreshTimer !== null) {
           clearTimeout(refreshTimer);
           refreshTimer = null;
         }
+        // Wake every poll so its loop reaches the released check and returns,
+        // instead of holding a timer inside a window being destroyed.
+        for (const entry of [...pendingSleeps]) {
+          clearTimeout(entry.timer);
+          pendingSleeps.delete(entry);
+          entry.wake();
+        }
+        for (const release of releaseOnDispose.splice(0)) {
+          try {
+            release();
+          } catch {
+            // One failed unsubscribe must not strand the others.
+          }
+        }
+        // The registry debounces its disk write by 800 ms, and closing a
+        // window is exactly when that debounce is still pending: add a folder,
+        // open the panel, quit. The layout and the bindings would then name a
+        // plugin `plugins_v1.json` had never heard of.
+        void plugins.flush();
       },
+      ...(bus !== null && bootWindowId !== MAIN_WINDOW_ID
+        ? {
+          // Spawning is main's alone, so this window's Relaunch is a REQUEST.
+          // The answer comes back as the plugin appearing, which the observe
+          // loop started by the same click is already watching for.
+          requestEnsure: (pluginId: string) => {
+            void bus.forwardPluginPanes({
+              kind: "pluginPanes",
+              op: "ensure",
+              pluginId,
+            });
+          },
+        }
+        : {}),
       ensureUp: async (pluginId: string) => {
         const refusal = unavailableReason(pluginId);
         if (refusal !== null) {
@@ -907,8 +979,8 @@ export async function bootstrapWorkspace(
         return ensureUp(manifest, expandEnv(entry.path, await pluginEnv()), {
           native: pluginNative,
           env: await pluginEnv(),
-          now: () => Date.now(),
-          sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+          now: hostNow,
+          sleep: hostSleep,
         });
       },
       /**
@@ -1006,9 +1078,9 @@ export async function bootstrapWorkspace(
     // file read at that moment; a failed read leaves the last good map in
     // place. Fire-and-forget: nothing waits on the refresh, the pane simply
     // has its capture by the time the user reaches for the button.
-    client.onSessionExited(() => {
+    releaseOnDispose.push(client.onSessionExited(() => {
       refreshCaptures();
-    });
+    }));
 
     const windowId = bootWindowId;
     const slot = slotOf(reconciled.layout, windowId);

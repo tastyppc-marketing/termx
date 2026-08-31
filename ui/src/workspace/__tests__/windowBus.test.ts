@@ -304,6 +304,56 @@ function tornLayout(pluginPane = false): Layout {
   return layout;
 }
 
+/// The tear-out: the same torn layout, but the plugin pane is in the AUX
+/// window's rail rather than main's.
+function panelTornOut(): Layout {
+  const layout = tornLayout(true);
+  layout.rootItems = layout.rootItems.filter(
+    (item) => !(item.kind === "tab" && item.id === "tab-3"),
+  );
+  layout.auxWindows["aux-1"] = {
+    rootItems: [{ kind: "tab", id: "tab-2" }, { kind: "tab", id: "tab-3" }],
+    activeTabId: "tab-3",
+    bounds: null,
+  };
+  return layout;
+}
+
+/// A plugin native whose runtime file can be taken away mid-test — the user
+/// killing `node server/showroom.js` — and comes back when something spawns.
+function killablePlugin(state: { alive: boolean } = { alive: true }) {
+  const spawn = vi.fn(async (): Promise<number> => {
+    state.alive = true;
+    return 4242;
+  });
+  const native = {
+    readRuntime: async () =>
+      (state.alive
+        ? JSON.stringify({ port: 7788, token: "t", version: "1.0.0" })
+        : null),
+    probe: async () => {
+      if (!state.alive) {
+        throw new Error("connection refused");
+      }
+      return JSON.stringify({ ok: true, version: "1.0.0" });
+    },
+    spawn,
+    stderrTail: async () => "",
+    readManifest: async () => null,
+  };
+  return { native, spawn, state };
+}
+
+const SHOWROOM_REGISTRY = JSON.stringify({
+  version: 1,
+  plugins: { showroom: { path: "C:\\code\\showroom", enabled: true } },
+});
+
+const PANEL_BINDING = JSON.stringify({
+  version: 1,
+  panes: { [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" } },
+});
+
 function session(id: number): SessionInfo {
   return {
     id,
@@ -552,6 +602,61 @@ describe("single-writer wiring over the bus", () => {
     expect(aux.pluginPanes.getSnapshot()).toEqual({
       "2147483648": { pluginId: "showroom" },
     });
+  });
+
+  it("an aux window's Relaunch makes MAIN spawn the plugin", async () => {
+    // Michael's flow: tear a Showroom tab into its own window, kill the
+    // plugin, press Relaunch. Spawning is main's alone (spec §3), so without a
+    // request over the bus that button has nothing behind it — the pane spins
+    // for ten seconds and comes back to the same card telling the user to go
+    // to the main window they just left.
+    const bus = loopbackBus();
+    const layout = panelTornOut();
+    const seed = {
+      "plugins_v1.json": SHOWROOM_REGISTRY,
+      "plugin_panes_v1.json": PANEL_BINDING,
+    } as Partial<Record<AppFileName, string>>;
+    // ONE runtime file, two windows reading it: the plugin's liveness is
+    // shared, only the spawn spies are per window.
+    const plugin = { alive: true };
+    const mainPlugin = killablePlugin(plugin);
+    const auxPlugin = killablePlugin(plugin);
+    const main = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fakeClient(layout).client,
+      appFiles: fakeAppFiles(seed).store,
+      pluginEnv: { APPDATA: "C:\\data" },
+      pluginNative: mainPlugin.native,
+      windowBus: bus,
+    });
+    const aux = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fakeClient(layout).client,
+      appFiles: fakeAppFiles(seed).store,
+      windowId: "aux-1",
+      pluginEnv: { APPDATA: "C:\\data" },
+      pluginNative: auxPlugin.native,
+      windowBus: bus,
+    });
+    // Both windows adopted the running plugin; nobody had to start it.
+    await vi.waitFor(() => {
+      expect(aux.controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID]
+        ?.pluginHealth).toBe("up");
+    });
+    expect(mainPlugin.spawn).not.toHaveBeenCalled();
+
+    // The user kills the plugin, then presses Relaunch in the aux window.
+    plugin.alive = false;
+    await aux.controller.relaunchPlugin(PLUGIN_PANE_MIN_ID);
+
+    await vi.waitFor(() => {
+      expect(mainPlugin.spawn).toHaveBeenCalledTimes(1);
+    });
+    // Started by MAIN, never by the window that asked.
+    expect(auxPlugin.spawn).not.toHaveBeenCalled();
+
+    main.controller.dispose();
+    aux.controller.dispose();
   });
 
   it("an aux boot attaches only its own slot's sessions", async () => {

@@ -95,6 +95,24 @@ function layoutWithPanelInMain(): Layout {
   return state;
 }
 
+/** A layout whose plugin pane sits in an AUX window's rail. */
+function layoutWithPanelInAux(): Layout {
+  const state = layout();
+  state.tabs.panel = {
+    id: "panel",
+    title: "Showroom",
+    color: "magenta",
+    fill: "off",
+    split: { kind: "pane", sessionId: PLUGIN_PANE_MIN_ID },
+  };
+  state.auxWindows["aux-1"] = {
+    rootItems: [{ kind: "tab", id: "panel" }],
+    activeTabId: "panel",
+    bounds: null,
+  };
+  return state;
+}
+
 function harness(options: {
   /** `null` builds a host with NO probe method at all (the legacy shape). */
   probe?: ((pluginId: string, origin: string) => Promise<boolean>) | null;
@@ -403,6 +421,31 @@ describe("plugin health polling", () => {
     await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS * 4);
 
     expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("MAIN polls a panel that lives in another window", async () => {
+    // The counterpart of the rule above, and the reason it is not simply
+    // "poll your own slot". Main is the only window allowed to START a plugin
+    // (spec §3), so main's runtime cache is what every later open trusts. Tear
+    // a Showroom tab into a window and kill the plugin, and a main that polled
+    // only its own rail would keep saying "up" for ever — with nothing on
+    // screen here to correct it.
+    const { controller, probe } = harness({
+      initial: layoutWithPanelInAux(),
+      bindings: { [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" } },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID]?.pluginHealth)
+      .toBe("up");
+
+    probe.mockResolvedValue(false);
+    await vi.advanceTimersByTimeAsync(PLUGIN_HEALTH_INTERVAL_MS);
+
+    expect(probe).toHaveBeenCalledWith("showroom", "http://127.0.0.1:7345");
+    // Main's cache is corrected, so the down card is what a pane here shows
+    // instead of an iframe pointed at a port nothing is listening on.
+    expect(controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID]?.pluginHealth)
+      .toBe("down");
   });
 
   it("polls nothing when the host has no probe seam, rather than guessing", async () => {

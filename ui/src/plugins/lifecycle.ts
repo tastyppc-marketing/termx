@@ -110,7 +110,7 @@ function errorMessage(error: unknown): string {
  * for a missing file but rejects for a non-absolute path, an oversize file or
  * an IO error — faults that spawning and polling can never resolve.
  */
-type ConnectOutcome =
+export type ConnectOutcome =
   | { kind: "up"; runtime: PluginRuntime }
   | { kind: "down" }
   | { kind: "unreadable"; reason: string };
@@ -119,7 +119,7 @@ type ConnectOutcome =
  * One connect attempt: the runtime file is re-read every time because plugins
  * rotate their token per boot (spec §3.5), so a cached token is wrong by design.
  */
-async function connect(
+export async function connect(
   runtimePath: string,
   manifest: PluginManifest,
   deps: EnsureUpDeps,
