@@ -568,6 +568,9 @@ export class WorkspaceController {
   /// One queued retry per plugin: every Relaunch pressed during a slow start
   /// joins it, so N clicks are one extra attempt rather than N serialized ones.
   private readonly pluginForceRuns = new Map<string, Promise<void>>();
+  /// Binding keys already accounted for, so a row this window has just
+  /// ACCEPTED can be told from one it has held all along.
+  private knownBindingKeys: ReadonlySet<string> = new Set();
   /// Reserved ids this window gave up waiting for main to acknowledge. A late
   /// broadcast for one of them is an orphan, not a panel.
   private readonly abandonedBindings = new Set<string>();
@@ -643,6 +646,7 @@ export class WorkspaceController {
         : {}),
     };
     this.windowId = options.windowId ?? MAIN_WINDOW_ID;
+    this.lastLayout = options.store.getState();
     this.store = options.store;
     this.persistence = options.persistence;
     this.attachments = options.attachments;
@@ -754,6 +758,11 @@ export class WorkspaceController {
       }),
     );
 
+    // Seeded BEFORE the first sync: rows that were already in the file are
+    // not rows this window has just accepted, so an orphan binding the boot
+    // prune could not reach never starts a plugin nobody asked for.
+    this.knownBindingKeys = new Set(Object.keys(this.pluginPanes.getSnapshot()));
+
     // Restored panels (spec §4): a bound pane's liveness comes from the health
     // probe, and `ensurePluginUp` is otherwise reached ONLY by opening or
     // relaunching a panel. Without this, the second launch of TermX renders
@@ -764,37 +773,32 @@ export class WorkspaceController {
   }
 
   /**
-   * The plugins THIS window is responsible for keeping alive.
+   * The plugins a pane in THIS window renders right now.
    *
-   * Main answers with every plugin it holds a binding for, whatever window the
-   * pane ends up in: main is the only window allowed to spawn (spec §3's
-   * singleton is process-wide, and two windows both finding a plugin down
-   * would both start it), and a binding it has accepted is a pane about to
-   * exist. That also means a panel opened in an aux window, or moved into one,
-   * gets its process from main without waiting for a layout round trip.
-   *
-   * An aux window answers with the panes in ITS OWN slot only. Its ensure-up
-   * observes rather than spawns, so a wider set would just be a window polling
-   * for panels it does not render.
+   * Main counts panes anywhere in the blob: it is the only window allowed to
+   * spawn (spec §3's singleton is process-wide, and two windows both finding a
+   * plugin down would both start it), so it keeps alive whatever any window
+   * shows. An aux window counts its OWN slot only — its ensure-up observes
+   * rather than spawns, so a wider set would just be a window waiting on
+   * panels it does not render.
    */
-  private pluginsInScope(): Set<string> {
+  private pluginsRenderedHere(): Set<string> {
     const bindings = this.pluginPanes.getSnapshot();
-    if (this.windowId === MAIN_WINDOW_ID) {
-      return new Set(Object.values(bindings).map((binding) => binding.pluginId));
-    }
     const layout = this.store.getState();
-    const mine = flattenTabIds(layout, this.windowId).flatMap((tabId) => {
-      const tab = layout.tabs[tabId];
-      return tab ? sessionIdsInTab(tab) : [];
-    });
-    const scope = new Set<string>();
+    const mine = this.windowId === MAIN_WINDOW_ID
+      ? sessionIdsInLayout(layout)
+      : flattenTabIds(layout, this.windowId).flatMap((tabId) => {
+        const tab = layout.tabs[tabId];
+        return tab ? sessionIdsInTab(tab) : [];
+      });
+    const rendered = new Set<string>();
     for (const sessionId of mine) {
       const pluginId = bindings[String(sessionId)]?.pluginId;
       if (pluginId !== undefined) {
-        scope.add(pluginId);
+        rendered.add(pluginId);
       }
     }
-    return scope;
+    return rendered;
   }
 
   /**
@@ -813,16 +817,44 @@ export class WorkspaceController {
    * skip the probe and frame a dead port.
    */
   private syncPluginScope(): void {
+    const bindings = this.pluginPanes.getSnapshot();
+    const accepted = Object.keys(bindings).filter(
+      (key) => !this.knownBindingKeys.has(key),
+    );
+    this.knownBindingKeys = new Set(Object.keys(bindings));
     if (this.plugins === null || this.disposed) {
       return;
     }
-    const scope = this.pluginsInScope();
+    const rendered = this.pluginsRenderedHere();
+    // What may KEEP a runtime is wider than what renders one, and only on
+    // main: it holds the binding of a pane an aux window is still placing, and
+    // forgetting between the bind and the layout write would throw away the
+    // very start that bind triggered. Main therefore forgets a plugin when its
+    // last BINDING goes — which the departed-pane sweep does after the layout
+    // write, so it is strictly later than the pane going. An aux window has no
+    // such window to protect: it forgets what it no longer renders, which is
+    // how it drops a stale "up" for a pane main just closed.
+    const keep = this.windowId === MAIN_WINDOW_ID
+      ? new Set([...rendered, ...Object.values(bindings).map((b) => b.pluginId)])
+      : rendered;
     for (const pluginId of [...this.pluginRuntimes.keys()]) {
-      if (!scope.has(pluginId)) {
+      if (!keep.has(pluginId)) {
         this.forgetPluginRuntime(pluginId);
       }
     }
-    for (const pluginId of scope) {
+    const start = new Set(rendered);
+    if (this.windowId === MAIN_WINDOW_ID) {
+      // A binding main has just ACCEPTED, whose pane is not in the blob yet:
+      // that is an aux window's open, and main starting the plugin here is
+      // what makes it work at all — the aux window may not spawn, and its
+      // layout write is still on its way. Only rows that ARRIVE count, so a
+      // binding sitting in the file at boot with no pane (an orphan the prune
+      // could not reach) never launches anything.
+      for (const key of accepted) {
+        start.add(bindings[key]!.pluginId);
+      }
+    }
+    for (const pluginId of start) {
       if (this.pluginRuntimes.has(pluginId) || this.pluginEnsures.has(pluginId)) {
         continue;
       }
@@ -1916,7 +1948,7 @@ export class WorkspaceController {
     const sessionIds = sessionIdsInTab(tab);
     const { successful, failed } = await this.closeSessions(sessionIds);
     this.applyClosedSessions(successful);
-    await this.pluginPanes.flush().catch(() => undefined);
+    await this.flushPluginPanes();
     if (failed) {
       this.setNotice("Some terminal sessions could not be closed.");
     }
@@ -1953,7 +1985,7 @@ export class WorkspaceController {
       const candidate = failed ? pruned : removeGroupAndTabs(pruned, groupId);
       return this.store.replaceState(candidate);
     });
-    await this.pluginPanes.flush().catch(() => undefined);
+    await this.flushPluginPanes();
     if (failed) {
       this.setNotice("Some terminal sessions could not be closed.");
     } else {
@@ -1979,7 +2011,7 @@ export class WorkspaceController {
     );
     const { successful, failed } = await this.closeSessions(dismissible);
     this.applyClosedSessions(successful);
-    await this.pluginPanes.flush().catch(() => undefined);
+    await this.flushPluginPanes();
     if (failed) {
       this.setNotice("The ended terminal could not be dismissed.");
     }
@@ -2062,7 +2094,10 @@ export class WorkspaceController {
       // A plugin pane is RELAUNCHED, never restarted: restart creates a host
       // session and swaps its id into the pane, which would strand the
       // binding and leave a terminal where the panel was. Reachable because a
-      // reserved pane with no binding renders as an ordinary dead pane.
+      // reserved pane with no binding renders as an ordinary dead pane — and
+      // a button that silently does nothing is worse than one that explains
+      // itself, so this says the same thing Relaunch says there.
+      this.setNotice("This panel is still being registered. Try again in a moment.");
       return null;
     }
     const dead = this.sessions.get(deadSessionId);
@@ -2243,7 +2278,7 @@ export class WorkspaceController {
     }
     if (successful.has(sessionId)) {
       this.mutate("structural", () => this.store.closePane(tabId, sessionId));
-      await this.pluginPanes.flush().catch(() => undefined);
+      await this.flushPluginPanes();
     }
     this.publish();
   };
@@ -2450,17 +2485,17 @@ export class WorkspaceController {
     try {
       await this.pluginPanes.flush();
     } catch {
-      // The row never reached disk (or main). Nothing to take back on a
-      // replica, and on main the unbind is the same failing write — but a
-      // queued removal costs nothing and covers a transient failure.
-      this.pluginPanes.unbind([sessionId]);
+      // The row never reached disk (or main). The removal is SEEN THROUGH,
+      // not merely queued: a write that completed and then reported failure
+      // would otherwise leave a real row behind, and the store's failure
+      // record would still be pending for the next open to trip over.
+      await this.releasePluginBinding(sessionId);
       return false;
     }
     if (await this.awaitBindingAdopted(sessionId)) {
       return true;
     }
-    this.pluginPanes.unbind([sessionId]);
-    await this.pluginPanes.flush().catch(() => undefined);
+    await this.releasePluginBinding(sessionId);
     return false;
   }
 
@@ -2491,8 +2526,15 @@ export class WorkspaceController {
         done = true;
         clearTimeout(timer);
         stop();
+        this.adoptWaiters.delete(settle);
+        if (!adopted) {
+          // Main may still answer, long after this open gave up. That row
+          // would belong to no pane, so it is disowned on arrival.
+          this.abandonedBindings.add(key);
+        }
         resolve(adopted);
       };
+      this.adoptWaiters.add(settle);
       const timer = setTimeout(() => settle(false), PLUGIN_BIND_ADOPT_TIMEOUT_MS);
       const stop = this.pluginPanes.subscribe(() => {
         if (this.pluginPanes.getSnapshot()[key] !== undefined) {
@@ -2541,17 +2583,29 @@ export class WorkspaceController {
    * where a failure has somewhere to go.
    */
   flush = async (): Promise<void> => {
-    await Promise.all([
-      this.persistence.flush(),
-      this.pluginPanes.flush().catch(() => undefined),
-    ]);
+    await this.persistence.flush();
+    await this.flushPluginPanes();
   };
+
+  /// Everything the bindings file owes, INCLUDING a departed-pane sweep still
+  /// waiting on its layout write — a close path that skipped that would
+  /// destroy its window with the unbind still unqueued.
+  private async flushPluginPanes(): Promise<void> {
+    await this.pluginSweepChain.catch(() => undefined);
+    await this.pluginPanes.flush().catch(() => undefined);
+  }
 
   dispose(): void {
     if (this.disposed) {
       return;
     }
     this.disposed = true;
+    for (const settle of [...this.adoptWaiters]) {
+      // A replica open still waiting for main would otherwise hold a 5 s timer
+      // — and roll a binding back — inside a window that is already gone.
+      settle(false);
+    }
+    this.adoptWaiters.clear();
     try {
       this.plugins?.dispose?.();
     } catch {
@@ -3164,13 +3218,33 @@ export class WorkspaceController {
       }
       // Relaunch must mean "try again", never "wait for the attempt already
       // under way" — which is very often the attempt the user is relaunching
-      // BECAUSE it is failing or hanging. Queue a fresh run behind it rather
-      // than racing two spawns of a singleton plugin.
-      return inFlight.then(() => this.ensurePluginUp(pluginId, { force: true }));
+      // BECAUSE it is failing or hanging. ONE retry is queued behind it and
+      // every further click joins that: a user clicking through a slow start
+      // must not queue a spawn per click, each with its own ten-second budget.
+      const queued = this.pluginForceRuns.get(pluginId);
+      if (queued !== undefined) {
+        return queued;
+      }
+      const chained = inFlight.then(() => {
+        this.pluginForceRuns.delete(pluginId);
+        return this.startPluginEnsure(plugins, pluginId);
+      });
+      this.pluginForceRuns.set(pluginId, chained);
+      return chained;
     }
     if (!options.force && this.pluginRuntimes.has(pluginId)) {
       return Promise.resolve();
     }
+    return this.startPluginEnsure(plugins, pluginId);
+  }
+
+  /// One ensure-up attempt, with its deadline and its generation stamp. Split
+  /// from `ensurePluginUp` so a queued Relaunch can start a real attempt
+  /// instead of re-entering the join it is trying to escape.
+  private startPluginEnsure(
+    plugins: WorkspacePluginHost,
+    pluginId: string,
+  ): Promise<void> {
     this.setPluginRuntime(pluginId, {
       health: "starting",
       // The last known URL is kept so a relaunch does not blank a live iframe

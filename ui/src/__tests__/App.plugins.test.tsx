@@ -10,7 +10,7 @@
  */
 
 import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAIN_WINDOW_ID, type Layout, type SplitNode } from "../state/layout";
 import type { PluginManifest } from "../plugins/manifest";
@@ -25,7 +25,11 @@ import type {
   WorkspaceSnapshot,
 } from "../workspace/WorkspaceController";
 import type { BootstrappedWorkspace } from "../workspace/bootstrapWorkspace";
-import { fixtureWorkspace } from "./fixtureWorkspace";
+import {
+  fixtureWorkspace,
+  manifestFeed,
+  type ManifestFeed,
+} from "./fixtureWorkspace";
 
 const captured = vi.hoisted(() => ({
   sidebar: null as unknown,
@@ -233,6 +237,8 @@ function harness(
     snapshot?: WorkspaceSnapshot;
     /** Bootstrap's ungated manifest accessor; absent = not wired yet. */
     pluginManifestFor?: (pluginId: string) => PluginManifest | null;
+    /** The "manifest cache landed" feed, when a test drives it. */
+    manifests?: ManifestFeed;
   } = {},
 ): Harness {
   const current = options.snapshot ?? snapshot();
@@ -278,6 +284,9 @@ function harness(
       ...(options.pluginManifestFor
         ? { pluginManifestFor: options.pluginManifestFor }
         : {}),
+      ...(options.manifests
+        ? { subscribeManifests: options.manifests.subscribeManifests }
+        : {}),
     }),
     controller,
     openPluginTab,
@@ -287,14 +296,27 @@ function harness(
   };
 }
 
+/// The root of the App most recently rendered, so a test can unmount it and
+/// watch what App lets go of.
+let mounted: Root | null = null;
+
 async function renderApp(fixture: Harness): Promise<HTMLDivElement> {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
+  mounted = root;
   await act(async () =>
     root.render(<App bootstrap={vi.fn(async () => fixture.workspace)} />)
   );
   return container;
+}
+
+async function unmountApp(): Promise<void> {
+  const root = mounted;
+  mounted = null;
+  if (root) {
+    await act(async () => root.unmount());
+  }
 }
 
 beforeEach(() => {
@@ -464,6 +486,77 @@ describe("App plugin wiring — sidebar", () => {
     // The adapter overrides ONE member; nothing else may be dropped or rebound.
     expect(sidebarProps().actions.activateTab).toBe(fixture.controller.activateTab);
     expect(sidebarProps().actions.moveItem).toBe(fixture.controller.moveItem);
+  });
+});
+
+describe("App plugin wiring — late manifests", () => {
+  /**
+   * Bootstrap fills its folder-manifest cache asynchronously: after the boot
+   * budget, or a debounce past a registry change. Nothing about that lands in
+   * React state, so without a subscription App keeps showing whatever the
+   * bundled fallback said until some unrelated render happens to refresh it.
+   */
+  function lateHarness(): {
+    fixture: Harness;
+    feed: ManifestFeed;
+    land(): void;
+  } {
+    const feed = manifestFeed();
+    // Empty until the cache "lands", exactly like a folder not read yet.
+    let resolved: Record<string, PluginManifest> = {};
+    const fixture = harness({
+      registry: {
+        plugins: { notes: { path: "C:\\code\\notes", enabled: true, grants: [] } },
+      },
+      pluginManifestFor: (pluginId) => resolved[pluginId] ?? null,
+      manifests: feed,
+    });
+    return {
+      fixture,
+      feed,
+      land: () => {
+        resolved = { notes: NOTES_MANIFEST };
+      },
+    };
+  }
+
+  it("picks up a manifest that lands after boot", async () => {
+    const { fixture, feed, land } = lateHarness();
+    await renderApp(fixture);
+
+    // Before the cache lands, the folder plugin has no name to show.
+    expect(sidebarProps().plugins?.map((plugin) => plugin.id)).toEqual(["showroom"]);
+
+    land();
+    await act(async () => feed.emit());
+
+    expect(sidebarProps().plugins?.map((plugin) => plugin.name)).toEqual([
+      "Notes",
+      "Showroom",
+    ]);
+    expect(splitProps().pluginManifestFor?.("notes")?.name).toBe("Notes");
+  });
+
+  it("does not pick it up before the feed says so", async () => {
+    const { fixture, land } = lateHarness();
+    await renderApp(fixture);
+
+    land();
+
+    // No notification, no re-read: this is the bug's shape, and pinning it is
+    // what proves the test above is driven by the feed and not by a stray
+    // render that would have refreshed the memo anyway.
+    expect(sidebarProps().plugins?.map((plugin) => plugin.id)).toEqual(["showroom"]);
+  });
+
+  it("lets go of the feed when the workspace unmounts", async () => {
+    const { fixture, feed } = lateHarness();
+    await renderApp(fixture);
+    expect(feed.listenerCount()).toBe(1);
+
+    await unmountApp();
+
+    expect(feed.listenerCount()).toBe(0);
   });
 });
 

@@ -594,6 +594,91 @@ describe("PaneBindingsStore failure reporting", () => {
     await expect(store.flush()).resolves.toBeUndefined();
   });
 
+  it("clears the record once a later write succeeds", async () => {
+    // The exact sequence a failed open leaves behind: the rollback's own save
+    // failed, nobody flushed it, and the NEXT open binds successfully. Without
+    // clearing, that open's flush throws about a write that already worked,
+    // and a healthy panel is rolled back for nothing.
+    let failNext = true;
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: async () => {
+        if (failNext) {
+          throw new Error("disk full");
+        }
+      },
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    failNext = false;
+    store.bind(PLUGIN_PANE_MIN_ID + 1, { pluginId: "showroom" });
+
+    await expect(store.flush()).resolves.toBeUndefined();
+  });
+
+  it("reports the FIRST failure of a batch, not the last", async () => {
+    // The first one says what actually broke; whatever was queued behind it
+    // usually just reports the same fault a second time.
+    const reasons = ["disk full", "file is locked"];
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: async () => {
+        throw new Error(reasons.shift() ?? "unexpected");
+      },
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    store.bind(PLUGIN_PANE_MIN_ID + 1, { pluginId: "showroom" });
+
+    await expect(store.flush()).rejects.toThrow("disk full");
+  });
+
+  it("broadcasts a binding only AFTER its write lands", async () => {
+    // Other windows treat main's broadcast as "this row is durable" — an aux
+    // window records the layout naming that pane the moment it arrives. A
+    // broadcast ahead of the write puts the layout ahead of the bindings,
+    // which is the one order that loses a panel.
+    let release = (): void => undefined;
+    const written = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const broadcasts: unknown[] = [];
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: () => written,
+      onBroadcast: (state) => broadcasts.push(state),
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await Promise.resolve();
+    expect(broadcasts).toEqual([]);
+
+    release();
+    await store.flush();
+
+    expect(broadcasts).toEqual([
+      { [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" } },
+    ]);
+  });
+
+  it("never announces a binding it could not write", async () => {
+    const broadcasts: unknown[] = [];
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: async () => {
+        throw new Error("disk full");
+      },
+      onBroadcast: (state) => broadcasts.push(state),
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await store.flush().catch(() => undefined);
+
+    // The window that asked for it times out its adopt-wait and rolls the pane
+    // back, which is the honest outcome of a file that does not have the row.
+    expect(broadcasts).toEqual([]);
+  });
+
   it("keeps the in-memory map even when the write failed", async () => {
     // The pane is open in front of the user; refusing to remember it would be
     // worse than a stale file, which the next boot's prune reconciles anyway.

@@ -280,6 +280,17 @@ export interface BootstrappedWorkspace {
    * plugin that exists only as a folder manifest must be nameable at all.
    */
   pluginManifestFor: (pluginId: string) => PluginManifest | null;
+  /**
+   * "The manifest cache moved." Folder manifests resolve asynchronously — at
+   * boot within a budget, and again a debounce after any registry change — so
+   * `pluginManifestFor` answers differently over time without anything in
+   * React noticing. A renderer that names panes and menu rows from it has to
+   * be told, or a panel wears the bundled name (or its bare id) until some
+   * unrelated render happens to refresh it.
+   *
+   * Returns the unsubscribe.
+   */
+  subscribeManifests: (listener: () => void) => () => void;
 }
 
 /**
@@ -700,6 +711,7 @@ export async function bootstrapWorkspace(
      * (`registry.add` returns early on an unchanged path).
      */
     const folderManifests = new Map<string, PluginManifest | null>();
+    const manifestListeners = new Set<() => void>();
     let manifestEpoch = 0;
     const refreshFolderManifests = async (): Promise<void> => {
       const epoch = (manifestEpoch += 1);
@@ -728,6 +740,9 @@ export async function bootstrapWorkspace(
       folderManifests.clear();
       for (const [id, manifest] of next) {
         folderManifests.set(id, manifest);
+      }
+      for (const listener of [...manifestListeners]) {
+        listener();
       }
     };
     // Bounded (see the constant): the boot must not hang on a folder read.
@@ -862,6 +877,7 @@ export async function bootstrapWorkspace(
       unavailableReason,
       dispose: () => {
         stopWatchingRegistry();
+        manifestListeners.clear();
         if (refreshTimer !== null) {
           clearTimeout(refreshTimer);
           refreshTimer = null;
@@ -1069,6 +1085,12 @@ export async function bootstrapWorkspace(
       plugins,
       pluginHost,
       pluginManifestFor: knownManifest,
+      subscribeManifests: (listener: () => void) => {
+        manifestListeners.add(listener);
+        return () => {
+          manifestListeners.delete(listener);
+        };
+      },
     };
   } catch {
     try {

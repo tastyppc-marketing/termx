@@ -179,14 +179,22 @@ function harness(options: {
   /// Interleaved log of the two writes a plugin pane needs, in the order they
   /// really happened — the only way to prove the bindings file lands first.
   const events: string[] = [];
+  /// The layout writer's own state, so a test can hold a write open or make
+  /// one fail without touching the controller.
+  const layoutWrites = { gate: null as Promise<void> | null, error: null as string | null };
   const persistence: WorkspacePersistence = {
-    getSnapshot: () => ({ saving: false, error: null }),
+    getSnapshot: () => ({ saving: false, error: layoutWrites.error }),
     subscribe: () => () => undefined,
     record(next, kind) {
       persistenceCalls.push({ layout: next, kind });
       events.push(`layout:${kind}`);
     },
-    flush: async () => undefined,
+    flush: async () => {
+      if (layoutWrites.gate !== null) {
+        await layoutWrites.gate;
+      }
+      events.push("layout:written");
+    },
     dispose: vi.fn(),
   };
   const pluginWrites: string[] = [];
@@ -238,9 +246,10 @@ function harness(options: {
   const ids = ["new-tab", "new-group", "later-tab"];
   const settingsValue: TermxSettings = { ...DEFAULT_SETTINGS, ...options.settings };
   const uiState = options.uiState ?? new UiStateStore();
+  const store = createLayoutStore(options.initial ?? layout());
   const controller = new WorkspaceController({
     client,
-    store: createLayoutStore(options.initial ?? layout()),
+    store,
     persistence,
     attachments,
     sessions: options.sessions ?? [session(1), session(2), session(3)],
@@ -260,6 +269,8 @@ function harness(options: {
   });
   return {
     controller,
+    store,
+    layoutWrites,
     client,
     createSession,
     closeSession,
@@ -2672,6 +2683,249 @@ describe("WorkspaceController plugin panes (plugin spec §4)", () => {
       .toBe("The plugin panel could not be opened.");
     expect(h.pluginPanes.getSnapshot()).toEqual({});
     expect(h.controller.getSnapshot().layout.tabs["new-tab"]).toBeUndefined();
+  });
+
+  /// The same panel, torn out into an aux window's slot.
+  function panelInAux(): Layout {
+    const next = layoutWithPanel();
+    next.rootItems = next.rootItems.filter(
+      (item) => !(item.kind === "tab" && item.id === "tab-3"),
+    );
+    next.auxWindows["aux-1"] = {
+      rootItems: [{ kind: "tab", id: "tab-3" }],
+      activeTabId: "tab-3",
+      bounds: null,
+    };
+    return next;
+  }
+
+  const BOUND_PANEL = { [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" } };
+
+  it("pins the two waits a panel depends on", () => {
+    // Both are promises made in prose elsewhere (a 5 s acknowledgement, a 15 s
+    // answer); advancing by the constant itself would pass at any value.
+    expect(PLUGIN_BIND_ADOPT_TIMEOUT_MS).toBe(5_000);
+    expect(PLUGIN_ENSURE_DEADLINE_MS).toBe(15_000);
+  });
+
+  it("starts a plugin when the pane arrives in a layout from ANOTHER window", async () => {
+    // Layout adoption is `replaceState`, not `mutate`: an aux window's open,
+    // a returned aux window, a moved tab. Nothing here goes through the open
+    // paths, so without a kick on layout change the pane renders "starting"
+    // for ever — and T6's starting card has no Relaunch button.
+    const h = harness({ pluginBindings: BOUND_PANEL });
+    await tick();
+    expect(h.ensureUp).not.toHaveBeenCalled();
+
+    h.store.replaceState(layoutWithPanel());
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledWith("showroom");
+  });
+
+  it("leaves a pane in ANOTHER window's slot to that window", async () => {
+    // Every window builds its own controller from the same blob. An aux
+    // window ensuring for main's pane is a second lifecycle owner for a
+    // process the spec says is a singleton.
+    const h = harness({
+      initial: layoutWithPanel(),
+      windowId: "aux-1",
+      pluginBindings: BOUND_PANEL,
+    });
+    await tick();
+
+    expect(h.ensureUp).not.toHaveBeenCalled();
+  });
+
+  it("observes a panel once it is moved INTO this aux window", async () => {
+    const h = harness({
+      initial: layoutWithPanel(),
+      windowId: "aux-1",
+      pluginBindings: BOUND_PANEL,
+    });
+    await tick();
+
+    h.store.replaceState(panelInAux());
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledWith("showroom");
+  });
+
+  it("forgets a plugin an aux window no longer renders", async () => {
+    // Main moved the pane away; this window only ever sees the new layout, and
+    // never mutates anything itself. A kept "up" would let the next panel here
+    // frame a port nobody has checked since.
+    const h = harness({
+      initial: panelInAux(),
+      windowId: "aux-1",
+      // A real replica: its map is main's to change, so the row stays while
+      // the pane comes and goes from THIS window's slot.
+      pluginPanesStore: new PaneBindingsStore({
+        initial: { ...BOUND_PANEL },
+        save: null,
+        onForward: () => undefined,
+      }),
+    });
+    await tick();
+    expect(h.ensureUp).toHaveBeenCalledTimes(1);
+
+    h.store.replaceState(layoutWithPanel());
+    await tick();
+    h.store.replaceState(panelInAux());
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a binding until the layout write that dropped its pane lands", async () => {
+    // The crash order, in the direction nobody tests: unbind first and a crash
+    // restores a layout naming a pane with no binding — a dead pane where a
+    // working panel was.
+    const h = harness({ initial: layoutWithPanel(), pluginBindings: BOUND_PANEL });
+    let release = (): void => undefined;
+    h.layoutWrites.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const closing = h.controller.closePane("tab-3", PLUGIN_PANE_MIN_ID);
+    await tick();
+    expect(h.controller.getSnapshot().layout.tabs["tab-3"]).toBeUndefined();
+    expect(h.pluginPanes.getSnapshot()[String(PLUGIN_PANE_MIN_ID)]).toBeDefined();
+
+    release();
+    await closing;
+
+    expect(h.pluginPanes.getSnapshot()).toEqual({});
+  });
+
+  it("keeps a binding when the layout write FAILED", async () => {
+    const h = harness({ initial: layoutWithPanel(), pluginBindings: BOUND_PANEL });
+    h.layoutWrites.error = "Unable to save the workspace layout.";
+
+    await h.controller.closePane("tab-3", PLUGIN_PANE_MIN_ID);
+
+    // The layout on disk may still name this pane, so its panel must survive.
+    expect(h.pluginPanes.getSnapshot()[String(PLUGIN_PANE_MIN_ID)]).toBeDefined();
+  });
+
+  it("ignores an ensure-up that lands after its pane closed", async () => {
+    // Otherwise the late answer re-creates a runtime for a plugin no pane
+    // renders, and the NEXT open short-circuits on it.
+    const pending: { release: ((result: EnsureUpResult) => void) | null } =
+      { release: null };
+    const h = harness({
+      ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+        pending.release = resolve;
+      }),
+    });
+    const tabId = await h.controller.openPluginTab("showroom");
+    const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+
+    await h.controller.closePane(tabId!, sessionId);
+    pending.release?.(runtimeUp());
+    await tick();
+
+    await h.controller.openPluginTab("showroom");
+    await tick();
+    expect(h.ensureUp).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces Relaunch clicks during a slow start into one retry", async () => {
+    // Each click used to chain its own full attempt off the same promise: a
+    // frustrated user clicking four times bought four serialized launches,
+    // each with its own ten-second budget.
+    const gates: Array<(result: EnsureUpResult) => void> = [];
+    const h = harness({
+      ensureUp: () => new Promise<EnsureUpResult>((resolve) => {
+        gates.push(resolve);
+      }),
+    });
+    const tabId = await h.controller.openPluginTab("showroom");
+    const sessionId = panelId(h.controller.getSnapshot().layout, tabId!);
+
+    const clicks = [
+      h.controller.relaunchPlugin(sessionId),
+      h.controller.relaunchPlugin(sessionId),
+      h.controller.relaunchPlugin(sessionId),
+    ];
+    gates[0]?.({ ok: false, reason: "health probe never passed", stderrTail: "" });
+    await tick();
+
+    expect(h.ensureUp).toHaveBeenCalledTimes(2);
+    gates[1]?.(runtimeUp());
+    await Promise.all(clicks);
+    expect(h.controller.getSnapshot().paneStates[sessionId]?.pluginHealth).toBe("up");
+  });
+
+  it("settles a pending adopt wait when the window is disposed", async () => {
+    // Otherwise a closing aux window holds a 5 s timer and rolls a binding
+    // back from inside a webview that is already gone.
+    const replica = new PaneBindingsStore({
+      initial: {},
+      save: null,
+      onForward: () => undefined,
+    });
+    const { controller, events } = harness({
+      initial: auxLayout(),
+      windowId: "aux-1",
+      pluginPanesStore: replica,
+    });
+
+    const opened = controller.openPluginTab("showroom");
+    await tick();
+    controller.dispose();
+
+    expect(await opened).toBeNull();
+    expect(events).toEqual([]);
+  });
+
+  it("disowns a binding main acknowledges after the open gave up", async () => {
+    // The bound id belongs to no pane by then. Left alone it is an orphan
+    // nothing clears until the next boot — and on main it would start a
+    // plugin nobody asked for.
+    vi.useFakeTimers();
+    try {
+      const forwarded: Array<{ op: string; sessionId?: number }> = [];
+      const replica = new PaneBindingsStore({
+        initial: {},
+        save: null,
+        onForward: (request) => {
+          forwarded.push(
+            request.op === "bind"
+              ? { op: "bind", sessionId: request.sessionId }
+              : { op: "unbind" },
+          );
+        },
+      });
+      const { controller } = harness({
+        initial: auxLayout(),
+        windowId: "aux-1",
+        pluginPanesStore: replica,
+      });
+
+      const opened = controller.openPluginTab("showroom");
+      await vi.advanceTimersByTimeAsync(PLUGIN_BIND_ADOPT_TIMEOUT_MS + 10);
+      expect(await opened).toBeNull();
+      const sessionId = forwarded[0]?.sessionId as number;
+
+      replica.adopt({ [String(sessionId)]: { pluginId: "showroom" } });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(forwarded.filter((request) => request.op === "unbind")).toHaveLength(2);
+      expect(controller.getSnapshot().layout.tabs["new-tab"]).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says why Restart does nothing on a reserved pane with no binding", async () => {
+    // The downgrade path renders an ordinary DeadPane, Restart button and all;
+    // refusing in silence looks like a broken button.
+    const h = harness({ initial: layoutWithPanel() });
+
+    expect(await h.controller.restartPane("tab-3", PLUGIN_PANE_MIN_ID, "restart"))
+      .toBeNull();
+    expect(h.controller.getSnapshot().notice).not.toBeNull();
   });
 
   it("an aux window gives up when main never acknowledges the binding", async () => {

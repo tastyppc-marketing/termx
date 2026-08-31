@@ -1140,6 +1140,38 @@ describe("bootstrapWorkspace plugin panes", () => {
     }
   });
 
+  it("tells the renderer when a folder manifest finally lands", async () => {
+    // `pluginManifestFor` answers differently over time — the boot read is
+    // bounded, and a registry change re-reads after a debounce — and nothing
+    // in React would notice. A panel would wear the bundled name, or its bare
+    // id, until some unrelated render refreshed it.
+    let manifest: string | null = null;
+    const spy = healthyNative({ readManifest: async () => manifest });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registryOf({ toolbox: {} }) },
+      native: spy.native,
+    });
+    let moved = 0;
+    const stop = workspace.subscribeManifests(() => {
+      moved += 1;
+    });
+
+    manifest = folderManifest("toolbox", "Toolbox");
+    workspace.plugins.add("toolbox", "C:\\code\\toolbox-moved");
+    await vi.waitFor(() => {
+      expect(workspace.pluginManifestFor("toolbox")?.name).toBe("Toolbox");
+    });
+    expect(moved).toBeGreaterThan(0);
+
+    // And it lets go: a listener that outlived its window would keep a dead
+    // renderer's closure alive.
+    stop();
+    const after = moved;
+    workspace.plugins.add("toolbox", "C:\\code\\toolbox-again");
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    expect(moved).toBe(after);
+  });
+
   it("stops watching the registry once the workspace is disposed", async () => {
     const spy = healthyNative();
     const workspace = await bootWith({
@@ -1382,20 +1414,44 @@ describe("bootstrapWorkspace conversation captures", () => {
     // The map is not React state: a pane that gained a resumable conversation
     // after it died would keep showing the plain Restart card until something
     // unrelated repainted it.
+    //
+    // The read is held open on purpose. The exit itself publishes, so a test
+    // that only counted publishes after the exit would pass with no repaint at
+    // all — the one that matters is the publish AFTER the file comes back.
     const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
-    const { appFiles, state } = captureFiles(null);
+    let defer = false;
+    const pending: Array<(text: string | null) => void> = [];
+    const appFiles: AppFileStore = {
+      read: async (name) => {
+        if (name !== CAPTURES_FILE) {
+          return null;
+        }
+        if (!defer) {
+          return null;
+        }
+        return new Promise<string | null>((resolve) => {
+          pending.push(resolve);
+        });
+      },
+      write: async () => undefined,
+    };
 
     const workspace = await boot(appFiles, fake);
+    defer = true;
+    fake.emitExit(3, 0);
+    await flush();
+    expect(pending).toHaveLength(1);
+
+    // Everything the exit itself could repaint has already happened.
     let published = 0;
     workspace.controller.subscribe(() => {
       published += 1;
     });
 
-    state.text = `${captureLine()}\n`;
-    fake.emitExit(3, 0);
+    pending[0]?.(`${captureLine()}\n`);
     await flush();
 
-    expect(published).toBeGreaterThan(0);
+    expect(published).toBe(1);
     expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
   });
 

@@ -274,9 +274,9 @@ export class PaneBindingsStore {
   private readonly replica: boolean;
   private readonly listeners = new Set<() => void>();
   private saveChain: Promise<void> = Promise.resolve();
-  /// The last queued write or forward that failed, until a `flush()` reports
-  /// it. Held rather than thrown at the point of failure because the failing
-  /// op is queued work nobody is awaiting yet.
+  /// The first queued write or forward that failed since the last success,
+  /// until a `flush()` reports it. Held rather than thrown at the point of
+  /// failure because the failing op is queued work nobody is awaiting yet.
   private failure: Error | null = null;
 
   constructor(options: PaneBindingsStoreOptions) {
@@ -448,6 +448,12 @@ export class PaneBindingsStore {
     }
     this.saveChain = this.saveChain
       .then(() => onForward(request))
+      // A delivery that worked clears the record: `flush()` reports what is
+      // wrong NOW, and a store that had one bad write must not refuse every
+      // later open for the rest of the session.
+      .then(() => {
+        this.failure = null;
+      })
       .catch((error: unknown) => this.note(error, "forwarded to the main window"));
   }
 
@@ -455,21 +461,42 @@ export class PaneBindingsStore {
     this.current = next;
     this.notify();
     const save = this.save;
-    if (save !== null) {
-      const text = serializePluginPanes(next);
-      // A failed write costs the binding on the next boot — a dismissible dead
-      // pane, never a crash — so it is recorded rather than thrown, and the
-      // chain keeps running for whatever is queued behind it. `flush()` is
-      // where it reaches a caller that can act on it.
-      this.saveChain = this.saveChain
-        .then(() => save(text))
-        .catch((error: unknown) => this.note(error, "saved"));
+    if (save === null) {
+      this.onBroadcast?.(next);
+      return;
     }
-    this.onBroadcast?.(next);
+    const text = serializePluginPanes(next);
+    // A failed write costs the binding on the next boot — a dismissible dead
+    // pane, never a crash — so it is recorded rather than thrown, and the
+    // chain keeps running for whatever is queued behind it. `flush()` is
+    // where it reaches a caller that can act on it.
+    this.saveChain = this.saveChain
+      .then(() => save(text))
+      .then(() => {
+        // The broadcast waits for the WRITE. Other windows treat main's
+        // broadcast as the acknowledgement that a binding is durable — an aux
+        // window records the layout naming that pane the moment it arrives —
+        // so announcing before the file has it would put the layout ahead of
+        // the bindings, which is the one order that loses a panel. A failed
+        // write announces nothing: the requesting window's adopt-wait then
+        // times out and rolls its pane back, which is the honest outcome.
+        this.failure = null;
+        this.onBroadcast?.(next);
+      })
+      .catch((error: unknown) => this.note(error, "saved"));
   }
 
   /// Remember why a queued op failed, in a shape `flush()` can throw.
+  /**
+   * Remember a failure for the next `flush()`. The FIRST one since the last
+   * success wins: it is the one that says what actually went wrong, and a
+   * later failure is usually the same fault reported again by whatever was
+   * queued behind it.
+   */
   private note(error: unknown, what: string): void {
+    if (this.failure !== null) {
+      return;
+    }
     this.failure = error instanceof Error
       ? error
       : new Error(`Plugin pane bindings could not be ${what}: ${String(error)}`);

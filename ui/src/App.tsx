@@ -966,6 +966,23 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     pluginsStore.subscribe,
     pluginsStore.getSnapshot,
   );
+  // Bootstrap's folder-manifest cache fills in LATE — after the boot budget it
+  // gave itself, and again a debounce after the registry changes — and none of
+  // that lands in React state. Without this subscription the memos below stay
+  // on whatever the first render resolved (the bundled table, or the plugin's
+  // bare id) until some unrelated render happens to refresh them, which is a
+  // panel wearing the wrong name for as long as the user leaves it alone.
+  // The counter is the whole mechanism: it exists to be a dependency.
+  const [manifestRevision, setManifestRevision] = useState(0);
+  useEffect(() => {
+    const bump = () => setManifestRevision((revision) => revision + 1);
+    const unsubscribe = workspace.subscribeManifests(bump);
+    // A cache that landed between this render and this effect would otherwise
+    // notify nobody, so read once more now that the subscription is live.
+    bump();
+    return unsubscribe;
+  }, [workspace]);
+
   // Bootstrap resolves a registered folder's own `termx-plugin.json` and falls
   // back to the bundled table; it is ungated by `enabled`, so it answers for a
   // plugin that is merely switched off. Read through an OPTIONAL view: this
@@ -975,7 +992,10 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     const resolve = (workspace as PluginManifestSource).pluginManifestFor;
     return (pluginId: string): PluginManifest | null =>
       resolve?.(pluginId) ?? manifestFor(pluginId, null);
-  }, [workspace]);
+    // `manifestRevision` is not read here and is not meant to be: the accessor
+    // answers differently once the cache moves, so the revision is what makes
+    // this memo — and everything derived from it — ask again.
+  }, [workspace, manifestRevision]);
   // Registered plugins UNION the bundled table: a first-party panel is named
   // even before anyone adds its folder, which is what keeps the right glyph on
   // a pane whose plugin has since been removed. `enabled` is the registry's
@@ -1002,7 +1022,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       });
     }
     return listed.sort((left, right) => left.name.localeCompare(right.name));
-  }, [pluginsRegistry, knownManifest]);
+  }, [pluginsRegistry, knownManifest, manifestRevision]);
 
   // The sidebar's actions ARE the controller, with exactly one override: which
   // pane a plugin split hangs off.
@@ -1049,7 +1069,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         pluginsRegistry.plugins[pluginId] === undefined
           ? null
           : knownManifest(pluginId),
-    [pluginsRegistry, knownManifest],
+    [pluginsRegistry, knownManifest, manifestRevision],
   );
 
   // Live health per plugin for the Settings rows, read off the panes that are

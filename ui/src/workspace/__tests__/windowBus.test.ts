@@ -495,6 +495,9 @@ describe("single-writer wiring over the bus", () => {
 
     aux.pluginPanes.unbind([PLUGIN_PANE_MIN_ID]);
     await main.pluginPanes.flush();
+    // Main announces a change only once its own write has landed, so the
+    // broadcast reaches this window one turn after main's flush resolves.
+    await aux.pluginPanes.flush();
 
     expect(main.pluginPanes.getSnapshot()).toEqual({});
     expect(aux.pluginPanes.getSnapshot()).toEqual({});
