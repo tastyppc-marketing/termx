@@ -129,6 +129,19 @@ describe("reconcile — plugin panes (plugin spec §4)", () => {
     expect(result.deadSessionIds).toEqual([PLUGIN_PANE_MIN_ID]);
   });
 
+  it("ignores a non-reserved id in the set", () => {
+    // Defence in depth against a bad caller: sparing a REAL session id would
+    // leave its dead pane neither live nor dead — it would render as a corpse
+    // with no dismiss path, because Dismiss works off `deadSessionIds`. Only
+    // ids that could actually be panels are allowed to skip the sweep.
+    const layout = baseLayout();
+    const result = reconcile(layout, [session(1)], {
+      pluginPaneIds: new Set([2, 3]),
+    });
+
+    expect(result.deadSessionIds.sort()).toEqual([2, 3]);
+  });
+
   it("still flags dead terminals while sparing the plugin pane", () => {
     const layout = layoutWithPanel();
     const result = reconcile(layout, [session(1), session(2, false)], {

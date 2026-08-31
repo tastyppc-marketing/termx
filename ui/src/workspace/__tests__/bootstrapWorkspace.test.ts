@@ -458,6 +458,21 @@ describe("bootstrapWorkspace plugin panes", () => {
       }),
     });
     const runtimeReads: string[] = [];
+    // Built as a const and passed by reference, not written inline: the seam
+    // gains members over time, and a variable satisfies the interface without
+    // an excess-property complaint on the ones it does not name yet.
+    const native = {
+      readRuntime: async (path: string) => {
+        runtimeReads.push(path);
+        return null;
+      },
+      probe: async () => "",
+      spawn: async () => {
+        throw new Error("spawn refused");
+      },
+      stderrTail: async () => "",
+      readManifest: async () => null,
+    };
 
     const workspace = await bootstrapWorkspace({
       invokeBootstrap: async () => ({ port: 1234, token: "token" }),
@@ -465,17 +480,7 @@ describe("bootstrapWorkspace plugin panes", () => {
       appFiles,
       generateId: () => "panel-tab",
       pluginEnv: { APPDATA: "C:\\data" },
-      pluginNative: {
-        readRuntime: async (path) => {
-          runtimeReads.push(path);
-          return null;
-        },
-        probe: async () => "",
-        spawn: async () => {
-          throw new Error("spawn refused");
-        },
-        stderrTail: async () => "",
-      },
+      pluginNative: native,
     });
 
     await workspace.controller.openPluginTab("showroom");
@@ -514,14 +519,7 @@ describe("bootstrapWorkspace plugin panes", () => {
       appFiles,
       generateId: () => "panel-tab",
       // Nothing may reach the real Tauri commands from a unit test.
-      pluginNative: {
-        readRuntime: async () => null,
-        probe: async () => "",
-        spawn: async () => {
-          throw new Error("spawn refused");
-        },
-        stderrTail: async () => "",
-      },
+      pluginNative: nativeSpy().native,
     });
 
     const tabId = await workspace.controller.openPluginTab("showroom");
@@ -538,6 +536,433 @@ describe("bootstrapWorkspace plugin panes", () => {
     expect(Object.values(workspace.controller.getSnapshot().paneStates)).toContainEqual(
       expect.objectContaining({ status: "plugin", pluginHealth: "down" }),
     );
+  });
+
+  /// A registry holding one Showroom entry at a chosen enabled state.
+  function registry(enabled: boolean): string {
+    return JSON.stringify({
+      plugins: { showroom: { path: "C:\\code\\showroom", enabled, grants: [] } },
+    });
+  }
+
+  /// A native seam that records spawns and never reaches a Tauri command.
+  ///
+  /// Spawning REFUSES by default, and deliberately: a spawn that "succeeds"
+  /// leaves ensure-up polling for its whole ten-second budget before it gives
+  /// up, so the honest failure is also the fast one. The tests here are about
+  /// whether a spawn happens at all.
+  function nativeSpy() {
+    const spawn = vi.fn(async (): Promise<number> => {
+      throw new Error("spawn refused");
+    });
+    return {
+      spawn,
+      native: {
+        readRuntime: async () => null,
+        probe: async () => "",
+        spawn,
+        stderrTail: async () => "",
+        readManifest: async () => null,
+      },
+    };
+  }
+
+  /// One turn of the loop: ensure-up is fire-and-forget, so its verdict lands
+  /// a tick after the action that kicked it.
+  function settled(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  it("refuses to open a DISABLED plugin and never spawns its process", async () => {
+    // `enabled` is a real off switch (spec §2, §7), and the controller API is a
+    // seam other code calls — T8 hiding the menu entry is not the guard. The
+    // same gate covers openPluginSplit: both ask the host for the manifest
+    // first, and a disabled plugin has none to give.
+    const fake = fakeClient({ layout: serializeLayout(emptyLayout()) });
+    const { appFiles } = files({ "plugins_v1.json": registry(false) });
+    const spy = nativeSpy();
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      generateId: () => "panel-tab",
+      pluginNative: spy.native,
+    });
+
+    expect(await workspace.controller.openPluginTab("showroom")).toBeNull();
+    await settled();
+
+    expect(spy.spawn).not.toHaveBeenCalled();
+    expect(workspace.controller.getSnapshot().layout.tabs).toEqual({});
+    // Nothing was bound either: a refused open leaves no orphan behind.
+    expect(workspace.pluginPanes.getSnapshot()).toEqual({});
+  });
+
+  it("tells a restored pane its plugin is disabled, and Relaunch keeps saying so", async () => {
+    // The pane must stay a PLUGIN pane reporting why it is down, not decay
+    // into a dead terminal: a dead terminal offers Restart/Resume, which would
+    // put a shell where the user's panel was. And Relaunch must not become a
+    // way to start a plugin the user switched off.
+    const fake = fakeClient({ layout: panelLayout() });
+    const { appFiles } = files({
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom" } },
+      }),
+      "plugins_v1.json": registry(false),
+    });
+    const spy = nativeSpy();
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      pluginNative: spy.native,
+    });
+
+    await workspace.controller.relaunchPlugin(PLUGIN_PANE_MIN_ID);
+    const state = workspace.controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID]!;
+
+    expect(state.status).toBe("plugin");
+    expect(state.pluginHealth).toBe("down");
+    expect(state.pluginError).toContain("disabled");
+    expect(spy.spawn).not.toHaveBeenCalled();
+
+    // Clicking it again is the same honest answer, still with no process.
+    await workspace.controller.relaunchPlugin(PLUGIN_PANE_MIN_ID);
+    expect(workspace.controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID])
+      .toMatchObject({ pluginHealth: "down" });
+    expect(workspace.controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID]?.pluginError)
+      .toContain("disabled");
+    expect(spy.spawn).not.toHaveBeenCalled();
+  });
+
+  it("tells a restored pane its plugin is no longer installed", async () => {
+    // The plugin was removed from the registry while its pane sat in the
+    // layout. Same rule: a plugin pane saying what is wrong, never a corpse.
+    const fake = fakeClient({ layout: panelLayout() });
+    const { appFiles } = files({
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom" } },
+      }),
+    });
+    const spy = nativeSpy();
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      pluginNative: spy.native,
+    });
+
+    await workspace.controller.relaunchPlugin(PLUGIN_PANE_MIN_ID);
+    const state = workspace.controller.getSnapshot().paneStates[PLUGIN_PANE_MIN_ID]!;
+
+    expect(state.status).toBe("plugin");
+    expect(state.pluginHealth).toBe("down");
+    expect(state.pluginError).toContain("not installed");
+    expect(spy.spawn).not.toHaveBeenCalled();
+  });
+
+  it("unbinds a plugin pane when the group holding it is closed", async () => {
+    // `deleteGroup("close-tabs")` is the one close path that does not go
+    // through applyClosedSessions, so it gets its own end-to-end pin: the
+    // binding must go, and the reserved id must never reach the daemon.
+    const state = emptyLayout();
+    state.groups.g = {
+      id: "g",
+      name: "Work",
+      collapsed: false,
+      color: null,
+      items: [{ kind: "tab", id: "panel" }, { kind: "tab", id: "term" }],
+    };
+    state.tabs.panel = {
+      id: "panel",
+      title: "Showroom",
+      color: "magenta",
+      fill: "off",
+      split: { kind: "pane", sessionId: PLUGIN_PANE_MIN_ID },
+    };
+    state.tabs.term = {
+      id: "term",
+      title: null,
+      color: "blue",
+      fill: "off",
+      split: { kind: "pane", sessionId: 1 },
+    };
+    state.rootItems = [{ kind: "group", id: "g" }];
+    state.activeTabId = "term";
+    const fake = fakeClient({
+      layout: serializeLayout(state),
+      sessions: [session(1)],
+    });
+    const { appFiles, writes } = files({
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom" } },
+      }),
+      "plugins_v1.json": registry(true),
+    });
+
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+    });
+    await workspace.controller.deleteGroup("g", "close-tabs");
+    await workspace.pluginPanes.flush();
+
+    expect(workspace.pluginPanes.getSnapshot()).toEqual({});
+    expect(workspace.controller.getSnapshot().layout.groups).toEqual({});
+    // Only the real terminal was closed host-side.
+    expect(vi.mocked(fake.client.closeSession).mock.calls).toEqual([[1]]);
+    const written = writes.filter(([name]) => name === "plugin_panes_v1.json");
+    expect(parsePluginPanes(written.at(-1)![1])).toEqual({});
+  });
+
+  /// A registry holding the given entries, enabled with a per-id folder path
+  /// unless the test says otherwise.
+  function registryOf(
+    entries: Record<string, { enabled?: boolean; path?: string }>,
+  ): string {
+    return JSON.stringify({
+      plugins: Object.fromEntries(
+        Object.entries(entries).map(([id, entry]) => [
+          id,
+          {
+            path: entry.path ?? `C:\\code\\${id}`,
+            enabled: entry.enabled ?? true,
+            grants: [],
+          },
+        ]),
+      ),
+    });
+  }
+
+  /// A well-formed `termx-plugin.json`, so a test can prove the plugin's own
+  /// file is preferred over the bundled table.
+  function folderManifest(id: string, name: string): string {
+    return JSON.stringify({
+      manifest: 1,
+      id,
+      name,
+      icon: "🧩",
+      start: { command: "node", args: ["server.js"] },
+      singleton: true,
+      discovery: {
+        runtimeFile: "%APPDATA%\\Thing\\runtime.json",
+        healthPath: "/health",
+      },
+      panel: { path: "/" },
+    });
+  }
+
+  /// A native seam answering a healthy Showroom on port 7788, with every hook
+  /// a test may want to redirect.
+  function healthyNative(overrides: {
+    readRuntime?: () => Promise<string | null>;
+    probe?: (url: string) => Promise<string>;
+    readManifest?: () => Promise<string | null>;
+  } = {}) {
+    const spawn = vi.fn(async (): Promise<number> => {
+      throw new Error("a probe must never spawn");
+    });
+    const probeUrls: string[] = [];
+    const runtimeReads: string[] = [];
+    const native = {
+      readRuntime: async (path: string) => {
+        runtimeReads.push(path);
+        return overrides.readRuntime
+          ? await overrides.readRuntime()
+          : JSON.stringify({ port: 7788, token: "t", version: "1.0.0" });
+      },
+      probe: async (url: string) => {
+        probeUrls.push(url);
+        return overrides.probe
+          ? await overrides.probe(url)
+          : JSON.stringify({ ok: true, version: "1.0.0" });
+      },
+      spawn,
+      stderrTail: async () => "",
+      readManifest: overrides.readManifest ?? (async () => null),
+    };
+    return { native, spawn, probeUrls, runtimeReads };
+  }
+
+  async function bootWith(options: {
+    seed: Record<string, string>;
+    native: ReturnType<typeof healthyNative>["native"];
+    layout?: JsonValue;
+  }) {
+    const fake = fakeClient(
+      options.layout === undefined ? {} : { layout: options.layout },
+    );
+    const { appFiles } = files(options.seed);
+    return bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      generateId: () => "panel-tab",
+      pluginEnv: { APPDATA: "C:\\data" },
+      pluginNative: options.native,
+    });
+  }
+
+  it("probes a running plugin without ever spawning it", async () => {
+    // The poller asks this every 15 s. It must stay a pure OBSERVATION: an
+    // ensure-up here would respawn a plugin the user just killed, so the down
+    // card could never appear and Relaunch would have nothing to do.
+    const spy = healthyNative();
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    expect(await workspace.pluginHost.probe?.("showroom")).toBe(true);
+    expect(spy.runtimeReads).toEqual(["C:\\data\\Showroom\\runtime.json"]);
+    expect(spy.probeUrls).toEqual(["http://127.0.0.1:7788/api/health"]);
+    expect(spy.spawn).not.toHaveBeenCalled();
+  });
+
+  it("reports a plugin with no runtime file as not healthy", async () => {
+    const spy = healthyNative({ readRuntime: async () => null });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    expect(await workspace.pluginHost.probe?.("showroom")).toBe(false);
+    // Nothing to probe: a missing runtime file IS the answer.
+    expect(spy.probeUrls).toEqual([]);
+  });
+
+  it("treats a probe that throws as not healthy", async () => {
+    const spy = healthyNative({
+      probe: async () => {
+        throw new Error("connection refused");
+      },
+    });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    expect(await workspace.pluginHost.probe?.("showroom")).toBe(false);
+  });
+
+  it("reports an unhealthy body as not healthy", async () => {
+    // A foreign app squatting on the recorded port answers 200; only the
+    // {ok, version} pair proves the plugin itself is listening.
+    const spy = healthyNative({ probe: async () => "<html>not us</html>" });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    expect(await workspace.pluginHost.probe?.("showroom")).toBe(false);
+  });
+
+  it("never probes a disabled plugin", async () => {
+    const spy = healthyNative();
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(false) },
+      native: spy.native,
+    });
+
+    expect(await workspace.pluginHost.probe?.("showroom")).toBe(false);
+    expect(spy.runtimeReads).toEqual([]);
+  });
+
+  it("prefers a plugin's own folder manifest over the bundled one", async () => {
+    // The tab title is the manifest's name, so it is the visible proof of
+    // which manifest won.
+    const spy = healthyNative({
+      readManifest: async () => folderManifest("showroom", "Showroom Dev"),
+    });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    expect(await workspace.controller.openPluginTab("showroom")).toBe("panel-tab");
+    expect(workspace.controller.getSnapshot().ungroupedTabs.at(-1)?.title)
+      .toBe("Showroom Dev");
+  });
+
+  it("falls back to the bundled manifest when the folder file is malformed", async () => {
+    // A first-party plugin must not become unopenable because its repository
+    // grew a broken file; Settings is where the parse errors are explained.
+    const spy = healthyNative({ readManifest: async () => "{ not json" });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registry(true) },
+      native: spy.native,
+    });
+
+    expect(await workspace.controller.openPluginTab("showroom")).toBe("panel-tab");
+    expect(workspace.controller.getSnapshot().ungroupedTabs.at(-1)?.title)
+      .toBe("Showroom");
+  });
+
+  it("opens a non-bundled plugin from its folder manifest alone", async () => {
+    const spy = healthyNative({
+      readManifest: async () => folderManifest("toolbox", "Toolbox"),
+    });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registryOf({ toolbox: {} }) },
+      native: spy.native,
+    });
+
+    expect(await workspace.controller.openPluginTab("toolbox")).toBe("panel-tab");
+    expect(workspace.controller.getSnapshot().ungroupedTabs.at(-1)?.title)
+      .toBe("Toolbox");
+  });
+
+  it("leaves a non-bundled plugin with a malformed manifest unopenable", async () => {
+    // Nothing to fall back to, and half-opening a plugin TermX cannot describe
+    // would produce a pane with no name and no panel path.
+    const spy = healthyNative({ readManifest: async () => "{ not json" });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registryOf({ toolbox: {} }) },
+      native: spy.native,
+    });
+
+    expect(await workspace.controller.openPluginTab("toolbox")).toBeNull();
+    expect(workspace.controller.getSnapshot().layout.tabs).toEqual({});
+  });
+
+  it("ignores a folder manifest that claims a different plugin id", async () => {
+    // The registry key is what the binding stores and what the spawn stamps as
+    // TERMX_PLUGIN_ID; a folder answering to another name would let one plugin
+    // impersonate another.
+    const spy = healthyNative({
+      readManifest: async () => folderManifest("showroom", "Impostor"),
+    });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registryOf({ toolbox: {} }) },
+      native: spy.native,
+    });
+
+    expect(await workspace.controller.openPluginTab("toolbox")).toBeNull();
+  });
+
+  it("re-reads folder manifests when the registry changes", async () => {
+    let manifest: string | null = null;
+    const spy = healthyNative({ readManifest: async () => manifest });
+    const workspace = await bootWith({
+      seed: { "plugins_v1.json": registryOf({ toolbox: {} }) },
+      native: spy.native,
+    });
+    // Boot read found nothing, and toolbox is not bundled.
+    expect(workspace.pluginHost.manifestFor("toolbox")).toBeNull();
+
+    manifest = folderManifest("toolbox", "Toolbox");
+    workspace.plugins.add("toolbox", "C:\\code\\toolbox-moved");
+
+    await vi.waitFor(() => {
+      expect(workspace.pluginHost.manifestFor("toolbox")?.name).toBe("Toolbox");
+    });
   });
 });
 

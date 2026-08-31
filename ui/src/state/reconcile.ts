@@ -1,3 +1,4 @@
+import { isPluginPaneId } from "../plugins/paneBindings";
 import { sessionIdsInLayout } from "./layout";
 import type { Item, Layout, Tab } from "./layout";
 
@@ -43,7 +44,8 @@ export interface ReconcileOptions {
   /// Membership is the BINDING, not the range: a reserved id whose binding was
   /// lost is deliberately left in `deadSessionIds`, which is what makes it the
   /// dismissible dead pane the spec requires (and exactly what an older build
-  /// without this option sees).
+  /// without this option sees). Ids outside the reserved range are ignored —
+  /// they cannot be panels, and sparing one would strand a real dead session.
   ///
   /// Orphan adoption needs no equivalent guard: orphans come from the host's
   /// own session list, which can never contain a reserved id.
@@ -124,8 +126,15 @@ export function reconcile(
   );
 
   const pluginPaneIds = opts?.pluginPaneIds;
+  // The RANGE is checked as well as the membership. A caller that put a real
+  // daemon id in the set would otherwise take a genuinely dead session out of
+  // `deadSessionIds`, and since Dismiss works off that list its pane would
+  // render as a corpse nobody can clear. A plugin pane is by definition a
+  // reserved id, so the two conditions cost nothing together.
+  const isLivePluginPane = (id: number): boolean =>
+    pluginPaneIds?.has(id) === true && isPluginPaneId(id);
   const deadSessionIds = [...referenced].filter(
-    (id) => !alive.has(id) && pluginPaneIds?.has(id) !== true,
+    (id) => !alive.has(id) && !isLivePluginPane(id),
   );
   const orphans = hostSessions.filter((s) => s.alive && !referenced.has(s.id));
   const unreferencedDeadSessionIds = hostSessions

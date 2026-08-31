@@ -19,7 +19,8 @@ import { HostBootstrapError, ReconnectingHostClient } from "../host/reconnect";
 import type { SessionInfo } from "../host/protocol";
 import { tauriAppFiles, type AppFileStore } from "../native/appFiles";
 import type { FolderPicker } from "../native/dialog";
-import { ensureUp } from "../plugins/lifecycle";
+import { ensureUp, isHealthy, parseRuntimeFile } from "../plugins/lifecycle";
+import { expandEnv, type PluginManifest } from "../plugins/manifest";
 import { tauriPluginNative, type PluginNative } from "../plugins/native";
 import {
   clonePluginPanes,
@@ -55,7 +56,7 @@ import { AttachmentHub } from "./AttachmentHub";
 import { firstSessionId, flattenTabIds, sessionIdsInTab } from "./layoutOperations";
 import { LayoutPersistence } from "./LayoutPersistence";
 import type { WindowBus } from "./windowBus";
-import { WorkspaceController } from "./WorkspaceController";
+import { WorkspaceController, type WorkspacePluginHost } from "./WorkspaceController";
 
 export type BootstrapWorkspaceClient = Pick<
   HostClient,
@@ -254,6 +255,12 @@ export interface BootstrappedWorkspace {
    * Always present; an empty registry is simply a workspace with no plugins.
    */
   plugins: PluginsStore;
+  /**
+   * The lifecycle seam the controller opens panels through, exposed so a
+   * health indicator (and the tests that pin this wiring) can ask the same
+   * questions the controller does without reaching into it.
+   */
+  pluginHost: WorkspacePluginHost;
 }
 
 /**
@@ -269,6 +276,9 @@ export interface BootstrappedWorkspace {
  * intact — the plugin then reads as down, with a Relaunch button, rather than
  * taking the boot with it.
  */
+/** A loopback health check either answers at once or is not serving us. */
+const PLUGIN_PROBE_TIMEOUT_MS = 1_000;
+
 async function defaultPluginEnv(): Promise<Record<string, string | undefined>> {
   try {
     // On Windows this is `%APPDATA%` itself (the roaming data dir).
@@ -590,11 +600,11 @@ export async function bootstrapWorkspace(
     // Ensure-up adopts a healthy instance and only spawns when there is none,
     // so TermX never owns — or kills — a plugin's process.
     //
-    // The manifest comes from the BUNDLED table for now: reading a plugin
-    // folder's own `termx-plugin.json` needs a native read this build does not
-    // have yet, and Phase 1's only plugin (Showroom) is bundled precisely so
-    // its repository needs no file. A plugin with no bundled manifest reads as
-    // "not installed" rather than half-opening.
+    // A manifest comes from the plugin's OWN `termx-plugin.json` when it ships
+    // one, else the bundled table (spec §9 — a first-party plugin needs no file
+    // in its repository). The read is async and the controller's `manifestFor`
+    // seam is synchronous (it names a tab mid-open), so folder manifests are
+    // pre-read into a cache at boot and re-read whenever the registry changes.
     const pluginNative = options.pluginNative ?? tauriPluginNative;
     // Resolved lazily and once: a workspace with no plugins never pays for it,
     // and two panes opened together share the one lookup.
@@ -604,19 +614,106 @@ export async function bootstrapWorkspace(
       pluginEnvOnce ??= injectedEnv ? Promise.resolve(injectedEnv) : defaultPluginEnv();
       return pluginEnvOnce;
     };
-    const installedManifest = (pluginId: string) =>
-      plugins.getSnapshot().plugins[pluginId] === undefined
-        ? null
-        : manifestFor(pluginId, null);
-    const pluginHost = {
+    /**
+     * One plugin's manifest from its folder file, falling back to the bundled
+     * table. The file WINS when it parses; a malformed one falls back rather
+     * than making the plugin unopenable, because a first-party plugin whose
+     * repository grew a broken file should keep working (Settings is where the
+     * parse errors are explained).
+     *
+     * The id must MATCH the registry key: that key is what a pane binding
+     * stores and what the spawn stamps as TERMX_PLUGIN_ID, so a folder
+     * answering to another plugin's name would let one impersonate another.
+     */
+    const resolveManifest = (
+      pluginId: string,
+      text: string | null,
+    ): PluginManifest | null => {
+      const fromFile = text === null ? null : manifestFor(pluginId, text);
+      if (fromFile !== null && fromFile.id === pluginId) {
+        return fromFile;
+      }
+      return manifestFor(pluginId, null);
+    };
+    const folderManifests = new Map<string, PluginManifest | null>();
+    let manifestEpoch = 0;
+    const refreshFolderManifests = async (): Promise<void> => {
+      const epoch = (manifestEpoch += 1);
+      const next = new Map<string, PluginManifest | null>();
+      await Promise.all(
+        Object.entries(plugins.getSnapshot().plugins).map(async ([id, entry]) => {
+          if (entry.enabled !== true) {
+            return;
+          }
+          let text: string | null = null;
+          try {
+            text = await pluginNative.readManifest(entry.path);
+          } catch {
+            // No folder file, an unreadable one, or an older host without the
+            // command: the bundled table answers, exactly as before.
+            text = null;
+          }
+          next.set(id, resolveManifest(id, text));
+        }),
+      );
+      // A refresh that started earlier must not overwrite a newer one's answers.
+      if (epoch !== manifestEpoch) {
+        return;
+      }
+      folderManifests.clear();
+      for (const [id, manifest] of next) {
+        folderManifests.set(id, manifest);
+      }
+    };
+    await refreshFolderManifests();
+    // Enabling, adding, or re-pathing a plugin changes which file to read, and
+    // the answer must not stay stale until the next boot. Asynchronous by
+    // nature: until it lands, the previous cache entry (or the bundled table)
+    // answers, which is never worse than what came before.
+    plugins.subscribe(() => void refreshFolderManifests());
+    /// The manifest ignoring the enabled gate — for messages that need a NAME.
+    const knownManifest = (pluginId: string): PluginManifest | null =>
+      folderManifests.get(pluginId) ?? manifestFor(pluginId, null);
+    // `enabled` is a real off switch (spec §2, §7), enforced HERE rather than
+    // in the menus: the controller's open/relaunch methods are a seam other
+    // code calls, so a hidden menu entry is not a guard. A disabled plugin has
+    // no manifest to give, which is what makes every one of those paths refuse.
+    const installedManifest = (pluginId: string): PluginManifest | null => {
+      if (plugins.getSnapshot().plugins[pluginId]?.enabled !== true) {
+        return null;
+      }
+      const cached = folderManifests.get(pluginId);
+      return cached !== undefined ? cached : manifestFor(pluginId, null);
+    };
+    const pluginHost: WorkspacePluginHost = {
       manifestFor: installedManifest,
       ensureUp: async (pluginId: string) => {
+        // Each refusal says which of the three things is wrong, because this
+        // text is what a restored pane shows on its down card. "Not installed"
+        // on a plugin the user only switched off would send them hunting for a
+        // folder they never removed.
         const entry = plugins.getSnapshot().plugins[pluginId];
-        const manifest = installedManifest(pluginId);
-        if (entry === undefined || manifest === null) {
+        if (entry === undefined) {
           return {
             ok: false as const,
             reason: `The plugin "${pluginId}" is not installed.`,
+            stderrTail: "",
+          };
+        }
+        if (entry.enabled !== true) {
+          return {
+            ok: false as const,
+            // Named WITHOUT the enabled gate: a disabled plugin still has a
+            // name, and its card should use it.
+            reason: `${knownManifest(pluginId)?.name ?? pluginId} is disabled in Settings.`,
+            stderrTail: "",
+          };
+        }
+        const manifest = installedManifest(pluginId);
+        if (manifest === null) {
+          return {
+            ok: false as const,
+            reason: `TermX cannot read a manifest for the plugin "${pluginId}".`,
             stderrTail: "",
           };
         }
@@ -626,6 +723,48 @@ export async function bootstrapWorkspace(
           now: () => Date.now(),
           sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
         });
+      },
+      /**
+       * The 15-second poll's question, and a pure OBSERVATION: it re-reads the
+       * runtime file and asks the health route, and that is all. It must NEVER
+       * become an ensure-up — a spawn here would resurrect a plugin the user
+       * just killed, so the down card could never appear and Relaunch would
+       * have nothing left to do. It also flips health to "starting" on every
+       * tick, remounting the iframe.
+       *
+       * Every failure is the same answer, "not healthy": a disabled or
+       * uninstalled plugin (no manifest), no runtime file, a refused
+       * connection, or a body that is not this plugin's own health response.
+       */
+      probe: async (pluginId: string): Promise<boolean> => {
+        const manifest = installedManifest(pluginId);
+        if (manifest === null) {
+          return false;
+        }
+        const runtimePath = expandEnv(
+          manifest.discovery.runtimeFile,
+          await pluginEnv(),
+        );
+        let text: string | null;
+        try {
+          text = await pluginNative.readRuntime(runtimePath);
+        } catch {
+          return false;
+        }
+        const file = parseRuntimeFile(text);
+        if (file === null) {
+          return false;
+        }
+        try {
+          return isHealthy(
+            await pluginNative.probe(
+              `http://127.0.0.1:${file.port}${manifest.discovery.healthPath}`,
+              PLUGIN_PROBE_TIMEOUT_MS,
+            ),
+          );
+        } catch {
+          return false;
+        }
       },
     };
     const attachments = new AttachmentHub(client);
@@ -776,6 +915,7 @@ export async function bootstrapWorkspace(
       sshCredentials,
       pluginPanes,
       plugins,
+      pluginHost,
     };
   } catch {
     try {
