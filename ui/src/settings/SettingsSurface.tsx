@@ -256,6 +256,17 @@ export function SettingsSurface({
       if (!root || !root.contains(document.activeElement)) {
         return;
       }
+      // A control inside the surface may own Esc for itself — an armed
+      // destructive button disarms rather than closing the whole surface out
+      // from under the user. This is settled by OWNERSHIP, not by listener
+      // order: both handlers are window-capture, so `stopPropagation` from the
+      // panel cannot reach this one, and even `stopImmediatePropagation` would
+      // not help because the panel registers SECOND (it mounts when the user
+      // navigates to its section, long after this surface did). Marking the
+      // owning element and deferring to it is the only ordering-proof answer.
+      if (document.activeElement?.closest("[data-esc-guard]")) {
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       onClose();

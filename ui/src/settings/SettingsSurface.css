@@ -408,12 +408,13 @@
   border: 1px solid var(--warn);
 }
 
-/* Chips, not overlines: 600 is the heaviest weight allowed outside the exact
-   10px/700/0.08em overline recipe, and these track at 0.06em. */
-.settings-plugin__tag,
-.settings-plugin__status {
+/* A chip — one word, a classification. Not an overline: 600 is the heaviest
+   weight allowed outside the exact 10px/700/0.08em recipe, and it tracks at
+   0.06em. The status below deliberately does NOT share this. */
+.settings-plugin__tag {
   flex: 0 0 auto;
   padding: 1px 5px;
+  color: var(--text-hint);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font-size: 10px;
@@ -422,17 +423,26 @@
   text-transform: uppercase;
 }
 
-.settings-plugin__tag {
-  color: var(--text-hint);
-}
-
 /* A row that cannot work says so in the error colour — the same signal the
-   rest of the app uses for a destructive or broken state. */
+   rest of the app uses for a destructive or broken state — but as PROSE, not
+   as a chip. These are sentences ("This folder's manifest says gadgets, not
+   widgets."), and a sentence set in tracked uppercase 600 reads as shouting
+   and is markedly slower to scan. So: sentence case, the row's own secondary
+   size, normal tracking, weight 400 (the design language allows 400 and 600
+   only, which is well inside "500 at most"). The error colour, the 45%
+   hairline, the padding and the ellipsis all stay — only the shouting goes.
+   It shrinks after the name so a long reason truncates instead of pushing the
+   controls off the row; the full text is on the element's `title`. */
 .settings-plugin__status {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
+  padding: 1px 5px;
   color: var(--error);
-  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+  border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -494,6 +504,16 @@
 
 .settings-plugins__action--danger:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--error) 55%, transparent);
+}
+
+/* The surface's focus ring is the accent; on the one destructive control that
+   would be the wrong promise. Same specificity as `.settings-surface
+   :focus-visible`, and later in the file, so it wins. The armed state is
+   listed too even though it always carries --danger as well: the colour of a
+   destructive focus ring should not depend on that staying true. */
+.settings-plugins__action--danger:focus-visible,
+.settings-plugins__action--confirm:focus-visible {
+  outline-color: var(--error);
 }
 
 /* The armed state of the same button — filled, so it cannot be mistaken for

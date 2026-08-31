@@ -16,6 +16,8 @@ import {
   shortenPath,
   type PluginHealth,
 } from "../PluginsPanel";
+import { SettingsStore } from "../SettingsStore";
+import { SettingsSurface } from "../SettingsSurface";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -444,6 +446,83 @@ describe("PluginsPanel accessible names", () => {
       "Widgets",
     );
   });
+
+  it("starts every accessible name with the control's own visible text", async () => {
+    // WCAG 2.5.3 label-in-name: someone driving by voice says what they can
+    // see ("click open as tab"), so the visible words must lead the name.
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+      onOpen: vi.fn(),
+    });
+
+    expect(
+      row("showroom")
+        .querySelector<HTMLInputElement>("input[type='checkbox']")!
+        .getAttribute("aria-label"),
+    ).toBe("Enabled: Showroom");
+    expect(
+      action("showroom", "Open as tab")!.getAttribute("aria-label"),
+    ).toBe("Open as tab: Showroom");
+    expect(removeButton("widgets")!.getAttribute("aria-label")).toBe(
+      "Remove: Widgets",
+    );
+    // Bundled: the plugin stays, only its folder goes — and "Remove" still
+    // leads, so the visible word is still the spoken one.
+    expect(removeButton("showroom")!.getAttribute("aria-label")).toBe(
+      "Remove folder: Showroom",
+    );
+  });
+
+  it("keeps the visible text leading once Remove is armed", async () => {
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+    });
+
+    await click(removeButton("widgets")!);
+    expect(removeButton("widgets")!.textContent).toBe("Confirm remove");
+    expect(removeButton("widgets")!.getAttribute("aria-label")).toBe(
+      "Confirm remove: Widgets",
+    );
+  });
+
+  it("names a row's Add and Change folder buttons too", async () => {
+    await renderPanel({ store: storeWith({}) });
+    expect(action("showroom", "Add folder…")!.getAttribute("aria-label")).toBe(
+      "Add folder: Showroom",
+    );
+
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+      }),
+    });
+    expect(
+      action("showroom", "Change folder…")!.getAttribute("aria-label"),
+    ).toBe("Change folder: Showroom");
+  });
+
+  it("does not leave the toggle's visible text to be read twice", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+      }),
+    });
+
+    // The aria-label already says "Enabled: Showroom"; the visible "Enabled"
+    // beside it would otherwise be announced again as static text.
+    expect(
+      row("showroom")
+        .querySelector(".settings-radio__text")!
+        .getAttribute("aria-hidden"),
+    ).toBe("true");
+  });
 });
 
 describe("PluginsPanel remove confirmation", () => {
@@ -621,16 +700,47 @@ describe("PluginsPanel manifest problems", () => {
   it("still lets a broken plugin be switched off", async () => {
     // The row broke while it was on. Trapping it there is worse than the
     // problem it is reporting.
-    await renderPanel({
-      store: storeWith({
-        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
-      }),
+    const store = storeWith({
+      widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
     });
+    const setEnabled = vi.spyOn(store, "setEnabled");
+    await renderPanel({ store });
 
     const toggle = row("widgets").querySelector<HTMLInputElement>(
       "input[type='checkbox']",
     )!;
     expect(toggle.disabled).toBe(false);
+
+    await click(toggle);
+    expect(setEnabled).toHaveBeenCalledWith("widgets", false);
+    expect(store.getSnapshot().plugins.widgets!.enabled).toBe(false);
+  });
+
+  it("hides Open on a mismatched manifest even while the plugin is on", async () => {
+    // Separate from the enabled gate: this row IS enabled, so if Open is gone
+    // it is the manifest problem hiding it and nothing else.
+    const store = storeWith({
+      widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+    });
+    const setEnabled = vi.spyOn(store, "setEnabled");
+    await renderPanel({
+      store,
+      native: fakeNative({ [WIDGETS_PATH]: manifestText({ id: "gadgets" }) }),
+      onOpen: vi.fn(),
+    });
+
+    expect(text(row("widgets").querySelector(".settings-plugin__status"))).toBe(
+      "This folder's manifest says gadgets, not widgets.",
+    );
+    expect(action("widgets", "Open as tab")).toBeNull();
+
+    // And the way out is still open.
+    const toggle = row("widgets").querySelector<HTMLInputElement>(
+      "input[type='checkbox']",
+    )!;
+    expect(toggle.disabled).toBe(false);
+    await click(toggle);
+    expect(setEnabled).toHaveBeenCalledWith("widgets", false);
   });
 
   it("uses the bundled manifest when the bundled plugin's folder has no file", async () => {
@@ -953,67 +1063,211 @@ describe("PluginsPanel row-scoped folder actions", () => {
 });
 
 describe("PluginsPanel late folder reads", () => {
-  /** A `readManifest` whose promises only settle when the test says so. */
-  function deferredNative(): {
+  /**
+   * A `readManifest` whose promises settle only when the test says so, and
+   * per folder — the discriminating tests need to answer an OLD read while a
+   * newer one for a different folder is still outstanding.
+   */
+  function queuedNative(): {
     native: PluginNative;
-    release(text: string | null): Promise<void>;
+    settle(folder: string, value: string | null): Promise<void>;
   } {
-    const pending: ((value: string | null) => void)[] = [];
+    const waiting: { folder: string; resolve(value: string | null): void }[] =
+      [];
     const native = fakeNative();
     native.readManifest = vi.fn(
-      () => new Promise<string | null>((resolve) => pending.push(resolve)),
+      (folder: string) =>
+        new Promise<string | null>((resolve) => {
+          waiting.push({ folder, resolve });
+        }),
     );
     return {
       native,
-      release: async (value) => {
+      settle: async (folder, value) => {
+        // Snapshot the matches BEFORE resolving: settling one read re-runs the
+        // effect, which queues the next one, and that must not be settled here.
+        const matched = waiting.filter((entry) => entry.folder === folder);
+        for (const entry of matched) {
+          waiting.splice(waiting.indexOf(entry), 1);
+        }
         await act(async () => {
-          for (const resolve of pending.splice(0)) {
-            resolve(value);
+          for (const entry of matched) {
+            entry.resolve(value);
           }
         });
       },
     };
   }
 
-  it("ignores a read that lands after the panel is gone", async () => {
-    const { native, release } = deferredNative();
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      await renderPanel({
-        store: storeWith({
-          widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
-        }),
-        native,
-      });
-
-      await act(async () => root.unmount());
-      // The disk answers after the surface closed. Setting state here is what
-      // produces the "update on an unmounted component" class of bug.
-      await release(manifestText());
-
-      expect(errors).not.toHaveBeenCalled();
-    } finally {
-      errors.mockRestore();
-      // afterEach unmounts again; a second unmount on the same root throws.
-      root = createRoot(container);
-    }
-  });
-
-  it("does not resurrect a row that was removed while its folder was being read", async () => {
-    const { native, release } = deferredNative();
+  it("does not show a stale payload to the panel that replaces it", async () => {
     const store = storeWith({
       widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
     });
+    const { native, settle } = queuedNative();
     await renderPanel({ store, native });
 
-    await click(removeButton("widgets")!);
-    await click(removeButton("widgets")!);
-    expect(rowIds()).toEqual(["showroom"]);
+    // Settings closes with the read still outstanding, and the disk answers
+    // afterwards with what the folder used to hold.
+    await act(async () => root.unmount());
+    await settle(WIDGETS_PATH, manifestText({ name: "Stale Widgets" }));
 
-    await release(manifestText());
+    // Reopened: the folder now holds something else, and that is what must
+    // show. A leaked cache or a write from the dead read would say otherwise.
+    root = createRoot(container);
+    await renderPanel({
+      store,
+      native: fakeNative({
+        [WIDGETS_PATH]: manifestText({ name: "Fresh Widgets" }),
+      }),
+    });
 
-    // The in-flight read belongs to a plugin that is no longer installed.
-    expect(rowIds()).toEqual(["showroom"]);
+    expect(text(row("widgets").querySelector(".settings-plugin__label"))).toBe(
+      "Fresh Widgets",
+    );
+  });
+
+  it("lets the new folder's manifest win when an old read lands late", async () => {
+    const OLD_PATH = "C:\old\showroom";
+    const store = storeWith({
+      showroom: { path: OLD_PATH, enabled: true, grants: [] },
+    });
+    const { native, settle } = queuedNative();
+    await renderPanel({ store, native, pickFolder: async () => SHOWROOM_PATH });
+
+    // Repoint while the read of the OLD folder is still outstanding. The add
+    // path reads the picked folder itself, so answer that one to let it land.
+    await click(action("showroom", "Change folder…")!);
+    await settle(
+      SHOWROOM_PATH,
+      manifestText({ id: "showroom", name: "New Showroom" }),
+    );
+    expect(store.getSnapshot().plugins.showroom!.path).toBe(SHOWROOM_PATH);
+
+    // Now the abandoned read answers. It describes a folder this row no longer
+    // points at, so it must not reach the screen.
+    await settle(
+      OLD_PATH,
+      manifestText({ id: "showroom", name: "Old Showroom" }),
+    );
+    expect(
+      text(row("showroom").querySelector(".settings-plugin__label")),
+    ).not.toBe("Old Showroom");
+
+    // And the read the effect issued for the NEW folder is the one that lands.
+    await settle(
+      SHOWROOM_PATH,
+      manifestText({ id: "showroom", name: "New Showroom" }),
+    );
+    expect(text(row("showroom").querySelector(".settings-plugin__label"))).toBe(
+      "New Showroom",
+    );
+  });
+});
+
+describe("PluginsPanel inside the real Settings surface", () => {
+  /**
+   * The armed-Remove Esc rule can only be proved with the surface actually
+   * mounted: both Esc handlers are window-capture listeners, and the panel's
+   * registers SECOND because it mounts when this test navigates to the
+   * Plugins section — long after the surface registered. A panel-only test
+   * would pass on ordering that does not exist in the app.
+   */
+  async function openPluginsSection(
+    store: PluginsStore,
+    onClose: () => void,
+  ): Promise<void> {
+    await act(async () => {
+      root.render(
+        <SettingsSurface
+          store={new SettingsStore({ save: () => Promise.resolve() })}
+          onClose={onClose}
+          plugins={{
+            store,
+            native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+          }}
+        />,
+      );
+    });
+    const tab = container.querySelector<HTMLButtonElement>(
+      ".settings-surface__tab[data-section='plugins']",
+    )!;
+    await act(async () => {
+      tab.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+    });
+    await act(async () => undefined);
+  }
+
+  async function pressEscape(target: HTMLElement): Promise<void> {
+    await act(async () => {
+      target.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+  }
+
+  it("gives Escape to an armed Remove before it closes Settings", async () => {
+    const onClose = vi.fn();
+    const store = storeWith({
+      widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+    });
+    const remove = vi.spyOn(store, "remove");
+    await openPluginsSection(store, onClose);
+
+    const button = removeButton("widgets")!;
+    // A real click focuses the button it hits; that focus is what marks the
+    // armed control as the owner of the key.
+    button.focus();
+    await click(button);
+    expect(button.textContent).toBe("Confirm remove");
+
+    await pressEscape(removeButton("widgets")!);
+
+    // Disarmed, and Settings is still open — losing the whole surface because
+    // you backed out of one button would be the worse of the two outcomes.
+    expect(removeButton("widgets")!.textContent).toBe("Remove");
+    expect(remove).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes Settings on the next Escape once nothing is armed", async () => {
+    const onClose = vi.fn();
+    const store = storeWith({
+      widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+    });
+    await openPluginsSection(store, onClose);
+
+    const button = removeButton("widgets")!;
+    button.focus();
+    await click(button);
+    await pressEscape(removeButton("widgets")!);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The guard is gone with the armed state, so Esc means what it always
+    // means again.
+    await pressEscape(removeButton("widgets")!);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes Settings on Escape when no Remove is armed at all", async () => {
+    const onClose = vi.fn();
+    await openPluginsSection(
+      storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      onClose,
+    );
+
+    const button = removeButton("widgets")!;
+    button.focus();
+    await pressEscape(button);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
 

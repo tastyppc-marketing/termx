@@ -46,7 +46,15 @@ export function Toggle({
         {...(ariaLabel === undefined ? {} : { "aria-label": ariaLabel })}
         onChange={(event) => onToggle(event.currentTarget.checked)}
       />
-      <span className="settings-radio__text">
+      {/* When `ariaLabel` overrides the name, the visible text is hidden from
+          assistive tech: it is already said — better — by the override, and
+          leaving it exposed makes a screen reader announce "Enabled" and then
+          "Enabled" again as the label's own static text. Safe to hide because
+          the control itself is the sibling <input>, not inside this span. */}
+      <span
+        className="settings-radio__text"
+        {...(ariaLabel === undefined ? {} : { "aria-hidden": true })}
+      >
         <span className="settings-radio__label">{label}</span>
         {hint === undefined ? null : (
           <span className="settings-radio__hint">{hint}</span>

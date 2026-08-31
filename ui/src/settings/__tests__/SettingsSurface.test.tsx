@@ -245,6 +245,23 @@ describe("SettingsSurface controls", () => {
     expect(save).toHaveBeenCalledTimes(3);
   });
 
+  it("leaves an ordinary toggle's label readable to assistive tech", async () => {
+    // The Plugins panel hides this span because it passes `ariaLabel`; a
+    // settings field has no override, so the visible text IS the name and
+    // hiding it would leave the checkbox nameless.
+    const { store } = storeWithSave();
+    await renderSurface(store);
+    await selectSection("terminal");
+
+    const text = container.querySelector(
+      ".settings-surface__panel .settings-check .settings-radio__text",
+    )!;
+    expect(text.getAttribute("aria-hidden")).toBeNull();
+    expect(
+      input("input[type='checkbox']").getAttribute("aria-label"),
+    ).toBeNull();
+  });
+
   it("Terminal: shell integration and the default shell select", async () => {
     const { store } = storeWithSave();
     await renderSurface(store);

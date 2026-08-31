@@ -221,9 +221,6 @@ export function PluginsPanel({
   /** Id of the plugin whose Remove button is armed, or null. */
   const [confirming, setConfirming] = useState<string | null>(null);
 
-  const confirmingRef = useRef<string | null>(null);
-  confirmingRef.current = confirming;
-
   /** Guards the picker synchronously; `picking` only disables the buttons. */
   const pickingRef = useRef(false);
 
@@ -236,23 +233,6 @@ export function PluginsPanel({
     const timer = setTimeout(() => setConfirming(null), CONFIRM_RESET_MS);
     return () => clearTimeout(timer);
   }, [confirming]);
-
-  useEffect(() => {
-    // Registered once on mount, which puts it ahead of the Settings surface's
-    // own Esc guard (child effects run before their parent's). While a Remove
-    // is armed, Esc disarms it instead of closing Settings; otherwise the key
-    // passes straight through.
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || confirmingRef.current === null) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      setConfirming(null);
-    };
-    window.addEventListener("keydown", handleKey, true);
-    return () => window.removeEventListener("keydown", handleKey, true);
-  }, []);
 
   // Re-read folders when an id or its path changes, never when `enabled` flips:
   // a toggle is instant and a disk read behind it would make it feel otherwise.
@@ -441,7 +421,9 @@ export function PluginsPanel({
                     <span className="settings-plugin__tag">Bundled</span>
                   ) : null}
                   {row.problem === null ? null : (
-                    <span className="settings-plugin__status">{row.problem}</span>
+                    <span className="settings-plugin__status" title={row.problem}>
+                      {row.problem}
+                    </span>
                   )}
                   {/* Only a plugin the workspace is actually running has health
                       to report. No entry — no workspace wired, or never opened
@@ -472,7 +454,7 @@ export function PluginsPanel({
                   label="Enabled"
                   // "Enabled" repeated down a list says nothing about which
                   // plugin the switch belongs to.
-                  ariaLabel={`Enable ${row.name}`}
+                  ariaLabel={`Enabled: ${row.name}`}
                   checked={row.enabled}
                   // Nothing to switch on without a folder, and nothing to
                   // switch on when the folder is broken — the lifecycle would
@@ -488,7 +470,7 @@ export function PluginsPanel({
                   <button
                     type="button"
                     className="settings-plugins__action"
-                    aria-label={`Open ${row.name} as a tab`}
+                    aria-label={`Open as tab: ${row.name}`}
                     onClick={() => onOpen(row.id)}
                   >
                     Open as tab
@@ -498,22 +480,25 @@ export function PluginsPanel({
                   <button
                     type="button"
                     className="settings-plugins__action"
-                    aria-label={`Add a folder for ${row.name}`}
+                    aria-label={`Add folder: ${row.name}`}
                     disabled={picking}
                     onClick={() => void addFolder(row.id)}
                   >
                     Add folder…
                   </button>
                 ) : null}
-                {/* A bundled row has no Remove, so repointing is its only way
-                    out of a wrong or moved folder — otherwise the fix is to
-                    hand-edit plugins_v1.json. A folder plugin can just be
-                    removed and added again. */}
+                {/* Repointing in one step, for the row that cannot be dropped
+                    and re-added: removing a bundled plugin's folder only
+                    clears the path and leaves the catalog row behind, so
+                    without this, moving Showroom means Remove, confirm, then
+                    Add folder — three steps and a row that looks uninstalled
+                    in between. A folder plugin needs none of that; Remove
+                    takes its row with it. */}
                 {row.bundled && row.path !== null ? (
                   <button
                     type="button"
                     className="settings-plugins__action"
-                    aria-label={`Change the folder for ${row.name}`}
+                    aria-label={`Change folder: ${row.name}`}
                     disabled={picking}
                     onClick={() => void addFolder(row.id)}
                   >
@@ -545,17 +530,29 @@ export function PluginsPanel({
                     }`}
                     aria-label={
                       confirming === row.id
-                        ? `Confirm removing ${row.name}`
+                        ? `Confirm remove: ${row.name}`
                         : row.bundled
-                          ? `Remove the folder for ${row.name}`
-                          : `Remove ${row.name}`
+                          ? `Remove folder: ${row.name}`
+                          : `Remove: ${row.name}`
                     }
+                    // Claims Esc for as long as it is armed. Arming focuses
+                    // the button and blur disarms it, so "armed" and "focused"
+                    // are the same state — which is what lets the surface
+                    // decide by asking where focus is, rather than by a
+                    // listener order neither side can rely on.
+                    {...(confirming === row.id ? { "data-esc-guard": "" } : {})}
                     onClick={() => {
                       if (confirming === row.id) {
                         setConfirming(null);
                         store.remove(row.id);
                       } else {
                         setConfirming(row.id);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (confirming === row.id && event.key === "Escape") {
+                        event.preventDefault();
+                        setConfirming(null);
                       }
                     }}
                     onBlur={() => setConfirming(null)}
