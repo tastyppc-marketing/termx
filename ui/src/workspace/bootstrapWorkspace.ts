@@ -392,22 +392,6 @@ export async function bootstrapWorkspace(
       capturesText = null;
     }
     let captures = parseCaptures(capturesText);
-    // Nothing else ever prunes an append-only log the UI re-reads on every
-    // session exit, so boot is where it gets bounded. Errors are swallowed on
-    // purpose: the hook is a separate process that may be appending at this
-    // very instant, and Windows refuses a write over a file another process
-    // holds open. Losing the rewrite costs nothing — the next boot retries,
-    // and the log we just parsed is still correct either way.
-    if (capturesText !== null) {
-      const compacted = compactCaptures(capturesText);
-      if (compacted !== null) {
-        try {
-          await appFiles.write(CAPTURES_FILE, compacted);
-        } catch {
-          // Next boot tries again.
-        }
-      }
-    }
     // Overlapping refreshes: two panes exiting together start two reads, and
     // the SLOWER one may resolve last while holding the OLDER file. Only the
     // most recently started read may apply its result.
@@ -418,6 +402,12 @@ export async function bootstrapWorkspace(
       void readCaptures().then((next) => {
         if (next !== null && generation === capturesGeneration) {
           captures = next;
+          // A dead pane decides whether to offer "Resume conversation" from
+          // this map, and nothing else observes it. Without the nudge the
+          // pane keeps showing the plain Restart card until some unrelated
+          // event happens to repaint it — which, for a pane that just died,
+          // may be never.
+          controller?.notifyCapturesChanged();
         }
       });
     };
@@ -456,6 +446,34 @@ export async function bootstrapWorkspace(
       ...(options.generateId ? { generateId: options.generateId } : {}),
       pluginPaneIds,
     });
+    // Nothing else ever prunes an append-only log the UI re-reads on every
+    // session exit, so boot is where it gets bounded — here rather than
+    // earlier, because the reconciled layout is what says which captures are
+    // still reachable.
+    //
+    // The keep set is passed ONLY when the layout actually parsed. An empty
+    // keep set means "keep nothing" by contract, and a corrupt or missing
+    // layout blob reconciles to an EMPTY layout — so trusting it would erase
+    // the user's whole capture log at exactly the boot where their panes are
+    // most in need of a resume. Unfiltered compaction (by age and per-pane
+    // count) is the safe answer there.
+    //
+    // Errors are swallowed on purpose: the hook is a separate process that
+    // may be appending at this very instant, and Windows refuses a write over
+    // a file another process holds open. Losing the rewrite costs nothing —
+    // the next boot retries, and the log we just parsed is still correct.
+    if (capturesText !== null) {
+      const compacted = restored === null
+        ? compactCaptures(capturesText)
+        : compactCaptures(capturesText, new Set(sessionIdsInLayout(reconciled.layout)));
+      if (compacted !== null) {
+        try {
+          await appFiles.write(CAPTURES_FILE, compacted);
+        } catch {
+          // Next boot tries again.
+        }
+      }
+    }
     const store = createLayoutStore(reconciled.layout);
     // Single-writer rule (multi-window spec): only the MAIN window's
     // persistence reaches the daemon. With a bus, every main write also

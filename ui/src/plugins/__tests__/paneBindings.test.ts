@@ -287,9 +287,13 @@ describe("PaneBindingsStore (main window)", () => {
       },
     });
 
-    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    // "Survives" means the store keeps serving the window that is showing the
+    // pane: `bind` never throws at the call site, and the map still holds the
+    // binding. The failure itself reaches the caller through `flush()` — see
+    // the failure-reporting suite below.
+    expect(() => store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" })).not.toThrow();
 
-    await expect(store.flush()).resolves.toBeUndefined();
+    await expect(store.flush()).rejects.toThrow("disk full");
     expect(store.getSnapshot()).toEqual({ "2147483648": { pluginId: "showroom" } });
   });
 });
@@ -360,9 +364,11 @@ describe("PaneBindingsStore (aux window)", () => {
       },
     });
 
-    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    expect(() => store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" })).not.toThrow();
 
-    await expect(store.flush()).resolves.toBeUndefined();
+    // Undeliverable, and the replica says so rather than pretending main has
+    // the row: an aux window has no other way to make a binding real.
+    await expect(store.flush()).rejects.toThrow("the main window is gone");
   });
 
   it("is read-only when it has no channel to main", async () => {
@@ -525,5 +531,84 @@ describe("PaneBindingsStore (aux window)", () => {
     store.adopt({});
 
     expect(seen).toEqual([1]);
+  });
+});
+
+/**
+ * `flush()` is the promise the controller treats as "this binding is real"
+ * before it writes a layout that references the pane. A flush that resolved
+ * after a FAILED write would be a lie with a specific, ugly consequence: a
+ * reserved id in the layout blob with no row in the bindings file, which is a
+ * dead pane at the next boot and a panel identity gone for good.
+ */
+describe("PaneBindingsStore failure reporting", () => {
+  it("rejects when a queued write failed", async () => {
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: async () => {
+        throw new Error("disk full");
+      },
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+
+    await expect(store.flush()).rejects.toThrow("disk full");
+  });
+
+  it("rejects when a forwarded request could not be delivered", async () => {
+    // A replica's forward is its only way to make a binding real; a dropped
+    // one leaves main knowing nothing about the pane.
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: null,
+      onForward: async () => {
+        throw new Error("the main window is gone");
+      },
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+
+    await expect(store.flush()).rejects.toThrow("the main window is gone");
+  });
+
+  it("reports a failure once and then keeps working", async () => {
+    // A transient failure must not poison every later flush: the next bind is
+    // a fresh promise about a fresh write.
+    let failNext = true;
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: async () => {
+        if (failNext) {
+          throw new Error("disk full");
+        }
+      },
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await expect(store.flush()).rejects.toThrow("disk full");
+    // The same failure is not replayed to an unrelated caller.
+    await expect(store.flush()).resolves.toBeUndefined();
+
+    failNext = false;
+    store.bind(PLUGIN_PANE_MIN_ID + 1, { pluginId: "showroom" });
+    await expect(store.flush()).resolves.toBeUndefined();
+  });
+
+  it("keeps the in-memory map even when the write failed", async () => {
+    // The pane is open in front of the user; refusing to remember it would be
+    // worse than a stale file, which the next boot's prune reconciles anyway.
+    const store = new PaneBindingsStore({
+      initial: {},
+      save: async () => {
+        throw new Error("disk full");
+      },
+    });
+
+    store.bind(PLUGIN_PANE_MIN_ID, { pluginId: "showroom" });
+    await store.flush().catch(() => undefined);
+
+    expect(store.getSnapshot()).toEqual({
+      [String(PLUGIN_PANE_MIN_ID)]: { pluginId: "showroom" },
+    });
   });
 });

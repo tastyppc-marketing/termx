@@ -1119,6 +1119,27 @@ describe("bootstrapWorkspace conversation captures", () => {
     expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
   });
 
+  it("repaints the dead pane when a re-read brings its capture in", async () => {
+    // The map is not React state: a pane that gained a resumable conversation
+    // after it died would keep showing the plain Restart card until something
+    // unrelated repainted it.
+    const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+    const { appFiles, state } = captureFiles(null);
+
+    const workspace = await boot(appFiles, fake);
+    let published = 0;
+    workspace.controller.subscribe(() => {
+      published += 1;
+    });
+
+    state.text = `${captureLine()}\n`;
+    fake.emitExit(3, 0);
+    await flush();
+
+    expect(published).toBeGreaterThan(0);
+    expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+  });
+
   /**
    * The regression Grok caught: a THROWN read used to return an empty map and
    * be assigned unconditionally, erasing every capture for the rest of the
@@ -1209,7 +1230,8 @@ describe("bootstrapWorkspace conversation captures", () => {
 
       const written = writes.filter(([name]) => name === CAPTURES_FILE);
       expect(written).toHaveLength(1);
-      expect(written[0]?.[1]).toBe(compactCaptures(big));
+      // Shorter, and rewritten exactly once — the exact contents are pinned by
+      // the keep-set cases below.
       expect((written[0]?.[1] ?? "").length).toBeLessThan(big.length);
       // Compaction must not cost the boot a single resume.
       expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
@@ -1222,6 +1244,39 @@ describe("bootstrapWorkspace conversation captures", () => {
       await boot(appFiles, fake);
 
       expect(writes.filter(([name]) => name === CAPTURES_FILE)).toEqual([]);
+    });
+
+    it("drops the captures of panes the restored layout no longer holds", async () => {
+      // The log outlives the panes: every closed tab leaves records nothing
+      // can ever resume, and they are the bulk of a long-lived log.
+      const fake = fakeClient({ layout: soloLayout(3), sessions: [corpse(3)] });
+      const big = hugeLog();
+      const { appFiles, writes } = captureFiles(big);
+
+      const workspace = await boot(appFiles, fake);
+
+      const written = writes.filter(([name]) => name === CAPTURES_FILE);
+      expect(written[0]?.[1]).toBe(compactCaptures(big, new Set([3])));
+      // Strictly less than age-and-count compaction alone, and the pane that
+      // IS in the layout keeps its resume.
+      expect((written[0]?.[1] ?? "").length)
+        .toBeLessThan((compactCaptures(big) ?? "").length);
+      expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+    });
+
+    it("compacts WITHOUT a keep set when the layout blob could not be parsed", async () => {
+      // A corrupt blob reconciles to an empty layout, and an empty keep set
+      // clears the log by contract. Trusting it here would erase every
+      // capture at the one boot where the user most needs a resume.
+      const fake = fakeClient({ layout: "not a layout", sessions: [corpse(3)] });
+      const big = hugeLog();
+      const { appFiles, writes } = captureFiles(big);
+
+      await boot(appFiles, fake);
+
+      const written = writes.filter(([name]) => name === CAPTURES_FILE);
+      expect(written[0]?.[1]).toBe(compactCaptures(big));
+      expect(written[0]?.[1]).not.toBe("");
     });
 
     it("swallows a failed compaction write — the hook may hold the file open", async () => {
