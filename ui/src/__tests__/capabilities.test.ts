@@ -63,6 +63,17 @@ describe("multi-window capability (Phase 1)", () => {
   );
 });
 
+describe("status bar folder actions", () => {
+  it(
+    "grants open-folder — clicking the status bar path invokes it, and the " +
+      "wrapper swallows a denied invoke, so without the grant the click is " +
+      "indistinguishable from a dead button",
+    () => {
+      expect(capability.permissions).toContain("allow-open-folder");
+    },
+  );
+});
+
 describe("plugin native commands (Phase 1)", () => {
   it("grants the plugin lifecycle commands to every capable window", () => {
     expect(capability.permissions).toContain("allow-plugin-spawn");

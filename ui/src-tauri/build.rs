@@ -12,6 +12,7 @@ fn main() {
                 "unprotect_secret",
                 "ssh_probe",
                 "list_dirs",
+                "open_folder",
                 "list_llm_sessions",
                 "generate_session_note",
                 "generate_session_bundle",

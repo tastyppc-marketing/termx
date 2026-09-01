@@ -25,6 +25,7 @@
     "allow-unprotect-secret",
     "allow-ssh-probe",
     "allow-list-dirs",
+    "allow-open-folder",
     "allow-list-llm-sessions",
     "allow-generate-session-note",
     "allow-generate-session-bundle",

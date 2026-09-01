@@ -27,6 +27,7 @@ import type { LlmSessionRecord } from "./conversations/types";
 import { FolderSearch } from "./folders/FolderSearch";
 import { isEditableElement } from "./keyboard";
 import { tauriListDirs } from "./native/folders";
+import { tauriOpenFolder } from "./native/openFolder";
 import {
   tauriDismissOutput,
   tauriGenerateBundle,
@@ -1587,6 +1588,15 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           focusedSessionId !== null
             ? controller.sshPaneInfo?.(focusedSessionId)?.host ?? null
             : null
+        }
+        // The path is the shortest route to the folder itself. A remote pane's
+        // cwd lives on the far side of an ssh hop, so there is nothing here to
+        // open — the bar keeps it as plain text in that case.
+        onOpenCwd={
+          focusedSessionId !== null &&
+          !controller.sshPaneInfo?.(focusedSessionId)
+            ? (folder) => void tauriOpenFolder(folder)
+            : undefined
         }
       />
     </>

@@ -8,6 +8,7 @@ mod outputs;
 mod paths;
 mod plugins;
 mod power;
+mod reveal;
 mod ssh;
 mod storage;
 mod transcript;
@@ -42,6 +43,7 @@ pub fn run() {
             ssh::unprotect_secret,
             ssh::ssh_probe,
             folders::list_dirs,
+            reveal::open_folder,
             llm_sessions::list_llm_sessions,
             llm_sessions::generate_session_note,
             llm_sessions::generate_session_bundle,
