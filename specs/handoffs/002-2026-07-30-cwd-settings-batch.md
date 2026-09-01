@@ -1603,3 +1603,9 @@ Routing: Wave 1 = T1 Codex, T2 Codex (Rust), T4 Opus → reviews: T1→Grok, T2�
 
 - Hit the greyed "Enabled" toggle on the bundled Showroom row — expected behaviour (bundled row needs "Add folder…" first: C:\Users\mjfos\code\showroom); walked him through it. If the "Add folder…" button was missing on that row it's a bug — awaiting his confirmation.
 - QUEUE (his words, not to work on yet): (1) plugins as SEPARATE OS WINDOWS that can interact, not only panes bound to the TermX UI (tear-into-aux-window already works and was pointed out); (2) a plugin to help create many pages per client. His message cut off mid-sentence ("and for if we're") — ask him to finish it next session.
+
+## Delta 2026-09-01 (later 34) — Showroom enabled for Michael; workflow-plugin concepts queued
+
+- Wrote `%APPDATA%\TermX\plugins_v1.json` directly (showroom → path C:\Users\mjfos\code\showroom, enabled, no grants) at his request; told him to restart TermX before touching Settings > Plugins (registry loads at boot; the running app could overwrite the file).
+- "Second brain" = reports-registry + client hubs + Showroom index + session memory (no folder by that name). Workflow digest: bulk landing-page production per client (ECB: 47 pages w/ gate + dashboard), Drafting Table design language, chronic where-is-it pain.
+- QUEUED plugin concepts (brainstorm properly next session, never one-shot): (1) Client Cockpit pane (per-client page-pipeline status + one-click opens); (2) Design Guard pane (render a page, flag off-language tokens); (3) Recall pane (one search over Showroom index + conversation captures) — RECOMMENDED FIRST, Showroom does 80%; (4) starter template so plugins are customizable by others. His cut-off word read as "conversations" (covered by #3) — confirm with him.
