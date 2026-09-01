@@ -1598,3 +1598,8 @@ Routing: Wave 1 = T1 Codex, T2 Codex (Rust), T4 Opus → reviews: T1→Grok, T2�
 **Since later-31:** aa713d0 (Grok R9c minors: aux heal success generation-stamped; bus epoch hand-back pinned by a gated-listen test) · 726e39a docs. Grok R9c on d3be1ed: all claims VERIFIED, PASS-WITH-MINORS → both minors fixed → re-staged. **Every review lane is closed; all agents idle** (impl-t5, impl-t8, fix-t7 — resumable by name, no work assigned).
 
 **Morning message** delivered in chat (content also in `scratchpad\plugin-p1\morning-message.md`). Michael's live checklist = plan T9 Step 3 (the only open box). Next session per later-31: read his results → Phase C aux registry replica → the queued feature batch (full planning) → deferred list.
+
+## Delta 2026-08-31 (later 33) — Michael's first live feedback (morning)
+
+- Hit the greyed "Enabled" toggle on the bundled Showroom row — expected behaviour (bundled row needs "Add folder…" first: C:\Users\mjfos\code\showroom); walked him through it. If the "Add folder…" button was missing on that row it's a bug — awaiting his confirmation.
+- QUEUE (his words, not to work on yet): (1) plugins as SEPARATE OS WINDOWS that can interact, not only panes bound to the TermX UI (tear-into-aux-window already works and was pointed out); (2) a plugin to help create many pages per client. His message cut off mid-sentence ("and for if we're") — ask him to finish it next session.
