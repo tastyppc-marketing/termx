@@ -105,14 +105,14 @@ export function WindowNameHeader({ workspace }: { workspace: BootstrappedWorkspa
   return (
     <WindowName
       name={name}
-      onRename={(next) => {
-        controller.renameWindow(windowId, next);
-        // Off by default, and that IS the feature: the window becomes a group
-        // label while the rail tab keeps naming its own terminal.
-        if (settings.syncWindowRenameToTab && snapshot.activeTabId !== null) {
-          controller.renameTab(snapshot.activeTabId, next);
-        }
-      }}
+      // Off by default, and that IS the feature: the window becomes a group
+      // label while the rail tab keeps naming its own terminal. The flag is
+      // handed to the controller rather than spent on a second call here so
+      // both writes land as one structural mutation — an aux window's rename
+      // then crosses the bus once, with no half-synced layout in between.
+      onRename={(next) =>
+        controller.renameWindow(windowId, next, settings.syncWindowRenameToTab)
+      }
     />
   );
 }

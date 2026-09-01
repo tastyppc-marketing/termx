@@ -194,7 +194,11 @@ describe("WindowNameHeader — what a commit actually does", () => {
     await type("Client work");
     await press("Enter");
 
-    expect(controller.renameWindow).toHaveBeenCalledExactlyOnceWith("main", "Client work");
+    expect(controller.renameWindow).toHaveBeenCalledExactlyOnceWith(
+      "main",
+      "Client work",
+      false,
+    );
   });
 
   it(
@@ -209,23 +213,37 @@ describe("WindowNameHeader — what a commit actually does", () => {
       await type("Client work");
       await press("Enter");
 
-      expect(controller.renameWindow).toHaveBeenCalledTimes(1);
-      expect(controller.renameTab).not.toHaveBeenCalled();
+      expect(controller.renameWindow).toHaveBeenCalledExactlyOnceWith(
+        "main",
+        "Client work",
+        false,
+      );
     },
   );
 
-  it("renames this window's active tab as well once the setting is on", async () => {
-    const { controller, workspace } = harness({
-      settings: { syncWindowRenameToTab: true },
-    });
-    await render(<WindowNameHeader workspace={workspace} />);
+  it(
+    "asks for the tab rename in the SAME call once the setting is on, never " +
+      "as a second mutation of its own",
+    async () => {
+      const { controller, workspace } = harness({
+        settings: { syncWindowRenameToTab: true },
+      });
+      await render(<WindowNameHeader workspace={workspace} />);
 
-    await beginEdit();
-    await type("Client work");
-    await press("Enter");
+      await beginEdit();
+      await type("Client work");
+      await press("Enter");
 
-    expect(controller.renameTab).toHaveBeenCalledExactlyOnceWith("tab-1", "Client work");
-  });
+      expect(controller.renameWindow).toHaveBeenCalledExactlyOnceWith(
+        "main",
+        "Client work",
+        true,
+      );
+      // A second call here is the bug this shape exists to prevent: it would
+      // put a half-synced layout on the bus and could persist alone.
+      expect(controller.renameTab).not.toHaveBeenCalled();
+    },
+  );
 
   it("carries a cleared name through to the tab too, when the setting is on", async () => {
     const { controller, workspace } = harness({
@@ -238,8 +256,8 @@ describe("WindowNameHeader — what a commit actually does", () => {
     await type("");
     await press("Enter");
 
-    expect(controller.renameWindow).toHaveBeenCalledExactlyOnceWith("main", null);
-    expect(controller.renameTab).toHaveBeenCalledExactlyOnceWith("tab-1", null);
+    expect(controller.renameWindow).toHaveBeenCalledExactlyOnceWith("main", null, true);
+    expect(controller.renameTab).not.toHaveBeenCalled();
   });
 
   it("shows the name this window already carries in the layout", async () => {

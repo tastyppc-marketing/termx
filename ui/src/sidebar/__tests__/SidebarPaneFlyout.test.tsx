@@ -19,6 +19,7 @@ import type {
 } from "../../workspace/WorkspaceController";
 import { Sidebar, type SidebarActions, type SidebarProps } from "../Sidebar";
 import { HOVER_PANES_FLYOUT_MS } from "../PaneFlyout";
+import { WindowName } from "../../workspace/WindowName";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -422,6 +423,86 @@ describe("rail hover flyout — everything that calls it off", () => {
 
     expect(flyout()).toBeNull();
   });
+});
+
+describe("rail hover flyout — an editor opening elsewhere", () => {
+  /**
+   * The rail and the window-name header are separate components that meet only
+   * in the document, so this mounts both: the bug being closed here is that a
+   * rename started from the KEYBOARD left the preview up, and one Escape then
+   * cancelled both — throwing away the rename the user was in the middle of
+   * when they only meant to dismiss a tooltip.
+   */
+  async function renderWithHeader(onRename = vi.fn()) {
+    await act(async () =>
+      root.render(
+        <>
+          <WindowName name={null} onRename={onRename} />
+          <Sidebar
+            snapshot={workspace()}
+            actions={actions()}
+            paneTitles={(tabId) => PANE_TITLES[tabId] ?? {}}
+          />
+        </>,
+      )
+    );
+    return onRename;
+  }
+
+  function renameEditor(): HTMLElement | null {
+    return container.querySelector<HTMLElement>("input.inline-rename");
+  }
+
+  it(
+    "gets out of the way when a window rename opens from the keyboard, and " +
+      "the Escape that follows then belongs to the rename alone",
+    async () => {
+      const onRename = await renderWithHeader();
+      await dwellOn("tab-split");
+      expect(flyout()).not.toBeNull();
+
+      await act(async () => {
+        container
+          .querySelector("[data-testid='window-name']")!
+          .dispatchEvent(
+            new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true }),
+          );
+      });
+
+      expect(flyout()).toBeNull();
+      expect(renameEditor()).not.toBeNull();
+
+      await act(async () => {
+        renameEditor()!.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        );
+      });
+
+      expect(renameEditor()).toBeNull();
+      expect(onRename).not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    "stays up when focus lands in a terminal — reading the preview while " +
+      "typing is exactly what a three-second dwell is for",
+    async () => {
+      await renderWithHeader();
+      await dwellOn("tab-split");
+      // xterm's hidden textarea IS the terminal; `isEditableElement` excludes
+      // it for precisely this reason.
+      const terminal = document.createElement("textarea");
+      terminal.className = "xterm-helper-textarea";
+      document.body.append(terminal);
+
+      try {
+        await act(async () => terminal.focus());
+        expect(flyout()).not.toBeNull();
+      } finally {
+        terminal.remove();
+      }
+    },
+  );
 });
 
 describe("rail hover flyout — Escape", () => {

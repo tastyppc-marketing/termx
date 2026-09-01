@@ -1805,6 +1805,51 @@ describe("WorkspaceController multi-window (Phase 1)", () => {
     return initial;
   }
 
+  it(
+    "a synced rename names the window and its OWN slot's active tab in one " +
+      "structural write — two writes would broadcast a half-synced layout",
+    () => {
+      const { controller, persistenceCalls } = harness({
+        initial: tornLayout(),
+        windowId: "aux-1",
+      });
+
+      controller.renameWindow("aux-1", "Deploys", true);
+
+      const after = controller.getSnapshot().layout;
+      expect(after.windowNames).toEqual({ "aux-1": "Deploys" });
+      expect(after.tabs["tab-1"]!.title).toBe("Deploys");
+      // main's active tab is tab-2; the sync follows the named window's slot.
+      expect(after.tabs["tab-2"]!.title).toBe("Split");
+      expect(persistenceCalls.map((call) => call.kind)).toEqual(["structural"]);
+    },
+  );
+
+  it("clearing a synced name hands the tab back its auto-derived title", () => {
+    const { controller, persistenceCalls } = harness({
+      initial: tornLayout(),
+      windowId: "aux-1",
+    });
+    controller.renameWindow("aux-1", "Deploys", true);
+
+    controller.renameWindow("aux-1", null, true);
+
+    const after = controller.getSnapshot().layout;
+    expect(after.windowNames).toEqual({});
+    expect(after.tabs["tab-1"]!.title).toBeNull();
+    expect(persistenceCalls).toHaveLength(2);
+  });
+
+  it("leaves the tab alone when the sync setting is off", () => {
+    const { controller } = harness({ initial: tornLayout(), windowId: "aux-1" });
+
+    controller.renameWindow("aux-1", "Deploys");
+
+    const after = controller.getSnapshot().layout;
+    expect(after.windowNames).toEqual({ "aux-1": "Deploys" });
+    expect(after.tabs["tab-1"]!.title).toBeNull();
+  });
+
   it("an aux controller snapshots only its own window's slot", () => {
     const { controller } = harness({ initial: tornLayout(), windowId: "aux-1" });
     const snapshot = controller.getSnapshot();

@@ -1,3 +1,5 @@
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
 import type { JsonValue, SessionInfo } from "../../host/protocol";
 import { emptyLayout, serializeLayout, type Layout } from "../../state/layout";
@@ -7,8 +9,10 @@ import type {
 } from "../../host/client";
 import {
   bootstrapWorkspace,
+  type BootstrappedWorkspace,
   type BootstrapWorkspaceClient,
 } from "../bootstrapWorkspace";
+import { WindowNameHeader } from "../WindowName";
 import type { AppFileName, AppFileStore } from "../../native/appFiles";
 import { PLUGIN_PANE_MIN_ID } from "../../plugins/paneBindings";
 import {
@@ -542,6 +546,54 @@ function fakeAppFiles(seed: Partial<Record<AppFileName, string>> = {}) {
   return { store, files, write };
 }
 
+
+/**
+ * The window-name header, mounted over a real bootstrapped workspace.
+ *
+ * Driving the rename through the component rather than calling the controller
+ * is the whole point of the sync test: the two-write bug lived in the header's
+ * commit handler, so a test that called `renameWindow` directly would have
+ * been green while the app was not.
+ */
+async function renderHeader(workspace: BootstrappedWorkspace) {
+  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
+    .IS_REACT_ACT_ENVIRONMENT = true;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => root.render(createElement(WindowNameHeader, { workspace })));
+  return async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  };
+}
+
+async function beginWindowRename() {
+  const label = document.querySelector<HTMLElement>("[data-testid='window-name']")!;
+  await act(async () => {
+    label.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+  });
+}
+
+function windowNameEditor(): HTMLInputElement {
+  return document.querySelector<HTMLInputElement>("input.inline-rename")!;
+}
+
+async function typeWindowName(value: string) {
+  const input = windowNameEditor();
+  await act(async () => {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+async function pressInEditor(key: string) {
+  const input = windowNameEditor();
+  await act(async () => {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  });
+}
+
 describe("single-writer wiring over the bus", () => {
   async function pair(
     options: {
@@ -623,6 +675,52 @@ describe("single-writer wiring over the bus", () => {
       expect(aux.controller.getSnapshot().layout.windowNames).toEqual({
         main: "Client work",
       });
+    },
+  );
+
+  it(
+    "a sync-ON rename driven through the header crosses the bus as ONE " +
+      "forward — two mutations would broadcast a half-synced layout and " +
+      "could persist the window name without the tab name",
+    async () => {
+      const { bus, main, aux, mainFake, auxFake } = await pair({
+        seed: {
+          "settings_v1.json": JSON.stringify({ syncWindowRenameToTab: true }),
+        },
+      });
+      // Watching the wire itself, not just the save count: main's persistence
+      // is free to coalesce two saves into one, so only the forward count can
+      // prove the rename left the aux window as a single transaction.
+      const forwarded: LayoutMutation[] = [];
+      bus.onMutation((mutation) => forwarded.push(mutation));
+
+      const cleanup = await renderHeader(aux);
+      try {
+        await beginWindowRename();
+        await typeWindowName("Deploys");
+        await pressInEditor("Enter");
+      } finally {
+        await cleanup();
+      }
+      await aux.controller.flush();
+      await main.controller.flush();
+
+      expect(forwarded).toHaveLength(1);
+      expect(forwarded[0]).toMatchObject({
+        kind: "setLayout",
+        layout: {
+          windowNames: { "aux-1": "Deploys" },
+          tabs: { "tab-2": { title: "Deploys" } },
+        },
+      });
+      expect(auxFake.setLayout).not.toHaveBeenCalled();
+      expect(mainFake.setLayout).toHaveBeenCalledTimes(1);
+      expect(main.controller.getSnapshot().layout.windowNames).toEqual({
+        "aux-1": "Deploys",
+      });
+      expect(main.controller.getSnapshot().layout.tabs["tab-2"]!.title).toBe(
+        "Deploys",
+      );
     },
   );
 

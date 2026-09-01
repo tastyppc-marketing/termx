@@ -57,9 +57,19 @@ fn launch_file_manager(dir: &Path) -> bool {
         .is_ok()
 }
 
+/// The same job away from Windows, where two things differ: macOS has no
+/// `xdg-open` (asking for it there is a silent no-op, not a folder), and a
+/// spawned child has to be reaped or it stays a zombie until TermX exits.
+/// Waiting does the reaping, costs nothing — we are already on a blocking
+/// thread and both openers hand off to the desktop session and exit at once —
+/// and unlike `explorer.exe` both report their success honestly.
 #[cfg(not(windows))]
 fn launch_file_manager(dir: &Path) -> bool {
-    std::process::Command::new("xdg-open").arg(dir).spawn().is_ok()
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    std::process::Command::new(opener)
+        .arg(dir)
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]

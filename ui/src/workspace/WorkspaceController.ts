@@ -1239,8 +1239,24 @@ export class WorkspaceController {
   /// Name (or, with null, un-name) an OS window. Structural like every other
   /// rename, so an aux window's edit rides the same bus forwarding to main
   /// that `renameTab` does — nothing window-specific is needed for that.
-  renameWindow = (windowId: string, name: string | null): void => {
-    this.mutate("structural", () => this.store.setWindowName(windowId, name));
+  ///
+  /// `alsoRenameActiveTab` is the `syncWindowRenameToTab` setting, and it
+  /// belongs HERE rather than at the call site so the two writes are one
+  /// transaction: a caller that mutated twice would put a half-synced layout
+  /// on the bus between them, and could leave the name persisted with the tab
+  /// title lost if the second write failed. The tab is resolved from the named
+  /// window's own slot, so an aux window renames its tab, not main's.
+  renameWindow = (
+    windowId: string,
+    name: string | null,
+    alsoRenameActiveTab = false,
+  ): void => {
+    this.mutate("structural", () => {
+      const named = this.store.setWindowName(windowId, name);
+      if (!alsoRenameActiveTab) return named;
+      const activeTabId = slotOf(named, windowId)?.activeTabId ?? null;
+      return activeTabId === null ? named : this.store.renameTab(activeTabId, name);
+    });
   };
 
   renameGroup = (groupId: string, name: string): void => {

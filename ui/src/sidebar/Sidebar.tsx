@@ -11,6 +11,7 @@ import {
   type ConversationsRailProps,
 } from "../conversations/ConversationsRail";
 import type { ConversationsStore } from "../conversations/store";
+import { isEditableElement } from "../keyboard";
 import type { LlmSessionRecord } from "../conversations/types";
 import type { SavedSession } from "../saved/types";
 import { DEFAULT_SETTINGS, type TermxSettings } from "../settings/settings";
@@ -581,11 +582,27 @@ export function Sidebar({
       }
     };
     const handlePointerDown = () => closePaneFlyout();
+    /// An editor taking focus anywhere in the app has taken over from a hover
+    /// preview — the window-name rename opened with F2 is the case that
+    /// exposed this, since a keyboard route fires no pointerdown to dismiss on.
+    ///
+    /// Keyed on focus rather than on a bespoke "a rename began" signal so that
+    /// EVERY editor counts without each one having to know the rail exists —
+    /// and so the terminal does NOT, because `isEditableElement` excludes
+    /// xterm's helper textarea. Reading the preview while typing is exactly
+    /// what a three-second dwell is for.
+    const handleFocusIn = (event: FocusEvent) => {
+      if (isEditableElement(event.target instanceof Element ? event.target : null)) {
+        closePaneFlyout();
+      }
+    };
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("pointerdown", handlePointerDown, true);
+    window.addEventListener("focusin", handleFocusIn, true);
     return () => {
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("pointerdown", handlePointerDown, true);
+      window.removeEventListener("focusin", handleFocusIn, true);
     };
   }, [paneFlyout]);
 
