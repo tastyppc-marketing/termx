@@ -1344,6 +1344,9 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           onOpenFolderSearch={(groupId) =>
             setFolderSearch({ groupId, profile: null })}
           maxGroupDepth={settings.maxGroupDepth}
+          // The rail's hover preview names panes from the same source the pane
+          // headers do, so the two can never disagree.
+          paneTitles={controller.paneTitles}
           {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
           {...(sidebarSaved ? { saved: sidebarSaved } : {})}
           {...(sidebarHosts ? { hosts: sidebarHosts } : {})}

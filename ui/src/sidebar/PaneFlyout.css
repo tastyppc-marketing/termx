@@ -1,0 +1,52 @@
+/* Rail hover preview (Direction B — drafting-table chrome: square corners,
+   hairline frame, elevation from the shadow alone). It shares an edge with the
+   row it hangs off, so the pointer can cross into it without a gap to fall
+   through, and it draws its own left hairline where that seam lands. */
+
+.pane-flyout {
+  z-index: 200;
+  min-width: 168px;
+  max-width: 320px;
+  padding: 5px 0 6px;
+  color: var(--sidebar-text, var(--text-main));
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  /* Square, like the rows it describes. */
+  border-radius: 0;
+  box-shadow: var(--shadow-overlay);
+  font: 12px/1.35 Inter, "Segoe UI", sans-serif;
+  /* Nothing in here is clickable; a stray text selection would only be a way
+     to make the panel outstay its welcome. */
+  user-select: none;
+}
+
+/* The same 10px overline every section header in the app wears. */
+.pane-flyout__title {
+  overflow: hidden;
+  padding: 2px 10px 5px;
+  color: var(--text-hint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.pane-flyout__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One pane, one line — a long name ellipsizes rather than wrapping the panel
+   into a paragraph. */
+.pane-flyout__pane {
+  display: flex;
+  min-height: var(--row-list);
+  align-items: center;
+  overflow: hidden;
+  padding: 0 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

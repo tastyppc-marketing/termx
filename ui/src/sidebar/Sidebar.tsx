@@ -36,6 +36,12 @@ import type {
 import { ContextMenu, type MenuPoint } from "./ContextMenu";
 import { InlineRename } from "./InlineRename";
 import {
+  HOVER_PANES_FLYOUT_MS,
+  PANE_FLYOUT_ID,
+  PaneFlyout,
+  type PaneFlyoutPane,
+} from "./PaneFlyout";
+import {
   commitDrop,
   crossedDragThreshold,
   type DragSource,
@@ -190,6 +196,13 @@ export interface SidebarProps {
   maxGroupDepth?: number;
   conversations?: SidebarConversations;
   /**
+   * Display names of a tab's panes, keyed by session id — the controller's
+   * `paneTitles`, the SAME source the pane headers read, so the hover preview
+   * can never contradict what the split view says. Absent switches the preview
+   * off entirely: a sidebar with no way to name a pane has no preview to show.
+   */
+  paneTitles?: (tabId: string) => Readonly<Record<number, string>>;
+  /**
    * Saved sessions section (saved-sessions spec). Omitted — or disabled in
    * settings — leaves the sidebar exactly as it was.
    */
@@ -247,6 +260,11 @@ export interface SidebarProps {
 
 /** Tooltip on the creation controls while the host connection is down. */
 const WAITING_FOR_HOST = "Waiting for host…";
+
+/** Is the pointer heading into the open pane preview rather than away from it? */
+function enteringPaneFlyout(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest("[data-pane-flyout]") !== null;
+}
 
 /** Human label for a window id: main → "Main window", aux-<n> → "Window <n+1>"
  *  (main counts as window 1). Unrecognized ids fall back to the raw id. */
@@ -318,6 +336,7 @@ export function Sidebar({
   onOpenFolderSearch,
   maxGroupDepth = DEFAULT_SETTINGS.maxGroupDepth,
   conversations,
+  paneTitles,
   saved,
   hosts,
   plugins,
@@ -361,6 +380,16 @@ export function Sidebar({
   const dialogCancelRef = useRef<HTMLButtonElement | null>(null);
   const asideRef = useRef<HTMLElement | null>(null);
   const resizeRef = useRef<ResizeDragState | null>(null);
+  /// Non-null while the pane preview is up: the row it hangs off, and where
+  /// that row stood when the dwell completed.
+  const [paneFlyout, setPaneFlyout] = useState<
+    { tabId: string; anchor: { top: number; right: number } } | null
+  >(null);
+  const paneFlyoutTimerRef = useRef<number | null>(null);
+  const paneFlyoutPendingRef = useRef<string | null>(null);
+  /// The dwell outlives the render that started it, so the guards it has to
+  /// re-check on firing are read through refs rather than closed over.
+  const renameTargetRef = useRef<RenameTarget | null>(null);
 
   /// Rendered top-to-bottom order of the rows a user can actually reach:
   /// a collapsed group hides its whole subtree, not just its own tabs.
@@ -467,6 +496,115 @@ export function Sidebar({
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
   }, []);
+
+  /// ── Rail hover preview (pane flyout) ──────────────────────────────────
+  /// The dwell timer lives here rather than in the panel, because everything
+  /// that calls it off — a drag, a rename, a menu, a click — is the sidebar's
+  /// to know about, and only one preview may be up at a time.
+
+  const cancelPaneDwell = () => {
+    if (paneFlyoutTimerRef.current !== null) {
+      window.clearTimeout(paneFlyoutTimerRef.current);
+      paneFlyoutTimerRef.current = null;
+    }
+    paneFlyoutPendingRef.current = null;
+  };
+
+  const closePaneFlyout = () => {
+    cancelPaneDwell();
+    setPaneFlyout(null);
+  };
+
+  const startPaneDwell = (tabId: string) => {
+    /// A rail with no way to name a pane has no preview to offer, and a row
+    /// being dragged or renamed is not a row being read.
+    if (!paneTitles || dragRef.current || renameTargetRef.current) {
+      return;
+    }
+    /// Re-entering the row the clock is already running for must not restart
+    /// it — otherwise crossing a badge inside the row resets the dwell.
+    if (paneFlyoutPendingRef.current === tabId || paneFlyout?.tabId === tabId) {
+      return;
+    }
+    cancelPaneDwell();
+    paneFlyoutPendingRef.current = tabId;
+    paneFlyoutTimerRef.current = window.setTimeout(() => {
+      paneFlyoutTimerRef.current = null;
+      paneFlyoutPendingRef.current = null;
+      /// Three seconds is long enough for a drag or a rename to have begun
+      /// since the pointer arrived, so the guards are asked again here.
+      if (dragRef.current || renameTargetRef.current) {
+        return;
+      }
+      const rect = tabRefs.current.get(tabId)?.getBoundingClientRect();
+      if (rect) {
+        setPaneFlyout({ tabId, anchor: { top: rect.top, right: rect.right } });
+      }
+    }, HOVER_PANES_FLYOUT_MS);
+  };
+
+  /// Leaving the row ends the preview — unless the pointer is on its way INTO
+  /// the panel, which shares the row's right edge exactly so it can be.
+  const handleTabPointerLeave = (target: EventTarget | null) => {
+    if (enteringPaneFlyout(target)) {
+      cancelPaneDwell();
+    } else {
+      closePaneFlyout();
+    }
+  };
+
+  useEffect(() => cancelPaneDwell, []);
+
+  useEffect(() => {
+    renameTargetRef.current = renameTarget;
+    if (renameTarget) {
+      closePaneFlyout();
+    }
+  }, [renameTarget]);
+
+  useEffect(() => {
+    if (!paneFlyout) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      closePaneFlyout();
+      /// Esc belongs to whoever claimed it first: an open editor or an armed
+      /// confirm cancels ITSELF, and the preview merely gets out of the way.
+      /// With no such owner the preview is what Esc was for, and nothing else
+      /// should act on the same press.
+      if (!document.activeElement?.closest("[data-esc-guard]")) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    const handlePointerDown = () => closePaneFlyout();
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [paneFlyout]);
+
+  /// The panes of `tab` in layout order, wearing the names their own pane
+  /// headers wear. A pane the title source does not cover falls back to the
+  /// tab's rail name — which is exactly what a lone pane is called anyway.
+  const paneRowsFor = (tab: SidebarTabModel): PaneFlyoutPane[] => {
+    const titles = paneTitles?.(tab.id) ?? {};
+    return tab.sessionIds.map((sessionId) => ({
+      sessionId,
+      name: titles[sessionId] ?? tab.title,
+    }));
+  };
+
+  /// The row the preview hangs off — null once that tab leaves the rail, which
+  /// takes the panel with it rather than leaving it pointing at nothing.
+  const paneFlyoutTab = paneFlyout
+    ? visibleTabs.find((tab) => tab.id === paneFlyout.tabId) ?? null
+    : null;
 
   /// Every container `item` is allowed into, the root included — the depth
   /// setting and the no-cycle rule both live in `canMoveItem`.
@@ -776,14 +914,24 @@ export function Sidebar({
         data-group-id={tab.groupId ?? ""}
         data-drop-kind="tab"
         data-drop-index={index}
-        onPointerDown={(event) => startDrag(event, {
-          item: { kind: "tab", id: tab.id },
-          containerId: tab.groupId,
-          index,
-        }, tab.title)}
+        {...(paneFlyout?.tabId === tab.id
+          ? { "aria-describedby": PANE_FLYOUT_ID }
+          : {})}
+        onPointerEnter={() => startPaneDwell(tab.id)}
+        onPointerLeave={(event) => handleTabPointerLeave(event.relatedTarget)}
+        onPointerDown={(event) => {
+          /// The row is being clicked or dragged, not read.
+          closePaneFlyout();
+          startDrag(event, {
+            item: { kind: "tab", id: tab.id },
+            containerId: tab.groupId,
+            index,
+          }, tab.title);
+        }}
         onContextMenu={(event) => {
           event.preventDefault();
           event.stopPropagation();
+          closePaneFlyout();
           openMenu({
             kind: "tab",
             id: tab.id,
@@ -1843,6 +1991,15 @@ export function Sidebar({
         </div>
       ) : null}
       {renderedMenu}
+      {paneFlyout && paneFlyoutTab ? (
+        <PaneFlyout
+          tabId={paneFlyoutTab.id}
+          title={paneFlyoutTab.title}
+          panes={paneRowsFor(paneFlyoutTab)}
+          anchor={paneFlyout.anchor}
+          onDismiss={closePaneFlyout}
+        />
+      ) : null}
       {drag?.active ? (
         <>
           <div

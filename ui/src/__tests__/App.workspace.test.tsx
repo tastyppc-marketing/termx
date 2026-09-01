@@ -15,11 +15,17 @@ vi.mock("../sidebar/Sidebar", () => ({
   Sidebar: ({
     snapshot,
     onOpenSettings,
+    paneTitles,
   }: {
     snapshot: WorkspaceSnapshot;
     onOpenSettings?: () => void;
+    paneTitles?: (tabId: string) => Readonly<Record<number, string>>;
   }) => (
-    <div data-active-tab={snapshot.activeTabId ?? ""} data-testid="workspace-sidebar">
+    <div
+      data-active-tab={snapshot.activeTabId ?? ""}
+      data-pane-titles={paneTitles ? "wired" : ""}
+      data-testid="workspace-sidebar"
+    >
       <button
         type="button"
         data-testid="sidebar-open-settings"
@@ -229,6 +235,28 @@ describe("App workspace lifecycle", () => {
     await act(async () => root.unmount());
     expect(harness.order).toEqual(["controller.dispose", "client.close"]);
   });
+
+  it(
+    "hands the sidebar the controller's pane titles — the rail's hover preview " +
+      "is off whenever that prop is missing, and a silently disabled preview " +
+      "looks exactly like a preview that simply never opened",
+    async () => {
+      const harness = controllerHarness();
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+
+      await act(async () => root.render(<App bootstrap={async () => harness.workspace} />));
+
+      expect(
+        container
+          .querySelector("[data-testid='workspace-sidebar']")
+          ?.getAttribute("data-pane-titles"),
+      ).toBe("wired");
+
+      await act(async () => root.unmount());
+    },
+  );
 
   it("renders the intentional empty panel and a dead-pane placeholder for a dead tab", async () => {
     const emptyHarness = controllerHarness(snapshot(null));
