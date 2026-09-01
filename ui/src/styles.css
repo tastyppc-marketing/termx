@@ -115,6 +115,35 @@ input {
   text-transform: uppercase;
 }
 
+/* The window's own name. It reads as a label, not a control — the double-click
+   is the affordance — so the only resting hint is the cursor, and hover just
+   lifts it to full-strength text. */
+.app-subtitle--nameable {
+  overflow: hidden;
+  max-width: 40ch;
+  cursor: default;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-subtitle--nameable:hover {
+  color: var(--text-main);
+}
+
+.app-subtitle--nameable:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The editor takes the label's place without moving the row: same 10px type,
+   same tracking, and a fixed width so the header cannot reflow mid-edit. */
+.app-subtitle--editing {
+  width: 24ch;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .app-workspace {
   display: flex;
   min-width: 0;

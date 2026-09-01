@@ -120,6 +120,7 @@ function snapshot(activeTab: SidebarTabModel = tab()): WorkspaceSnapshot {
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {},
     rootItems: [{ kind: "tab", id: activeTab.id }],
     tabs: {

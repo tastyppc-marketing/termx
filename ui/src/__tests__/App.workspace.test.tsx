@@ -92,6 +92,7 @@ function snapshot(activeTab: SidebarTabModel | null = tab()): WorkspaceSnapshot 
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {},
     rootItems: activeTab ? [{ kind: "tab", id: activeTab.id }] : [],
     tabs,
@@ -381,6 +382,7 @@ function twoTabSnapshot(activeTabId: "tab-a" | "tab-b"): WorkspaceSnapshot {
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {},
     rootItems: [{ kind: "tab", id: "tab-a" }, { kind: "tab", id: "tab-b" }],
     tabs: {

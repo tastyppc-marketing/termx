@@ -118,6 +118,7 @@ export function reconcile(
         tabs,
         activeTabId: rootItems[0]?.id ?? null,
         auxWindows: {},
+        windowNames: {},
       },
       deadSessionIds: [],
       orphanAdoptedIds,

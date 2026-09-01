@@ -104,6 +104,7 @@ function workspace(): WorkspaceSnapshot {
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {
       "group-1": {
         id: "group-1",
@@ -345,6 +346,7 @@ function nestedWorkspace(): WorkspaceSnapshot {
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {
       marketing: {
         id: "marketing",

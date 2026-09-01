@@ -546,6 +546,16 @@ function SettingsControl({
           onPick={(value) => onChange({ maxGroupDepth: value })}
         />
       );
+    case "syncWindowRenameToTab":
+      return (
+        <Toggle
+          name="syncWindowRenameToTab"
+          label="Renaming a window also renames its rail tab"
+          hint="Off by default: a window name labels the group of panes in it, while each rail tab keeps its own name."
+          checked={settings.syncWindowRenameToTab}
+          onToggle={(checked) => onChange({ syncWindowRenameToTab: checked })}
+        />
+      );
     case "conversationsRail":
       return (
         <Toggle

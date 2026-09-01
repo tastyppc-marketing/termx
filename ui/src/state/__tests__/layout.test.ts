@@ -264,6 +264,7 @@ function nestedChain(depth: number): Layout {
     },
     activeTabId: "t1",
     auxWindows: {},
+    windowNames: {},
   };
 }
 
@@ -295,7 +296,12 @@ describe("layout v2", () => {
       },
       activeTabId: "t1",
     };
-    expect(parseLayout(blob)).toEqual({ ...blob, version: 3, auxWindows: {} });
+    expect(parseLayout(blob)).toEqual({
+      ...blob,
+      version: 3,
+      auxWindows: {},
+      windowNames: {},
+    });
   });
 
   it("migrates a v1 blob preserving order and defaulting fill/color", () => {
@@ -434,7 +440,7 @@ function withAuxWindow(id = "aux-1"): Layout {
 }
 
 describe("layout v3 (aux windows)", () => {
-  it("emptyLayout is v3 with no aux windows", () => {
+  it("emptyLayout is v3 with no aux windows and no window names", () => {
     expect(emptyLayout()).toEqual({
       version: 3,
       groups: {},
@@ -442,6 +448,7 @@ describe("layout v3 (aux windows)", () => {
       tabs: {},
       activeTabId: null,
       auxWindows: {},
+      windowNames: {},
     });
   });
 

@@ -80,6 +80,11 @@ export interface LayoutStore {
   /// restores its position. Unknown windows, main, and invalid bounds are
   /// no-ops.
   setWindowBounds(windowId: string, bounds: WindowBounds): Layout;
+  /// The window's own display name — the label over its top-left corner, and
+  /// the one thing that distinguishes two windows at a glance. `null` (or a
+  /// blank string) clears it back to the default. Main and aux windows alike;
+  /// a window this layout does not know is a no-op.
+  setWindowName(windowId: string, name: string | null): Layout;
 
   createGroup(opts: CreateGroupOptions): Layout;
   renameGroup(groupId: string, name: string): Layout;
@@ -736,6 +741,32 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       });
     },
 
+    setWindowName(windowId, name) {
+      if (windowId !== MAIN_WINDOW_ID && state.auxWindows[windowId] === undefined) {
+        return state;
+      }
+      const current = state.windowNames[windowId];
+      // Blank is not a name, it is the request to stop having one — which is
+      // what an empty inline-rename commit means.
+      const trimmed = name === null ? "" : name.trim();
+      if (trimmed.length === 0) {
+        if (current === undefined) {
+          return state;
+        }
+        const windowNames = { ...state.windowNames };
+        delete windowNames[windowId];
+        return commit({ ...state, windowNames });
+      }
+      const next = normalizeName(trimmed);
+      if (next === null || next === current) {
+        return state;
+      }
+      return commit({
+        ...state,
+        windowNames: { ...state.windowNames, [windowId]: next },
+      });
+    },
+
     returnWindowToMain(windowId) {
       const slot = state.auxWindows[windowId];
       if (windowId === MAIN_WINDOW_ID || slot === undefined) {
@@ -743,9 +774,14 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
       }
       const auxWindows = { ...state.auxWindows };
       delete auxWindows[windowId];
+      // The label goes with the window. Ids are reused, so a name left behind
+      // would surface on whatever window next takes this slot.
+      const windowNames = { ...state.windowNames };
+      delete windowNames[windowId];
       const next: Layout = {
         ...state,
         auxWindows,
+        windowNames,
         rootItems: [...state.rootItems, ...slot.rootItems],
         // Main keeps its own active tab; it only adopts the slot's when it
         // had none to show.

@@ -97,6 +97,7 @@ import {
 import type { FolderSearchTarget } from "./workspace/WorkspaceController";
 import { firstSessionId } from "./workspace/layoutOperations";
 import { tauriWindowBus } from "./workspace/windowBus";
+import { DEFAULT_WINDOW_NAME, WindowNameHeader } from "./workspace/WindowName";
 import {
   manageAuxWindow,
   openAuxWindows,
@@ -239,7 +240,13 @@ export default function App({ bootstrap = bootstrapWorkspace, windowId }: AppPro
     <div className="app-shell">
       <header className="app-header">
         <div className="app-brand">TermX</div>
-        <div className="app-subtitle">Terminal workspace</div>
+        {/* The window's own label, once there is a workspace to read it from.
+            Before that there is nothing to name and nowhere to store it. */}
+        {state.type === "ready" ? (
+          <WindowNameHeader workspace={state.workspace} />
+        ) : (
+          <div className="app-subtitle">{DEFAULT_WINDOW_NAME}</div>
+        )}
       </header>
       {state.type === "loading" ? (
         <WorkspacePanel testId="workspace-loading" title="Starting TermX…">

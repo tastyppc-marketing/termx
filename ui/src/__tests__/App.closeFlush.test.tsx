@@ -90,6 +90,7 @@ function snapshot(pane: PaneSessionState): WorkspaceSnapshot {
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {},
     rootItems: [{ kind: "tab", id: active.id }],
     tabs: {

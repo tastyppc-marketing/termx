@@ -34,6 +34,15 @@ describe("main window capability", () => {
     },
   );
 
+  it(
+    "grants set-title — a named window puts its name in the OS title bar, " +
+      "and the call site swallows the rejection (there is no error path worth " +
+      "having for a caption), so without this the title silently never changes",
+    () => {
+      expect(capability.permissions).toContain("core:window:allow-set-title");
+    },
+  );
+
   it("still grants the window lifecycle permissions the close path needs", () => {
     expect(capability.permissions).toContain("core:window:allow-close");
     expect(capability.permissions).toContain("core:window:allow-destroy");

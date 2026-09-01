@@ -67,6 +67,7 @@ function workspaceSnapshot(): WorkspaceSnapshot {
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {},
     rootItems: [{ kind: "tab", id: "tab-1" }],
     tabs: {

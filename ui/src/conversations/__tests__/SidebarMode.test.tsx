@@ -53,6 +53,7 @@ function snapshot(): WorkspaceSnapshot {
     layout: {
       version: 3,
       auxWindows: {},
+      windowNames: {},
       groups: {},
       rootItems: [{ kind: "tab", id: "tab-1" }],
       tabs: {

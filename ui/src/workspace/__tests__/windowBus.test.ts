@@ -588,6 +588,44 @@ describe("single-writer wiring over the bus", () => {
     );
   });
 
+  it(
+    "an aux window naming ITSELF reaches main the same way a tab rename does " +
+      "— the name rides in the layout, so no window-specific plumbing exists " +
+      "for it to be missing from",
+    async () => {
+      const { main, aux, mainFake, auxFake } = await pair();
+
+      aux.controller.renameWindow("aux-1", "Deploys");
+      await aux.controller.flush();
+      await main.controller.flush();
+
+      expect(auxFake.setLayout).not.toHaveBeenCalled();
+      expect(mainFake.setLayout).toHaveBeenCalledTimes(1);
+      expect(mainFake.setLayout.mock.calls[0]?.[0]).toMatchObject({
+        windowNames: { "aux-1": "Deploys" },
+      });
+      expect(main.controller.getSnapshot().layout.windowNames).toEqual({
+        "aux-1": "Deploys",
+      });
+    },
+  );
+
+  it(
+    "a window name survives the round trip back out to the other window — " +
+      "main re-parses every forwarded blob, so a name the parser dropped " +
+      "would vanish the instant a second window existed",
+    async () => {
+      const { main, aux } = await pair();
+
+      main.controller.renameWindow("main", "Client work");
+      await main.controller.flush();
+
+      expect(aux.controller.getSnapshot().layout.windowNames).toEqual({
+        main: "Client work",
+      });
+    },
+  );
+
   it("a main broadcast reaches aux, which adopts without persisting", async () => {
     const { main, aux, mainFake, auxFake } = await pair();
 

@@ -116,6 +116,15 @@ export interface LayoutV3 {
   tabs: Record<string, Tab>;
   activeTabId: string | null;
   auxWindows: Record<string, AuxWindowSlot>;
+  /// What each OS window calls itself, keyed by window id — the main window
+  /// included, which is why this is a flat map rather than a field on
+  /// `AuxWindowSlot`. Sparse: a window with no entry wears the default name.
+  ///
+  /// It rides in the layout because the layout is the only per-window model
+  /// there is, and because the layout is what crosses the window bus: an aux
+  /// window's rename then reaches main through exactly the plumbing that
+  /// already carries a tab rename.
+  windowNames: Record<string, string>;
 }
 
 /// The current layout shape everywhere in the UI.
@@ -137,6 +146,13 @@ export function slotOf(layout: Layout, windowId: string): AuxWindowSlot | null {
     };
   }
   return layout.auxWindows[windowId] ?? null;
+}
+
+/// What this window calls itself, or null when it has never been named. Null
+/// is deliberately not "" — the caller shows its own default for null, and a
+/// window named the empty string is not a thing that can exist.
+export function windowNameOf(layout: Layout, windowId: string): string | null {
+  return layout.windowNames[windowId] ?? null;
 }
 
 interface TabV1 {
@@ -179,6 +195,7 @@ export function emptyLayout(): Layout {
     tabs: {},
     activeTabId: null,
     auxWindows: {},
+    windowNames: {},
   };
 }
 
@@ -764,7 +781,7 @@ export function migrateV1(v1: LayoutV1): LayoutV2 {
 /// share; there are no aux windows yet. Exported for tests; parseLayout
 /// applies it.
 export function migrateV2(v2: LayoutV2): Layout {
-  return { ...v2, version: 3, auxWindows: {} };
+  return { ...v2, version: 3, auxWindows: {}, windowNames: {} };
 }
 
 function parseWindowBounds(value: unknown): WindowBounds | null {
@@ -802,6 +819,31 @@ function parseAuxWindowSlot(value: unknown): AuxWindowSlot | null {
     }
   }
   return { rootItems, activeTabId: value.activeTabId, bounds };
+}
+
+/// Window names, parsed leniently where the rest of this file is strict.
+///
+/// Two reasons for the asymmetry. Every v3 layout written before names existed
+/// simply has no field here, so a missing map has to mean "no names" rather
+/// than "reject" — otherwise the upgrade empties everyone's workspace. And a
+/// name is COSMETIC where a layout is not: rejecting the whole blob over a
+/// junk label would trade every tab the user has for a caption. So bad entries
+/// are dropped one by one and the workspace comes through intact.
+function parseWindowNames(value: unknown): Record<string, string> {
+  if (!isRecord(value)) {
+    return {};
+  }
+  const names: Record<string, string> = {};
+  for (const [windowId, raw] of Object.entries(value)) {
+    if (typeof raw !== "string") {
+      continue;
+    }
+    const name = raw.trim();
+    if (name.length > 0 && name.length <= MAX_NAME_LENGTH) {
+      names[windowId] = name;
+    }
+  }
+  return names;
 }
 
 /// Parse an untrusted GetState blob, v1..v3. Returns null on ANY version,
@@ -875,6 +917,7 @@ export function parseLayout(value: unknown): Layout | null {
     tabs,
     activeTabId: value.activeTabId,
     auxWindows,
+    windowNames: parseWindowNames(value.windowNames),
   };
 
   return validateInvariants(layout).length === 0 ? layout : null;

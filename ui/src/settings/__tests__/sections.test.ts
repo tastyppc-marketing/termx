@@ -51,7 +51,11 @@ describe("SETTINGS_SECTIONS", () => {
       "terminalFontSize",
       "shellIntegration",
     ]);
-    expect(byId.groups).toEqual(["newTabPolicy", "maxGroupDepth"]);
+    expect(byId.groups).toEqual([
+      "newTabPolicy",
+      "maxGroupDepth",
+      "syncWindowRenameToTab",
+    ]);
     expect(byId.conversations).toEqual([
       "conversationsRail",
       "conversationsPalette",

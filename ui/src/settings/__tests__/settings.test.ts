@@ -24,6 +24,7 @@ const ALTERNATE_SETTINGS: TermxSettings = {
   sleepHiddenTerminals: "60",
   onWindowClose: "stop-all",
   maxGroupDepth: 5,
+  syncWindowRenameToTab: true,
   theme: "paper-light",
   agentPaneDefaultView: "chat",
   chatDefaultDensity: "full",
@@ -61,6 +62,7 @@ describe("parseSettings", () => {
       sleepHiddenTerminals: "60",
       onWindowClose: "stop-all",
       maxGroupDepth: 5,
+      syncWindowRenameToTab: true,
       theme: "paper-light",
       agentPaneDefaultView: "chat",
       chatDefaultDensity: "chips",
@@ -90,6 +92,7 @@ describe("parseSettings", () => {
         sleepHiddenTerminals: "30",
         onWindowClose: "explode",
         maxGroupDepth: 7,
+        syncWindowRenameToTab: "sometimes",
         theme: "neon",
         agentPaneDefaultView: "bubble",
         chatDefaultDensity: 7,
@@ -115,6 +118,7 @@ describe("parseSettings", () => {
       sleepHiddenTerminals: DEFAULT_SETTINGS.sleepHiddenTerminals,
       onWindowClose: DEFAULT_SETTINGS.onWindowClose,
       maxGroupDepth: DEFAULT_SETTINGS.maxGroupDepth,
+      syncWindowRenameToTab: DEFAULT_SETTINGS.syncWindowRenameToTab,
       theme: DEFAULT_SETTINGS.theme,
       agentPaneDefaultView: DEFAULT_SETTINGS.agentPaneDefaultView,
       chatDefaultDensity: DEFAULT_SETTINGS.chatDefaultDensity,
@@ -213,6 +217,27 @@ describe("parseSettings", () => {
       savedConversationsRail: false,
     });
   });
+
+  it(
+    "window rename does NOT touch the rail tab by default — the whole point " +
+      "of naming a window is a group label ABOVE two or three panes, while " +
+      "each rail tab keeps its own identity",
+    () => {
+      expect(DEFAULT_SETTINGS.syncWindowRenameToTab).toBe(false);
+      expect(parseSettings(JSON.stringify({}))).toMatchObject({
+        syncWindowRenameToTab: false,
+      });
+      expect(parseSettings(JSON.stringify({ syncWindowRenameToTab: true })))
+        .toMatchObject({ syncWindowRenameToTab: true });
+      // Anything that is not a boolean falls back to off, like its neighbours.
+      for (const junk of ["true", "", 0, 1, null, [], {}]) {
+        expect(
+          parseSettings(JSON.stringify({ syncWindowRenameToTab: junk }))
+            .syncWindowRenameToTab,
+        ).toBe(false);
+      }
+    },
+  );
 
   it("ssh: both surfaces on, passwords stored and encrypted by default", () => {
     // Spec §6: the default is the one that makes connecting effortless, with

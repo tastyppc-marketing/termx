@@ -62,6 +62,7 @@ function snapshot(tabs: readonly SidebarTabModel[]): WorkspaceSnapshot {
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {},
     rootItems: tabs.map((entry) => ({ kind: "tab" as const, id: entry.id })),
     tabs: layoutTabs,

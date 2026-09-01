@@ -41,6 +41,7 @@ function layout(): Layout {
   return {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {
       group: {
         id: "group",
@@ -900,6 +901,7 @@ describe("WorkspaceController split actions", () => {
     const initial: Layout = {
       version: 3,
       auxWindows: {},
+      windowNames: {},
       groups: {},
       rootItems: [{ kind: "tab", id: "deep" }],
       tabs: {
@@ -1672,6 +1674,7 @@ function nestedLayout(): Layout {
   return {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {
       marketing: {
         id: "marketing",

@@ -1236,6 +1236,13 @@ export class WorkspaceController {
     return this.store.getState().groups[id] ? id : null;
   };
 
+  /// Name (or, with null, un-name) an OS window. Structural like every other
+  /// rename, so an aux window's edit rides the same bus forwarding to main
+  /// that `renameTab` does — nothing window-specific is needed for that.
+  renameWindow = (windowId: string, name: string | null): void => {
+    this.mutate("structural", () => this.store.setWindowName(windowId, name));
+  };
+
   renameGroup = (groupId: string, name: string): void => {
     this.mutate("structural", () => this.store.renameGroup(groupId, name));
   };

@@ -92,6 +92,7 @@ function coloredWorkspace(): WorkspaceSnapshot {
   const layout: Layout = {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {
       blue: {
         id: "blue",

@@ -84,6 +84,15 @@ export interface TermxSettings {
   readonly onWindowClose: CloseBehavior;
   /** How deep sidebar groups may be nested by creation or drag. */
   readonly maxGroupDepth: MaxGroupDepthOption;
+  /**
+   * Whether renaming a WINDOW also renames that window's active rail tab.
+   *
+   * Off by design, not by caution. A window name is a label over the two or
+   * three panes it holds — a group name — while a rail tab names one terminal.
+   * Tying them together would overwrite the tab's own identity every time the
+   * group is labelled, which is the opposite of what the name is for.
+   */
+  readonly syncWindowRenameToTab: boolean;
   /** Colour theme. Applies live — no restart, no confirmation. */
   readonly theme: ThemeId;
   /** Which view an agent pane opens in: the raw terminal or the chat view. */
@@ -123,6 +132,7 @@ export const DEFAULT_SETTINGS: TermxSettings = {
   sleepHiddenTerminals: "15",
   onWindowClose: "ask",
   maxGroupDepth: 3,
+  syncWindowRenameToTab: false,
   theme: DEFAULT_THEME_ID,
   agentPaneDefaultView: "terminal",
   chatDefaultDensity: "smart",
@@ -244,6 +254,10 @@ export function parseSettings(text: string | null): TermxSettings {
     maxGroupDepth: isMaxGroupDepth(record.maxGroupDepth)
       ? record.maxGroupDepth
       : DEFAULT_SETTINGS.maxGroupDepth,
+    syncWindowRenameToTab:
+      typeof record.syncWindowRenameToTab === "boolean"
+        ? record.syncWindowRenameToTab
+        : DEFAULT_SETTINGS.syncWindowRenameToTab,
     theme: isThemeId(record.theme) ? record.theme : DEFAULT_SETTINGS.theme,
     agentPaneDefaultView: isAgentPaneView(record.agentPaneDefaultView)
       ? record.agentPaneDefaultView

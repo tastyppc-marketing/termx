@@ -66,6 +66,7 @@ export function baseLayout(): Layout {
     },
     activeTabId: "t1",
     auxWindows: {},
+    windowNames: {},
   };
 }
 

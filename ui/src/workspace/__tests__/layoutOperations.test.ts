@@ -39,6 +39,7 @@ function layout(): Layout {
   return {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {
       g1: { id: "g1", name: "One", collapsed: false, color: null, items: [tabItem("t2")] },
       g2: { id: "g2", name: "Two", collapsed: false, color: null, items: [tabItem("t3")] },
@@ -237,6 +238,7 @@ function depthLayout(): Layout {
   return {
     version: 3,
     auxWindows: {},
+    windowNames: {},
     groups: {},
     rootItems: [tabItem("deep"), tabItem("three"), tabItem("simple")],
     tabs: {
