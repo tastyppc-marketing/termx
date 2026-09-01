@@ -1635,3 +1635,17 @@ Routing: Wave 1 = T1 Codex, T2 Codex (Rust), T4 Opus → reviews: T1→Grok, T2�
 - **impl-recall NEXT (IN PROGRESS): B5 starter template** → new repo C:\Users\mjfos\code\termx-plugin-template (lift server\plugin\ contract layer + security floor + contract tests; tiny example product). Client Cockpit + Design Guard HELD until Michael sees Recall.
 
 **Mechanics:** every TermX commit via gate-commit.sh (hash-guard); build-stage.sh slot = `.prev27` (ready). Next: impl-ui2 fixes re-verify → stage build → register Recall → Michael click-test (open_folder, OS title, 3s flyout feel, Recall search + live Showroom).
+
+## Delta 2026-09-01 (later 37) — BUILD STAGED at e1a202c (UI trio complete + reviewed); Recall registered
+
+**STAGED:** `C:\Dev\TermX\dist-portable\TermX\TermX.exe` + `termx-ui.exe` = HEAD **e1a202c** (Sep 1 05:15, 6,395,392 bytes, dev-fingerprint 0). Rotation: `.prev27` = the aa713d0 build (Aug 31 05:05) — Michael is CURRENTLY running that (his live pid was 12632). `termx-host.exe` untouched (Aug 28 02:33). He must RESTART TermX to pick up the trio + the new plugins_v1.json.
+
+**UI trio FINAL commits:** 0af6de0 (A1 status-bar open-folder) · 7ef9143 (A2 pane flyout) · 4b601d6 (A3 window rename) · 8025a5a (trio review fixes: F2 closes flyout via focusin+isEditableElement; sync-rename one structural txn via renameWindow(id,name,alsoRenameActiveTab); reveal.rs non-win arm reaps) · e1a202c (docs). Gates at e1a202c: tsc 0, vitest **2089/2089**, cargo **221**. Trio reviews: Grok PASS-WITH-MINORS + Codex FAIL(3 fixed) on the features; Grok re-verify of the fix diff (8025a5a) **PASS, zero findings**. Outputs in scratchpad\batch2\RT-*.out, RTF-grok.out.
+
+**Recall REGISTERED:** `%APPDATA%\TermX\plugins_v1.json` now has recall (path C:\Users\mjfos\code\recall, enabled, no grants) alongside showroom. Backup: plugins_v1.json.bak-2026-09-01-add-recall. Recall repo DONE at 6378419, 137/137. Stray test instance (was on 7346) killed; TermX will spawn its own on launch. Showroom (7345) was down all build — Michael's live-Deliverables check is still pending.
+
+**MICHAEL'S CLICK-TEST (the live gate for this batch):** restart TermX, then: (1) click the cwd in the bottom status bar → Explorer opens that folder; (2) rest the pointer ~3s on a rail tab → pane flyout appears to the right (tell us if 3s feels right — it's one exported constant HOVER_PANES_FLYOUT_MS); (3) double-click (or F2) the top-left window name → rename inline; check the rail tab is NOT renamed (default off) unless he turns on Settings → Groups & Tabs → "Renaming a window also renames its rail tab"; (4) open the Recall pane → search a client/word → conversations return with a copyable `claude --resume` line; start Showroom (`node C:\Users\mjfos\code\showroom\server\showroom.js`) to also get the Deliverables group.
+
+**DEFERRED / TELL MICHAEL:** cross-window settings sync (no setting propagates to already-open windows — pre-existing, needs a settings-over-bus batch, twin of plugin Phase C). Recall frame-ancestors (needs exact Windows Tauri webview origin confirmed live). reveal.rs non-windows arm never compiled here (Windows-first; rustc metadata-checked only).
+
+**IN FLIGHT:** impl-recall on B5 starter template (C:\Users\mjfos\code\termx-plugin-template). Client Cockpit + Design Guard HELD until Michael sees Recall.
