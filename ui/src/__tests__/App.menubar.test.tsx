@@ -38,7 +38,11 @@ vi.mock("../sidebar/Sidebar", () => ({
 }));
 vi.mock("../terminal/TerminalPane", () => ({
   TerminalPane: ({ sessionId }: { sessionId: number }) => (
-    <div data-session-id={sessionId} data-testid="workspace-terminal" />
+    <div data-session-id={sessionId} data-testid="workspace-terminal">
+      {/* xterm builds a helper textarea and `terminal.focus()` focuses it, so
+          the stand-in carries one: focus has to be able to land somewhere. */}
+      <textarea className="xterm-helper-textarea" readOnly value="" />
+    </div>
   ),
 }));
 
@@ -62,7 +66,9 @@ function tab(): SidebarTabModel {
   } as SidebarTabModel;
 }
 
-function snapshot(paneStatus: "live" | "exited" = "live"): WorkspaceSnapshot {
+function snapshot(
+  paneState: Record<string, unknown> = { status: "live", exitCode: null },
+): WorkspaceSnapshot {
   const active = tab();
   const layout: Layout = {
     version: 3,
@@ -86,7 +92,7 @@ function snapshot(paneStatus: "live" | "exited" = "live"): WorkspaceSnapshot {
     rootItems: [{ kind: "tab", tab: active }],
     ungroupedTabs: [active],
     groups: [],
-    paneStates: { 7: { status: paneStatus, exitCode: null } },
+    paneStates: { 7: paneState },
     activeTabId: active.id,
     activeSessionId: 7,
     windowIds: ["main"],
@@ -122,6 +128,8 @@ function harness(
     renameWindow: vi.fn(),
     toggleGroup: vi.fn(),
     createTab: vi.fn(async () => undefined),
+    createTabInNewWindow: vi.fn(async () => undefined),
+    setFocusedPane: vi.fn(),
     duplicateTab: vi.fn(),
     openFolderHere: vi.fn(),
     closeLiveTab: vi.fn(),
@@ -182,6 +190,15 @@ afterEach(async () => {
   }
   document.body.replaceChildren();
 });
+
+async function unmount() {
+  if (root) {
+    const current = root;
+    root = null;
+    await act(async () => current.unmount());
+  }
+  container.replaceChildren();
+}
 
 async function mount(workspace: ReturnType<typeof harness>["workspace"]) {
   root = createRoot(container);
@@ -278,47 +295,19 @@ describe("App — the Workspace menu runs the workspace's own actions", () => {
   );
 
   it(
-    "New window makes a NEW tab and moves THAT one out — the tab the user is " +
-      "standing in stays where it is",
+    "New window asks the controller for one — ONE structural write, so no " +
+      "layout diff can pick up a tab something else created mid-await",
     async () => {
-      const current = snapshot();
-      const controller = {
-        createTab: vi.fn(async () => {
-          // What the real createTab does: the tab lands in the layout.
-          current.layout.tabs["tab-2"] = {
-            id: "tab-2",
-            title: null,
-            color: "blue",
-            fill: "off",
-            split: { kind: "pane", sessionId: 9 },
-          } as (typeof current.layout.tabs)[string];
-        }),
-      };
-      const { controller: spy, workspace } = harness({ snapshot: current, ...controller });
+      const { controller, workspace } = harness();
       await mount(workspace);
       await pick("workspace", "new-window");
 
-      expect(spy.createTab).toHaveBeenCalledExactlyOnceWith({
-        groupId: null,
+      expect(controller.createTabInNewWindow).toHaveBeenCalledExactlyOnceWith({
         profile: null,
       });
-      expect(spy.moveItemToWindow).toHaveBeenCalledExactlyOnceWith(
-        { kind: "tab", id: "tab-2" },
-        "new",
-      );
-    },
-  );
-
-  it(
-    "moves nothing when the tab could not be created — a failed create must " +
-      "never send the active tab out of the window instead",
-    async () => {
-      const { controller, workspace } = harness({
-        createTab: vi.fn(async () => undefined),
-      });
-      await mount(workspace);
-      await pick("workspace", "new-window");
-      expect(controller.createTab).toHaveBeenCalledTimes(1);
+      // The tab the user is standing in must not move, and nothing may be
+      // created here first and shipped out afterwards.
+      expect(controller.createTab).not.toHaveBeenCalled();
       expect(controller.moveItemToWindow).not.toHaveBeenCalled();
     },
   );
@@ -331,14 +320,45 @@ describe("App — the Workspace menu runs the workspace's own actions", () => {
     expect(container.querySelector("[aria-label='Name this window']")).not.toBeNull();
   });
 
-  it("greys out the pane rows when the focused pane is not alive", async () => {
-    const { workspace } = harness({ snapshot: snapshot("exited") });
+  it("greys out the SPLIT rows when the focused pane is not alive", async () => {
+    const { workspace } = harness({
+      snapshot: snapshot({ status: "exited", exitCode: 0 }),
+    });
     await mount(workspace);
     await click(container.querySelector(".menubar__item[data-menu-id='workspace']"));
     expect(rowOf("split-right")?.disabled).toBe(true);
     expect(rowOf("split-down")?.disabled).toBe(true);
-    expect(rowOf("close-pane")?.disabled).toBe(true);
     expect(rowOf("new-tab")?.disabled).toBe(false);
+  });
+
+  it(
+    "keeps Close pane reachable on a plugin panel and on a dead terminal — " +
+      "the Ctrl+Shift+W it prints closes both, so greying it would make the " +
+      "menu contradict the keyboard beside it",
+    async () => {
+      for (const paneState of [
+        { status: "plugin", pluginId: "recall", pluginHealth: "up" },
+        { status: "exited", exitCode: 1 },
+      ]) {
+        const { workspace } = harness({ snapshot: snapshot(paneState) });
+        await mount(workspace);
+        await click(
+          container.querySelector(".menubar__item[data-menu-id='workspace']"),
+        );
+        expect(rowOf("close-pane")?.disabled, JSON.stringify(paneState)).toBe(false);
+        expect(rowOf("split-right")?.disabled).toBe(true);
+        await unmount();
+      }
+    },
+  );
+
+  it("greys Close pane only when there is no focused pane at all", async () => {
+    const empty = snapshot();
+    (empty as { paneStates: Record<number, unknown> }).paneStates = {};
+    const { workspace } = harness({ snapshot: empty });
+    await mount(workspace);
+    await click(container.querySelector(".menubar__item[data-menu-id='workspace']"));
+    expect(rowOf("close-pane")?.disabled).toBe(true);
   });
 
   it("greys out Save session… when this window has no saved-sessions store", async () => {
@@ -632,5 +652,152 @@ describe("App — Settings › Plugins opens through the same entry point", () =
     expect(controller.openPlugin).toHaveBeenCalledExactlyOnceWith("recall", "tab");
     // And never the old tab-only path, which would ignore the surface.
     expect(controller.openPluginTab).not.toHaveBeenCalled();
+  });
+});
+
+describe("Menubar workspace — focus requests", () => {
+  /**
+   * "Already open somewhere → focus it" is only true if the PANE takes focus.
+   * Switching the active tab alone leaves the ring on the pane the user left
+   * and sends every keystroke to that terminal, which reads as the click
+   * having done nothing at all.
+   *
+   * The controller has no DOM, so it publishes a request and App performs it.
+   * These tests drive the real SplitLayout: the ring comes from App's focus
+   * map, and the caret from the element a click would have landed on.
+   */
+  function twoPanes(
+    focusRequest: { tabId: string; sessionId: number; seq: number } | null,
+  ): WorkspaceSnapshot {
+    const base = snapshot();
+    const active = { ...tab(), sessionIds: [7, 8] } as SidebarTabModel;
+    return {
+      ...base,
+      layout: {
+        ...base.layout,
+        tabs: {
+          "tab-1": {
+            ...base.layout.tabs["tab-1"]!,
+            split: {
+              kind: "split" as const,
+              dir: "row" as const,
+              sizes: [0.5, 0.5] as [number, number],
+              children: [
+                { kind: "pane" as const, sessionId: 7 },
+                { kind: "pane" as const, sessionId: 8 },
+              ],
+            },
+          },
+        },
+      },
+      rootItems: [{ kind: "tab", tab: active }],
+      ungroupedTabs: [active],
+      paneStates: {
+        7: { status: "live", exitCode: null },
+        // A real panel, not a mock: an "up" plugin on a loopback origin is
+        // what makes PluginPane draw the frame the caret has to reach.
+        8: {
+          status: "plugin",
+          pluginId: "showroom",
+          pluginHealth: "up",
+          pluginUrl: "http://127.0.0.1:5051",
+        },
+      },
+      focusRequest,
+    } as unknown as WorkspaceSnapshot;
+  }
+
+  /** A harness that can publish a later snapshot, the way the daemon does. */
+  function live(initial: WorkspaceSnapshot) {
+    let snap = initial;
+    const listeners = new Set<() => void>();
+    const built = harness({
+      snapshot: initial,
+      getSnapshot: () => snap,
+      subscribe: (fn: () => void) => {
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
+    });
+    const publish = async (next: WorkspaceSnapshot) => {
+      snap = next;
+      await act(async () => {
+        for (const fn of [...listeners]) fn();
+      });
+    };
+    return { ...built, publish };
+  }
+
+  function pane(sessionId: number): HTMLElement {
+    const found = container.querySelector<HTMLElement>(
+      `.split-pane[data-session-id='${sessionId}']`,
+    );
+    if (!found) throw new Error(`no pane ${sessionId}`);
+    return found;
+  }
+
+  it("moves the ring AND the caret onto the plugin panel it names", async () => {
+    const { workspace, publish } = live(twoPanes(null));
+    await mount(workspace);
+    expect(pane(7).className).toContain("split-pane--focused");
+
+    await publish(twoPanes({ tabId: "tab-1", sessionId: 8, seq: 1 }));
+
+    expect(pane(8).className).toContain("split-pane--focused");
+    // The frame, not the section: a section takes no caret, and a panel whose
+    // ring moved but whose iframe never focused still swallows nothing.
+    expect(document.activeElement).toBe(pane(8).querySelector("iframe"));
+  });
+
+  it("focuses a terminal pane where the caret really goes", async () => {
+    const { workspace, publish } = live(twoPanes({ tabId: "tab-1", sessionId: 8, seq: 1 }));
+    await mount(workspace);
+
+    await publish(twoPanes({ tabId: "tab-1", sessionId: 7, seq: 2 }));
+
+    expect(pane(7).className).toContain("split-pane--focused");
+    expect(document.activeElement).toBe(pane(7).querySelector("textarea"));
+  });
+
+  it("acts on a request once, however often the snapshot is republished", async () => {
+    const { workspace, publish } = live(twoPanes(null));
+    await mount(workspace);
+    await publish(twoPanes({ tabId: "tab-1", sessionId: 8, seq: 1 }));
+
+    // The user goes back to the terminal, then something unrelated republishes.
+    const shell = pane(7).querySelector<HTMLElement>("textarea")!;
+    await act(async () => shell.focus());
+    await publish(twoPanes({ tabId: "tab-1", sessionId: 8, seq: 1 }));
+
+    // Re-serving a served request would yank the caret out from under them.
+    expect(pane(7).className).toContain("split-pane--focused");
+    expect(document.activeElement).toBe(shell);
+  });
+
+  it("ignores a request for a tab this window no longer has", async () => {
+    const { workspace, publish } = live(twoPanes(null));
+    await mount(workspace);
+
+    await publish(twoPanes({ tabId: "tab-gone", sessionId: 8, seq: 1 }));
+
+    expect(pane(7).className).toContain("split-pane--focused");
+    expect(pane(8).className).not.toContain("split-pane--focused");
+  });
+
+  it("ignores a request for a pane that has left the layout", async () => {
+    const { controller, workspace, publish } = live(twoPanes(null));
+    await mount(workspace);
+
+    await publish(twoPanes({ tabId: "tab-1", sessionId: 99, seq: 1 }));
+
+    expect(pane(7).className).toContain("split-pane--focused");
+    // The damage a missing pane does is not visible on screen: recording it
+    // leaves every later split anchored on a session id the layout has never
+    // heard of, which is exactly what the controller reads back here.
+    const provider = controller.setFocusedPane.mock.calls
+      .map((call: unknown[]) => call[0])
+      .filter((first: unknown) => typeof first === "function")
+      .at(-1) as (tabId: string) => number | null;
+    expect(provider("tab-1")).toBeNull();
   });
 });

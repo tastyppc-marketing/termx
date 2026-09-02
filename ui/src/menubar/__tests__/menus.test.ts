@@ -35,6 +35,7 @@ function workspaceDeps(
 ): WorkspaceMenuDeps {
   return {
     hasLivePane: true,
+    canClosePane: true,
     canSaveSession: true,
     newTab: vi.fn(),
     openFolderAsTab: vi.fn(),
@@ -134,15 +135,31 @@ describe("workspaceMenu", () => {
     expect(deps.saveSession).toHaveBeenCalledTimes(1);
   });
 
-  it("disables the rows that need a live pane when there is none", () => {
+  it("disables the SPLIT rows when the focused pane is not alive", () => {
     const rows = workspaceMenu(workspaceDeps({ hasLivePane: false }));
     expect(byId(rows, "split-right").disabled).toBe(true);
     expect(byId(rows, "split-down").disabled).toBe(true);
-    expect(byId(rows, "close-pane").disabled).toBe(true);
     // Creating work never needs a pane to already exist.
     expect(byId(rows, "new-tab").disabled).toBe(false);
     expect(byId(rows, "open-folder").disabled).toBe(false);
   });
+
+  it(
+    "keeps Close pane live for a pane that is NOT alive — a plugin panel and " +
+      "a dead terminal are both panes you close, and the Ctrl+Shift+W this " +
+      "row prints closes them either way",
+    () => {
+      const rows = workspaceMenu(
+        workspaceDeps({ hasLivePane: false, canClosePane: true }),
+      );
+      expect(byId(rows, "close-pane").disabled).toBe(false);
+      // Only the absence of a focused pane greys it.
+      const empty = workspaceMenu(
+        workspaceDeps({ hasLivePane: false, canClosePane: false }),
+      );
+      expect(byId(empty, "close-pane").disabled).toBe(true);
+    },
+  );
 
   it("disables Save session… without a store, and nothing else", () => {
     const noSave = workspaceMenu(workspaceDeps({ canSaveSession: false }));

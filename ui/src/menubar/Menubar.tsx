@@ -22,7 +22,6 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -53,6 +52,20 @@ export interface MenubarProps {
   menus: readonly MenuSpec[];
 }
 
+/**
+ * The slice of a keyboard event the bar actually reads. React's synthetic
+ * event and the DOM's own both satisfy it, which is what lets one handler
+ * serve the nav and the window listener below without a second copy of the
+ * navigation rules.
+ */
+interface MenubarKeyEvent {
+  readonly key: string;
+  readonly target: EventTarget | null;
+  readonly defaultPrevented: boolean;
+  preventDefault(): void;
+  stopPropagation(): void;
+}
+
 export function Menubar({ menus }: MenubarProps) {
   const [openId, setOpenId] = useState<string | null>(null);
   const navRef = useRef<HTMLElement | null>(null);
@@ -62,18 +75,42 @@ export function Menubar({ menus }: MenubarProps) {
   // soon as it exists. A pointer-opened menu leaves focus where it was, so the
   // pointer can keep sliding along the bar.
   const focusFirstRef = useRef(false);
+  // Where focus was when the menu opened, so picking a row hands it back. The
+  // bar sits above a terminal: a pointer open leaves focus in that terminal
+  // (the labels refuse the mousedown below), and returning to the LABEL would
+  // send every keystroke after "New tab" to a button instead of the shell.
+  // A keyboard open records the label, which is exactly where Esc must return.
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
   const close = useCallback((restoreFocus: boolean) => {
     setOpenId((current) => {
       if (current !== null && restoreFocus) {
         // Synchronously, before any row action runs: an action that opens a
         // dialog of its own records the focused element as the one to return
-        // to, and that should be the label the user came from.
-        labelRefs.current.get(current)?.focus();
+        // to, and that should be where the user came from.
+        const back = returnFocusRef.current;
+        if (back !== null && back.isConnected) {
+          back.focus();
+        } else {
+          // Nothing to go back to (or it left the document while the menu was
+          // open): the label the user is standing on is the honest answer.
+          labelRefs.current.get(current)?.focus();
+        }
       }
       return null;
     });
   }, []);
+
+  // Opening is the moment the return address is taken. Switching menus with an
+  // open bar is NOT an open, so the address survives sliding along the labels.
+  const openMenu = (id: string) => {
+    if (openId === null) {
+      const active = document.activeElement;
+      returnFocusRef.current =
+        active instanceof HTMLElement && active !== document.body ? active : null;
+    }
+    setOpenId(id);
+  };
 
   // A click anywhere else is a dismissal — the same rule the context menus and
   // the rail flyout keep. Capture, so a menu cannot be left open by a handler
@@ -91,6 +128,25 @@ export function Menubar({ menus }: MenubarProps) {
     window.addEventListener("pointerdown", handlePointerDown, true);
     return () => window.removeEventListener("pointerdown", handlePointerDown, true);
   }, [openId, close]);
+
+  // The nav's own handler only sees keys typed INTO the bar. A pointer-opened
+  // menu deliberately left focus in the terminal, so Escape and the arrows
+  // have to be picked up at the window while a menu is open; anything typed
+  // inside the bar is already handled and must not run twice.
+  const keyHandlerRef = useRef<(event: MenubarKeyEvent) => void>(() => undefined);
+  useEffect(() => {
+    if (openId === null) {
+      return;
+    }
+    const handleWindowKey = (event: KeyboardEvent) => {
+      if (event.target instanceof Node && navRef.current?.contains(event.target)) {
+        return;
+      }
+      keyHandlerRef.current(event);
+    };
+    window.addEventListener("keydown", handleWindowKey);
+    return () => window.removeEventListener("keydown", handleWindowKey);
+  }, [openId]);
 
   useLayoutEffect(() => {
     if (openId === null || !focusFirstRef.current) {
@@ -115,7 +171,7 @@ export function Menubar({ menus }: MenubarProps) {
     }
   };
 
-  const handleKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+  const handleKeyDown = (event: MenubarKeyEvent) => {
     // A panel may claim a key for itself (the Plugins rows walk their
     // placement chips with Left/Right); a claimed key never also moves the bar.
     if (event.defaultPrevented) {
@@ -143,7 +199,12 @@ export function Menubar({ menus }: MenubarProps) {
     const insideMenu = target !== null && dropdownRef.current?.contains(target) === true;
 
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      if (!insideMenu) {
+      // Typed from outside the bar with a menu open: the pointer opened it and
+      // left focus in the terminal, so the arrows walk the open menu's rows.
+      const strayFromOutside =
+        openId !== null &&
+        (target === null || navRef.current?.contains(target) !== true);
+      if (!insideMenu && !strayFromOutside) {
         const menuId = labelIdOf(event.target);
         const spec = menus.find((menu) => menu.id === menuId);
         if (!spec || spec.kind === "item") {
@@ -152,7 +213,7 @@ export function Menubar({ menus }: MenubarProps) {
         event.preventDefault();
         event.stopPropagation();
         focusFirstRef.current = true;
-        setOpenId(spec.id);
+        openMenu(spec.id);
         return;
       }
       const rows = enabledRows(dropdownRef.current);
@@ -181,6 +242,8 @@ export function Menubar({ menus }: MenubarProps) {
       }
     }
   };
+
+  keyHandlerRef.current = handleKeyDown;
 
   return (
     <nav
@@ -216,13 +279,20 @@ export function Menubar({ menus }: MenubarProps) {
                   spec.onSelect();
                   return;
                 }
-                setOpenId(open ? null : spec.id);
+                if (open) {
+                  close(false);
+                } else {
+                  openMenu(spec.id);
+                }
               }}
               // Sliding along an open bar switches menus without a click. With
               // nothing open, crossing the bar is just crossing the bar.
+              // A label never takes focus from the pointer: the terminal
+              // under the bar keeps it, and keeps receiving what is typed.
+              onMouseDown={(event) => event.preventDefault()}
               onPointerEnter={() => {
                 if (openId !== null && spec.kind !== "item") {
-                  setOpenId(spec.id);
+                  openMenu(spec.id);
                 } else if (openId !== null && spec.kind === "item") {
                   // A plain label has nothing to show; the open menu closes
                   // rather than following the pointer onto a dead end.

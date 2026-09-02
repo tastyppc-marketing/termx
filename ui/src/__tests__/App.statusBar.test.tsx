@@ -119,6 +119,7 @@ function harness(overrides: Record<string, unknown> = {}) {
     resumedEntries: vi.fn(() => []),
     rebindResumedTab: vi.fn(),
     setResumeBootListener: vi.fn(),
+    setFocusedPane: vi.fn(),
     ...overrides,
   };
   return fixtureWorkspace({ controller, client: { close: vi.fn() } });

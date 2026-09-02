@@ -140,6 +140,7 @@ function harness(options: { outcome: ResumeOutcome }): Harness {
     getSnapshot: () => snapshot,
     subscribe: () => () => undefined,
     dispose: vi.fn(),
+    setFocusedPane: vi.fn(),
     activateTab,
     renameTab: vi.fn(),
     recolorTab: vi.fn(),

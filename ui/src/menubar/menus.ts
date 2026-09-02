@@ -53,8 +53,18 @@ export interface MenuSeparatorModel {
 export type MenuRow = MenuItemModel | MenuSeparatorModel;
 
 export interface WorkspaceMenuDeps {
-  /** A focused pane exists and is alive — splits and close need one. */
+  /**
+   * The focused pane exists AND is alive. Splitting needs that — SplitLayout
+   * refuses to split anything else — but closing does not.
+   */
   readonly hasLivePane: boolean;
+  /**
+   * There is a focused pane at all, whatever state it is in. A plugin panel
+   * and a dead terminal are both things you close, and the Ctrl+Shift+W this
+   * row prints closes them; greying the row while the key still works would
+   * make the menu lie about the keyboard it is teaching.
+   */
+  readonly canClosePane: boolean;
   /** A saved-sessions store and a pane to save are both present. */
   readonly canSaveSession: boolean;
   newTab(): void;
@@ -104,7 +114,7 @@ export function workspaceMenu(deps: WorkspaceMenuDeps): readonly MenuRow[] {
       id: "close-pane",
       label: "Close pane",
       shortcut: EXISTING_SHORTCUTS.closePane,
-      disabled: !deps.hasLivePane,
+      disabled: !deps.canClosePane,
       onSelect: () => deps.closePane(),
     },
     { kind: "separator", id: "sep-windows" },

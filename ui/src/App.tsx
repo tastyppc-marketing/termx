@@ -80,7 +80,6 @@ import { useSettings } from "./settings/useSettings";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import {
   Sidebar,
-  type SidebarActions,
   type SidebarConversations,
   type SidebarHosts,
   type SidebarPlugin,
@@ -379,6 +378,55 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   } | null>(null);
   // Focused pane per tab is ephemeral UI state (layout spec: never persisted).
   const [focusByTab, setFocusByTab] = useState<Record<string, number>>({});
+  // ...and it is App's alone, so the controller gets a PROVIDER over it. That
+  // is what makes `openPlugin("split")` land beside the pane the user is in:
+  // the controller's own `activeSessionId` is `firstSessionId(activeTab.split)`,
+  // the leftmost leaf, which is the wrong pane in every multi-pane tab.
+  //
+  // A ref because a menu is built once and clicked much later - the provider
+  // must read the CURRENT map, not the one that existed when it was handed
+  // over, and re-registering on every focus move would be a second source of
+  // truth for the same fact.
+  const focusByTabRef = useRef(focusByTab);
+  useEffect(() => {
+    focusByTabRef.current = focusByTab;
+  }, [focusByTab]);
+  // The other direction: the controller asking App to MOVE focus. "Already
+  // open somewhere - focus it" is only true if the pane itself takes focus;
+  // switching the active tab alone leaves the ring on the pane the user came
+  // from and every keystroke in that pane's terminal, which reads as the click
+  // having done nothing. The controller has no DOM, so it publishes a request
+  // and App performs it, once per `seq`.
+  const focusRequest = snapshot.focusRequest;
+  const servedFocusRef = useRef<number | null>(null);
+  useEffect(() => {
+    // Absent, not just null: a snapshot published by an older window - or by
+    // a fixture that predates the field - carries no request at all.
+    if (!focusRequest || servedFocusRef.current === focusRequest.seq) {
+      return;
+    }
+    servedFocusRef.current = focusRequest.seq;
+    const { tabId, sessionId } = focusRequest;
+    const target = snapshot.layout.tabs[tabId];
+    // A request that outlived its pane: the layout moved between the
+    // controller's mutation and this effect. Recording a session the layout
+    // has never heard of would put the ring nowhere and misanchor every later
+    // split, so an unresolvable request is simply dropped.
+    if (!target || !sessionIdsInSplit(target.split).includes(sessionId)) {
+      return;
+    }
+    setFocusByTab((prev) =>
+      prev[tabId] === sessionId ? prev : { ...prev, [tabId]: sessionId },
+    );
+    focusPaneContents(sessionId);
+  }, [focusRequest, snapshot.layout.tabs]);
+
+  useEffect(() => {
+    controller.setFocusedPane((tabId) => focusByTabRef.current[tabId] ?? null);
+    // A dead App's focus map must not outlive it on the controller: null is
+    // "no answer", which sends the split path back to the caller's own guess.
+    return () => controller.setFocusedPane(null);
+  }, [controller]);
   const [dismissing, setDismissing] = useState<ReadonlySet<number>>(new Set());
   const [restarting, setRestarting] = useState<ReadonlySet<number>>(new Set());
   const viewerRef = useRef<ViewerApi | null>(null);
@@ -528,11 +576,17 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const focusedSessionId = activeTab
     ? resolveFocusedSession(activeTab.split, focusByTab[activeTab.id])
     : null;
-  // Splits and Close pane act on the focused pane, so the menu rows that offer
-  // them are only live when that pane is.
+  // Splitting needs a LIVE pane — SplitLayout's own handler refuses anything
+  // else, and the menu must not offer what the key beside it would refuse.
   const focusedPaneLive =
     focusedSessionId !== null &&
     snapshot.paneStates[focusedSessionId]?.status === "live";
+  // Closing does not: a plugin panel and a dead terminal are both panes you
+  // close, and the Ctrl+Shift+W this row prints closes them. Only the absence
+  // of a focused pane greys the row.
+  const focusedPaneExists =
+    focusedSessionId !== null &&
+    snapshot.paneStates[focusedSessionId] !== undefined;
   const liveOutputs = useSyncExternalStore(
     outputsStore.subscribe,
     () =>
@@ -641,7 +695,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   // probes throw and openAuxWindows contains that per window.
   const auxWindowIds = (snapshot.windowIds ?? [])
     .filter((id) => id !== MAIN_WINDOW_ID)
-    .join(" ");
+    .join("\0");
   useEffect(() => {
     if (controller.windowId !== MAIN_WINDOW_ID || auxWindowIds.length === 0) {
       return;
@@ -1100,38 +1154,6 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     return listed.sort((left, right) => left.name.localeCompare(right.name));
   }, [pluginsRegistry, knownManifest, manifestRevision]);
 
-  // The sidebar's actions ARE the controller, with exactly one override: which
-  // pane a plugin split hangs off.
-  //
-  // The sidebar cannot work that out for itself. `snapshot.activeSessionId` is
-  // `firstSessionId(activeTab.split)` — the LEFTMOST leaf of the active tab,
-  // not the pane the user is in — so anchoring on it would split the first
-  // pane of every multi-pane tab. The pane that actually holds focus lives in
-  // `focusByTab`, which is App's, and is the same source SplitLayout draws its
-  // focus ring from.
-  //
-  // Spreading the controller is safe because every action on it is a bound
-  // arrow-function field; turning one into a prototype method would silently
-  // drop it here, which is why the sidebar tests pin the pass-throughs.
-  const sidebarActions = useMemo<SidebarActions>(
-    () => ({
-      ...controller,
-      openPluginSplit: (tabId, anchorSessionId, pluginId, dir) => {
-        const target = snapshot.layout.tabs[tabId];
-        void controller.openPluginSplit(
-          tabId,
-          // No such tab means the layout moved under the open menu; the
-          // sidebar's own guess is then the best information left.
-          target
-            ? resolveFocusedSession(target.split, focusByTab[tabId])
-            : anchorSessionId,
-          pluginId,
-          dir,
-        );
-      },
-    }),
-    [controller, snapshot.layout.tabs, focusByTab],
-  );
 
   // The manifest that DRESSES a bound pane. Registry presence is the gate, and
   // deliberately not the enabled flag: switching a plugin off must not strip
@@ -1396,6 +1418,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   // Nothing below reimplements one.
   const workspaceRows: readonly MenuRow[] = workspaceMenu({
     hasLivePane: focusedPaneLive,
+    canClosePane: focusedPaneExists,
     canSaveSession:
       savedStore !== null && activeTabId !== null && focusedSessionId !== null,
     newTab: () =>
@@ -1424,7 +1447,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         }),
       );
     },
-    newWindow: () => void intoNewWindow(),
+    // A genuinely NEW window, in ONE structural write. Creating a tab here and
+    // shipping it out afterwards meant diffing the layout to find it, and that
+    // diff can pick up a tab MAIN created during the await; the controller op
+    // has the whole thing under one mutation and moves nothing on failure.
+    newWindow: () => void controller.createTabInNewWindow({ profile: null }),
     // F2 on the header's own label: the editor is that component's state, and
     // F2 is the key it already listens for — the same route the keyboard takes.
     renameWindow: () => {
@@ -1443,26 +1470,6 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     },
   });
 
-  /**
-   * A genuinely NEW window: make a tab, then hand THAT tab a window of its own.
-   *
-   * The tab is identified by diffing the layout, never by reading the active
-   * id. A create that failed — or a "ask every time" new-tab policy that only
-   * raised the folder searcher — leaves the active id pointing at the tab the
-   * user is standing in, and moving that one out is the exact bug this row
-   * would otherwise be: "New window" silently meaning "take my current work
-   * somewhere else".
-   */
-  const intoNewWindow = async (): Promise<void> => {
-    const before = new Set(Object.keys(controller.getSnapshot().layout.tabs));
-    await controller.createTab({ groupId: activeGroupId, profile: null });
-    const created = Object.keys(controller.getSnapshot().layout.tabs).find(
-      (id) => !before.has(id),
-    );
-    if (created !== undefined) {
-      controller.moveItemToWindow({ kind: "tab", id: created }, "new");
-    }
-  };
 
   // Written field by field rather than through a computed key: a settings
   // patch built from a variable name is a patch TypeScript cannot check.
@@ -1570,7 +1577,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         {settings.sideRail ? (
           <Sidebar
             snapshot={snapshot}
-            actions={sidebarActions}
+            actions={controller}
             windowId={controller.windowId}
             hostConnected={connectionState.phase === "connected"}
             onOpenSettings={() => setSettingsOpen(true)}
@@ -1845,6 +1852,24 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       ) : null}
     </>
   );
+}
+
+/**
+ * Put real DOM focus inside a pane, the way clicking into it does.
+ *
+ * A click works because the browser focuses whatever the pointer landed on and
+ * `.split-pane`'s capture handler reports it back; there is no imperative
+ * "focus pane N" to call, and the section itself takes no caret. So the target
+ * is the element a click would have landed on: the plugin's frame, or the
+ * terminal's own textarea (xterm's helper, what `terminal.focus()` focuses).
+ * A pane with neither - an offline plugin card - has nothing that should hold
+ * the caret, and only the ring moves.
+ */
+function focusPaneContents(sessionId: number): void {
+  const pane = document.querySelector<HTMLElement>(
+    `.split-pane[data-session-id="${sessionId}"]`,
+  );
+  pane?.querySelector<HTMLElement>("iframe, textarea")?.focus();
 }
 
 function resolveFocusedSession(root: SplitNode, preferred: number | undefined): number {

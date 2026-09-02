@@ -327,6 +327,94 @@ describe("Menubar — opening, switching and closing", () => {
   });
 });
 
+describe("Menubar — focus", () => {
+  /**
+   * The bar sits above a terminal. Every keystroke the user types belongs to
+   * that terminal, so opening a menu with the pointer must not take focus off
+   * it, and picking a row must hand it straight back.
+   */
+  function terminal(): HTMLElement {
+    const pane = document.createElement("div");
+    pane.tabIndex = -1;
+    pane.id = "fake-xterm";
+    document.body.append(pane);
+    pane.focus();
+    return pane;
+  }
+
+  /** What a browser really sends: mousedown (which moves focus) then click. */
+  async function pointerOpen(element: HTMLElement): Promise<MouseEvent> {
+    const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    await act(async () => {
+      element.dispatchEvent(down);
+    });
+    await click(element);
+    return down;
+  }
+
+  it("refuses the mousedown that would pull focus onto a label", async () => {
+    await mount();
+    const pane = terminal();
+
+    const down = await pointerOpen(label("workspace"));
+
+    // jsdom does not implement focus-on-mousedown, so the honest assertion is
+    // on the suppression itself - that is the whole mechanism a browser uses.
+    expect(down.defaultPrevented).toBe(true);
+    expect(dropdown()).not.toBeNull();
+    expect(document.activeElement).toBe(pane);
+  });
+
+  it("puts focus back where it was when a row is picked", async () => {
+    await mount();
+    const pane = terminal();
+    await pointerOpen(label("workspace"));
+
+    await click(
+      container.querySelector<HTMLElement>("[data-row-id='new-tab']")!,
+    );
+
+    expect(picked).toHaveBeenCalledWith("new-tab");
+    // Not the label: further typing has to reach the terminal, not a button.
+    expect(document.activeElement).toBe(pane);
+  });
+
+  it("closes on Escape typed into the pane the pointer left focus in", async () => {
+    await mount();
+    const pane = terminal();
+    await pointerOpen(label("workspace"));
+
+    await key(pane, { key: "Escape" });
+
+    expect(dropdown()).toBeNull();
+    expect(document.activeElement).toBe(pane);
+  });
+
+  it("walks the rows of a menu opened by pointer, from outside the bar", async () => {
+    await mount();
+    const pane = terminal();
+    await pointerOpen(label("workspace"));
+
+    // The bar has no focus to receive arrow keys, so it listens while open.
+    await key(pane, { key: "ArrowDown" });
+
+    expect(document.activeElement?.getAttribute("data-row-id")).toBe("new-tab");
+  });
+
+  it("returns to the label when the menu was opened from the keyboard", async () => {
+    await mount();
+    terminal();
+    label("workspace").focus();
+
+    await key(label("workspace"), { key: "ArrowDown" });
+    await key(document.activeElement!, { key: "Escape" });
+
+    // Keyboard in, keyboard out: the label is where the user's focus was.
+    expect(dropdown()).toBeNull();
+    expect(document.activeElement).toBe(label("workspace"));
+  });
+});
+
 describe("Menubar — keyboard", () => {
   it("opens with ArrowDown and lands on the first enabled row", async () => {
     await mount();

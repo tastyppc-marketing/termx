@@ -131,6 +131,7 @@ function harness(initial: WorkspaceSnapshot) {
     resumedEntries: vi.fn(() => []),
     rebindResumedTab: vi.fn(),
     setResumeBootListener: vi.fn(),
+    setFocusedPane: vi.fn(),
     noteBell: vi.fn(),
     markTabSeen: vi.fn(),
   };

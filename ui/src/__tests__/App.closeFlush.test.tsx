@@ -183,6 +183,7 @@ function harness(
     resumedEntries: vi.fn(() => []),
     rebindResumedTab: vi.fn(),
     setResumeBootListener: vi.fn(),
+    setFocusedPane: vi.fn(),
   };
   return {
     workspace: fixtureWorkspace({

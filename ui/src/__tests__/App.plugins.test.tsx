@@ -228,6 +228,7 @@ interface Harness {
   openPluginTab: ReturnType<typeof vi.fn>;
   openPluginSplit: ReturnType<typeof vi.fn>;
   openPlugin: ReturnType<typeof vi.fn>;
+  setFocusedPane: ReturnType<typeof vi.fn>;
   relaunchPlugin: ReturnType<typeof vi.fn>;
   plugins: PluginsStore;
 }
@@ -247,6 +248,7 @@ function harness(
   const openPluginTab = vi.fn(async () => "tab-2");
   const openPluginSplit = vi.fn(async () => 0x8000_0000);
   const openPlugin = vi.fn(async () => undefined);
+  const setFocusedPane = vi.fn();
   const relaunchPlugin = vi.fn(async () => undefined);
   const plugins = new PluginsStore({ initial: options.registry ?? INSTALLED });
   const controller = {
@@ -264,6 +266,7 @@ function harness(
     openPluginTab,
     openPluginSplit,
     openPlugin,
+    setFocusedPane,
     relaunchPlugin,
     splitPane: vi.fn(async () => null),
     closePane: vi.fn(async () => undefined),
@@ -296,6 +299,7 @@ function harness(
     openPluginTab,
     openPluginSplit,
     openPlugin,
+    setFocusedPane,
     relaunchPlugin,
     plugins,
   };
@@ -443,45 +447,64 @@ describe("App plugin wiring — sidebar", () => {
 
   // The split anchor CANNOT come from the snapshot: the controller publishes
   // `activeSessionId` as `firstSessionId(activeTab.split)`, the leftmost leaf,
-  // while the pane the user is actually in lives in App's `focusByTab` — the
-  // same source SplitLayout draws its focus ring from. Reading the snapshot
-  // instead would split the leftmost pane of every multi-pane tab.
-  it("anchors a plugin split on the focused pane, not the tab's first", async () => {
+  // while the pane the user is actually in lives in App's `focusByTab` - the
+  // same source SplitLayout draws its focus ring from. So App hands the
+  // controller a PROVIDER over that map, and every caller of `openPlugin`
+  // (menubar, rail, Settings) gets the right anchor without knowing about it.
+  //
+  // A provider rather than a value because a menu is built once and clicked
+  // much later; these tests call the provider the controller was given, which
+  // is the only thing the controller can use.
+  function providerOf(fixture: Harness): (tabId: string) => number | null {
+    const calls = fixture.setFocusedPane.mock.calls.filter(
+      (call) => typeof call[0] === "function",
+    );
+    const last = calls[calls.length - 1];
+    if (last === undefined) throw new Error("App never registered a provider");
+    return last[0] as (tabId: string) => number | null;
+  }
+
+  it("gives the controller a provider that answers with the focused pane", async () => {
     const fixture = harness({ snapshot: twoPaneSnapshot() });
     await renderApp(fixture);
 
     // The user clicks into the second pane; SplitLayout reports it.
     await act(async () => splitProps().onFocusPane(5));
-    // The sidebar still passes the anchor IT can see (the snapshot's leftmost).
-    await act(async () =>
-      sidebarProps().actions.openPluginSplit?.("tab-1", 1, "showroom", "row")
-    );
 
-    expect(fixture.openPluginSplit).toHaveBeenCalledWith("tab-1", 5, "showroom", "row");
+    expect(providerOf(fixture)("tab-1")).toBe(5);
   });
 
-  it("falls back to the tab's first pane when no focus has been recorded", async () => {
+  it("keeps the provider live as focus moves", async () => {
+    const fixture = harness({ snapshot: twoPaneSnapshot() });
+    await renderApp(fixture);
+    const provider = providerOf(fixture);
+
+    await act(async () => splitProps().onFocusPane(5));
+    expect(provider("tab-1")).toBe(5);
+    // The SAME provider - captured before the move - must see the new focus,
+    // or a menu built at boot would anchor on a stale pane forever.
+    await act(async () => splitProps().onFocusPane(1));
+    expect(provider("tab-1")).toBe(1);
+  });
+
+  it("answers null for a tab nobody has focused a pane in", async () => {
     const fixture = harness({ snapshot: twoPaneSnapshot() });
     await renderApp(fixture);
 
-    await act(async () =>
-      sidebarProps().actions.openPluginSplit?.("tab-1", 1, "showroom", "row")
-    );
+    await act(async () => splitProps().onFocusPane(5));
 
-    expect(fixture.openPluginSplit).toHaveBeenCalledWith("tab-1", 1, "showroom", "row");
+    // null means "no record", which is the controller's cue to fall back to
+    // the caller's guess. undefined would read as a recorded pane of nothing.
+    expect(providerOf(fixture)("tab-unknown")).toBeNull();
   });
 
-  it("passes the sidebar's own anchor through when the tab is already gone", async () => {
+  it("takes the provider back when the workspace unmounts", async () => {
     const fixture = harness({ snapshot: twoPaneSnapshot() });
     await renderApp(fixture);
+    await unmountApp();
 
-    // The layout moved under an open menu: App has no split to resolve against,
-    // so the sidebar's guess is the best information left.
-    await act(async () =>
-      sidebarProps().actions.openPluginSplit?.("tab-gone", 7, "showroom", "row")
-    );
-
-    expect(fixture.openPluginSplit).toHaveBeenCalledWith("tab-gone", 7, "showroom", "row");
+    // A dead App's focus map must not outlive it on the controller.
+    expect(fixture.setFocusedPane).toHaveBeenLastCalledWith(null);
   });
 
   it("keeps every other sidebar action pointing at the controller", async () => {

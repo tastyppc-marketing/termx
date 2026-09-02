@@ -178,6 +178,7 @@ function harness(options: HarnessOptions = {}) {
     resumedEntries: vi.fn(() => []),
     rebindResumedTab: vi.fn(),
     setResumeBootListener: vi.fn(),
+    setFocusedPane: vi.fn(),
     // SSH (ssh-sessions spec): these panes are all local, so no host info.
     sshPaneInfo: vi.fn(() => null),
     capturedConversation: vi.fn(() => null),

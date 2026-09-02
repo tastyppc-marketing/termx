@@ -169,6 +169,7 @@ function controllerHarness(initial = snapshot()): ControllerHarness {
     resumedEntries: vi.fn(() => []),
     rebindResumedTab: vi.fn(),
     setResumeBootListener: vi.fn(),
+    setFocusedPane: vi.fn(),
   };
   const client = {
     close: vi.fn(() => order.push("client.close")),
