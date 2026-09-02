@@ -1354,6 +1354,10 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           // The rail's hover preview names panes from the same source the pane
           // headers do, so the two can never disagree.
           paneTitles={controller.paneTitles}
+          // ...and where each of them is standing. A pane name is a profile
+          // and a folder tail, which two panes in one repo share; the path is
+          // what tells them apart.
+          paneCwds={controller.paneCwds}
           {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
           {...(sidebarSaved ? { saved: sidebarSaved } : {})}
           {...(sidebarHosts ? { hosts: sidebarHosts } : {})}

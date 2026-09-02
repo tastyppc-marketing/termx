@@ -37,6 +37,15 @@ export interface PaneFlyoutPane {
   sessionId: number;
   /** The name this pane wears in its own pane header. */
   name: string;
+  /**
+   * The folder this pane's shell is standing in. A name is a profile and a
+   * folder TAIL, so two panes deep in one repo read almost identically — the
+   * path is what separates them.
+   *
+   * Null or absent draws no second line: a dash in a path's place would read
+   * as a path, and "we do not know" is better said with silence.
+   */
+  cwd?: string | null;
 }
 
 export interface PaneFlyoutProps {
@@ -97,7 +106,14 @@ export function PaneFlyout({ tabId, title, panes, anchor, onDismiss }: PaneFlyou
             className="pane-flyout__pane"
             data-session-id={pane.sessionId}
           >
-            {pane.name}
+            <span className="pane-flyout__name">{pane.name}</span>
+            {pane.cwd ? (
+              // The line ellipsizes from the left, so the whole path stays
+              // reachable in the tooltip.
+              <span className="pane-flyout__cwd" title={pane.cwd}>
+                {pane.cwd}
+              </span>
+            ) : null}
           </li>
         ))}
       </ul>

@@ -453,6 +453,28 @@ describe("WorkspaceController projection", () => {
     expect(controller.paneTitles("no-such-tab")).toEqual({});
   });
 
+  it("reports every pane's live cwd, the same one the status bar shows", () => {
+    const { controller } = harness({
+      sessions: [session(1), session(2, { cwd: null }), session(3)],
+    });
+
+    // A lone pane: the folder the host reported for it.
+    expect(controller.paneCwds("tab-1")).toEqual({ 1: "C:\\work\\project-1" });
+
+    // A split keys EVERY pane, and a pane the host has no directory for is an
+    // explicit null — the reader draws nothing rather than a placeholder.
+    expect(controller.paneCwds("tab-2")).toEqual({
+      2: null,
+      3: "C:\\work\\project-3",
+    });
+
+    // OSC 9;9 moves it, so the preview follows the shell around.
+    controller.reportSessionCwd(2, "C:\\work\\moved", true);
+    expect(controller.paneCwds("tab-2")[2]).toBe("C:\\work\\moved");
+
+    expect(controller.paneCwds("no-such-tab")).toEqual({});
+  });
+
   it("forwards noteBell per pane and markTabSeen to every pane in the tab", () => {
     const { controller, attachments } = harness();
 

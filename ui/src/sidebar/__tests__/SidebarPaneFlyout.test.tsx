@@ -201,6 +201,18 @@ function paneNames(): string[] {
   );
 }
 
+/** The name line of each listed pane, on its own. */
+function paneNameLines(): string[] {
+  return [...container.querySelectorAll(".pane-flyout__name")].map(
+    (row) => row.textContent ?? "",
+  );
+}
+
+/** The cwd line of each listed pane — a pane with no known cwd has none. */
+function paneCwdRows(): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>(".pane-flyout__cwd")];
+}
+
 async function fire(element: Element, type: string, init: PointerEventInit = {}) {
   await act(async () => {
     element.dispatchEvent(
@@ -310,6 +322,79 @@ describe("rail hover flyout — what it lists", () => {
 
     expect(container.querySelectorAll("[data-testid='pane-flyout']")).toHaveLength(1);
     expect(paneNames()).toEqual(["Notes"]);
+  });
+});
+
+describe("rail hover flyout — where each pane is standing", () => {
+  /**
+   * Michael, on the first cut of this panel: "hovering over the rail doesn't
+   * actually bring me the information that I was kind of hoping for. I was
+   * hoping that I could also see the path of where that terminal is." A pane's
+   * NAME is a profile and a folder tail; two panes deep in the same repo wear
+   * near-identical names, and the whole point of the preview is telling them
+   * apart without clicking.
+   */
+  const PANE_CWDS: Record<string, Record<number, string | null>> = {
+    "tab-lone": { 7: "C:\\Dev\\TermX" },
+    "tab-split": {
+      1: "C:\\Dev\\TermX\\ui",
+      2: null,
+      3: "C:\\Dev\\TermX\\docs",
+    },
+  };
+
+  const withCwds = { paneCwds: (tabId: string) => PANE_CWDS[tabId] ?? {} };
+
+  it("prints each pane's working directory under its name", async () => {
+    await renderSidebar(withCwds);
+
+    await dwellOn("tab-split");
+
+    // The name still reads on a line of its own...
+    expect(paneNameLines()).toEqual([
+      "powershell · ui",
+      "cmd · src-tauri",
+      "powershell · docs",
+    ]);
+    // ...with the folder under the two panes that report one.
+    expect(paneCwdRows().map((row) => row.textContent)).toEqual([
+      "C:\\Dev\\TermX\\ui",
+      "C:\\Dev\\TermX\\docs",
+    ]);
+  });
+
+  it("carries the whole path in the tooltip, since the line ellipsizes", async () => {
+    await renderSidebar(withCwds);
+
+    await dwellOn("tab-split");
+
+    expect(paneCwdRows()[0]?.title).toBe("C:\\Dev\\TermX\\ui");
+  });
+
+  it("draws no second line for a pane whose cwd is unknown", async () => {
+    await renderSidebar(withCwds);
+
+    await dwellOn("tab-split");
+
+    // Its two siblings DO get a path, so the missing line is this pane's
+    // alone and not the whole feature failing to arrive.
+    expect(paneCwdRows()).toHaveLength(2);
+    const unknown = container.querySelector("[data-session-id='2']")!;
+    expect(unknown.querySelector(".pane-flyout__cwd")).toBeNull();
+    expect(unknown.textContent).toBe("cmd · src-tauri");
+  });
+
+  it("leaves the panel exactly as it was when no cwd source is wired", async () => {
+    await renderSidebar();
+
+    await dwellOn("tab-split");
+
+    expect(paneCwdRows()).toHaveLength(0);
+    expect(paneNames()).toEqual([
+      "powershell · ui",
+      "cmd · src-tauri",
+      "powershell · docs",
+    ]);
   });
 });
 

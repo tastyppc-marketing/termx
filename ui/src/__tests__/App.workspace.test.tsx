@@ -16,14 +16,17 @@ vi.mock("../sidebar/Sidebar", () => ({
     snapshot,
     onOpenSettings,
     paneTitles,
+    paneCwds,
   }: {
     snapshot: WorkspaceSnapshot;
     onOpenSettings?: () => void;
     paneTitles?: (tabId: string) => Readonly<Record<number, string>>;
+    paneCwds?: (tabId: string) => Readonly<Record<number, string | null>>;
   }) => (
     <div
       data-active-tab={snapshot.activeTabId ?? ""}
       data-pane-titles={paneTitles ? "wired" : ""}
+      data-pane-cwds={paneCwds ? "wired" : ""}
       data-testid="workspace-sidebar"
     >
       <button
@@ -160,6 +163,7 @@ function controllerHarness(initial = snapshot()): ControllerHarness {
     resumeSession: vi.fn(async () => undefined),
     sessionDims: vi.fn(() => ({})),
     paneTitles: vi.fn(() => ({})),
+    paneCwds: vi.fn(() => ({})),
     sessionCwd: vi.fn(() => null),
     resumedSessionKeyForTab: vi.fn(() => null),
     resumedEntries: vi.fn(() => []),
@@ -253,6 +257,27 @@ describe("App workspace lifecycle", () => {
         container
           .querySelector("[data-testid='workspace-sidebar']")
           ?.getAttribute("data-pane-titles"),
+      ).toBe("wired");
+
+      await act(async () => root.unmount());
+    },
+  );
+
+  it(
+    "hands the sidebar the controller's pane cwds too — an unwired accessor " +
+      "is a preview that quietly stops answering where a terminal is standing",
+    async () => {
+      const harness = controllerHarness();
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+
+      await act(async () => root.render(<App bootstrap={async () => harness.workspace} />));
+
+      expect(
+        container
+          .querySelector("[data-testid='workspace-sidebar']")
+          ?.getAttribute("data-pane-cwds"),
       ).toBe("wired");
 
       await act(async () => root.unmount());

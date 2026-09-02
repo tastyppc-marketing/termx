@@ -1766,6 +1766,30 @@ export class WorkspaceController {
     return titles;
   };
 
+  /// Where each pane of a tab is standing, keyed by session id.
+  ///
+  /// The SAME per-session cwd the status bar shows for the focused pane, so
+  /// the rail's hover preview can never disagree with the bar about a folder.
+  /// A pane's NAME is only a profile and a folder TAIL, which two panes deep
+  /// in one repo share — the full path is what tells them apart (Michael, on
+  /// the first cut of the preview: "I was hoping that I could also see the
+  /// path of where that terminal is").
+  ///
+  /// Every pane in the tab is keyed, a pane the host has reported no directory
+  /// for included: an explicit null says "not known", which the preview draws
+  /// as nothing rather than as a placeholder that would read like a path.
+  paneCwds = (tabId: string): Readonly<Record<number, string | null>> => {
+    const tab = this.store.getState().tabs[tabId];
+    if (!tab) {
+      return {};
+    }
+    const cwds: Record<number, string | null> = {};
+    for (const sessionId of sessionIdsInTab(tab)) {
+      cwds[sessionId] = this.sessions.get(sessionId)?.cwd ?? null;
+    }
+    return cwds;
+  };
+
   /// The profile a session was created with (status bar chrome).
   sessionProfile = (sessionId: number): string | null =>
     this.sessions.get(sessionId)?.profile ?? null;

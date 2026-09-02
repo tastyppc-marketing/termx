@@ -204,6 +204,12 @@ export interface SidebarProps {
    */
   paneTitles?: (tabId: string) => Readonly<Record<number, string>>;
   /**
+   * Where each of a tab's panes is standing, keyed by session id — the
+   * controller's `paneCwds`, the same per-session cwd the status bar reads.
+   * Absent leaves the preview exactly as it was: names only, no second line.
+   */
+  paneCwds?: (tabId: string) => Readonly<Record<number, string | null>>;
+  /**
    * Saved sessions section (saved-sessions spec). Omitted — or disabled in
    * settings — leaves the sidebar exactly as it was.
    */
@@ -338,6 +344,7 @@ export function Sidebar({
   maxGroupDepth = DEFAULT_SETTINGS.maxGroupDepth,
   conversations,
   paneTitles,
+  paneCwds,
   saved,
   hosts,
   plugins,
@@ -611,9 +618,11 @@ export function Sidebar({
   /// tab's rail name — which is exactly what a lone pane is called anyway.
   const paneRowsFor = (tab: SidebarTabModel): PaneFlyoutPane[] => {
     const titles = paneTitles?.(tab.id) ?? {};
+    const cwds = paneCwds?.(tab.id) ?? {};
     return tab.sessionIds.map((sessionId) => ({
       sessionId,
       name: titles[sessionId] ?? tab.title,
+      cwd: cwds[sessionId] ?? null,
     }));
   };
 
