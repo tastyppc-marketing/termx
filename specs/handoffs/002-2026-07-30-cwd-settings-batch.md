@@ -1649,3 +1649,19 @@ Routing: Wave 1 = T1 Codex, T2 Codex (Rust), T4 Opus → reviews: T1→Grok, T2�
 **DEFERRED / TELL MICHAEL:** cross-window settings sync (no setting propagates to already-open windows — pre-existing, needs a settings-over-bus batch, twin of plugin Phase C). Recall frame-ancestors (needs exact Windows Tauri webview origin confirmed live). reveal.rs non-windows arm never compiled here (Windows-first; rustc metadata-checked only).
 
 **IN FLIGHT:** impl-recall on B5 starter template (C:\Users\mjfos\code\termx-plugin-template). Client Cockpit + Design Guard HELD until Michael sees Recall.
+
+## Delta 2026-09-01 (later 38) — Michael tested the e1a202c build; Batch 3 design in flight (menubar + plugin placement + autostart)
+
+**Michael stopped ALL background agents** (20, incl. impl-ui2/impl-recall) after the staged build. Template repo survived with its commit: C:\Users\mjfos\code\termx-plugin-template @ c8db525 (clean) — B5 is "landed, unreviewed".
+
+**His feedback on the build:** (1) 3s flyout too long → "industry standard + 200-300ms" → **800 ms committed at d1fd9ae** (tooltip 500 + 300; = Chrome tab hover-card). NOT staged yet — bundle with Batch 3. (2) Flyout should ALSO show each pane's cwd ("the path of where that terminal is") → **impl-ui3 spawned** (brief scratchpad\batch2\brief-flyout-cwd.md): `paneCwds` accessor mirroring `paneTitles`, mono second line, left-ellipsized. (3) Wants an option for Showroom to **start with TermX** (per-plugin autostart toggle). (4) Wants plugins reachable outside Settings: **a top navigation menubar**.
+
+**Batch 3 decisions so far (AskUserQuestion answers):** wants to SEE both menubar variants ("full menubar seems better"); plugin open target must be a **per-plugin policy** ("some dedicated window, one split into the current tab, sometimes both") with **intelligent resizing** ("not cramming; layout restructures at different sizes"); stage 800ms **bundled** with the menu batch.
+
+**Mockup published:** https://claude.ai/code/artifact/fdcfd547-6474-461d-89a3-68754196c97a (file scratchpad\batch2\menubar-options.html) — Option A (Plugins+Settings) vs Option B (Workspace·View·Plugins·Settings), launcher rows with status dot + placement chips (Tab/Split/Win, default filled); proposed manifest fields `surfaces:{default,allowed}` + `minSize`; size rule (split ≥ minSize else split-down else tab; `data-compact` on shrink); Start-with-TermX per-plugin toggle; dedicated windows via existing aux tear-out. **AWAITING Michael's pick + model sign-off → then spec (docs\superpowers\specs) → plan → build.**
+
+**State:** TermX HEAD d1fd9ae (tsc 0, vitest 2089, cargo 221); staged build still e1a202c (.prev27 = aa713d0). Recall registered + enabled. Deferred list unchanged (cross-window settings sync; Recall frame-ancestors; live Showroom Deliverables check).
+
+## Delta 2026-09-02 (later 39) — Batch 3 APPROVED: full menubar (Option B) + per-plugin placement + autostart; spec+plan written, two lanes spawned
+
+Michael: "I like the full menubar the most". Spec: `docs\superpowers\specs\2026-09-02-menubar-and-plugin-placement-design.md`. Plan: `docs\superpowers\plans\2026-09-02-menubar-and-plugin-placement.md` (tasks P1-P3 / M1-M2 / R). Pinned interface: `controller.openPlugin(pluginId, surface?: "tab"|"split"|"window")`; manifest `surfaces{default,allowed}` + `minSize`; registry `autostart`. Lanes: **impl-placement** (P: manifest/registry/PluginPane/PluginsPanel/controller/bootstrap + Sidebar plugin-submenu call sites) and **impl-menubar** (M: NEW ui/src/menubar/*, App.tsx, settings.ts/sections.ts, styles.css header). Menu prints ONLY existing shortcuts (Ctrl+Shift+D/E/W/O/R, F2). Also landed: flyout cwd line cfc0522 (vitest 2095). build-stage slot rotated to `.prev28`. Stage after Task R (Grok+Codex whole-diff from cfc0522).
