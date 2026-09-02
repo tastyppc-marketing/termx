@@ -77,6 +77,8 @@ function harness(options: {
   settings?: Partial<TermxSettings>;
   persistence?: WorkspacePersistence;
   createSession?: () => Promise<SessionInfo>;
+  /** The native folder dialog's answer; null is a cancel. */
+  pickFolder?: () => Promise<string | null>;
 } = {}) {
   const createSession = vi.fn(options.createSession ?? (async () => session(50)));
   const client: WorkspaceHostClient = {
@@ -126,6 +128,7 @@ function harness(options: {
     settings: { getSnapshot: () => ({ ...DEFAULT_SETTINGS, ...options.settings }) },
     uiState: new UiStateStore(),
     pluginPanes: new PaneBindingsStore({ initial: {}, save: async () => undefined }),
+    ...(options.pickFolder ? { pickFolder: options.pickFolder } : {}),
     ...(options.windowId ? { windowId: options.windowId } : {}),
   });
   return { controller, store, persistenceCalls, createSession };
@@ -222,5 +225,62 @@ describe("createTabInNewWindow", () => {
     expect(h.controller.getSnapshot().notice)
       .toBe("The terminal session could not be created.");
     expect(Object.keys(h.controller.getSnapshot().layout.auxWindows)).toEqual(["aux-1"]);
+  });
+});
+
+/**
+ * The ask policies and "New window" (review P-RV1).
+ *
+ * `ask-native` is not the searcher: there is no deferred answer and no handler
+ * to hand the request to. The dialog is awaited right here, and by the time it
+ * returns the folder the session is about to be created in this very call - so
+ * the new-window bit is still in hand and there is nothing to lose it to. The
+ * "empty window while the user browses" objection belongs to the SEARCHER,
+ * whose answer comes back through a different entry point entirely.
+ *
+ * Getting this wrong is silent: the tab appears, just on the wrong rail.
+ */
+describe("createTabInNewWindow under the ask policies", () => {
+  it("opens the folder the native dialog returned in a NEW window", async () => {
+    const h = harness({
+      settings: { newTabPolicy: "ask-native" },
+      pickFolder: async () => "C:\\picked",
+    });
+
+    await h.controller.createTabInNewWindow({ profile: null });
+
+    const state = h.controller.getSnapshot().layout;
+    expect(Object.keys(state.auxWindows).sort()).toEqual(["aux-1", "aux-2"]);
+    expect(state.auxWindows["aux-2"]!.rootItems).toEqual([{ kind: "tab", id: "new-tab" }]);
+    // Still ONE transaction: the dialog changes when the tab is made, never
+    // how many layout writes making it takes.
+    expect(h.persistenceCalls.filter((call) => call.kind === "structural")).toHaveLength(1);
+  });
+
+  it("opens nothing at all when the dialog is cancelled", async () => {
+    const h = harness({
+      settings: { newTabPolicy: "ask-native" },
+      pickFolder: async () => null,
+    });
+
+    await h.controller.createTabInNewWindow({ profile: null });
+
+    expect(Object.keys(h.controller.getSnapshot().layout.auxWindows)).toEqual(["aux-1"]);
+    expect(h.controller.getSnapshot().notice).toBeNull();
+  });
+
+  it("leaves an ordinary new tab on this rail, dialog or no dialog", async () => {
+    // The flag must not leak into `createTab`: the same dialog, the same pick,
+    // and the tab belongs where it was asked for.
+    const h = harness({
+      settings: { newTabPolicy: "ask-native" },
+      pickFolder: async () => "C:\\picked",
+    });
+
+    await h.controller.createTab({ groupId: null, profile: null });
+
+    expect(Object.keys(h.controller.getSnapshot().layout.auxWindows)).toEqual(["aux-1"]);
+    expect(h.controller.getSnapshot().layout.rootItems)
+      .toContainEqual({ kind: "tab", id: "new-tab" });
   });
 });

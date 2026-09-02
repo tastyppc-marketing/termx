@@ -413,6 +413,94 @@ describe("bootstrapWorkspace plugin panes", () => {
     expect(fake.setLayout).not.toHaveBeenCalled();
   });
 
+  /**
+   * The single writer arbitrates the singleton rule (review P-RV2).
+   *
+   * An aux window cannot see that main is already showing - or mid-open on -
+   * the same singleton: its replica has no row until main has bound one AND
+   * the broadcast has landed. Both windows then think nothing is open and both
+   * open, and one process ends up with two panels fighting over its page.
+   * Only main sees both, so only main can say no.
+   */
+  function pluginSeed(): Record<string, string> {
+    return {
+      "plugin_panes_v1.json": JSON.stringify({
+        version: 1,
+        panes: { "2147483648": { pluginId: "showroom" } },
+      }),
+      "plugins_v1.json": JSON.stringify({
+        plugins: { showroom: { path: "C:\code\showroom", enabled: true, grants: [] } },
+      }),
+    };
+  }
+
+  it("refuses a forwarded bind that would give a singleton a second panel", async () => {
+    const bus = loopbackBus();
+    const refusals: number[][] = [];
+    bus.onPluginPanesMutation((mutation) => {
+      if (mutation.op === "rejected") {
+        refusals.push(mutation.sessionIds);
+      }
+    });
+    const fake = fakeClient({ layout: panelLayout() });
+    const { appFiles } = files(pluginSeed());
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      windowBus: bus,
+    });
+
+    await bus.forwardPluginPanes({
+      kind: "pluginPanes",
+      op: "bind",
+      sessionId: 2147483649,
+      pluginId: "showroom",
+    });
+
+    // Not written, and the asking window is TOLD rather than left to sit out
+    // its adopt timeout on a panel that is never coming.
+    expect(workspace.pluginPanes.getSnapshot()["2147483649"]).toBeUndefined();
+    expect(refusals).toEqual([[2147483649]]);
+    workspace.controller.dispose();
+  });
+
+  it("takes a forwarded bind when the singleton is not open anywhere", async () => {
+    // The guard is exclusivity, not a lock: the ordinary aux open still works,
+    // which is the whole reason the forwarding path exists.
+    const bus = loopbackBus();
+    const refusals: number[][] = [];
+    bus.onPluginPanesMutation((mutation) => {
+      if (mutation.op === "rejected") {
+        refusals.push(mutation.sessionIds);
+      }
+    });
+    const fake = fakeClient({});
+    const { appFiles } = files({
+      "plugins_v1.json": JSON.stringify({
+        plugins: { showroom: { path: "C:\code\showroom", enabled: true, grants: [] } },
+      }),
+    });
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: async () => fake.client,
+      appFiles,
+      windowBus: bus,
+    });
+
+    await bus.forwardPluginPanes({
+      kind: "pluginPanes",
+      op: "bind",
+      sessionId: 2147483649,
+      pluginId: "showroom",
+    });
+
+    expect(workspace.pluginPanes.getSnapshot()["2147483649"])
+      .toEqual({ pluginId: "showroom" });
+    expect(refusals).toEqual([]);
+    workspace.controller.dispose();
+  });
+
   it("boots an unbound reserved pane as a dismissible dead pane", async () => {
     // The downgrade path: an old build wrote this layout, or the bindings file
     // was lost. Degraded and visible, never a ghost.

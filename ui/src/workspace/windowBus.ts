@@ -34,6 +34,13 @@ export type LayoutMutation = { kind: "setLayout"; layout: JsonValue };
  * aux window's Relaunch has nothing to press without this. It carries no
  * reply: the asking window goes on observing, and sees the plugin come up the
  * same way it would if main had started it for any other reason.
+ *
+ * `rejected` is the one message that runs main -> aux on this channel, and the
+ * only reply any of them has. Main refuses a bind it cannot honour - a second
+ * panel for a singleton already open, or already opening in another window -
+ * and the asking window has to be TOLD, or it sits out the five-second adopt
+ * timeout showing a panel that is never coming. Main ignores its own copy;
+ * every other window acts only on the ids it was waiting for.
  */
 export type PluginPanesMutation =
   | {
@@ -45,7 +52,8 @@ export type PluginPanesMutation =
     }
   | { kind: "pluginPanes"; op: "unbind"; sessionIds: number[] }
   | { kind: "pluginPanes"; op: "sync" }
-  | { kind: "pluginPanes"; op: "ensure"; pluginId: string };
+  | { kind: "pluginPanes"; op: "ensure"; pluginId: string }
+  | { kind: "pluginPanes"; op: "rejected"; sessionIds: number[] };
 
 export interface WindowBus {
   /** Aux → main: apply this mutation to the shared layout. The promise
@@ -142,13 +150,13 @@ function parsePluginPanesMutation(payload: unknown): PluginPanesMutation | null 
       ...(typeof path === "string" && path.length > 0 ? { path } : {}),
     };
   }
-  if (record.op === "unbind") {
+  if (record.op === "unbind" || record.op === "rejected") {
     if (!Array.isArray(record.sessionIds)) {
       return null;
     }
     return {
       kind: "pluginPanes",
-      op: "unbind",
+      op: record.op,
       sessionIds: record.sessionIds.filter(
         (id): id is number => typeof id === "number" && Number.isInteger(id),
       ),

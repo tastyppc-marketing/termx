@@ -639,10 +639,30 @@ export async function bootstrapWorkspace(
       if (bootWindowId === MAIN_WINDOW_ID) {
         releaseOnDispose.push(bus.onPluginPanesMutation((mutation) => {
           if (mutation.op === "bind") {
+            // The single writer arbitrates (menubar spec, singleton rule). An
+            // aux window cannot see main is mid-open, so it asks and main
+            // answers - and answers OUT LOUD, because the asking window would
+            // otherwise wait out its adopt timeout showing a panel that is
+            // never coming. Before the controller exists there is nothing to
+            // arbitrate with and nothing yet open, so the bind is taken.
+            if (
+              controller !== null
+              && !controller.acceptsPluginBind(mutation.sessionId, mutation.pluginId)
+            ) {
+              void bus.forwardPluginPanes({
+                kind: "pluginPanes",
+                op: "rejected",
+                sessionIds: [mutation.sessionId],
+              });
+              return;
+            }
             pluginPanes.bind(mutation.sessionId, {
               pluginId: mutation.pluginId,
               ...(mutation.path !== undefined ? { path: mutation.path } : {}),
             });
+          } else if (mutation.op === "rejected") {
+            // Main's own refusal, echoed back by a bus that reaches every
+            // window including this one. Nothing to do with it here.
           } else if (mutation.op === "unbind") {
             pluginPanes.unbind(mutation.sessionIds);
           } else if (mutation.op === "ensure") {
@@ -673,6 +693,14 @@ export async function bootstrapWorkspace(
         // file read and adopt only what survives.
         releaseOnDispose.push(
           bus.onPluginPanes((state) => pluginPanes.adopt(parsePluginPanesValue(state))),
+          // Main refusing a bind we forwarded (singleton rule). The open
+          // waiting on that row is settled at once rather than sitting out its
+          // five-second adopt timeout on a panel that is never coming.
+          bus.onPluginPanesMutation((mutation) => {
+            if (mutation.op === "rejected") {
+              controller?.rejectPluginBindings(mutation.sessionIds);
+            }
+          }),
         );
         // Only once the subscription is REALLY live (the transport's listen is
         // async) do we ask main for the truth — otherwise the answer could

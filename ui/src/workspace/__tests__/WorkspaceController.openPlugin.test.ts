@@ -1013,3 +1013,156 @@ describe("openPlugin chip picks its own instance", () => {
       .toEqual({ tabId: tabPane[0], sessionId: tabPane[1], seq: 1 });
   });
 });
+
+/**
+ * The singleton rule survives the gap ACROSS windows too (review P-RV2).
+ *
+ * The per-controller in-flight set closes a double click in one window and
+ * nothing more. An aux window's replica has no row for main's open until main
+ * has bound it AND the broadcast has landed, so two windows launching the same
+ * singleton inside that window both see "not open" and both open.
+ *
+ * Only the single writer can arbitrate, because only the single writer sees
+ * both. So main answers a forwarded bind it cannot honour with a REFUSAL, and
+ * the asking window stops - explicitly, rather than by waiting out the adopt
+ * timeout with a spinner on screen.
+ */
+describe("main arbitrates singleton binds", () => {
+  it("refuses a second binding for a singleton that already has one", () => {
+    const h = harness({ pluginBindings: { "2147483648": { pluginId: "showroom" } } });
+
+    expect(h.controller.acceptsPluginBind(2147483649, "showroom")).toBe(false);
+  });
+
+  it("accepts the binding it already holds, so a re-sync is not a refusal", () => {
+    const h = harness({ pluginBindings: { "2147483648": { pluginId: "showroom" } } });
+
+    expect(h.controller.acceptsPluginBind(2147483648, "showroom")).toBe(true);
+  });
+
+  it("accepts a second binding for a plugin that is not a singleton", () => {
+    // Recall may have as many panels as the user asks for, in as many windows.
+    const h = harness({ pluginBindings: { "2147483648": { pluginId: "recall" } } });
+
+    expect(h.controller.acceptsPluginBind(2147483649, "recall")).toBe(true);
+  });
+
+  it("refuses while its OWN open of the singleton is still in flight", async () => {
+    // The narrow case the review found: main has committed nothing yet, so the
+    // bindings map is empty and only the in-flight set knows.
+    const h = harness();
+    let seen: boolean | null = null;
+    const opening = h.controller.openPlugin("showroom");
+    seen = h.controller.acceptsPluginBind(2147483649, "showroom");
+    await opening;
+    await tick();
+
+    expect(seen).toBe(false);
+  });
+});
+
+describe("an aux window told no", () => {
+  /// An aux replica whose forwarded binds are answered by a `main` the test
+  /// drives — accepting by adopting the row, refusing by rejecting it.
+  function auxHarness(options: { initial?: Layout; bindings?: PluginPanesV1 } = {}) {
+    const setLayout = vi.fn(async () => undefined);
+    const forwarded: string[] = [];
+    let pending: number | null = null;
+    const replica = new PaneBindingsStore({
+      initial: options.bindings ?? {},
+      save: null,
+      onForward: (request) => {
+        forwarded.push(request.op);
+        if (request.op === "bind") {
+          pending = request.sessionId;
+        }
+      },
+    });
+    const persistence = new LayoutPersistence({ setLayout });
+    const h = harness({
+      initial: options.initial ?? auxLayout(),
+      windowId: "aux-1",
+      pluginPanesStore: replica,
+      persistence,
+      sessions: [session(1), session(9)],
+    });
+    return {
+      ...h,
+      replica,
+      persistence,
+      setLayout,
+      forwarded,
+      refuse: () => { h.controller.rejectPluginBindings([pending!]); },
+    };
+  }
+
+  it("writes no layout and says nothing when main refuses the binding", async () => {
+    // Not a failure the user did anything about: the panel they asked for is
+    // already on its way up in another window. A notice here would be an
+    // error message for a click that worked.
+    const a = auxHarness();
+
+    const opening = a.controller.openPlugin("showroom");
+    await tick();
+    a.refuse();
+    await opening;
+    await a.persistence.flush();
+
+    expect(a.setLayout).not.toHaveBeenCalled();
+    expect(a.controller.getSnapshot().notice).toBeNull();
+    expect(a.replica.getSnapshot()).toEqual({});
+  });
+
+  it("focuses the panel instead, once the layout catches up", async () => {
+    // Main's own open landed while ours was refused. The click meant "show me
+    // Showroom", and now there is a Showroom to show.
+    const withPanel: Layout = {
+      ...auxLayout(),
+      rootItems: [{ kind: "tab", id: "tab-1" }, { kind: "tab", id: "panel" }],
+      tabs: {
+        ...auxLayout().tabs,
+        panel: {
+          id: "panel",
+          title: "Showroom",
+          color: "magenta",
+          fill: "off",
+          split: { kind: "pane", sessionId: 2147483648 },
+        },
+      },
+    };
+    // The tab is there but its binding is NOT: a reserved pane with no row is
+    // not a panel yet, so this window really does think nothing is open and
+    // really does try to open one.
+    const a = auxHarness({ initial: withPanel });
+
+    const opening = a.controller.openPlugin("showroom", "split");
+    await tick();
+    expect(a.forwarded).toEqual(["bind"]);
+    // Main bound its own pane and broadcast the row, and refused ours.
+    a.replica.adopt({ "2147483648": { pluginId: "showroom" } });
+    a.refuse();
+    await opening;
+
+    // The row we asked for is withdrawn, not left as an orphan, and no layout
+    // was written for a pane that never existed.
+    expect(a.forwarded).toEqual(["bind", "unbind"]);
+    expect(a.setLayout).not.toHaveBeenCalled();
+    expect(a.controller.getSnapshot().layout.activeTabId).toBe("panel");
+    expect(a.controller.getSnapshot().notice).toBeNull();
+  });
+
+  it("still explains a binding that failed for any other reason", async () => {
+    // A refusal is silent; a timeout, a full id space or a layout that would
+    // not take the tab is not. Losing that message would leave a dead click.
+    vi.useFakeTimers();
+    const a = auxHarness();
+
+    const opening = a.controller.openPlugin("showroom");
+    await vi.advanceTimersByTimeAsync(PLUGIN_BIND_ADOPT_TIMEOUT_MS + 10);
+    await opening;
+
+    expect(a.controller.getSnapshot().notice)
+      .toBe("The plugin panel could not be opened.");
+    vi.useRealTimers();
+  });
+});

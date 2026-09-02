@@ -786,7 +786,14 @@ export class WorkspaceController {
   private readonly abandonedBindings = new Set<string>();
   /// Pending adopt waits, so `dispose` can settle them instead of leaving a
   /// 5 s timer holding a controller nobody can see any more.
-  private readonly adoptWaiters = new Set<(adopted: boolean) => void>();
+  private readonly adoptWaiters = new Set<{
+    sessionId: number;
+    settle: (adopted: boolean) => void;
+  }>();
+  /// Session ids main has explicitly REFUSED (singleton exclusivity). Read
+  /// once, by the open that asked, to tell "no, and that is fine" apart from
+  /// "something went wrong".
+  private readonly refusedBindings = new Set<number>();
   /// The layout this controller has already reacted to. Every change — local
   /// mutation, a remote window's blob, a returned aux window — is compared
   /// against it exactly once.
@@ -1538,12 +1545,15 @@ export class WorkspaceController {
    * own rather than on this window's rail.
    *
    * The policy front half is `createTab`'s, with no group - a window has no
-   * rail position to inherit from. The ask policies keep their documented
-   * caveat: the searcher and the native dialog both come back through the
-   * ordinary create-with-cwd path, so an answer given there opens a tab on the
-   * rail, not a window. Creating the window first and asking afterwards would
-   * leave an empty window on screen while the user browsed, and abandoning it
-   * on cancel is a worse trade than the one we take here.
+   * rail position to inherit from.
+   *
+   * `ask-native` keeps the flag: the dialog is awaited right here, so when it
+   * answers, the session is created in this same call with the bit still in
+   * hand. Only `ask-searcher` loses it, and only because its answer comes back
+   * through a different entry point entirely (App's onPick, which has no
+   * new-window bit to carry) - the documented caveat, unchanged. Opening the
+   * window BEFORE asking would put an empty window on screen while the user
+   * browses, and leave it there on cancel.
    */
   createTabInNewWindow = async (options: { profile: string | null }): Promise<void> => {
     this.setNotice(null);
@@ -1556,7 +1566,7 @@ export class WorkspaceController {
       return;
     }
     if (policy === "ask-searcher" || policy === "ask-native") {
-      await this.createTabViaNativeDialog({ groupId: null, profile });
+      await this.createTabViaNativeDialog({ groupId: null, profile }, true);
       return;
     }
 
@@ -1594,7 +1604,14 @@ export class WorkspaceController {
 
   /// Native folder dialog → new tab (the searcher's Browse… escape hatch and
   /// the ask policies' fallback).
-  createTabViaNativeDialog = async (target: FolderSearchTarget): Promise<void> => {
+  ///
+  /// `toNewWindow` is "New window" arriving here through an ask policy: the
+  /// dialog is awaited inline, so the bit is still in hand when the session is
+  /// made and the tab can be torn out in the same transaction as always.
+  createTabViaNativeDialog = async (
+    target: FolderSearchTarget,
+    toNewWindow = false,
+  ): Promise<void> => {
     this.setNotice(null);
     const profile =
       target.profile ?? this.settings.getSnapshot().defaultProfile;
@@ -1604,7 +1621,7 @@ export class WorkspaceController {
         { profile, picker: { title: "Open folder for new terminal" } },
       );
       if (created) {
-        await this.addSessionTab(created, target.groupId);
+        await this.addSessionTab(created, target.groupId, toNewWindow);
       }
     } catch {
       this.setNotice("The terminal session could not be created.");
@@ -3050,7 +3067,7 @@ export class WorkspaceController {
         return null;
       }
       if (!await this.commitPluginBinding(sessionId, pluginId)) {
-        this.setNotice("The plugin panel could not be opened.");
+        this.settleRefusedBind(pluginId, sessionId, "The plugin panel could not be opened.");
         return null;
       }
 
@@ -3131,7 +3148,7 @@ export class WorkspaceController {
         return null;
       }
       if (!await this.commitPluginBinding(sessionId, pluginId)) {
-        this.setNotice("The pane could not be split.");
+        this.settleRefusedBind(pluginId, sessionId, "The pane could not be split.");
         return null;
       }
 
@@ -3177,6 +3194,81 @@ export class WorkspaceController {
    * must then leave the layout alone. The binding is taken back here so every
    * failure path is one call.
    */
+  /**
+   * May main accept this forwarded binding? Asked by the single writer, of the
+   * single writer, before it adopts another window's bind.
+   *
+   * Only main can answer, because only main sees both windows. An aux window's
+   * replica has no row for main's open until main has bound it AND the
+   * broadcast has landed, so two windows launching the same singleton inside
+   * that gap both see "not open" — and the plugin spec's one process would end
+   * up with two panels fighting over its page.
+   *
+   * Non-singletons are always accepted: a second Recall panel is a feature.
+   * The row main already holds for THIS pane is accepted too, or a re-sync
+   * would read as a refusal.
+   */
+  acceptsPluginBind = (sessionId: number, pluginId: string): boolean => {
+    if (this.plugins?.manifestFor(pluginId)?.singleton !== true) {
+      return true;
+    }
+    if (this.pluginOpensInFlight.has(pluginId)) {
+      return false;
+    }
+    for (const [key, binding] of Object.entries(this.pluginPanes.getSnapshot())) {
+      if (binding.pluginId === pluginId && Number(key) !== sessionId) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  /**
+   * Main said no to these bindings. Settle the opens waiting on them NOW
+   * rather than letting them sit out the adopt timeout with a spinner on
+   * screen — a refusal is an answer, and five seconds of "starting" for a
+   * panel that is never coming is the worst of both.
+   */
+  rejectPluginBindings = (sessionIds: readonly number[]): void => {
+    const refused = new Set(sessionIds);
+    for (const sessionId of refused) {
+      this.refusedBindings.add(sessionId);
+    }
+    for (const waiter of [...this.adoptWaiters]) {
+      if (refused.has(waiter.sessionId)) {
+        waiter.settle(false);
+      }
+    }
+  };
+
+  /**
+   * A commit that came back empty-handed, and what to say about it.
+   *
+   * A REFUSAL is not a failure: the panel the user asked for is already open
+   * or moments from it in another window, so the honest answer is to show them
+   * that one and say nothing at all. Every other way a commit can fail — the
+   * adopt timeout, a full reserved-id space, a main that never answered — is a
+   * click that did nothing, and still gets its message.
+   */
+  private settleRefusedBind(
+    pluginId: string,
+    sessionId: number,
+    otherwise: string,
+  ): void {
+    if (!this.refusedBindings.delete(sessionId)) {
+      this.setNotice(otherwise);
+      return;
+    }
+    const open = this.pluginPanesOpen(pluginId);
+    if (open.length > 0) {
+      this.focusPluginPane(open[0]!);
+      return;
+    }
+    // Nothing to show yet: main's layout write is still on its way. Silence is
+    // right — the panel is coming, and it is not this window's to place.
+    this.publish();
+  }
+
   private async commitPluginBinding(
     sessionId: number,
     pluginId: string,
@@ -3219,6 +3311,7 @@ export class WorkspaceController {
     }
     return new Promise<boolean>((resolve) => {
       let done = false;
+      const waiter = { sessionId, settle: (adopted: boolean): void => settle(adopted) };
       const settle = (adopted: boolean): void => {
         if (done) {
           return;
@@ -3226,7 +3319,7 @@ export class WorkspaceController {
         done = true;
         clearTimeout(timer);
         stop();
-        this.adoptWaiters.delete(settle);
+        this.adoptWaiters.delete(waiter);
         if (!adopted) {
           // Main may still answer, long after this open gave up. That row
           // would belong to no pane, so it is disowned on arrival.
@@ -3234,7 +3327,7 @@ export class WorkspaceController {
         }
         resolve(adopted);
       };
-      this.adoptWaiters.add(settle);
+      this.adoptWaiters.add(waiter);
       const timer = setTimeout(() => settle(false), PLUGIN_BIND_ADOPT_TIMEOUT_MS);
       const stop = this.pluginPanes.subscribe(() => {
         if (this.pluginPanes.getSnapshot()[key] !== undefined) {
@@ -3320,7 +3413,7 @@ export class WorkspaceController {
       return;
     }
     this.disposed = true;
-    for (const settle of [...this.adoptWaiters]) {
+    for (const { settle } of [...this.adoptWaiters]) {
       // A replica open still waiting for main would otherwise hold a 5 s timer
       // — and roll a binding back — inside a window that is already gone.
       settle(false);
