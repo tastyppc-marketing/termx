@@ -133,6 +133,12 @@ export function Menubar({ menus }: MenubarProps) {
   // menu deliberately left focus in the terminal, so Escape and the arrows
   // have to be picked up at the window while a menu is open; anything typed
   // inside the bar is already handled and must not run twice.
+  //
+  // CAPTURE, not bubble: the element holding focus is a live terminal whose
+  // own keydown handler writes to the PTY. On the way up it would read the
+  // arrow as history recall and the Escape as "leave insert mode" before the
+  // bar ever saw them. Claiming a key here means stopping it before the target
+  // - and only the keys the bar navigates by; ordinary typing passes through.
   const keyHandlerRef = useRef<(event: MenubarKeyEvent) => void>(() => undefined);
   useEffect(() => {
     if (openId === null) {
@@ -144,8 +150,8 @@ export function Menubar({ menus }: MenubarProps) {
       }
       keyHandlerRef.current(event);
     };
-    window.addEventListener("keydown", handleWindowKey);
-    return () => window.removeEventListener("keydown", handleWindowKey);
+    window.addEventListener("keydown", handleWindowKey, true);
+    return () => window.removeEventListener("keydown", handleWindowKey, true);
   }, [openId]);
 
   useLayoutEffect(() => {
@@ -179,6 +185,15 @@ export function Menubar({ menus }: MenubarProps) {
     }
     if (event.key === "Escape") {
       if (openId !== null) {
+        // The house convention: an inner overlay that marked itself
+        // `data-esc-guard` - an open editor, an armed confirm - owns the press
+        // and cancels ITSELF, and nothing else acts on the same one. Settled
+        // by ownership rather than listener order, because both sides are
+        // window-capture and neither can rely on registering first. The menu
+        // is still there for the next Escape.
+        if (document.activeElement?.closest("[data-esc-guard]")) {
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
         close(true);

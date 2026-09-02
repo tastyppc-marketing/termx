@@ -401,6 +401,76 @@ describe("Menubar — focus", () => {
     expect(document.activeElement?.getAttribute("data-row-id")).toBe("new-tab");
   });
 
+  /**
+   * The pane under the bar is a live terminal: its own keydown handler writes
+   * to the PTY. A menu the pointer opened has left focus there ON PURPOSE, so
+   * every key the menu claims has to be taken at the window in CAPTURE phase -
+   * a bubble-phase listener runs after the textarea, by which point the arrow
+   * has already recalled shell history and Escape has left vim's insert mode.
+   */
+  function typingPane(): { pane: HTMLTextAreaElement; seen: string[] } {
+    const pane = document.createElement("textarea");
+    document.body.append(pane);
+    const seen: string[] = [];
+    pane.addEventListener("keydown", (event) => seen.push(event.key));
+    pane.focus();
+    return { pane, seen };
+  }
+
+  it("takes ArrowDown before the terminal under it can read it", async () => {
+    await mount();
+    const { pane, seen } = typingPane();
+    await pointerOpen(label("workspace"));
+
+    await key(pane, { key: "ArrowDown" });
+
+    expect(seen).toEqual([]);
+    expect(document.activeElement?.getAttribute("data-row-id")).toBe("new-tab");
+  });
+
+  it("takes Escape before the terminal under it can read it", async () => {
+    await mount();
+    const { pane, seen } = typingPane();
+    await pointerOpen(label("workspace"));
+
+    await key(pane, { key: "Escape" });
+
+    expect(seen).toEqual([]);
+    expect(dropdown()).toBeNull();
+  });
+
+  it("lets ordinary typing through to the terminal untouched", async () => {
+    await mount();
+    const { pane, seen } = typingPane();
+    await pointerOpen(label("workspace"));
+
+    await key(pane, { key: "a" });
+
+    // The bar claims navigation, never the keyboard: a menu being open must
+    // not stop the user typing into the shell they are looking at.
+    expect(seen).toEqual(["a"]);
+    expect(dropdown()).not.toBeNull();
+  });
+
+  it("leaves Escape to an inner overlay that has claimed it", async () => {
+    await mount();
+    const guard = document.createElement("div");
+    guard.setAttribute("data-esc-guard", "");
+    document.body.append(guard);
+    const { pane, seen } = typingPane();
+    guard.append(pane);
+    pane.focus();
+    await pointerOpen(label("workspace"));
+
+    await key(pane, { key: "Escape" });
+
+    // The house convention: an open editor or an armed confirm cancels itself
+    // first, and nothing else acts on the same press. The menu is still there
+    // for the next one.
+    expect(seen).toEqual(["Escape"]);
+    expect(dropdown()).not.toBeNull();
+  });
+
   it("returns to the label when the menu was opened from the keyboard", async () => {
     await mount();
     terminal();
