@@ -70,6 +70,29 @@ export function tauriWindowFactory(): WindowFactory {
   };
 }
 
+/**
+ * Bring an existing OS window to the front (menubar spec: "already open →
+ * focus it", for a panel living in another window).
+ *
+ * A window nobody raised is the whole bug: selecting a tab in a window behind
+ * three others is invisible, so the click reads as having done nothing. By
+ * LABEL, which is the layout's own window id — the main window is declared as
+ * `main` in `tauri.conf.json` and each aux window is created above under its
+ * slot id, so `MAIN_WINDOW_ID` and every `aux-N` address themselves.
+ *
+ * A missing window is silence, not a failure: the slot may have been closed
+ * between the menu opening and the click, and the layout write that follows is
+ * still correct. Imported lazily so test environments without Tauri never
+ * touch it. Needs `core:window:allow-set-focus` in the capability file.
+ */
+export function tauriRaiseWindow(): (windowId: string) => Promise<void> {
+  return async (windowId: string) => {
+    const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+    const target = await WebviewWindow.getByLabel(windowId);
+    await target?.setFocus();
+  };
+}
+
 /** The slice of the current OS window an aux lifecycle needs; injected so
  * tests never touch Tauri. Mirrors Tauri's Window API. */
 export interface AuxWindowChrome {

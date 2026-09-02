@@ -22,6 +22,7 @@ import { createLayoutStore } from "../../state/store";
 import { MAIN_WINDOW_ID, sessionIdsInSplit, type Layout } from "../../state/layout";
 import { LayoutPersistence } from "../LayoutPersistence";
 import {
+  PLUGIN_BIND_ADOPT_TIMEOUT_MS,
   WorkspaceController,
   type WorkspaceAttachmentHub,
   type WorkspaceHostClient,
@@ -160,6 +161,8 @@ interface HarnessOptions {
   sessions?: SessionInfo[];
   /** The pane box the size rule measures; absent means "no box to measure". */
   measurePane?: (sessionId: number) => { width: number; height: number } | null;
+  /** The OS-window raise seam; absent means "nothing can raise a window". */
+  raiseWindow?: (windowId: string) => Promise<void>;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -223,6 +226,7 @@ function harness(options: HarnessOptions = {}) {
     pluginPanes,
     plugins,
     ...(options.measurePane ? { measurePane: options.measurePane } : {}),
+    ...(options.raiseWindow ? { raiseWindow: options.raiseWindow } : {}),
     ...(options.windowId ? { windowId: options.windowId } : {}),
   });
   return { controller, store, persistenceCalls, pluginPanes, ensureUp };
@@ -724,5 +728,288 @@ describe("openPlugin size rule", () => {
 
     expect(failing.controller.getSnapshot().notice)
       .toBe("Recall is disabled in Settings.");
+  });
+});
+
+/**
+ * Aux coverage for the ordinary surfaces (review P-F6). The dedicated-window
+ * case was pinned from the start; tab and split were not, and they are the two
+ * a user actually reaches for from a torn-out window.
+ *
+ * Two separate channels have to behave: the LAYOUT goes to main as one
+ * `setLayout` forward, and the BINDING goes to main over the plugin-panes
+ * channel. Neither may be written locally - an aux window is a replica of both
+ * files, and a local write is a second writer.
+ */
+describe("openPlugin surfaces from an aux window", () => {
+  function auxHarness() {
+    const setLayout = vi.fn(async () => undefined);
+    const forwarded: string[] = [];
+    let acknowledge = (): void => undefined;
+    const replica = new PaneBindingsStore({
+      initial: {},
+      save: null,
+      onForward: (request) => {
+        forwarded.push(request.op);
+        if (request.op === "bind") {
+          acknowledge = () => {
+            replica.adopt({ [String(request.sessionId)]: request.binding });
+          };
+        }
+      },
+    });
+    const persistence = new LayoutPersistence({ setLayout });
+    const h = harness({
+      initial: auxLayout(),
+      windowId: "aux-1",
+      pluginPanesStore: replica,
+      persistence,
+      sessions: [session(1), session(9)],
+    });
+    return {
+      ...h,
+      replica,
+      persistence,
+      setLayout,
+      forwarded,
+      ack: () => acknowledge(),
+    };
+  }
+
+  it("forwards a tab open once, and writes no binding locally", async () => {
+    const a = auxHarness();
+
+    const opening = a.controller.openPlugin("recall", "tab");
+    await tick();
+    // The layout must not move until main has accepted the binding: a pane in
+    // the blob with no binding behind it restores as a corpse.
+    expect(a.forwarded).toEqual(["bind"]);
+    expect(a.replica.getSnapshot()).toEqual({});
+    expect(a.setLayout).not.toHaveBeenCalled();
+
+    a.ack();
+    await opening;
+    await a.persistence.flush();
+
+    expect(a.setLayout).toHaveBeenCalledTimes(1);
+    expect(a.forwarded).toEqual(["bind"]);
+    const [[tabId]] = panesFor(a.controller, a.replica, "recall") as [[string, number]];
+    // A tab opened from aux-1 belongs to aux-1's rail, not main's.
+    expect(a.controller.getSnapshot().layout.auxWindows["aux-1"]!.rootItems)
+      .toContainEqual({ kind: "tab", id: tabId });
+  });
+
+  it("forwards a split open once, and writes no binding locally", async () => {
+    const a = auxHarness();
+
+    const opening = a.controller.openPlugin("recall", "split");
+    await tick();
+    expect(a.forwarded).toEqual(["bind"]);
+    expect(a.replica.getSnapshot()).toEqual({});
+
+    a.ack();
+    await opening;
+    await a.persistence.flush();
+
+    expect(a.setLayout).toHaveBeenCalledTimes(1);
+    expect(a.forwarded).toEqual(["bind"]);
+    // Beside aux-1's own focused pane, which is tab-9's only pane.
+    const panes = panesFor(a.controller, a.replica, "recall");
+    expect(panes).toHaveLength(1);
+    expect(panes[0]![0]).toBe("tab-9");
+  });
+
+  it("takes the binding back and forwards nothing more when main refuses", async () => {
+    // Main never acknowledges. The open must not write a layout at all, and the
+    // row it asked for must be withdrawn rather than left as an orphan.
+    vi.useFakeTimers();
+    const a = auxHarness();
+
+    const opening = a.controller.openPlugin("recall", "tab");
+    await vi.advanceTimersByTimeAsync(PLUGIN_BIND_ADOPT_TIMEOUT_MS + 10);
+    await opening;
+
+    expect(a.setLayout).not.toHaveBeenCalled();
+    expect(a.forwarded).toEqual(["bind", "unbind"]);
+    expect(a.replica.getSnapshot()).toEqual({});
+    vi.useRealTimers();
+  });
+});
+
+/**
+ * "Already open → focus it" has to be VISIBLE (review P-C3).
+ *
+ * Setting the owning window's `activeTabId` is the whole of what the layout
+ * can express, and it is not enough twice over. A panel sharing the ACTIVE tab
+ * is already in the active tab, so that write changes nothing at all - the
+ * terminal beside it keeps keyboard focus and every pane command still goes
+ * there. And a panel in another OS window gets its tab selected behind a
+ * window nobody raised.
+ *
+ * So the controller says what it wants and lets the two owners do it: App owns
+ * DOM focus and reads `focusRequest`; the window manager owns OS windows and is
+ * reached through the `raiseWindow` seam. `seq` exists because the same pane is
+ * very often the answer twice running - without it the second press of a menu
+ * row would be indistinguishable from the first and App would ignore it.
+ */
+describe("openPlugin focus request", () => {
+  it("asks App to focus the pane when the panel is in this window", async () => {
+    const h = harness();
+    await h.controller.openPlugin("recall", "tab");
+    await tick();
+    const [[tabId, sessionId]] = panesFor(h.controller, h.pluginPanes, "recall") as [[string, number]];
+    h.controller.activateTab("tab-1");
+
+    await h.controller.openPlugin("recall");
+    await tick();
+
+    expect(h.controller.getSnapshot().focusRequest)
+      .toEqual({ tabId, sessionId, seq: 1 });
+  });
+
+  it("asks again, with a fresh seq, when the pane is ALREADY the active tab", async () => {
+    // The bug in one test: the panel is in the active tab, so setting the
+    // active tab writes nothing, and a focus request that did not change would
+    // leave the click doing visibly nothing.
+    const h = harness();
+    await h.controller.openPlugin("recall", "tab");
+    await tick();
+
+    await h.controller.openPlugin("recall");
+    const first = h.controller.getSnapshot().focusRequest;
+    await h.controller.openPlugin("recall");
+    const second = h.controller.getSnapshot().focusRequest;
+
+    expect(first?.seq).toBe(1);
+    expect(second?.seq).toBe(2);
+    expect(second?.tabId).toBe(first?.tabId);
+  });
+
+  it("raises the other OS window instead, and asks App for nothing", async () => {
+    // App cannot focus a pane it does not render. Its window has to come
+    // forward first, and the window that owns it will make its own focus
+    // request when it renders the tab it was just told to activate.
+    const raised: string[] = [];
+    const h = harness({ raiseWindow: async (windowId) => { raised.push(windowId); } });
+    await h.controller.openPlugin("recall", "window");
+    await tick();
+
+    await h.controller.openPlugin("recall", "window");
+    await tick();
+
+    expect(raised).toEqual(["aux-1"]);
+    expect(h.controller.getSnapshot().focusRequest).toBeNull();
+  });
+
+  it("focuses without a raise seam rather than throwing", async () => {
+    // Every legacy fixture, and any window booted before the seam existed.
+    // The tab still becomes its window's active tab; only the raise is lost.
+    const h = harness();
+    await h.controller.openPlugin("recall", "window");
+    await tick();
+
+    await h.controller.openPlugin("recall", "window");
+    await tick();
+
+    const state = h.controller.getSnapshot().layout;
+    const [[tabId]] = panesFor(h.controller, h.pluginPanes, "recall") as [[string, number]];
+    expect(state.auxWindows["aux-1"]!.activeTabId).toBe(tabId);
+    expect(h.controller.getSnapshot().focusRequest).toBeNull();
+  });
+});
+
+/**
+ * A singleton stays ONE panel across the gap in its own open (review P-C4).
+ *
+ * An open commits the binding and waits for it to be accepted BEFORE it writes
+ * the layout, and "already open" is read from panes in the layout - so for the
+ * width of that await the plugin is open and looks shut. Two launches inside
+ * it (a double click, or main and an aux window at once) both see "not open"
+ * and a plugin the spec says is one process gets two panels framing it.
+ */
+describe("openPlugin singleton race", () => {
+  it("opens ONE panel for two launches in the same breath", async () => {
+    const h = harness();
+
+    await Promise.all([
+      h.controller.openPlugin("showroom"),
+      h.controller.openPlugin("showroom"),
+    ]);
+    await tick();
+
+    expect(panesFor(h.controller, h.pluginPanes, "showroom")).toHaveLength(1);
+  });
+
+  it("treats a committed binding with no pane yet as already opening", async () => {
+    // The cross-window half: main has ACCEPTED an aux window's binding and its
+    // layout write is still on the wire. A second launch here must wait for it
+    // rather than race it.
+    const h = harness({ pluginBindings: { "2147483648": { pluginId: "showroom" } } });
+
+    await h.controller.openPlugin("showroom");
+    await tick();
+
+    expect(panesFor(h.controller, h.pluginPanes, "showroom")).toEqual([]);
+    expect(h.persistenceCalls.filter((call) => call.kind === "structural")).toEqual([]);
+  });
+
+  it("still opens a second panel for a plugin that is not a singleton", async () => {
+    // The guard is the singleton rule, not a general lock: Recall may have as
+    // many panels as the user asks for.
+    const h = harness();
+
+    await h.controller.openPlugin("recall", "tab");
+    await tick();
+    h.controller.activateTab("tab-2");
+    await h.controller.openPlugin("recall", "split");
+    await tick();
+
+    expect(panesFor(h.controller, h.pluginPanes, "recall")).toHaveLength(2);
+  });
+});
+
+/**
+ * A chip focuses the instance ON THAT SURFACE (review P-C6).
+ *
+ * With a tab panel and a window panel of the same plugin, "already open on the
+ * surface you asked for" was answered by focusing the FIRST placement found -
+ * which is main's, because the search walks the windows in order. Pressing
+ * Window then brought the tab forward, which is the one thing the chip
+ * certainly did not mean.
+ */
+describe("openPlugin chip picks its own instance", () => {
+  async function twoInstances(raised: string[]) {
+    const h = harness({ raiseWindow: async (windowId) => { raised.push(windowId); } });
+    await h.controller.openPlugin("recall", "tab");
+    await tick();
+    await h.controller.openPlugin("recall", "window");
+    await tick();
+    return h;
+  }
+
+  it("raises the WINDOW instance for the window chip", async () => {
+    const raised: string[] = [];
+    const h = await twoInstances(raised);
+
+    await h.controller.openPlugin("recall", "window");
+    await tick();
+
+    expect(raised).toEqual(["aux-1"]);
+    expect(h.controller.getSnapshot().focusRequest).toBeNull();
+  });
+
+  it("focuses the TAB instance for the tab chip", async () => {
+    const raised: string[] = [];
+    const h = await twoInstances(raised);
+    const tabPane = panesFor(h.controller, h.pluginPanes, "recall")
+      .find(([tabId]) => h.controller.getSnapshot().layout.rootItems
+        .some((item) => item.kind === "tab" && item.id === tabId))!;
+
+    await h.controller.openPlugin("recall", "tab");
+    await tick();
+
+    expect(raised).toEqual([]);
+    expect(h.controller.getSnapshot().focusRequest)
+      .toEqual({ tabId: tabPane[0], sessionId: tabPane[1], seq: 1 });
   });
 });

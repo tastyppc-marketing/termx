@@ -71,6 +71,7 @@ import { firstSessionId, flattenTabIds, sessionIdsInTab } from "./layoutOperatio
 import { LayoutPersistence } from "./LayoutPersistence";
 import type { WindowBus } from "./windowBus";
 import { WorkspaceController, type WorkspacePluginHost } from "./WorkspaceController";
+import { tauriRaiseWindow } from "./windowManager";
 
 export type BootstrapWorkspaceClient = Pick<
   HostClient,
@@ -113,6 +114,12 @@ export interface BootstrapWorkspaceOptions {
    * an aux window's mutations go nowhere.
    */
   windowBus?: WindowBus;
+  /**
+   * Brings another OS window to the front, for focusing a plugin panel that
+   * lives in one. Defaults to the Tauri window manager; injected in tests,
+   * which have no OS windows to raise.
+   */
+  raiseWindow?: (windowId: string) => Promise<void>;
   /**
    * Plugin process/probe seam (plugin spec §3); defaults to the Tauri commands.
    * Injected in tests so a unit run never reaches a native command.
@@ -835,6 +842,15 @@ export async function bootstrapWorkspace(
     // answers, which is never worse than what came before.
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const stopWatchingRegistry = plugins.subscribe(() => {
+      // "Start with TermX" is a registry field, and the controller recomputes
+      // its plugin scope only from layout and binding changes — neither of
+      // which a Settings toggle produces. Undebounced on purpose: the flag is
+      // a direct instruction, the recompute is cheap and idempotent (the
+      // ensure-up path dedupes an answer that already stands), and a debounce
+      // would leave the switch visibly lagging its own effect.
+      if (bootWindowId === MAIN_WINDOW_ID) {
+        controller?.refreshPluginScope();
+      }
       if (refreshTimer !== null) {
         clearTimeout(refreshTimer);
       }
@@ -1121,6 +1137,7 @@ export async function bootstrapWorkspace(
       plugins: pluginHost,
       sshPasswords: { passwordFor: (alias: string) => sshCredentials.passwordFor(alias) },
       sshHosts: { byAlias: (alias: string) => sshHosts.find((host) => host.aliases.includes(alias)) ?? null },
+      raiseWindow: options.raiseWindow ?? tauriRaiseWindow(),
       ...(options.generateId ? { generateId: options.generateId } : {}),
       ...(options.pickFolder ? { pickFolder: options.pickFolder } : {}),
       ...(options.windowId ? { windowId: options.windowId } : {}),

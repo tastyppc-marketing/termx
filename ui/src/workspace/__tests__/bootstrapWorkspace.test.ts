@@ -811,6 +811,44 @@ describe("bootstrapWorkspace plugin panes", () => {
       expect(spy.runtimeReads).toEqual([]);
     });
 
+    it("starts a plugin marked from Settings after boot", async () => {
+      // The flag is LIVE, not a boot-time reading. Nothing about a registry
+      // write is a layout or a binding change, so without the registry watch
+      // reaching the controller the switch did nothing at all until some
+      // unrelated layout mutation happened by.
+      const spy = healthyNative();
+      const workspace = await bootWith({
+        seed: { "plugins_v1.json": registryOf({ showroom: {} }) },
+        native: spy.native,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(spy.runtimeReads).toEqual([]);
+
+      workspace.plugins.setAutostart("showroom", true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(spy.runtimeReads).toEqual(["C:\\data\\Showroom\\runtime.json"]);
+    });
+
+    it("stops there when the flag is flipped in an aux window", async () => {
+      // Belt and braces on top of the aux host having no accessor at all:
+      // bootstrap does not carry the registry change to an aux controller, and
+      // the controller refuses it even when something does. Two windows both
+      // acting on the flag would race to start the same singleton.
+      const spy = healthyNative();
+      const workspace = await bootWith({
+        seed: { "plugins_v1.json": registryOf({ showroom: {} }) },
+        native: spy.native,
+        windowId: "aux-1",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      workspace.plugins.setAutostart("showroom", true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(spy.runtimeReads).toEqual([]);
+    });
+
     it("carries the autostart accessor on main's host, and not on an aux one", async () => {
       const main = await bootWith({
         seed: {

@@ -345,6 +345,32 @@ export interface WorkspaceSnapshot {
    * Optional so existing fixtures keep type-checking; the controller always
    * sets it, and absent reads as "just the main window". */
   windowIds?: readonly string[];
+  /**
+   * "Put the keyboard in THIS pane, now" — App's half of bringing an
+   * already-open plugin panel forward.
+   *
+   * The controller owns the layout and can only say which tab is active, which
+   * is nothing at all when the panel is already IN the active tab. DOM focus is
+   * App's, so the wish is published and App grants it.
+   *
+   * Set only for a pane THIS window renders (another window's App answers its
+   * own), and `seq` rises on every request: the same pane is very often the
+   * answer twice running, and an unchanged value would make the second press
+   * of a menu row indistinguishable from the first.
+   *
+   * Optional for the same reason `windowIds` is — a dozen hand-written
+   * snapshot fixtures across both lanes would otherwise stop compiling. The
+   * controller always sets it, so a real snapshot never says `undefined`, and
+   * absent reads exactly as `null` does: nothing to focus.
+   */
+  focusRequest?: PluginFocusRequest | null;
+}
+
+/** The pane App is being asked to put the keyboard in. See `focusRequest`. */
+export interface PluginFocusRequest {
+  tabId: string;
+  sessionId: number;
+  seq: number;
 }
 
 /** Read-only view of live settings (SettingsStore satisfies this). */
@@ -377,6 +403,16 @@ export interface WorkspaceControllerOptions {
   uiState?: UiStateStore;
   /** Directory probe for the resume flow (spec §5); defaults to `list_dirs`. */
   dirExists?: DirExists;
+  /**
+   * Bring another OS window to the front. Injected because the controller owns
+   * the layout, not the window manager — and because every test environment
+   * and every non-Tauri harness has no OS window to raise.
+   *
+   * Absent means the raise is simply skipped: the tab still becomes its
+   * window's active tab, so the panel is waiting the moment that window is
+   * looked at.
+   */
+  raiseWindow?: (windowId: string) => Promise<void>;
   /**
    * Saved sessions (saved-sessions spec). Absent — legacy fixtures, and any
    * caller that does not persist saves — means a `resumeSaved` still resumes
@@ -636,7 +672,16 @@ export interface FocusedPane {
 export interface PluginOpenTarget {
   /** Which rail group a `tab` open lands in. Absent or null = the root. */
   groupId?: string | null;
-  /** Which pane a `split` opens beside. Absent = whatever has focus. */
+  /**
+   * Which pane a `split` opens beside. Absent = whatever has focus.
+   *
+   * A HINT, not an instruction, and deliberately the WEAKEST of the three
+   * sources: the rail passes its own guess at the pane (it knows which tab's
+   * menu was clicked, and only the tab), while App's focus provider is the
+   * authority on which pane of that tab the user is actually in. So a caller's
+   * pane is overridden whenever App has a live answer for the same tab, and it
+   * is used as given only when App has none. See `focusedPane`.
+   */
   pane?: FocusedPane;
 }
 
@@ -685,6 +730,16 @@ export class WorkspaceController {
   private readonly plugins: WorkspacePluginHost | null;
   /// App's live focus report for `openPlugin("split")`; null until it wires it.
   private focusedPaneProvider: ((tabId: string) => number | null) | null = null;
+  /// Raises another OS window; null when nothing can (tests, non-Tauri hosts).
+  private readonly raiseWindow: ((windowId: string) => Promise<void>) | null;
+  /// The pane App is being asked to focus, and the counter that makes a repeat
+  /// of the same pane a NEW request rather than the same one again.
+  private pluginFocusRequest: PluginFocusRequest | null = null;
+  private focusRequestSeq = 0;
+  /// Singleton opens between their binding write and their layout write. For
+  /// that window of time the plugin is open and looks shut, so a second launch
+  /// would open a second panel onto a process the spec says is one.
+  private readonly pluginOpensInFlight = new Set<string>();
   /// How the size rule measures a pane; the DOM read unless a test injects one.
   private readonly measurePane: PaneMeasurer;
   /// One entry per plugin, shared by every pane bound to it: a plugin is one
@@ -802,6 +857,7 @@ export class WorkspaceController {
     };
     this.windowId = options.windowId ?? MAIN_WINDOW_ID;
     this.measurePane = options.measurePane ?? measurePaneElement;
+    this.raiseWindow = options.raiseWindow ?? null;
     this.lastLayout = options.store.getState();
     this.store = options.store;
     this.persistence = options.persistence;
@@ -1026,6 +1082,32 @@ export class WorkspaceController {
       void this.ensurePluginUp(pluginId);
     }
   }
+
+  /**
+   * Re-decide what this window is responsible for, on demand.
+   *
+   * `syncPluginScope` runs from the constructor, a layout change and a binding
+   * change — and "Start with TermX" is none of those. The flag lives in the
+   * registry, so without this it was dead the moment boot finished: marking a
+   * plugin with no pane open started nothing until some unrelated layout
+   * mutation happened by, and unmarking one left its runtime, its health
+   * poller and its `pluginScopeIds` entry standing — which also left a queued
+   * relaunch free to spawn a plugin the user had just unmarked.
+   *
+   * MAIN ONLY, the same guard the accessor itself carries: spawning is main's
+   * alone (plugin spec §3), and an aux window acting on the flag would race
+   * main to start the same singleton.
+   */
+  refreshPluginScope = (): void => {
+    if (this.windowId !== MAIN_WINDOW_ID) {
+      return;
+    }
+    this.syncPluginScope();
+    // The pollers follow the scope, and `syncPluginHealthPolls` runs from
+    // `publish` — so an unmarked plugin stops being watched here rather than
+    // at whatever unrelated publish happens next.
+    this.publish();
+  };
 
   /**
    * A layout arrived — from this window's own mutation, from another window's
@@ -1264,6 +1346,7 @@ export class WorkspaceController {
       persistence,
       notice: this.notice,
       windowIds: windowIds(layout),
+      focusRequest: this.pluginFocusRequest,
     };
     this.cachedSnapshot = snapshot;
     this.cachedLayout = layout;
@@ -1445,6 +1528,48 @@ export class WorkspaceController {
     try {
       const created = await this.createSessionDownChain(profile, candidates);
       await this.addSessionTab(created, options.groupId);
+    } catch {
+      this.setNotice("The terminal session could not be created.");
+    }
+  };
+
+  /**
+   * "New window" (menubar spec): a new terminal that opens in a window of its
+   * own rather than on this window's rail.
+   *
+   * The policy front half is `createTab`'s, with no group - a window has no
+   * rail position to inherit from. The ask policies keep their documented
+   * caveat: the searcher and the native dialog both come back through the
+   * ordinary create-with-cwd path, so an answer given there opens a tab on the
+   * rail, not a window. Creating the window first and asking afterwards would
+   * leave an empty window on screen while the user browsed, and abandoning it
+   * on cancel is a worse trade than the one we take here.
+   */
+  createTabInNewWindow = async (options: { profile: string | null }): Promise<void> => {
+    this.setNotice(null);
+    const settings = this.settings.getSnapshot();
+    const profile = options.profile ?? settings.defaultProfile;
+    const policy = settings.newTabPolicy;
+
+    if (policy === "ask-searcher" && this.folderSearchHandler) {
+      this.folderSearchHandler({ groupId: null, profile });
+      return;
+    }
+    if (policy === "ask-searcher" || policy === "ask-native") {
+      await this.createTabViaNativeDialog({ groupId: null, profile });
+      return;
+    }
+
+    const key = scopeKeyFor(null);
+    const candidates = newTabCwdCandidates(
+      this.uiState.getSnapshot().scopePaths,
+      key,
+      policy,
+      policy === "active-tab" ? this.activeTabCwdInScope(key) : null,
+    );
+    try {
+      const created = await this.createSessionDownChain(profile, candidates);
+      await this.addSessionTab(created, null, true);
     } catch {
       this.setNotice("The terminal session could not be created.");
     }
@@ -2594,11 +2719,74 @@ export class WorkspaceController {
         && !manifest.singleton
         && !alreadyOpen.some((pane) => pane.surface === target);
       if (!wantsAnother) {
-        this.focusPluginPane(alreadyOpen[0]!);
+        // THE INSTANCE ON THAT SURFACE, not simply the first one found. The
+        // search walks the windows in order, so with a tab panel in main and a
+        // window panel torn off, "first" is always the tab — and the Window
+        // chip would bring the tab forward, which is the one thing it did not
+        // mean. Falling back to the first is for the surface with no instance
+        // (a singleton being focused from a chip it is not on), where any
+        // panel is the right answer because there is only one.
+        this.focusPluginPane(
+          alreadyOpen.find((pane) => pane.surface === target) ?? alreadyOpen[0]!,
+        );
         return;
       }
     }
 
+    if (manifest.singleton && this.pluginOpenInProgress(pluginId)) {
+      // An open is already between its binding write and its layout write, so
+      // the plugin is open and looks shut. Doing nothing is right: the panel
+      // that open is placing is the panel this click asked for, and it is
+      // moments away. Opening a second one would give a single process two
+      // panels to fight over.
+      this.publish();
+      return;
+    }
+    if (manifest.singleton) {
+      this.pluginOpensInFlight.add(pluginId);
+    }
+    try {
+      await this.placePluginPanel(pluginId, manifest, target, at);
+    } finally {
+      this.pluginOpensInFlight.delete(pluginId);
+    }
+  };
+
+  /**
+   * Is a panel for this plugin already on its way onto the screen?
+   *
+   * Two ways, and both are invisible to `pluginPanesOpen`, which reads panes in
+   * the LAYOUT. An open of our own is in the gap between committing the binding
+   * and writing the layout; and a binding this window has accepted whose pane
+   * is in no tab yet is another window's open, its layout write still on the
+   * wire.
+   *
+   * An orphan row (a crash between the two writes) would read as "opening" for
+   * the rest of the session, which is why the boot prune clears orphans and
+   * every failed open takes its own binding back.
+   */
+  private pluginOpenInProgress(pluginId: string): boolean {
+    if (this.pluginOpensInFlight.has(pluginId)) {
+      return true;
+    }
+    const layout = this.store.getState();
+    const placed = new Set(sessionIdsInLayout(layout));
+    for (const [key, binding] of Object.entries(this.pluginPanes.getSnapshot())) {
+      if (binding.pluginId === pluginId && !placed.has(Number(key))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// The placement half of `openPlugin`, once the surface is settled and the
+  /// plugin is known not to be open (or opening) already.
+  private async placePluginPanel(
+    pluginId: string,
+    manifest: PluginManifest,
+    target: PluginSurface,
+    at: PluginOpenTarget | undefined,
+  ): Promise<void> {
     if (target === "tab") {
       await this.openPluginTabInternal(pluginId, at?.groupId ?? null, false);
       return;
@@ -2640,7 +2828,7 @@ export class WorkspaceController {
           + " \u2014 opened as a tab.",
       );
     }
-  };
+  }
 
   /**
    * Which pane of a given tab really has focus - App's answer, because the
@@ -2772,14 +2960,47 @@ export class WorkspaceController {
     return placements;
   }
 
-  /// Bring an already-open panel forward: its tab becomes the active tab of
-  /// the window it lives in. Raising that OS window is App's job - the
-  /// controller owns the layout, not the window manager.
+  /**
+   * Bring an already-open panel forward, in all three of the ways that takes.
+   *
+   * The layout half — its tab becomes the active tab of the window it lives in
+   * — is the only part the controller can do itself, and on its own it is very
+   * often nothing at all: a panel sharing the ACTIVE tab is already in the
+   * active tab, so the write is a no-op and the terminal beside it keeps the
+   * keyboard.
+   *
+   * So the other two halves are asked for. DOM focus is App's, and it is asked
+   * through the snapshot. The OS window is the window manager's, and it is
+   * asked through the injected seam — for a panel in ANOTHER window, since App
+   * here does not draw that pane and could not focus it if it tried.
+   */
   private focusPluginPane(placement: PluginPanePlacement): void {
     this.setNotice(null);
     this.mutate("active_tab", () =>
       this.store.setActiveTab(placement.tabId, placement.windowId)
     );
+    if (placement.windowId === this.windowId) {
+      this.focusRequestSeq += 1;
+      this.pluginFocusRequest = {
+        tabId: placement.tabId,
+        sessionId: placement.sessionId,
+        seq: this.focusRequestSeq,
+      };
+      // The snapshot cache keys on the layout, and the case this whole request
+      // exists for is precisely the one where the layout did NOT change. The
+      // revision bump is what lets the new seq out.
+      this.pluginRevision += 1;
+    } else {
+      try {
+        // Fire and forget: the window coming forward is the answer, and its
+        // own App makes the focus request for the tab it has just been told to
+        // activate. A seam that fails leaves the tab active behind a window
+        // the user can still raise themselves, which is worth no notice.
+        void this.raiseWindow?.(placement.windowId)?.catch(() => undefined);
+      } catch {
+        // A seam that throws synchronously must not take the focus with it.
+      }
+    }
     this.publish();
   }
 
@@ -3150,22 +3371,45 @@ export class WorkspaceController {
 
   /// Returns the id of the tab it just created (the resume flow records it
   /// for dedupe tracking; every other caller ignores the return value).
-  private async addSessionTab(session: SessionInfo, groupId: string | null): Promise<string> {
+  ///
+  /// `toNewWindow` tears the new tab straight into a window of its own, in the
+  /// SAME structural mutation that creates it. Two mutations would be two
+  /// layout writes - and from an aux window a layout write IS a forward to
+  /// main, so the intermediate shape (a tab sitting in a rail it was never
+  /// meant to appear in) would reach main and disk on its own, and a crash
+  /// between the two would strand it there for good.
+  private async addSessionTab(
+    session: SessionInfo,
+    groupId: string | null,
+    toNewWindow = false,
+  ): Promise<string> {
     this.sessions.set(session.id, session);
     this.sessionsRevision += 1;
     await this.attachments.attachSession(session.id);
     const layout = this.store.getState();
     const targetGroupId = groupId !== null && layout.groups[groupId] ? groupId : null;
     const tabId = this.generateId();
-    this.mutate("structural", () => this.store.createTab({
-      id: tabId,
-      sessionId: session.id,
-      color: nextTabColor(layout),
-      groupId: targetGroupId,
-      // Ungrouped tabs land on THIS window's rail; a group target already
-      // names its own window.
-      windowId: this.windowId,
-    }));
+    this.mutate("structural", () => {
+      const created = this.store.createTab({
+        id: tabId,
+        sessionId: session.id,
+        color: nextTabColor(layout),
+        groupId: targetGroupId,
+        // Ungrouped tabs land on THIS window's rail; a group target already
+        // names its own window.
+        windowId: this.windowId,
+      });
+      if (!toNewWindow || created === layout) {
+        return created;
+      }
+      // By NAME, never by diffing the layout across the await above: main can
+      // add a tab of its own while the session is being created, and a diff
+      // would tear THAT one out.
+      return this.store.moveItemToWindow(
+        { kind: "tab", id: tabId },
+        this.allocateAuxWindowId(),
+      );
+    });
     if (session.cwd) {
       const cwd = session.cwd;
       this.uiState.update((state) =>
