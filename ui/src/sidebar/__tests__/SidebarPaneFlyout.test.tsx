@@ -237,7 +237,7 @@ async function dwellOn(id: string) {
 
 describe("rail hover flyout — when it appears", () => {
   it("is exported as one tunable dwell constant", () => {
-    expect(HOVER_PANES_FLYOUT_MS).toBe(3000);
+    expect(HOVER_PANES_FLYOUT_MS).toBe(800);
   });
 
   it("stays away one millisecond short of the dwell, and arrives on it", async () => {

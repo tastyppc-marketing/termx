@@ -20,12 +20,15 @@ import "./PaneFlyout.css";
 /**
  * How long the pointer must rest on a rail row before the panel appears.
  *
- * Three seconds, because the rail is crossed constantly — reordering rows,
- * dropping into groups, or just travelling to the terminal — and a panel that
- * appeared on every pass would be noise. This long a pause means "I stopped
- * here on purpose". One constant so the dwell can be retuned in one place.
+ * 800 ms: the platform tooltip delay (Windows ToolTip InitialDelay, 500 ms)
+ * plus a deliberate 300 ms margin, which also lands on Chrome's tab hover-card
+ * delay — the closest analogue to "hover a tab, see what's in it". Long enough
+ * that crossing the rail to reorder rows or reach the terminal does not flash
+ * a panel on every pass; short enough that a pause reads as intent without
+ * feeling like waiting. (Shipped first at 3000 ms; Michael found that too
+ * long.) One constant so the dwell can be retuned in one place.
  */
-export const HOVER_PANES_FLYOUT_MS = 3000;
+export const HOVER_PANES_FLYOUT_MS = 800;
 
 /** The id the owning row points at with `aria-describedby`. */
 export const PANE_FLYOUT_ID = "sidebar-pane-flyout";
