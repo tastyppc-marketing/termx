@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import type { PluginMinSize } from "./manifest";
 import type { PaneSessionState } from "../workspace/WorkspaceController";
 import "./PluginPane.css";
 
@@ -14,6 +16,12 @@ export interface PluginPaneProps {
    * a manifest constant.
    */
   panelPath: string;
+  /**
+   * `manifest.minSize` - the smallest box this panel can still be itself in.
+   * Drives `data-compact` only: TermX never resizes a pane on the plugin's
+   * behalf, it tells the plugin the box got tight and the plugin restacks.
+   */
+  minSize: PluginMinSize;
   /** Re-run ensure-up for this pane's plugin, KEEPING the pane. */
   onRelaunch(): void;
   /** Take the pane out of the layout. Never touches the daemon. */
@@ -66,6 +74,57 @@ function panelSrc(origin: string, panelPath: string): string | null {
     // An unparseable origin or path is a refusal, never a thrown render.
     return null;
   }
+}
+
+/// Which of the plugin's floors the box is under, or null when it clears both.
+type CompactAxis = "width" | "height" | "both";
+
+/**
+ * Watch the panel's own box against the plugin's `minSize` (menubar spec).
+ *
+ * A ResizeObserver rather than a media query or a window listener, because what
+ * matters is the PANE's box: a panel three levels down a split tree gets narrow
+ * while the window stays wide, and it is the pane that has to restack.
+ *
+ * A zero box is not a measurement. A tab that is not on screen and a first
+ * paint both measure zero, and calling that compact would have every panel
+ * restack itself the moment it mounts, then flip back a frame later.
+ *
+ * `null` when the environment has no ResizeObserver at all: the attribute is a
+ * hint, and a missing hint is a panel in its ordinary layout, which is a far
+ * better failure than one stuck permanently restacked.
+ */
+function useCompactAxis(
+  element: HTMLElement | null,
+  minWidth: number,
+  minHeight: number,
+): CompactAxis | null {
+  const [compact, setCompact] = useState<CompactAxis | null>(null);
+
+  useEffect(() => {
+    if (element === null || typeof ResizeObserver === "undefined") {
+      setCompact(null);
+      return;
+    }
+    const measure = (): void => {
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        setCompact(null);
+        return;
+      }
+      const narrow = rect.width < minWidth;
+      const short = rect.height < minHeight;
+      setCompact(
+        narrow && short ? "both" : narrow ? "width" : short ? "height" : null,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element, minWidth, minHeight]);
+
+  return compact;
 }
 
 /** What the health mark on the title bar means, for the screen reader. */
@@ -137,9 +196,14 @@ export function PluginPane({
   name,
   icon,
   panelPath,
+  minSize,
   onRelaunch,
   onDismiss,
 }: PluginPaneProps) {
+  // A callback ref in state, not a `useRef`: the effect has to re-run when the
+  // element itself arrives, and a ref object never triggers one.
+  const [paneElement, setPaneElement] = useState<HTMLDivElement | null>(null);
+  const compact = useCompactAxis(paneElement, minSize.width, minSize.height);
   const reported = state.pluginHealth ?? "starting";
   const origin = state.pluginUrl ?? null;
   // A reported-up plugin that names an address off this machine is a refusal,
@@ -168,7 +232,15 @@ export function PluginPane({
           aria-label={HEALTH_LABEL[health]}
         />
       </div>
-      <div className={`plugin-pane plugin-pane--${health}`} data-testid="plugin-pane">
+      {/* The attribute rides the pane's own box, so it is set on the element
+          that IS that box - and on the card as much as the frame, because an
+          offline card in a 200px column has the same restacking to do. */}
+      <div
+        ref={setPaneElement}
+        className={`plugin-pane plugin-pane--${health}`}
+        data-testid="plugin-pane"
+        {...(compact === null ? {} : { "data-compact": compact })}
+      >
         {health === "up" ? (
           <iframe
             className="plugin-pane__frame"

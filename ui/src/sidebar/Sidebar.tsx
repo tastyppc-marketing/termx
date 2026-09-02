@@ -27,7 +27,9 @@ import {
 } from "../state/layout";
 import { useThemeId } from "../theme/ThemeProvider";
 import { resolveTabColor, themeById } from "../theme/themes";
+import type { PluginSurface } from "../plugins/manifest";
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH } from "../workspace/uiState";
+import type { PluginOpenTarget } from "../workspace/WorkspaceController";
 import type {
   SidebarGroupModel,
   SidebarItemModel,
@@ -80,12 +82,30 @@ export interface SidebarActions {
    */
   moveItemToWindow?(item: Item, target: string | "new"): string | null;
   /**
-   * Plugin panels (plugin spec §4). Both are optional and both are
-   * fire-and-forget wrappers around the controller's async methods: a menu
-   * cannot wait, and neither entry renders at all when its action is unwired,
-   * exactly as `moveItemToWindow` does.
+   * Plugin panels (plugin spec §4, menubar spec). ONE entry point, shared with
+   * the menubar's Plugins list and Settings' Open button, so the placement
+   * policy - which surfaces a plugin allows, and focusing what is already open
+   * rather than opening it twice - is written once and every launcher agrees.
+   *
+   * Optional and fire-and-forget: a menu cannot wait, and the plugin entries do
+   * not render at all when it is unwired, exactly as `moveItemToWindow` does.
+   *
+   * `at` carries what the rail knows and the controller cannot guess - which
+   * group the create menu was opened on, and which pane of which tab the tab
+   * menu was opened on, very often not the active one.
+   */
+  openPlugin?(
+    pluginId: string,
+    surface?: PluginSurface,
+    at?: PluginOpenTarget,
+  ): void;
+  /**
+   * @deprecated Superseded by `openPlugin`, which both plugin submenus now
+   * call. Still declared because they remain the controller primitives
+   * `openPlugin` is built from, and App hands the sidebar the whole controller.
    */
   openPluginTab?(pluginId: string, groupId: string | null): void;
+  /** @deprecated See `openPluginTab`. */
   openPluginSplit?(
     tabId: string,
     anchorSessionId: number,
@@ -1503,8 +1523,8 @@ export function Sidebar({
   /// nothing — heading included — when no plugin is enabled or the action is
   /// unwired, so a sidebar with no plugins is the sidebar as it was.
   const renderPluginTabEntries = (groupId: string | null) => {
-    const openPluginTab = actions.openPluginTab;
-    if (!openPluginTab || enabledPlugins.length === 0) {
+    const openPlugin = actions.openPlugin;
+    if (!openPlugin || enabledPlugins.length === 0) {
       return null;
     }
     return (
@@ -1518,7 +1538,7 @@ export function Sidebar({
             data-testid={`create-menu-plugin-${plugin.id}`}
             onClick={() => {
               closeMenu();
-              openPluginTab(plugin.id, groupId);
+              openPlugin(plugin.id, "tab", { groupId });
             }}
           >
             <span className="context-menu__glyph" aria-hidden="true">{plugin.icon}</span>
@@ -1533,8 +1553,8 @@ export function Sidebar({
   /// panel is a companion to the terminal it was opened from, and a column
   /// split is the one the user reaches for when they want it below.
   const renderPluginSplitEntries = (tab: SidebarTabModel) => {
-    const openPluginSplit = actions.openPluginSplit;
-    if (!openPluginSplit || enabledPlugins.length === 0) {
+    const openPlugin = actions.openPlugin;
+    if (!openPlugin || enabledPlugins.length === 0) {
       return null;
     }
     const anchor = anchorPane(tab);
@@ -1549,7 +1569,9 @@ export function Sidebar({
             data-testid={`tab-menu-plugin-split-${plugin.id}`}
             onClick={() => {
               closeMenu();
-              openPluginSplit(tab.id, anchor, plugin.id, "row");
+              openPlugin(plugin.id, "split", {
+                pane: { tabId: tab.id, sessionId: anchor },
+              });
             }}
           >
             <span className="context-menu__glyph" aria-hidden="true">{plugin.icon}</span>

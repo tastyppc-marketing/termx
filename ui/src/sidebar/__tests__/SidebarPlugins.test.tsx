@@ -218,7 +218,7 @@ describe("Sidebar plugin menu entries", () => {
   });
 
   it("offers nothing when every listed plugin is disabled", async () => {
-    await renderSidebar({ plugins: [NOTES] }, actions({ openPluginTab: vi.fn() }));
+    await renderSidebar({ plugins: [NOTES] }, actions({ openPlugin: vi.fn() }));
     await openCreateMenu();
 
     expect(item("create-menu-plugin-notes")).toBeNull();
@@ -229,7 +229,7 @@ describe("Sidebar plugin menu entries", () => {
   it("lists enabled plugins under their own overline, after the built-ins", async () => {
     await renderSidebar(
       { plugins: [SHOWROOM, NOTES] },
-      actions({ openPluginTab: vi.fn() }),
+      actions({ openPlugin: vi.fn() }),
     );
     await openCreateMenu();
 
@@ -243,28 +243,31 @@ describe("Sidebar plugin menu entries", () => {
   });
 
   it("opens a plugin tab from the create menu and closes the menu first", async () => {
-    const openPluginTab = vi.fn();
-    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPluginTab }));
+    const openPlugin = vi.fn();
+    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPlugin }));
     await openCreateMenu();
     await click(item("create-menu-plugin-showroom")!);
 
-    expect(openPluginTab).toHaveBeenCalledTimes(1);
-    expect(openPluginTab).toHaveBeenCalledWith("showroom", null);
+    // "New Showroom tab" names its surface: the rail asks for a TAB, never the
+    // manifest default, or the entry would stop meaning what it says the day a
+    // plugin declares itself a split.
+    expect(openPlugin).toHaveBeenCalledTimes(1);
+    expect(openPlugin).toHaveBeenCalledWith("showroom", "tab", { groupId: null });
     expect(menu()).toBeNull();
   });
 
   it("opens a plugin tab from the sidebar background menu", async () => {
-    const openPluginTab = vi.fn();
-    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPluginTab }));
+    const openPlugin = vi.fn();
+    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPlugin }));
     await openMenuOn(container.querySelector(".sidebar")!);
     await click(item("create-menu-plugin-showroom")!);
 
-    expect(openPluginTab).toHaveBeenCalledWith("showroom", null);
+    expect(openPlugin).toHaveBeenCalledWith("showroom", "tab", { groupId: null });
   });
 
   it("opens a plugin tab inside the group whose menu was used", async () => {
-    const openPluginTab = vi.fn();
-    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPluginTab }));
+    const openPlugin = vi.fn();
+    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPlugin }));
     await openMenuOn(groupHeader("group-1"));
 
     expect(item("create-menu-plugin-showroom")?.textContent).toBe(
@@ -272,21 +275,25 @@ describe("Sidebar plugin menu entries", () => {
     );
     await click(item("create-menu-plugin-showroom")!);
 
-    expect(openPluginTab).toHaveBeenCalledWith("showroom", "group-1");
+    // The group survives the trip through `openPlugin`: the controller has no
+    // way to guess which group's menu the click came from.
+    expect(openPlugin).toHaveBeenCalledWith("showroom", "tab", {
+      groupId: "group-1",
+    });
   });
 });
 
 describe("Sidebar plugin split entries", () => {
   it("offers no split when the action is unwired", async () => {
-    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPluginTab: vi.fn() }));
+    await renderSidebar({ plugins: [SHOWROOM] }, actions({}));
     await openMenuOn(tabRow("tab-1"));
 
     expect(item("tab-menu-plugin-split-showroom")).toBeNull();
   });
 
   it("splits the tab's active pane to the right, before the destructive entry", async () => {
-    const openPluginSplit = vi.fn();
-    await renderSidebar({ plugins: [SHOWROOM, NOTES] }, actions({ openPluginSplit }));
+    const openPlugin = vi.fn();
+    await renderSidebar({ plugins: [SHOWROOM, NOTES] }, actions({ openPlugin }));
     await openMenuOn(tabRow("tab-1"));
 
     const order = menuOrder();
@@ -297,23 +304,29 @@ describe("Sidebar plugin split entries", () => {
 
     await click(item("tab-menu-plugin-split-showroom")!);
 
-    expect(openPluginSplit).toHaveBeenCalledTimes(1);
-    expect(openPluginSplit).toHaveBeenCalledWith("tab-1", 1, "showroom", "row");
+    expect(openPlugin).toHaveBeenCalledTimes(1);
+    expect(openPlugin).toHaveBeenCalledWith("showroom", "split", {
+      pane: { tabId: "tab-1", sessionId: 1 },
+    });
     expect(menu()).toBeNull();
   });
 
   it("anchors on the tab's own first pane when the focus is in another tab", async () => {
-    const openPluginSplit = vi.fn();
-    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPluginSplit }));
+    const openPlugin = vi.fn();
+    await renderSidebar({ plugins: [SHOWROOM] }, actions({ openPlugin }));
     // tab-2 holds pane 2; the active pane (1) belongs to tab-1.
     await openMenuOn(tabRow("tab-2"));
     await click(item("tab-menu-plugin-split-showroom")!);
 
-    expect(openPluginSplit).toHaveBeenCalledWith("tab-2", 2, "showroom", "row");
+    // The pane travels with the call. Without it the controller would split
+    // whatever has focus, which here is a pane in a different tab entirely.
+    expect(openPlugin).toHaveBeenCalledWith("showroom", "split", {
+      pane: { tabId: "tab-2", sessionId: 2 },
+    });
   });
 
   it("anchors on the focused pane of a split tab", async () => {
-    const openPluginSplit = vi.fn();
+    const openPlugin = vi.fn();
     const split = tabModel("tab-1", { primarySessionId: 1, sessionIds: [1, 5] });
     await act(async () =>
       root.render(
@@ -328,7 +341,7 @@ describe("Sidebar plugin split entries", () => {
               5: { status: "live", exitCode: null },
             },
           })}
-          actions={actions({ openPluginSplit })}
+          actions={actions({ openPlugin })}
           plugins={[SHOWROOM]}
         />,
       )
@@ -336,7 +349,9 @@ describe("Sidebar plugin split entries", () => {
     await openMenuOn(tabRow("tab-1"));
     await click(item("tab-menu-plugin-split-showroom")!);
 
-    expect(openPluginSplit).toHaveBeenCalledWith("tab-1", 5, "showroom", "row");
+    expect(openPlugin).toHaveBeenCalledWith("showroom", "split", {
+      pane: { tabId: "tab-1", sessionId: 5 },
+    });
   });
 });
 
@@ -396,7 +411,7 @@ describe("Sidebar plugin tab rows", () => {
               },
             },
           })}
-          actions={actions({ openPluginTab: vi.fn(), openPluginSplit: vi.fn() })}
+          actions={actions({ openPlugin: vi.fn() })}
           plugins={[{ ...SHOWROOM, enabled: false }]}
         />,
       )

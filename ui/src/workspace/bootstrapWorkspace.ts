@@ -38,7 +38,12 @@ import {
   parsePluginPanesValue,
   toJsonPluginPanes,
 } from "../plugins/paneBindings";
-import { manifestFor, parsePluginsFile, PluginsStore } from "../plugins/registry";
+import {
+  autostartOf,
+  manifestFor,
+  parsePluginsFile,
+  PluginsStore,
+} from "../plugins/registry";
 import {
   tauriProtectSecret,
   tauriReadSshConfig,
@@ -934,6 +939,18 @@ export async function bootstrapWorkspace(
     const pluginHost: WorkspacePluginHost = {
       manifestFor: installedManifest,
       unavailableReason,
+      ...(bootWindowId === MAIN_WINDOW_ID
+        ? {
+          // "Start with TermX" (menubar spec). Read LIVE from the registry, and
+          // gated on `enabled` as everything else is: a switched-off plugin has
+          // no manifest to give, so autostart must not smuggle it back into the
+          // lifecycle. Main only - spawning is main's alone (spec §3).
+          autostartIds: (): readonly string[] =>
+            Object.entries(plugins.getSnapshot().plugins)
+              .filter(([, entry]) => entry.enabled && autostartOf(entry))
+              .map(([id]) => id),
+        }
+        : {}),
       dispose: () => {
         manifestsReleased = true;
         hostReleased = true;

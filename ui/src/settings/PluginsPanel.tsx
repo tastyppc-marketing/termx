@@ -26,10 +26,12 @@ import { BUNDLED_MANIFESTS } from "../plugins/bundled";
 import {
   parseManifest,
   parseManifestErrors,
+  parseManifestWarnings,
   type PluginManifest,
+  type PluginSurface,
 } from "../plugins/manifest";
 import type { PluginNative } from "../plugins/native";
-import type { PluginsStore } from "../plugins/registry";
+import { autostartOf, type PluginsStore } from "../plugins/registry";
 import { Toggle } from "./Toggle";
 
 /**
@@ -54,8 +56,15 @@ export interface PluginsPanelProps {
    * entirely where no workspace is wired, so every row falls back to no mark.
    */
   health?: Record<string, PluginHealth>;
-  /** Opens the plugin in a new tab. Absent where no workspace is wired. */
-  onOpen?(pluginId: string): void;
+  /**
+   * Opens the plugin, on the surface the pressed button names. Absent where no
+   * workspace is wired.
+   *
+   * The surface is passed rather than assumed because the workspace's own entry
+   * point defaults to the MANIFEST's preferred surface, and a button labelled
+   * "Open as tab" that splits instead would be lying about what it does.
+   */
+  onOpen?(pluginId: string, surface?: PluginSurface): void;
   /** Injected by tests; production uses the OS folder dialog. */
   pickFolder?: FolderPicker;
   /** Injected by tests; production uses the manifests bundled with TermX. */
@@ -66,6 +75,13 @@ export interface PluginsPanelProps {
 interface FolderDetail {
   manifest: PluginManifest | null;
   problem: string | null;
+  /**
+   * A detail TermX overrode but could still work around - kept apart from
+   * `problem` because the two have opposite consequences. A problem means there
+   * is no usable manifest, so the row loses its Open button and its switch; a
+   * warning means the plugin runs, just not exactly as its file asked.
+   */
+  warning: string | null;
 }
 
 interface PluginRow {
@@ -77,6 +93,10 @@ interface PluginRow {
   enabled: boolean;
   bundled: boolean;
   problem: string | null;
+  /** See `FolderDetail.warning`: says so, gates nothing. */
+  warning: string | null;
+  /** "Start with TermX" - main brings this plugin up at boot. */
+  autostart: boolean;
   /**
    * null = nothing to show. Both an absent entry (no workspace wired, or the
    * plugin was never opened here) and a reported `unknown` land here: neither
@@ -145,14 +165,14 @@ async function describeFolder(
   try {
     text = await native.readManifest(path);
   } catch {
-    return { manifest: null, problem: "Folder unavailable" };
+    return { manifest: null, problem: "Folder unavailable", warning: null };
   }
 
   if (text === null) {
     const fallback = bundled[id];
     return fallback
-      ? { manifest: fallback, problem: null }
-      : { manifest: null, problem: "Manifest missing" };
+      ? { manifest: fallback, problem: null, warning: null }
+      : { manifest: null, problem: "Manifest missing", warning: null };
   }
 
   let raw: unknown;
@@ -162,13 +182,14 @@ async function describeFolder(
     // The exception text is a parser's, not a user's: it names byte offsets in
     // a file the user never asked to read. The field list below is the useful
     // half, and it needs a document that at least parsed.
-    return { manifest: null, problem: "Manifest is not valid JSON" };
+    return { manifest: null, problem: "Manifest is not valid JSON", warning: null };
   }
   const manifest = parseManifest(raw);
   if (!manifest) {
     return {
       manifest: null,
       problem: `Manifest invalid: ${parseManifestErrors(raw).join(", ")}`,
+      warning: null,
     };
   }
 
@@ -181,9 +202,16 @@ async function describeFolder(
     return {
       manifest: null,
       problem: `This folder's manifest says ${manifest.id}, not ${id}.`,
+      warning: null,
     };
   }
-  return { manifest, problem: null };
+  // Only a manifest that PARSED can be warned about: a warning is advice on a
+  // working plugin, and there is nothing to advise when there is no plugin.
+  return {
+    manifest,
+    problem: null,
+    warning: parseManifestWarnings(raw)[0] ?? null,
+  };
 }
 
 /**
@@ -317,6 +345,8 @@ export function PluginsPanel({
           bundled: bundled[id] !== undefined,
           // A folder that was never added has nothing to be wrong with it.
           problem: entry ? details[id]?.problem ?? null : null,
+          warning: entry ? details[id]?.warning ?? null : null,
+          autostart: entry ? autostartOf(entry) : false,
           health:
             reported === undefined || reported === "unknown" ? null : reported,
         };
@@ -459,6 +489,16 @@ export function PluginsPanel({
                       {row.problem}
                     </span>
                   )}
+                  {/* Same shape as a problem, in the caution colour rather than
+                      the error one, and it gates nothing: the plugin works. */}
+                  {row.warning === null ? null : (
+                    <span
+                      className="settings-plugin__status settings-plugin__status--warn"
+                      title={row.warning}
+                    >
+                      {row.warning}
+                    </span>
+                  )}
                   {/* Only a plugin the workspace is actually running has health
                       to report. No entry — no workspace wired, or never opened
                       in this window — draws nothing rather than an "unknown"
@@ -500,12 +540,31 @@ export function PluginsPanel({
                   }
                   onToggle={(checked) => store.setEnabled(row.id, checked)}
                 />
+                <Toggle
+                  name={`plugin-autostart-${row.id}`}
+                  label="Start with TermX"
+                  ariaLabel={`Start with TermX: ${row.name}`}
+                  checked={row.autostart}
+                  // Gated harder than Enabled, and deliberately. Enabled is a
+                  // statement of intent that survives a broken folder; this is
+                  // an instruction TermX has to CARRY OUT at every launch, so
+                  // it is only offered for a plugin that could actually start.
+                  // Switching OFF stays available whatever the state, exactly
+                  // as Enabled does: a row that broke while it was on must not
+                  // be trapped there, still starting at every launch and
+                  // failing. A `warning` does not gate it - the plugin runs.
+                  disabled={
+                    !row.autostart
+                    && (row.path === null || !row.enabled || row.problem !== null)
+                  }
+                  onToggle={(checked) => store.setAutostart(row.id, checked)}
+                />
                 {onOpen && row.enabled && row.path !== null && row.problem === null ? (
                   <button
                     type="button"
                     className="settings-plugins__action"
                     aria-label={`Open as tab: ${row.name}`}
-                    onClick={() => onOpen(row.id)}
+                    onClick={() => onOpen(row.id, "tab")}
                   >
                     Open as tab
                   </button>

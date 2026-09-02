@@ -21,7 +21,13 @@ import {
 } from "../conversations/resume";
 import { sessionKey, type LlmSessionRecord, type SessionKey } from "../conversations/types";
 import type { EnsureUpResult } from "../plugins/lifecycle";
-import type { PluginManifest } from "../plugins/manifest";
+import {
+  minSizeOf,
+  surfacesOf,
+  type PluginManifest,
+  type PluginMinSize,
+  type PluginSurface,
+} from "../plugins/manifest";
 import {
   allocatePluginPaneId,
   isPluginPaneId,
@@ -290,6 +296,19 @@ export interface WorkspacePluginHost {
    */
   observeOnce?: (pluginId: string) => Promise<EnsureUpResult>;
   /**
+   * The enabled plugins marked "Start with TermX" (menubar spec).
+   *
+   * Supplied by the MAIN window's host only. Spawning is main's alone (plugin
+   * spec §3), so an aux window that acted on this would race main to start the
+   * same singleton - and the controller refuses it there regardless, so this
+   * absence and that guard say the same thing twice on purpose.
+   *
+   * A function rather than a list because the registry is live: the user can
+   * switch a plugin off in Settings, and a plugin that is off must leave the
+   * set at once rather than stay polled until the next launch.
+   */
+  autostartIds?: () => readonly string[];
+  /**
    * Release whatever the host holds (registry subscriptions, timers). Called
    * from `WorkspaceController.dispose`, which is the only lifetime the host is
    * built for.
@@ -408,6 +427,11 @@ export interface WorkspaceControllerOptions {
    * same degradation as a lost bindings file.
    */
   pluginPanes?: PaneBindingsStore;
+  /**
+   * How the size rule measures a pane (menubar spec). Injected by tests;
+   * production reads the pane element's own bounding box.
+   */
+  measurePane?: PaneMeasurer;
   /**
    * The plugin lifecycle. Absent — legacy fixtures, and any window booted
    * without a plugin registry — means the open-plugin actions refuse; existing
@@ -535,6 +559,102 @@ interface SshPaneRecord {
   captured: { provider: "claude" | "codex"; id: string } | null;
 }
 
+/**
+ * Width of the divider strip a split costs the pair of panes, in CSS pixels.
+ *
+ * Panes TILE their tab - siblings share the whole box with no gutter - and the
+ * divider is a 6px absolutely-positioned grab target centred on the boundary
+ * (`dividerStyle` in SplitLayout). So the layout gives each side exactly half,
+ * and each side loses three pixels of that half to the strip sitting over it.
+ * The size rule counts the strip, because a panel measured to the last pixel
+ * and then covered by a grab target is a panel that does not fit.
+ */
+export const SPLIT_DIVIDER_PX = 6;
+
+/// A pane's real box in CSS pixels, or null when there is nothing to measure.
+export type PaneMeasurer = (
+  sessionId: number,
+) => { width: number; height: number } | null;
+
+/**
+ * Would splitting `box` along `dir` leave the new pane at least `min`?
+ *
+ * The axis being split is halved and pays the divider; the other axis is
+ * unchanged and must ALREADY clear its floor - a column split does not widen
+ * anything, so a pane narrower than `min.width` has no direction that works.
+ */
+function splitLeavesRoom(
+  box: { width: number; height: number },
+  min: PluginMinSize,
+  dir: SplitDir,
+): boolean {
+  return dir === "row"
+    ? (box.width - SPLIT_DIVIDER_PX) / 2 >= min.width && box.height >= min.height
+    : box.width >= min.width
+      && (box.height - SPLIT_DIVIDER_PX) / 2 >= min.height;
+}
+
+/**
+ * The production measurer: the pane element's own rect.
+ *
+ * Deliberately the REAL box rather than a fraction of the window - a pane three
+ * levels down a split tree, in a tab beside a rail and under a header, has
+ * nothing to do with the window's width. Scoped to `.split-pane` because
+ * `data-session-id` also appears on the pane flyout's rows.
+ *
+ * A zero box is NOT a measurement: a tab that is not on screen, or a first
+ * paint, measures zero, and treating that as "too small" would send every
+ * split to a tab. It comes back null, which the rule reads as room enough.
+ */
+function measurePaneElement(sessionId: number): { width: number; height: number } | null {
+  if (typeof document === "undefined") {
+    return null;
+  }
+  const element = document.querySelector(
+    `.split-pane[data-session-id="${sessionId}"]`,
+  );
+  if (element === null) {
+    return null;
+  }
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0
+    ? { width: rect.width, height: rect.height }
+    : null;
+}
+
+/// The pane a split opens beside, as App reports it.
+export interface FocusedPane {
+  tabId: string;
+  sessionId: number;
+}
+
+/**
+ * A caller's own idea of where the panel should go, for the callers that have
+ * one. Both halves are advisory: an unknown group falls back to this window's
+ * root, and a stale pane is validated the same way a reported focus is.
+ */
+export interface PluginOpenTarget {
+  /** Which rail group a `tab` open lands in. Absent or null = the root. */
+  groupId?: string | null;
+  /** Which pane a `split` opens beside. Absent = whatever has focus. */
+  pane?: FocusedPane;
+}
+
+/// Where one plugin pane sits right now, and what surface that counts as.
+interface PluginPanePlacement {
+  tabId: string;
+  sessionId: number;
+  windowId: string;
+  surface: PluginSurface;
+}
+
+/// How a refused surface reads in a sentence starting with the plugin's name.
+const SURFACE_REFUSAL: Record<PluginSurface, string> = {
+  tab: "as a tab",
+  split: "as a split",
+  window: "in its own window",
+};
+
 export class WorkspaceController {
   readonly attachments: WorkspaceAttachmentHub;
   /** Which window's slot this controller renders and mutates. */
@@ -563,6 +683,10 @@ export class WorkspaceController {
   /// every read site is a plain lookup instead of a null dance.
   private readonly pluginPanes: PaneBindingsStore;
   private readonly plugins: WorkspacePluginHost | null;
+  /// App's live focus report for `openPlugin("split")`; null until it wires it.
+  private focusedPaneProvider: ((tabId: string) => number | null) | null = null;
+  /// How the size rule measures a pane; the DOM read unless a test injects one.
+  private readonly measurePane: PaneMeasurer;
   /// One entry per plugin, shared by every pane bound to it: a plugin is one
   /// process, so N panes must not mean N spawns or N different health answers.
   private readonly pluginRuntimes = new Map<string, PluginRuntimeState>();
@@ -677,6 +801,7 @@ export class WorkspaceController {
         : {}),
     };
     this.windowId = options.windowId ?? MAIN_WINDOW_ID;
+    this.measurePane = options.measurePane ?? measurePaneElement;
     this.lastLayout = options.store.getState();
     this.store = options.store;
     this.persistence = options.persistence;
@@ -826,6 +951,20 @@ export class WorkspaceController {
     for (const sessionId of mine) {
       const pluginId = bindings[String(sessionId)]?.pluginId;
       if (pluginId !== undefined) {
+        rendered.add(pluginId);
+      }
+    }
+    if (this.windowId === MAIN_WINDOW_ID) {
+      // "Start with TermX" (menubar spec) joins the set rather than getting an
+      // ensure-up of its own at boot, and that single decision buys all three
+      // behaviours the flag needs: `syncPluginScope` starts it, nothing forgets
+      // its runtime while no pane renders it, and `syncPluginHealthPolls`
+      // watches it - so a marked plugin that dies unattended shows as down
+      // instead of leaving a stale "up" for the first pane to frame.
+      //
+      // MAIN ONLY: spawning is main's alone (plugin spec §3), so an aux window
+      // acting on the flag would race main to start the same singleton.
+      for (const pluginId of this.plugins?.autostartIds?.() ?? []) {
         rendered.add(pluginId);
       }
     }
@@ -2404,6 +2543,246 @@ export class WorkspaceController {
     );
   };
 
+  /**
+   * ONE entry point for every plugin launcher - the menubar's Plugins list, the
+   * rail's plugin submenus, Settings' Open button (menubar spec).
+   *
+   * The policy lives here rather than in each menu because it is not obvious
+   * from any single call site: which surface the manifest asked for, whether
+   * the plugin already has a panel somewhere, and whether the click was a
+   * general "open this" or a chip naming a surface. A menu that reimplemented
+   * any of it would drift the moment the other one changed.
+   *
+   * `surface` absent means the manifest's own default - the row click. A named
+   * surface is a chip click, and only a chip may open a SECOND panel: a plain
+   * row click on a plugin already on screen always focuses what is there, which
+   * is what "open Recall" means when Recall is already open.
+   *
+   * `at` is what a caller with a MORE precise target than "here" already knows,
+   * and it exists so routing the rail through this entry point does not throw
+   * that away: the rail's group menu opens into the group it was clicked on,
+   * and its tab menu splits the pane of the tab it was clicked on, which is
+   * very often not the active one. Every menubar caller omits it and gets the
+   * focused pane / this window's root, exactly as before.
+   */
+  openPlugin = async (
+    pluginId: string,
+    surface?: PluginSurface,
+    at?: PluginOpenTarget,
+  ): Promise<void> => {
+    const manifest = this.pluginManifest(pluginId);
+    if (manifest === null) {
+      this.publish();
+      return;
+    }
+    const surfaces = surfacesOf(manifest);
+    const target = surface ?? surfaces.default;
+    if (!surfaces.allowed.includes(target)) {
+      // Chips are drawn from `allowed`, so this is not reachable by clicking -
+      // it is the guard for every other caller of a public seam.
+      this.setNotice(`${manifest.name} cannot open ${SURFACE_REFUSAL[target]}.`);
+      this.publish();
+      return;
+    }
+
+    const alreadyOpen = this.pluginPanesOpen(pluginId);
+    if (alreadyOpen.length > 0) {
+      // A singleton is ONE process behind one page: a second pane would frame
+      // the same panel twice and let two copies fight over its state. So a
+      // singleton always focuses, whichever chip was pressed.
+      const wantsAnother = surface !== undefined
+        && !manifest.singleton
+        && !alreadyOpen.some((pane) => pane.surface === target);
+      if (!wantsAnother) {
+        this.focusPluginPane(alreadyOpen[0]!);
+        return;
+      }
+    }
+
+    if (target === "tab") {
+      await this.openPluginTabInternal(pluginId, at?.groupId ?? null, false);
+      return;
+    }
+    if (target === "window") {
+      // Deliberately ungrouped: the tab leaves this rail in the same
+      // transaction, so a group would only be a container it never sat in.
+      await this.openPluginTabInternal(pluginId, null, true);
+      return;
+    }
+    const focused = this.focusedPane(at?.pane ?? null);
+    if (focused === null) {
+      // Nothing to split against - an empty window, or a rail whose only tabs
+      // live somewhere else. A tab is the honest answer, and there is nothing
+      // to explain: no pane was squeezed, because there was no pane.
+      await this.openPluginTabInternal(pluginId, at?.groupId ?? null, false);
+      return;
+    }
+    const min = minSizeOf(manifest);
+    const dir = this.splitDirectionFor(focused.sessionId, min);
+    if (dir !== null) {
+      await this.openPluginSplit(focused.tabId, focused.sessionId, pluginId, dir);
+      return;
+    }
+    // Neither direction leaves the panel its floor. A tab is a whole box, so
+    // the plugin gets what it asked for - and is TOLD, because a split that
+    // silently became a tab reads as the click having gone somewhere else.
+    const opened = await this.openPluginTabInternal(
+      pluginId,
+      at?.groupId ?? null,
+      false,
+    );
+    if (opened !== null) {
+      // Only on success: the tab open sets its own reason when it fails, and
+      // replacing that with "opened as a tab" would claim something that did
+      // not happen.
+      this.setNotice(
+        `${manifest.name} needs ${min.width}\u00d7${min.height} to split`
+          + " \u2014 opened as a tab.",
+      );
+    }
+  };
+
+  /**
+   * Which pane of a given tab really has focus - App's answer, because the
+   * focus map is App's: it is kept per tab, so it survives tab switches, and
+   * the controller has no view of it at all.
+   *
+   * Without this, a split opened from a menu lands beside a tab's FIRST pane,
+   * which is the wrong pane in every multi-pane tab the user has moved around
+   * in. A provider rather than a value because a menu is built once and
+   * clicked much later; `null` from it means "no record for that tab".
+   */
+  setFocusedPane = (
+    provider: ((tabId: string) => number | null) | null,
+  ): void => {
+    this.focusedPaneProvider = provider;
+  };
+
+  /**
+   * The pane a split should open beside, from three sources in order of
+   * authority: the caller's TAB (the rail knows which tab's menu was used, and
+   * it is very often not the active one), then App's live focus WITHIN that
+   * tab, then the caller's own guess, then the tab's first pane.
+   *
+   * Every answer is validated against the layout, so a menu that outlived the
+   * pane it was opened on cannot split a pane that is no longer there. A tab
+   * that has gone entirely returns the caller's guess unchanged - the split
+   * path refuses an unknown tab on its own, and inventing a different tab to
+   * split would be worse than refusing.
+   */
+  private focusedPane(hint: FocusedPane | null): FocusedPane | null {
+    const layout = this.store.getState();
+    const tabId = hint?.tabId
+      ?? slotOf(layout, this.windowId)?.activeTabId
+      ?? null;
+    if (tabId === null) {
+      return null;
+    }
+    const tab = layout.tabs[tabId];
+    if (!tab) {
+      return hint;
+    }
+    const panes = sessionIdsInTab(tab);
+    const reported = this.focusedPaneProvider?.(tabId) ?? null;
+    const sessionId = reported !== null && panes.includes(reported)
+      ? reported
+      : hint !== null && panes.includes(hint.sessionId)
+        ? hint.sessionId
+        : firstSessionId(tab.split);
+    return { tabId, sessionId };
+  }
+
+  /**
+   * Which way to split beside `sessionId` so the new pane keeps `min`, or null
+   * when no direction does (menubar spec's size rule).
+   *
+   * Sideways first, because that is what was asked for; down second, because a
+   * pane that is too narrow to share its width may still have height to give.
+   * The rule RESTRUCTURES rather than cramming - a 200px-wide panel is not a
+   * smaller panel, it is an unusable one.
+   *
+   * An unmeasurable pane splits as asked. Refusing on a missing box would break
+   * splitting in exactly the cases where nothing is wrong: a tab that is not on
+   * screen, a first paint, a harness with no layout at all.
+   */
+  private splitDirectionFor(
+    sessionId: number,
+    min: PluginMinSize,
+  ): SplitDir | null {
+    const box = this.measurePane(sessionId);
+    if (box === null) {
+      return "row";
+    }
+    if (splitLeavesRoom(box, min, "row")) {
+      return "row";
+    }
+    return splitLeavesRoom(box, min, "col") ? "col" : null;
+  }
+
+  /**
+   * Every pane this plugin currently occupies, in ANY window, with the surface
+   * each one counts as.
+   *
+   * The surface is DERIVED from where the pane sits, never remembered from how
+   * it was opened: a panel opened as a tab and then dragged into a split is a
+   * split now, and "open Recall as a split" should focus it rather than make a
+   * second one. Sharing a tab means split; alone in an aux window means a
+   * dedicated window; alone in the main window means a tab.
+   *
+   * Read from the bindings and the layout, never the DOM: the bindings are the
+   * cross-window truth (`plugin_panes_v1.json` is main-owned and replicated),
+   * and this window cannot see another window's document at all.
+   */
+  private pluginPanesOpen(pluginId: string): PluginPanePlacement[] {
+    const bound = new Set<number>();
+    for (const [key, binding] of Object.entries(this.pluginPanes.getSnapshot())) {
+      if (binding.pluginId === pluginId) {
+        bound.add(Number(key));
+      }
+    }
+    if (bound.size === 0) {
+      return [];
+    }
+    const layout = this.store.getState();
+    const placements: PluginPanePlacement[] = [];
+    for (const windowId of windowIds(layout)) {
+      for (const tabId of flattenTabIds(layout, windowId)) {
+        const tab = layout.tabs[tabId];
+        if (!tab) {
+          continue;
+        }
+        const panes = sessionIdsInTab(tab);
+        for (const sessionId of panes) {
+          if (!bound.has(sessionId)) {
+            continue;
+          }
+          placements.push({
+            tabId,
+            sessionId,
+            windowId,
+            surface: panes.length > 1
+              ? "split"
+              : windowId === MAIN_WINDOW_ID
+                ? "tab"
+                : "window",
+          });
+        }
+      }
+    }
+    return placements;
+  }
+
+  /// Bring an already-open panel forward: its tab becomes the active tab of
+  /// the window it lives in. Raising that OS window is App's job - the
+  /// controller owns the layout, not the window manager.
+  private focusPluginPane(placement: PluginPanePlacement): void {
+    this.setNotice(null);
+    this.mutate("active_tab", () =>
+      this.store.setActiveTab(placement.tabId, placement.windowId)
+    );
+    this.publish();
+  }
+
   /// Open a plugin panel as its own tab (plugin spec §4): allocate a reserved
   /// pane id, bind it, create an ORDINARY one-pane tab around it, and kick the
   /// plugin's ensure-up. Returns the new tab's id, or null when the plugin is
@@ -2411,10 +2790,29 @@ export class WorkspaceController {
   ///
   /// Async because of the crash-ordering rule below — the caller does not have
   /// to await it for the tab to appear, only to know the writes landed.
-  openPluginTab = async (
+  // Deliberately NOT `async`: an async wrapper would add a microtask hop
+  // between the binding write and this promise settling, and the crash-order
+  // test reads the interleaved write log at exactly that moment.
+  openPluginTab = (
     pluginId: string,
     groupId: string | null = null,
-  ): Promise<string | null> => {
+  ): Promise<string | null> => this.openPluginTabInternal(pluginId, groupId, false);
+
+  /**
+   * The tab open, with the dedicated-window variant folded in.
+   *
+   * `toNewWindow` runs `createTab` and `moveItemToWindow` inside ONE structural
+   * mutate rather than calling the two public actions in turn. Two mutates are
+   * two layout writes, and on an aux window a layout write IS a bus forward to
+   * main — so the half-torn shape (a plugin tab sitting in the rail it was
+   * never meant to appear in) would reach main, and disk, on its own. One
+   * transaction means the tab is only ever observed where it belongs.
+   */
+  private async openPluginTabInternal(
+    pluginId: string,
+    groupId: string | null,
+    toNewWindow: boolean,
+  ): Promise<string | null> {
     const manifest = this.pluginManifest(pluginId);
     if (manifest === null) {
       return null;
@@ -2438,17 +2836,28 @@ export class WorkspaceController {
       const layout = this.store.getState();
       const targetGroupId = groupId !== null && layout.groups[groupId] ? groupId : null;
       const tabId = this.generateId();
-      this.mutate("structural", () => this.store.createTab({
-        id: tabId,
-        sessionId: sessionId as number,
-        // Named from the manifest: with no session behind it, `derivedTitle`
-        // would call a working panel "Terminal ended".
-        title: manifest.name,
-        color: nextTabColor(layout),
-        groupId: targetGroupId,
-        // Ungrouped tabs land on THIS window's rail; a group names its own.
-        windowId: this.windowId,
-      }));
+      this.mutate("structural", () => {
+        const created = this.store.createTab({
+          id: tabId,
+          sessionId: sessionId as number,
+          // Named from the manifest: with no session behind it, `derivedTitle`
+          // would call a working panel "Terminal ended".
+          title: manifest.name,
+          color: nextTabColor(layout),
+          groupId: targetGroupId,
+          // Ungrouped tabs land on THIS window's rail; a group names its own.
+          windowId: this.windowId,
+        });
+        if (!toNewWindow || created === layout) {
+          return created;
+        }
+        // The tear-out path, unchanged — a dedicated window is a tab that was
+        // moved, not a new kind of window (menubar spec).
+        return this.store.moveItemToWindow(
+          { kind: "tab", id: tabId },
+          this.allocateAuxWindowId(),
+        );
+      });
       if (this.store.getState() === layout) {
         // The layout refused it (an id clash, a bad target). Take the binding
         // back rather than leave an orphan in the bindings file — and see it
@@ -2469,7 +2878,7 @@ export class WorkspaceController {
       this.publish();
       return null;
     }
-  };
+  }
 
   /// The same, as a split beside an existing pane: any pane may be a plugin
   /// pane, so this is the ordinary split path with a reserved id in place of a

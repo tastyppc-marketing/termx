@@ -46,6 +46,7 @@ async function renderPane(options: {
   panelPath?: string;
   onRelaunch?: () => void;
   onDismiss?: () => void;
+  minSize?: { width: number; height: number };
 } = {}) {
   await act(async () =>
     root.render(
@@ -54,6 +55,7 @@ async function renderPane(options: {
         name="Showroom"
         icon="🖼"
         panelPath={options.panelPath ?? "/"}
+        minSize={options.minSize ?? { width: 360, height: 240 }}
         onRelaunch={options.onRelaunch ?? (() => undefined)}
         onDismiss={options.onDismiss ?? (() => undefined)}
       />,
@@ -312,5 +314,125 @@ describe("plugin pane — down", () => {
     await act(async () => dismiss?.click());
     expect(onDismiss).toHaveBeenCalledTimes(1);
     expect(onRelaunch).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * `data-compact` (menubar spec): TermX never resizes a pane below the plugin's
+ * `minSize` on its behalf - it says so, and the panel restacks itself. The
+ * attribute is the whole contract, so which value appears when is load-bearing
+ * for every plugin's `[data-compact]` stylesheet.
+ */
+describe("plugin pane compact hint", () => {
+  /**
+   * jsdom lays nothing out, so both halves are stubbed: the box the pane
+   * reports, and the observer that would tell React it changed.
+   */
+  let notify: (() => void) | null = null;
+
+  function stubLayout(width: number, height: number): void {
+    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value(this: HTMLElement) {
+        return this.classList.contains("plugin-pane")
+          ? { width, height, top: 0, left: 0, right: width, bottom: height, x: 0, y: 0 }
+          : { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0 };
+      },
+    });
+  }
+
+  beforeEach(() => {
+    notify = null;
+    (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
+      constructor(callback: () => void) {
+        notify = callback;
+      }
+      observe(): void {}
+      disconnect(): void {
+        notify = null;
+      }
+    };
+  });
+
+  afterEach(() => {
+    delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    delete (HTMLElement.prototype as { getBoundingClientRect?: unknown })
+      .getBoundingClientRect;
+  });
+
+  function pane(): HTMLElement {
+    return container.querySelector<HTMLElement>(".plugin-pane")!;
+  }
+
+  it("says nothing about a pane with room to spare", async () => {
+    stubLayout(800, 600);
+    await renderPane();
+
+    expect(pane().hasAttribute("data-compact")).toBe(false);
+  });
+
+  it("marks a pane that is only too narrow", async () => {
+    stubLayout(300, 600);
+    await renderPane();
+
+    expect(pane().getAttribute("data-compact")).toBe("width");
+  });
+
+  it("marks a pane that is only too short", async () => {
+    stubLayout(800, 180);
+    await renderPane();
+
+    expect(pane().getAttribute("data-compact")).toBe("height");
+  });
+
+  it("marks a pane that is short of both", async () => {
+    stubLayout(300, 180);
+    await renderPane();
+
+    expect(pane().getAttribute("data-compact")).toBe("both");
+  });
+
+  it("clears the mark when the pane grows back", async () => {
+    stubLayout(300, 180);
+    await renderPane();
+    expect(pane().getAttribute("data-compact")).toBe("both");
+
+    stubLayout(800, 600);
+    await act(async () => notify?.());
+
+    expect(pane().hasAttribute("data-compact")).toBe(false);
+  });
+
+  it("re-marks the pane when it shrinks again", async () => {
+    stubLayout(800, 600);
+    await renderPane();
+
+    stubLayout(800, 180);
+    await act(async () => notify?.());
+
+    expect(pane().getAttribute("data-compact")).toBe("height");
+  });
+
+  it("says nothing about a pane with no box yet", async () => {
+    // A hidden tab and a first paint both measure zero. Calling that compact
+    // would have every panel restack itself the moment it mounts.
+    stubLayout(0, 0);
+    await renderPane();
+
+    expect(pane().hasAttribute("data-compact")).toBe(false);
+  });
+
+  it("follows the plugin's own floor, not a fixed one", async () => {
+    stubLayout(340, 600);
+    await renderPane({ minSize: { width: 320, height: 200 } });
+
+    expect(pane().hasAttribute("data-compact")).toBe(false);
+  });
+
+  it("marks the offline card too, which has to restack like the panel", async () => {
+    stubLayout(300, 180);
+    await renderPane({ state: pluginState({ pluginHealth: "down", pluginUrl: null }) });
+
+    expect(pane().getAttribute("data-compact")).toBe("both");
   });
 });

@@ -728,7 +728,10 @@ describe("bootstrapWorkspace plugin panes", () => {
   /// A registry holding the given entries, enabled with a per-id folder path
   /// unless the test says otherwise.
   function registryOf(
-    entries: Record<string, { enabled?: boolean; path?: string }>,
+    entries: Record<
+      string,
+      { enabled?: boolean; path?: string; autostart?: boolean }
+    >,
   ): string {
     return JSON.stringify({
       plugins: Object.fromEntries(
@@ -738,11 +741,96 @@ describe("bootstrapWorkspace plugin panes", () => {
             path: entry.path ?? `C:\\code\\${id}`,
             enabled: entry.enabled ?? true,
             grants: [],
+            ...(entry.autostart === true ? { autostart: true } : {}),
           },
         ]),
       ),
     });
   }
+
+  /**
+   * "Start with TermX" (menubar spec), end to end through the real registry,
+   * the real host and the real controller.
+   *
+   * The observable is the RUNTIME FILE READ: ensure-up's first act is to look
+   * for the plugin's runtime file, and with no pane bound and no autostart
+   * nothing ever asks. So a path in `runtimeReads` is proof the plugin was
+   * started for no reason other than the flag.
+   */
+  describe("autostart", () => {
+    it("starts a marked plugin at boot with no pane open", async () => {
+      const spy = healthyNative();
+      await bootWith({
+        seed: { "plugins_v1.json": registryOf({ showroom: { autostart: true } }) },
+        native: spy.native,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(spy.runtimeReads).toEqual(["C:\\data\\Showroom\\runtime.json"]);
+    });
+
+    it("starts nothing for an unmarked plugin", async () => {
+      const spy = healthyNative();
+      await bootWith({
+        seed: { "plugins_v1.json": registryOf({ showroom: {} }) },
+        native: spy.native,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(spy.runtimeReads).toEqual([]);
+    });
+
+    it("starts nothing for a marked plugin that is switched off", async () => {
+      // `enabled` is the real off switch: a disabled plugin has no manifest to
+      // give, so autostart must not smuggle it back into the lifecycle.
+      const spy = healthyNative();
+      await bootWith({
+        seed: {
+          "plugins_v1.json": registryOf({
+            showroom: { enabled: false, autostart: true },
+          }),
+        },
+        native: spy.native,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(spy.runtimeReads).toEqual([]);
+    });
+
+    it("never autostarts from an aux window", async () => {
+      // Spawning is main's alone (plugin spec §3). Two windows both finding a
+      // marked plugin down would both start the singleton.
+      const spy = healthyNative();
+      await bootWith({
+        seed: { "plugins_v1.json": registryOf({ showroom: { autostart: true } }) },
+        native: spy.native,
+        windowId: "aux-1",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(spy.runtimeReads).toEqual([]);
+    });
+
+    it("carries the autostart accessor on main's host, and not on an aux one", async () => {
+      const main = await bootWith({
+        seed: {
+          "plugins_v1.json": registryOf({
+            showroom: { autostart: true },
+            toolbox: {},
+          }),
+        },
+        native: healthyNative().native,
+      });
+      const aux = await bootWith({
+        seed: { "plugins_v1.json": registryOf({ showroom: { autostart: true } }) },
+        native: healthyNative().native,
+        windowId: "aux-1",
+      });
+
+      expect([...(main.pluginHost.autostartIds?.() ?? [])]).toEqual(["showroom"]);
+      expect(aux.pluginHost.autostartIds).toBeUndefined();
+    });
+  });
 
   /// A well-formed `termx-plugin.json`, so a test can prove the plugin's own
   /// file is preferred over the bundled table.

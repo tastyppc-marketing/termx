@@ -9,6 +9,23 @@ export interface PluginEntry {
   path: string;
   enabled: boolean;
   grants: string[];
+  /**
+   * "Start with TermX" (menubar spec): main brings this plugin up at boot even
+   * with no pane showing it.
+   *
+   * Typed `?: true` rather than `boolean` because OFF IS THE ABSENCE OF THE
+   * KEY, and the type is where that invariant is cheapest to enforce. Three
+   * things fall out of it: a registry written before the field existed reads as
+   * off with no migration, `plugins_v1.json` never grows an `"autostart": false`
+   * on every plugin the user briefly considered, and there is exactly one
+   * representation of off for the file, the parser and the store to agree on.
+   */
+  autostart?: true;
+}
+
+/// Does this entry start with TermX? The one place the invariant above is read.
+export function autostartOf(entry: PluginEntry): boolean {
+  return entry.autostart === true;
 }
 
 export interface PluginsV1 {
@@ -63,6 +80,9 @@ export function parsePluginsFile(text: string | null): PluginsV1 {
         path: value.path,
         enabled: typeof value.enabled === "boolean" ? value.enabled : false,
         grants,
+        // Anything that is not literally `true` - absent, false, a string a
+        // hand-editor typed, a null - is off, and off writes no key at all.
+        ...(value.autostart === true ? { autostart: true as const } : {}),
       },
     ]);
   }
@@ -141,6 +161,29 @@ export class PluginsStore {
       ...this.current.plugins,
       [id]: { ...entry, enabled },
     });
+  };
+
+  /**
+   * Flip "Start with TermX", persisting down the same debounced chain as
+   * `setEnabled` - one app-file write for a burst of Settings toggles.
+   *
+   * Switching OFF deletes the key rather than writing false, which is the
+   * invariant on `PluginEntry.autostart`. A no-op flip returns before touching
+   * anything, so a controlled checkbox re-rendering its own value cannot
+   * schedule a write.
+   */
+  setAutostart = (id: string, on: boolean): void => {
+    const entry = this.current.plugins[id];
+    if (!entry || autostartOf(entry) === on) {
+      return;
+    }
+    const next: PluginEntry = { ...entry };
+    if (on) {
+      next.autostart = true;
+    } else {
+      delete next.autostart;
+    }
+    this.replacePlugins({ ...this.current.plugins, [id]: next });
   };
 
   add = (id: string, path: string): void => {

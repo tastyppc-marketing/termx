@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import type { PluginManifest } from "../plugins/manifest";
+import {
+  DEFAULT_PLUGIN_MIN_SIZE,
+  minSizeOf,
+  type PluginManifest,
+} from "../plugins/manifest";
 import { PluginPane } from "../plugins/PluginPane";
 import type { SplitDir, SplitNode } from "../state/layout";
 import { SleepingPane } from "../terminal/SleepingPane";
@@ -482,6 +486,9 @@ export function SplitLayout({
                   name={manifest?.name ?? state.pluginId ?? "Plugin"}
                   icon={manifest?.icon ?? "?"}
                   panelPath={manifest?.panel.path ?? "/"}
+                  minSize={
+                    manifest === null ? DEFAULT_PLUGIN_MIN_SIZE : minSizeOf(manifest)
+                  }
                   onRelaunch={() => void actions.relaunchPlugin?.(sessionId)}
                   onDismiss={() => void actions.dismissPane(sessionId)}
                 />

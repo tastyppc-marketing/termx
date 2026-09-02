@@ -447,6 +447,15 @@
   white-space: nowrap;
 }
 
+/* A manifest TermX disagreed with but could still use: the same prose chip in
+   the caution colour rather than the error one. The distinction is the whole
+   point - red says "this plugin cannot run", amber says "it runs, but not
+   quite as its file asked", and only the first takes the controls away. */
+.settings-plugin__status--warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
 .settings-plugin__actions {
   display: flex;
   flex: 0 0 auto;

@@ -75,7 +75,7 @@ interface PanelOptions {
   store: PluginsStore;
   native?: PluginNative;
   health?: Record<string, PluginHealth>;
-  onOpen?: (pluginId: string) => void;
+  onOpen?: (pluginId: string, surface?: string) => void;
   pickFolder?: () => Promise<string | null>;
   bundled?: Parameters<typeof PluginsPanel>[0]["bundled"];
 }
@@ -251,7 +251,9 @@ describe("PluginsPanel rows", () => {
     });
 
     await click(action("showroom", "Open as tab")!);
-    expect(onOpen).toHaveBeenCalledWith("showroom");
+    // The button names its surface. Left to the manifest default, "Open as
+    // tab" would split for any plugin that declares itself a split.
+    expect(onOpen).toHaveBeenCalledWith("showroom", "tab");
   });
 
   it("offers no Open action for a disabled plugin", async () => {
@@ -637,6 +639,83 @@ describe("PluginsPanel remove confirmation", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("PluginsPanel manifest warnings", () => {
+  it("warns about a default surface the manifest does not allow", async () => {
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({
+        [WIDGETS_PATH]: manifestText({
+          surfaces: { default: "window", allowed: ["tab", "split"] },
+        }),
+      }),
+      onOpen: vi.fn(),
+    });
+
+    expect(
+      text(row("widgets").querySelector(".settings-plugin__status--warn")),
+    ).toBe('surfaces.default "window" is not in surfaces.allowed; using "tab".');
+  });
+
+  it("keeps a warned plugin fully usable", async () => {
+    // A warning is TermX disagreeing with a detail of a manifest it can still
+    // use. Taking the Open button or the switch away would turn a typo into a
+    // plugin that cannot be run at all, which is what `problem` is for.
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({
+        [WIDGETS_PATH]: manifestText({
+          surfaces: { default: "window", allowed: ["tab", "split"] },
+        }),
+      }),
+      onOpen: vi.fn(),
+    });
+
+    expect(action("widgets", "Open as tab")).not.toBeNull();
+    // The warning chip shares the base class for its shape, so "no problem"
+    // means no status chip that is NOT the warning one.
+    expect(
+      row("widgets").querySelector(
+        ".settings-plugin__status:not(.settings-plugin__status--warn)",
+      ),
+    ).toBeNull();
+    const toggle = row("widgets").querySelector<HTMLInputElement>(
+      "input[type='checkbox']",
+    )!;
+    expect(toggle.disabled).toBe(false);
+  });
+
+  it("says nothing about a manifest whose placement is consistent", async () => {
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({
+        [WIDGETS_PATH]: manifestText({
+          surfaces: { default: "split", allowed: ["tab", "split"] },
+          minSize: { width: 360, height: 240 },
+        }),
+      }),
+    });
+
+    expect(row("widgets").querySelector(".settings-plugin__status--warn")).toBeNull();
+  });
+
+  it("says nothing about a manifest that mentions no placement at all", async () => {
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({ [WIDGETS_PATH]: manifestText() }),
+    });
+
+    expect(row("widgets").querySelector(".settings-plugin__status--warn")).toBeNull();
   });
 });
 
@@ -1341,5 +1420,146 @@ describe("PluginsPanel empty state", () => {
     expect(
       container.querySelector("[data-testid='plugins-add']"),
     ).not.toBeNull();
+  });
+});
+
+/**
+ * "Start with TermX" (menubar spec): the second switch on a plugin row.
+ *
+ * It is gated harder than Enabled, and deliberately. Enabled is a statement of
+ * intent that survives a broken folder; autostart is an instruction TermX has
+ * to CARRY OUT at every launch, so it is only offered for a plugin that could
+ * actually start - on, with a folder, with a readable manifest. Switching it
+ * back off stays available whatever the state, exactly as Enabled does, so a
+ * row that broke while it was on is never trapped.
+ */
+describe("PluginsPanel autostart", () => {
+  const AUTOSTART = "Start with TermX";
+
+  function autostartToggle(id: string): HTMLInputElement | null {
+    return row(id).querySelector<HTMLInputElement>(
+      `input[type='checkbox'][name='plugin-autostart-${id}']`,
+    );
+  }
+
+  it("offers the switch on a healthy enabled row", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+      }),
+    });
+
+    const toggle = autostartToggle("showroom")!;
+    expect(toggle).not.toBeNull();
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.checked).toBe(false);
+    expect(text(row("showroom"))).toContain(AUTOSTART);
+  });
+
+  it("reflects a marked entry", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: {
+          path: SHOWROOM_PATH,
+          enabled: true,
+          grants: [],
+          autostart: true,
+        },
+      }),
+    });
+
+    expect(autostartToggle("showroom")!.checked).toBe(true);
+  });
+
+  it("writes the flag through the store", async () => {
+    const store = storeWith({
+      showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+    });
+    await renderPanel({ store });
+
+    await click(autostartToggle("showroom")!);
+
+    expect(store.getSnapshot().plugins.showroom!.autostart).toBe(true);
+  });
+
+  it("switches back off", async () => {
+    const store = storeWith({
+      showroom: {
+        path: SHOWROOM_PATH,
+        enabled: true,
+        grants: [],
+        autostart: true,
+      },
+    });
+    await renderPanel({ store });
+
+    await click(autostartToggle("showroom")!);
+
+    expect(store.getSnapshot().plugins.showroom).not.toHaveProperty("autostart");
+  });
+
+  it("names the plugin, because a column of identical switches names nothing", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: true, grants: [] },
+      }),
+    });
+
+    expect(autostartToggle("showroom")!.getAttribute("aria-label"))
+      .toBe("Start with TermX: Showroom");
+  });
+
+  it("refuses a plugin that is switched off", async () => {
+    await renderPanel({
+      store: storeWith({
+        showroom: { path: SHOWROOM_PATH, enabled: false, grants: [] },
+      }),
+    });
+
+    expect(autostartToggle("showroom")!.disabled).toBe(true);
+  });
+
+  it("refuses a plugin with no folder", async () => {
+    await renderPanel({ store: storeWith({}) });
+
+    expect(autostartToggle("showroom")!.disabled).toBe(true);
+  });
+
+  it("refuses a plugin whose folder is broken", async () => {
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+    });
+
+    // "Manifest missing": the lifecycle would refuse to start it, so promising
+    // to start it at every launch is a promise TermX cannot keep.
+    expect(autostartToggle("widgets")!.disabled).toBe(true);
+  });
+
+  it("lets a row that broke while it was on be switched off", async () => {
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [], autostart: true },
+      }),
+    });
+
+    expect(autostartToggle("widgets")!.disabled).toBe(false);
+  });
+
+  it("leaves a warned plugin fully switchable", async () => {
+    // A warning is not a problem: the plugin runs, so it can start with TermX.
+    await renderPanel({
+      store: storeWith({
+        widgets: { path: WIDGETS_PATH, enabled: true, grants: [] },
+      }),
+      native: fakeNative({
+        [WIDGETS_PATH]: manifestText({
+          surfaces: { default: "window", allowed: ["tab", "split"] },
+        }),
+      }),
+    });
+
+    expect(autostartToggle("widgets")!.disabled).toBe(false);
   });
 });
