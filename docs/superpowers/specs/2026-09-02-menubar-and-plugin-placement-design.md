@@ -71,7 +71,7 @@ Registry entry gains `autostart: boolean` (absent → false), parsed tolerantly 
 
 ## Dedicated windows
 
-`window` surface reuses the tear-out path: the plugin pane becomes a tab, the tab moves to a new aux window. It appears in the rail under Plugins like any other pane. Closing that window returns nothing to main (the pane closes; the plugin server stays up per the existing lifecycle rules — a singleton stays up for the next open). No new window type, no new bus ops.
+`window` surface reuses the tear-out path: the plugin pane becomes a tab, the tab moves to a new aux window. It appears in the rail under Plugins like any other pane. Closing that window returns nothing to main (the pane closes; the plugin server stays up per the existing lifecycle rules — a singleton stays up for the next open). No new window type, no new bus ops for the window surface itself. *Amended 2026-09-02 (review round 3):* the singleton race across windows needed one main→aux answer, so the plugin-pane channel gained `{ kind: "pluginPanes", op: "rejected", sessionIds }` — main refuses a second singleton bind at adopt and says so, instead of letting the aux wait out the adopt timeout. It is parsed in the unbind branch (same shape); main ignores its own echo.
 
 ## Data / files
 
