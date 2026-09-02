@@ -26,6 +26,14 @@ import { SessionPalette } from "./conversations/palette/SessionPalette";
 import type { LlmSessionRecord } from "./conversations/types";
 import { FolderSearch } from "./folders/FolderSearch";
 import { isEditableElement } from "./keyboard";
+import { Menubar, type MenuSpec } from "./menubar/Menubar";
+import {
+  viewMenu,
+  workspaceMenu,
+  type MenuRow,
+  type ViewToggleField,
+} from "./menubar/menus";
+import { PluginsMenu, type PluginsMenuRow } from "./menubar/PluginsMenu";
 import { tauriListDirs } from "./native/folders";
 import { tauriOpenFolder } from "./native/openFolder";
 import {
@@ -38,7 +46,11 @@ import {
 import { OutputPane, type LiveOutputRow } from "./outputs/OutputPane";
 import { OutputsStore } from "./outputs/outputsStore";
 import { BUNDLED_MANIFESTS } from "./plugins/bundled";
-import type { PluginManifest } from "./plugins/manifest";
+import {
+  surfacesOf,
+  type PluginManifest,
+  type PluginSurface,
+} from "./plugins/manifest";
 import { tauriPluginNative } from "./plugins/native";
 import { manifestFor } from "./plugins/registry";
 import {
@@ -58,6 +70,7 @@ import {
   SettingsSurface,
   type SettingsPlugins,
 } from "./settings/SettingsSurface";
+import type { SettingsSectionId } from "./settings/sections";
 import {
   TERMINAL_FONT_SIZE_MAX,
   TERMINAL_FONT_SIZE_MIN,
@@ -238,26 +251,28 @@ export default function App({ bootstrap = bootstrapWorkspace, windowId }: AppPro
 
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div className="app-brand">TermX</div>
-        {/* The window's own label, once there is a workspace to read it from.
-            Before that there is nothing to name and nowhere to store it. */}
-        {state.type === "ready" ? (
-          <WindowNameHeader workspace={state.workspace} />
-        ) : (
-          <div className="app-subtitle">{DEFAULT_WINDOW_NAME}</div>
-        )}
-      </header>
-      {state.type === "loading" ? (
-        <WorkspacePanel testId="workspace-loading" title="Starting TermX…">
-          Connecting to the terminal host.
-        </WorkspacePanel>
-      ) : state.type === "error" ? (
-        <WorkspacePanel testId="workspace-error" title="Workspace unavailable">
-          {state.message}
-        </WorkspacePanel>
-      ) : (
+      {/* The ready workspace draws its OWN header: the menubar in it is wired
+          to the controller, the settings store and the focused pane, none of
+          which exist until the workspace does. Before that there is nothing to
+          name, nowhere to store it, and no action a menu could offer. */}
+      {state.type === "ready" ? (
         <ReadyWorkspace workspace={state.workspace} />
+      ) : (
+        <>
+          <header className="app-header">
+            <div className="app-brand">TermX</div>
+            <div className="app-subtitle">{DEFAULT_WINDOW_NAME}</div>
+          </header>
+          {state.type === "loading" ? (
+            <WorkspacePanel testId="workspace-loading" title="Starting TermX…">
+              Connecting to the terminal host.
+            </WorkspacePanel>
+          ) : (
+            <WorkspacePanel testId="workspace-error" title="Workspace unavailable">
+              {state.message}
+            </WorkspacePanel>
+          )}
+        </>
       )}
     </div>
   );
@@ -289,6 +304,17 @@ const PLUGIN_HEALTH_RANK: Record<PluginHealth, number> = {
  */
 interface PluginManifestSource {
   pluginManifestFor?: (pluginId: string) => PluginManifest | null;
+}
+
+/**
+ * The registry entry's "start with TermX" flag, seen optionally.
+ *
+ * Declared here rather than imported so App compiles both before and after the
+ * field lands on `PluginEntry`, and so a registry written by an older TermX —
+ * which has no such field — simply reads as off.
+ */
+interface PluginAutostartEntry {
+  autostart?: boolean;
 }
 
 /** Legacy fixtures carry no reconnect machine; they are simply always up. */
@@ -336,6 +362,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     uiStateStore.getSnapshot,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Which section the surface should land on when it is opened from a menu row
+  // that names a destination. Null = wherever the surface starts on its own.
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(
+    null,
+  );
   const [featuresOpen, setFeaturesOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
@@ -497,6 +528,11 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const focusedSessionId = activeTab
     ? resolveFocusedSession(activeTab.split, focusByTab[activeTab.id])
     : null;
+  // Splits and Close pane act on the focused pane, so the menu rows that offer
+  // them are only live when that pane is.
+  const focusedPaneLive =
+    focusedSessionId !== null &&
+    snapshot.paneStates[focusedSessionId]?.status === "live";
   const liveOutputs = useSyncExternalStore(
     outputsStore.subscribe,
     () =>
@@ -1132,6 +1168,46 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     return worst;
   }, [snapshot.paneStates]);
 
+  /**
+   * The launcher's rows: one per REGISTRY entry.
+   *
+   * Deliberately NOT the rail's union with the bundled table. The rail names
+   * panes, so naming a first-party panel before anyone adds its folder is
+   * right; a launcher OFFERS to start things, and offering to start a plugin
+   * that is not installed is an offer it cannot keep.
+   *
+   * The dot is three-valued and the middle value is the honest one: health is
+   * only observed through panes that are on screen, so a plugin whose server is
+   * up with nothing open still reads "down" — registered, nothing answering
+   * here. "starting" reads the same way rather than as a fourth state the
+   * mockup never drew.
+   */
+  const pluginMenuRows = useMemo<readonly PluginsMenuRow[]>(() => {
+    const rows: PluginsMenuRow[] = [];
+    for (const [id, entry] of Object.entries(pluginsRegistry.plugins)) {
+      const manifest = knownManifest(id);
+      if (manifest === null) {
+        // A plugin TermX cannot name has nothing to put in a menu, exactly as
+        // in the rail. Settings is where that is explained, with the field
+        // that failed.
+        continue;
+      }
+      rows.push({
+        id,
+        name: manifest.name,
+        icon: manifest.icon,
+        status: !entry.enabled
+          ? "disabled"
+          : pluginHealth[id] === "up"
+            ? "up"
+            : "down",
+        autostart: (entry as PluginAutostartEntry).autostart === true,
+        surfaces: surfacesOf(manifest),
+      });
+    }
+    return rows.sort((left, right) => left.name.localeCompare(right.name));
+  }, [pluginsRegistry, knownManifest, pluginHealth, manifestRevision]);
+
   // Plugin management WRITES `plugins_v1.json`, and the main window is its only
   // writer (spec §2) — bootstrap hands every window a read-write store, so the
   // single-writer rule is kept here. An aux window is handed no bundle and
@@ -1146,7 +1222,12 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       // this seam; a folder without one falls back to the bundled table.
       native: tauriPluginNative,
       health: pluginHealth,
-      onOpen: (pluginId: string) => void controller.openPluginTab(pluginId),
+      // The ONE entry point, exactly as the launcher uses it: the panel names
+      // the surface it wants and the controller owns what that means. Wiring
+      // this to `openPluginTab` instead would still open something, which is
+      // why it has to be pinned rather than eyeballed.
+      onOpen: (pluginId: string, surface?: PluginSurface) =>
+        void controller.openPlugin(pluginId, surface),
     };
   }, [controller, pluginsStore, pluginHealth]);
 
@@ -1309,6 +1390,140 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   };
   openSaveForRecordRef.current = openSaveForRecord;
 
+  // ---- The menubar (menubar + plugin-placement spec) ----
+  // Every row is a second doorway onto an action some other surface already
+  // offers — the rail's context menus, the pane toolbar, a keyboard shortcut.
+  // Nothing below reimplements one.
+  const workspaceRows: readonly MenuRow[] = workspaceMenu({
+    hasLivePane: focusedPaneLive,
+    canSaveSession:
+      savedStore !== null && activeTabId !== null && focusedSessionId !== null,
+    newTab: () =>
+      void controller.createTab({ groupId: activeGroupId, profile: null }),
+    openFolderAsTab: () =>
+      setFolderSearch({ groupId: activeGroupId, profile: null }),
+    // Through the cached per-tab actions, so a menu split lands the focus ring
+    // on the new pane exactly as the pane toolbar's split does.
+    splitPane: (dir) => {
+      if (activeTabId !== null && focusedSessionId !== null) {
+        actionsFor(activeTabId).splitPane(focusedSessionId, dir);
+      }
+    },
+    // The SAME Ctrl+Shift+W the keyboard sends. The confirmation a LIVE pane
+    // gets before it dies lives inside SplitLayout's handler, so calling
+    // closePane() from here would be a second implementation whose one
+    // difference from the first is that it kills the pane without asking.
+    closePane: () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "w",
+          ctrlKey: true,
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    },
+    newWindow: () => void intoNewWindow(),
+    // F2 on the header's own label: the editor is that component's state, and
+    // F2 is the key it already listens for — the same route the keyboard takes.
+    renameWindow: () => {
+      const label = document.querySelector<HTMLElement>(
+        "[data-testid='window-name']",
+      );
+      label?.focus();
+      label?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true }),
+      );
+    },
+    saveSession: () => {
+      if (activeTabId !== null && focusedSessionId !== null) {
+        openSaveForPane(activeTabId, focusedSessionId);
+      }
+    },
+  });
+
+  /**
+   * A genuinely NEW window: make a tab, then hand THAT tab a window of its own.
+   *
+   * The tab is identified by diffing the layout, never by reading the active
+   * id. A create that failed — or a "ask every time" new-tab policy that only
+   * raised the folder searcher — leaves the active id pointing at the tab the
+   * user is standing in, and moving that one out is the exact bug this row
+   * would otherwise be: "New window" silently meaning "take my current work
+   * somewhere else".
+   */
+  const intoNewWindow = async (): Promise<void> => {
+    const before = new Set(Object.keys(controller.getSnapshot().layout.tabs));
+    await controller.createTab({ groupId: activeGroupId, profile: null });
+    const created = Object.keys(controller.getSnapshot().layout.tabs).find(
+      (id) => !before.has(id),
+    );
+    if (created !== undefined) {
+      controller.moveItemToWindow({ kind: "tab", id: created }, "new");
+    }
+  };
+
+  // Written field by field rather than through a computed key: a settings
+  // patch built from a variable name is a patch TypeScript cannot check.
+  const setChrome = (field: ViewToggleField, next: boolean) => {
+    settingsStore.update(
+      field === "sideRail"
+        ? { sideRail: next }
+        : field === "conversationsRail"
+          ? { conversationsRail: next }
+          : { statusBar: next },
+    );
+  };
+
+  const menubarMenus: readonly MenuSpec[] = [
+    { kind: "menu", id: "workspace", label: "Workspace", rows: workspaceRows },
+    {
+      kind: "menu",
+      id: "view",
+      label: "View",
+      rows: viewMenu({
+        sideRail: settings.sideRail,
+        conversationsRail: settings.conversationsRail,
+        statusBar: settings.statusBar,
+        toggle: setChrome,
+      }),
+    },
+    {
+      kind: "panel",
+      id: "plugins",
+      label: "Plugins",
+      render: (close) => (
+        <PluginsMenu
+          rows={pluginMenuRows}
+          onOpen={(pluginId, surface) => {
+            // The surface is passed through ONLY when a chip was pressed. A row
+            // press must reach the controller with no surface at all, so the
+            // manifest's default is read in one place instead of being copied
+            // into the menu that draws it.
+            void (surface === undefined
+              ? controller.openPlugin(pluginId)
+              : controller.openPlugin(pluginId, surface));
+          }}
+          onManage={() => {
+            setSettingsSection("plugins");
+            setSettingsOpen(true);
+          }}
+          onDone={close}
+        />
+      ),
+    },
+    {
+      kind: "item",
+      id: "settings",
+      label: "Settings",
+      onSelect: () => {
+        setSettingsSection(null);
+        setSettingsOpen(true);
+      },
+    },
+  ];
+
   const commitSave = (result: {
     name: string;
     description: string;
@@ -1336,48 +1551,60 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
 
   return (
     <>
+      <header className="app-header">
+        <div className="app-brand">TermX</div>
+        {/* The window's own label, read from the layout it lives in. */}
+        <WindowNameHeader workspace={workspace} />
+        {/* The hairline that separates naming the window from acting on it. */}
+        <span className="app-header__divider" aria-hidden="true" />
+        <Menubar menus={menubarMenus} />
+      </header>
       <ConnectionBanner
         state={connectionState}
         onRetry={() => connection?.retryNow()}
       />
       <ThemeProvider themeId={settings.theme} />
       <div className="app-workspace">
-        <Sidebar
-          snapshot={snapshot}
-          actions={sidebarActions}
-          windowId={controller.windowId}
-          hostConnected={connectionState.phase === "connected"}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onOpenFolderSearch={(groupId) =>
-            setFolderSearch({ groupId, profile: null })}
-          maxGroupDepth={settings.maxGroupDepth}
-          // The rail's hover preview names panes from the same source the pane
-          // headers do, so the two can never disagree.
-          paneTitles={controller.paneTitles}
-          // ...and where each of them is standing. A pane name is a profile
-          // and a folder tail, which two panes in one repo share; the path is
-          // what tells them apart.
-          paneCwds={controller.paneCwds}
-          {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
-          {...(sidebarSaved ? { saved: sidebarSaved } : {})}
-          {...(sidebarHosts ? { hosts: sidebarHosts } : {})}
-          plugins={sidebarPlugins}
-          width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
-          onResize={(width) =>
-            uiStateStore.update((current) => setSidebarWidth(current, width))}
-          {...(sidebarConversations
-            ? { onExpandConversations: () => setConversationsFull(true) }
-            : {})}
-          sleeping={sleeping}
-          footerTray={
-            <Tray
-              trayId="sidebar-footer"
-              context={trayContext}
-              uiState={uiSnapshot}
-              onConfigure={configureTray}
-            />
-          }
-        />
+        {/* Hidden from the View menu, and only ever from there: the bar the
+            toggle lives on stays on screen, so the rail can always come back. */}
+        {settings.sideRail ? (
+          <Sidebar
+            snapshot={snapshot}
+            actions={sidebarActions}
+            windowId={controller.windowId}
+            hostConnected={connectionState.phase === "connected"}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenFolderSearch={(groupId) =>
+              setFolderSearch({ groupId, profile: null })}
+            maxGroupDepth={settings.maxGroupDepth}
+            // The rail's hover preview names panes from the same source the pane
+            // headers do, so the two can never disagree.
+            paneTitles={controller.paneTitles}
+            // ...and where each of them is standing. A pane name is a profile
+            // and a folder tail, which two panes in one repo share; the path is
+            // what tells them apart.
+            paneCwds={controller.paneCwds}
+            {...(sidebarConversations ? { conversations: sidebarConversations } : {})}
+            {...(sidebarSaved ? { saved: sidebarSaved } : {})}
+            {...(sidebarHosts ? { hosts: sidebarHosts } : {})}
+            plugins={sidebarPlugins}
+            width={uiSnapshot.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
+            onResize={(width) =>
+              uiStateStore.update((current) => setSidebarWidth(current, width))}
+            {...(sidebarConversations
+              ? { onExpandConversations: () => setConversationsFull(true) }
+              : {})}
+            sleeping={sleeping}
+            footerTray={
+              <Tray
+                trayId="sidebar-footer"
+                context={trayContext}
+                uiState={uiSnapshot}
+                onConfigure={configureTray}
+              />
+            }
+          />
+        ) : null}
         <div
           className="viewer-area"
           style={{ flexDirection: viewerLayoutDirection(viewerGeometry) }}
@@ -1454,6 +1681,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           <SettingsSurface
             store={settingsStore}
             onClose={() => setSettingsOpen(false)}
+            {...(settingsSection ? { section: settingsSection } : {})}
             {...(settingsPlugins ? { plugins: settingsPlugins } : {})}
           />
         ) : null}
@@ -1587,32 +1815,34 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           />
         ) : null}
       </div>
-      <StatusBar
-        cwd={
-          focusedSessionId !== null
-            ? controller.sessionCwd?.(focusedSessionId) ?? null
-            : null
-        }
-        profile={
-          focusedSessionId !== null
-            ? controller.sessionProfile?.(focusedSessionId) ?? null
-            : null
-        }
-        sshHost={
-          focusedSessionId !== null
-            ? controller.sshPaneInfo?.(focusedSessionId)?.host ?? null
-            : null
-        }
-        // The path is the shortest route to the folder itself. A remote pane's
-        // cwd lives on the far side of an ssh hop, so there is nothing here to
-        // open — the bar keeps it as plain text in that case.
-        onOpenCwd={
-          focusedSessionId !== null &&
-          !controller.sshPaneInfo?.(focusedSessionId)
-            ? (folder) => void tauriOpenFolder(folder)
-            : undefined
-        }
-      />
+      {settings.statusBar ? (
+        <StatusBar
+          cwd={
+            focusedSessionId !== null
+              ? controller.sessionCwd?.(focusedSessionId) ?? null
+              : null
+          }
+          profile={
+            focusedSessionId !== null
+              ? controller.sessionProfile?.(focusedSessionId) ?? null
+              : null
+          }
+          sshHost={
+            focusedSessionId !== null
+              ? controller.sshPaneInfo?.(focusedSessionId)?.host ?? null
+              : null
+          }
+          // The path is the shortest route to the folder itself. A remote pane's
+          // cwd lives on the far side of an ssh hop, so there is nothing here to
+          // open — the bar keeps it as plain text in that case.
+          onOpenCwd={
+            focusedSessionId !== null &&
+            !controller.sshPaneInfo?.(focusedSessionId)
+              ? (folder) => void tauriOpenFolder(folder)
+              : undefined
+          }
+        />
+      ) : null}
     </>
   );
 }

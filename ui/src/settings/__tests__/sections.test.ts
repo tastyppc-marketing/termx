@@ -45,7 +45,7 @@ describe("SETTINGS_SECTIONS", () => {
       SETTINGS_SECTIONS.map((section) => [section.id, section.fields]),
     );
     expect(byId.general).toEqual(["onWindowClose", "sleepHiddenTerminals"]);
-    expect(byId.appearance).toEqual(["theme"]);
+    expect(byId.appearance).toEqual(["theme", "sideRail", "statusBar"]);
     expect(byId.terminal).toEqual([
       "defaultProfile",
       "terminalFontSize",

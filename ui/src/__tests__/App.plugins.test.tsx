@@ -227,6 +227,7 @@ interface Harness {
   controller: { activateTab: unknown; moveItem: unknown };
   openPluginTab: ReturnType<typeof vi.fn>;
   openPluginSplit: ReturnType<typeof vi.fn>;
+  openPlugin: ReturnType<typeof vi.fn>;
   relaunchPlugin: ReturnType<typeof vi.fn>;
   plugins: PluginsStore;
 }
@@ -245,6 +246,7 @@ function harness(
   const current = options.snapshot ?? snapshot();
   const openPluginTab = vi.fn(async () => "tab-2");
   const openPluginSplit = vi.fn(async () => 0x8000_0000);
+  const openPlugin = vi.fn(async () => undefined);
   const relaunchPlugin = vi.fn(async () => undefined);
   const plugins = new PluginsStore({ initial: options.registry ?? INSTALLED });
   const controller = {
@@ -261,6 +263,7 @@ function harness(
     dispose: vi.fn(),
     openPluginTab,
     openPluginSplit,
+    openPlugin,
     relaunchPlugin,
     splitPane: vi.fn(async () => null),
     closePane: vi.fn(async () => undefined),
@@ -292,6 +295,7 @@ function harness(
     controller,
     openPluginTab,
     openPluginSplit,
+    openPlugin,
     relaunchPlugin,
     plugins,
   };
@@ -623,7 +627,7 @@ describe("App plugin wiring — split layout", () => {
 });
 
 describe("App plugin wiring — settings", () => {
-  it("gives the main window the plugins bundle, opening a plugin as a tab", async () => {
+  it("gives the main window the plugins bundle, opening through openPlugin", async () => {
     const fixture = harness();
     await renderApp(fixture);
 
@@ -637,8 +641,12 @@ describe("App plugin wiring — settings", () => {
     // manifest through it, so a hand-rolled stand-in would read nothing.
     expect(bundle?.native).toBe(tauriPluginNative);
 
-    bundle?.onOpen?.("showroom");
-    expect(fixture.openPluginTab).toHaveBeenCalledWith("showroom");
+    // The panel names the surface it wants and the controller owns what that
+    // means. It used to call `openPluginTab` directly, which pinned every
+    // Open to a tab however the plugin's manifest was written.
+    bundle?.onOpen?.("showroom", "tab");
+    expect(fixture.openPlugin).toHaveBeenCalledExactlyOnceWith("showroom", "tab");
+    expect(fixture.openPluginTab).not.toHaveBeenCalled();
   });
 
   it("reports the health of a plugin that has a panel open", async () => {

@@ -1,0 +1,107 @@
+/* The Plugins launcher inside a menubar dropdown. It borrows the dropdown's
+   rows wholesale (.menubar__row) and adds only what a plugin row needs the
+   others do not: a glyph, a status dot, and the placement chips. */
+
+.plugins-menu__empty {
+  padding: 4px 10px 6px;
+  color: var(--text-hint);
+}
+
+/* A row is the plugin's own button plus the chip strip beside it. The button
+   takes the room the chips leave, so a long plugin name ellipsizes instead of
+   pushing the chips off the panel. */
+.plugins-menu__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 10px;
+}
+
+.plugins-menu__open {
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 8px;
+}
+
+/* Fixed width, so the names line up with each other however wide the manifest
+   glyphs are — the same rule the rail's plugin menu items keep. */
+.plugins-menu__icon {
+  width: 14px;
+  flex: 0 0 auto;
+  color: var(--text-sub);
+  text-align: center;
+}
+
+/* Square, 6px, no ring: a mark, not a badge. */
+.plugins-menu__dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+}
+
+.plugins-menu__dot--up {
+  background: var(--ok);
+}
+
+/* Registered and not answering. Amber would read as "starting"; this is a
+   plugin that is installed and simply not there. */
+.plugins-menu__dot--down {
+  background: var(--error);
+}
+
+.plugins-menu__dot--disabled {
+  background: var(--text-disabled);
+}
+
+/* The whole row of a switched-off plugin recedes, including its glyph: it is
+   listed so you know it exists, not offered. */
+.plugins-menu__row:has(.plugins-menu__dot--disabled) .plugins-menu__open,
+.plugins-menu__row:has(.plugins-menu__dot--disabled) .plugins-menu__icon {
+  color: var(--text-disabled);
+}
+
+/* "· starts with TermX" — a fact about the row, quieter than the name it
+   trails, and never wide enough to push the name out of the panel. */
+.plugins-menu__auto {
+  color: var(--text-hint);
+  font-size: 10px;
+}
+
+.plugins-menu__chips {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+
+/* Overline chips: 9px bold, wide tracking, a hairline box. The filled one is
+   the plugin's default surface — the answer you get by pressing the row. */
+.plugins-menu__chip {
+  padding: 1px 5px;
+  color: var(--text-hint);
+  background: transparent;
+  border: 1px solid var(--divider);
+  border-radius: 0;
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.plugins-menu__chip--default {
+  color: var(--fg);
+  background: var(--accent-25);
+  border-color: var(--accent-25);
+}
+
+.plugins-menu__chip:hover,
+.plugins-menu__chip:focus-visible {
+  color: var(--text-main);
+  border-color: var(--text-sub);
+  outline: none;
+}
+
+.plugins-menu__chip--default:hover,
+.plugins-menu__chip--default:focus-visible {
+  color: var(--fg);
+  border-color: var(--accent);
+}

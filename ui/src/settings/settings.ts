@@ -115,6 +115,16 @@ export interface TermxSettings {
   readonly sshEncryptPasswords: boolean;
   /** Terminal text size in px. Ctrl+scroll over any pane adjusts it live. */
   readonly terminalFontSize: number;
+  /**
+   * Show the side rail (the sidebar with tabs, groups, plugins and hosts).
+   *
+   * A View-menu toggle rather than a hidden trick, and on by default: the
+   * rail is how a workspace is navigated, so hiding it is a deliberate
+   * "give me the whole window for one terminal" move, never a default.
+   */
+  readonly sideRail: boolean;
+  /** Show the status bar along the bottom (cwd, profile, ssh host). */
+  readonly statusBar: boolean;
 }
 
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -144,6 +154,8 @@ export const DEFAULT_SETTINGS: TermxSettings = {
   sshPasswordPolicy: "store",
   sshEncryptPasswords: true,
   terminalFontSize: 14,
+  sideRail: true,
+  statusBar: true,
 };
 
 /** Any finite number is honoured, rounded and clamped to the legible range;
@@ -293,6 +305,14 @@ export function parseSettings(text: string | null): TermxSettings {
         ? record.sshEncryptPasswords
         : DEFAULT_SETTINGS.sshEncryptPasswords,
     terminalFontSize: parseTerminalFontSize(record.terminalFontSize),
+    sideRail:
+      typeof record.sideRail === "boolean"
+        ? record.sideRail
+        : DEFAULT_SETTINGS.sideRail,
+    statusBar:
+      typeof record.statusBar === "boolean"
+        ? record.statusBar
+        : DEFAULT_SETTINGS.statusBar,
   };
 }
 

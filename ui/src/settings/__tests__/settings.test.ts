@@ -36,6 +36,8 @@ const ALTERNATE_SETTINGS: TermxSettings = {
   sshPasswordPolicy: "never",
   sshEncryptPasswords: false,
   terminalFontSize: 18,
+  sideRail: false,
+  statusBar: false,
 };
 
 describe("parseSettings", () => {
@@ -74,6 +76,8 @@ describe("parseSettings", () => {
       sshPasswordPolicy: "never",
       sshEncryptPasswords: false,
       terminalFontSize: 18,
+      sideRail: false,
+      statusBar: false,
     } as const;
     expect(parseSettings(serializeSettings(settings))).toEqual(settings);
   });
@@ -104,6 +108,8 @@ describe("parseSettings", () => {
         sshPasswordPolicy: "sometimes",
         sshEncryptPasswords: "dpapi",
         terminalFontSize: "big",
+        sideRail: "yes",
+        statusBar: 0,
       }),
     );
     expect(parsed).toEqual({
@@ -130,6 +136,8 @@ describe("parseSettings", () => {
       sshPasswordPolicy: DEFAULT_SETTINGS.sshPasswordPolicy,
       sshEncryptPasswords: DEFAULT_SETTINGS.sshEncryptPasswords,
       terminalFontSize: DEFAULT_SETTINGS.terminalFontSize,
+      sideRail: DEFAULT_SETTINGS.sideRail,
+      statusBar: DEFAULT_SETTINGS.statusBar,
     });
   });
 
@@ -217,6 +225,33 @@ describe("parseSettings", () => {
       savedConversationsRail: false,
     });
   });
+
+  it(
+    "chrome toggles: the side rail and the status bar are both on by " +
+      "default — a menu item that hides a surface must not decide, on a " +
+      "corrupt settings file, that the workspace has no rail",
+    () => {
+      expect(DEFAULT_SETTINGS.sideRail).toBe(true);
+      expect(DEFAULT_SETTINGS.statusBar).toBe(true);
+      expect(parseSettings(null)).toMatchObject({ sideRail: true, statusBar: true });
+      expect(parseSettings(JSON.stringify({}))).toMatchObject({
+        sideRail: true,
+        statusBar: true,
+      });
+      // Off is a real, storable answer — this is what the View menu writes.
+      expect(
+        parseSettings(JSON.stringify({ sideRail: false, statusBar: false })),
+      ).toMatchObject({ sideRail: false, statusBar: false });
+      // Anything that is not a boolean falls back to on.
+      for (const junk of ["false", "", 0, 1, null, [], {}]) {
+        expect(
+          parseSettings(
+            JSON.stringify({ sideRail: junk, statusBar: junk, defaultProfile: "cmd" }),
+          ),
+        ).toMatchObject({ sideRail: true, statusBar: true, defaultProfile: "cmd" });
+      }
+    },
+  );
 
   it(
     "window rename does NOT touch the rail tab by default — the whole point " +

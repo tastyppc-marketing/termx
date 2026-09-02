@@ -37,7 +37,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     label: "General",
     fields: ["onWindowClose", "sleepHiddenTerminals"],
   },
-  { id: "appearance", label: "Appearance", fields: ["theme"] },
+  {
+    id: "appearance",
+    label: "Appearance",
+    // The two chrome toggles the View menu drives live here, next to the
+    // theme: what the window LOOKS like, in one place, however it is reached.
+    fields: ["theme", "sideRail", "statusBar"],
+  },
   {
     id: "terminal",
     label: "Terminal",

@@ -44,7 +44,8 @@ Two new manifest fields, both optional and tolerant:
 "minSize":  { "width": 360, "height": 240 }
 ```
 
-- `surfaces` absent → `{ default: "tab", allowed: ["tab", "split"] }` (Showroom and Recall keep working unchanged). `default` must be in `allowed`; otherwise the manifest is *warned* (registry `problem`) and the default falls back to the first allowed.
+- `surfaces` absent → `{ default: "tab", allowed: ["tab", "split"] }` (Showroom and Recall keep working unchanged). `default` must be in `allowed`; otherwise the default falls back to the first allowed and the manifest carries a **`warning`** (a separate field from `problem`, shown as its own amber chip in Settings). *Amended 2026-09-02 during build:* a warning gates nothing — `problem` is what removes Open/Enabled, and a typo in `surfaces.default` must never make a plugin unrunnable.
+- *Amended 2026-09-02:* `openPlugin` takes an optional third argument, `at?: PluginOpenTarget` (the group a rail create-menu was opened on, or the tab + pane a split-menu was opened on), so the rail keeps opening into the right place. The menubar never passes it.
 - `minSize` absent → `{ width: 320, height: 200 }`.
 - Surfaces: `tab` = `openPluginTab`; `split` = `openPluginSplit` on the focused pane; `window` = open as a tab then `moveItemToWindow(item, "new")` in one structural transaction (or one bus forward from aux).
 

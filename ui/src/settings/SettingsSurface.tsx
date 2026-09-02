@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import type { PluginSurface } from "../plugins/manifest";
 import type { PluginNative } from "../plugins/native";
 import type { PluginsStore } from "../plugins/registry";
 import { deriveTokens } from "../theme/deriveTokens";
@@ -48,13 +49,28 @@ export interface SettingsPlugins {
   native: PluginNative;
   /** Live process health by plugin id; omitted where nothing is watching. */
   health?: Record<string, PluginHealth>;
-  onOpen?(pluginId: string): void;
+  /**
+   * Open a plugin, on the surface the panel asked for.
+   *
+   * The surface is load-bearing and must not be dropped on the way through:
+   * a narrower `(pluginId) => void` is still ASSIGNABLE here, so a handler
+   * that ignores the second argument type-checks perfectly and silently pins
+   * every Open to one surface. That is a compile-clean bug, which is why the
+   * pass-through is pinned by a test at the mount site as well.
+   */
+  onOpen?(pluginId: string, surface?: PluginSurface): void;
 }
 
 export interface SettingsSurfaceProps {
   store: SettingsStore;
   onClose(): void;
   plugins?: SettingsPlugins;
+  /**
+   * Which section the surface opens on. Absent = the first one, as it always
+   * has. A caller that names a destination ("Manage plugins…") should land on
+   * it rather than on General with a hunt to follow.
+   */
+  section?: SettingsSectionId;
 }
 
 interface LadderOption<T> {
@@ -225,11 +241,12 @@ export function SettingsSurface({
   store,
   onClose,
   plugins,
+  section,
 }: SettingsSurfaceProps) {
   const settings = useSettings(store);
   const rootRef = useRef<HTMLElement | null>(null);
   const [activeId, setActiveId] = useState<SettingsSectionId>(
-    SETTINGS_SECTIONS[0]!.id,
+    section ?? SETTINGS_SECTIONS[0]!.id,
   );
 
   // Focus moves into the surface on mount (so Esc works immediately and the
@@ -469,6 +486,26 @@ function SettingsControl({
             Switches instantly — running terminals retint as you click.
           </p>
         </div>
+      );
+    case "sideRail":
+      return (
+        <Toggle
+          name="sideRail"
+          label="Show the side rail"
+          hint="The sidebar with tabs, groups and plugins. Off gives the whole window to the terminals; the View menu toggles it too."
+          checked={settings.sideRail}
+          onToggle={(checked) => onChange({ sideRail: checked })}
+        />
+      );
+    case "statusBar":
+      return (
+        <Toggle
+          name="statusBar"
+          label="Show the status bar"
+          hint="The bottom strip with the focused pane's folder, profile and SSH host."
+          checked={settings.statusBar}
+          onToggle={(checked) => onChange({ statusBar: checked })}
+        />
       );
     case "defaultProfile":
       return (

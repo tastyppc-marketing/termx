@@ -144,6 +144,16 @@ input {
   text-transform: uppercase;
 }
 
+/* The hairline between naming the window and acting on it: the window name is
+   a label, the menubar is a set of doors, and one 1px rule is the whole
+   separation they need. Sized to the type it stands beside, not to the row. */
+.app-header__divider {
+  width: 1px;
+  height: 16px;
+  flex: 0 0 auto;
+  background: var(--divider);
+}
+
 .app-workspace {
   display: flex;
   min-width: 0;
