@@ -728,6 +728,17 @@ export class WorkspaceController {
   /// every read site is a plain lookup instead of a null dance.
   private readonly pluginPanes: PaneBindingsStore;
   private readonly plugins: WorkspacePluginHost | null;
+  /**
+   * Names the user typed over a pane, keyed by session id (Michael: "I want to
+   * change the terminal name").
+   *
+   * RUNTIME ONLY, and that is the design rather than a shortcut: session ids
+   * do not survive a restart, so a name written into the layout file would come
+   * back attached to whatever session inherited the id — or to no pane at all.
+   * A terminal that outlives its name is a much smaller surprise than a name
+   * that outlives its terminal.
+   */
+  private readonly paneNames = new Map<number, string>();
   /// App's live focus report for `openPlugin("split")`; null until it wires it.
   private focusedPaneProvider: ((tabId: string) => number | null) | null = null;
   /// Raises another OS window; null when nothing can (tests, non-Tauri hosts).
@@ -961,6 +972,10 @@ export class WorkspaceController {
         if (this.sessions.delete(sessionId)) {
           this.sessionsRevision += 1;
         }
+        // The name goes with the terminal it named. Ids are never reused, so
+        // this is hygiene rather than safety — but a map that only ever grows
+        // is a leak in a window left open for days.
+        this.paneNames.delete(sessionId);
         this.settleResumeWait(sessionId, "gone");
         this.stopSshPasswordWatch(sessionId);
         // The host has forgotten this session for good, so its ssh identity
@@ -1228,7 +1243,11 @@ export class WorkspaceController {
       return {
         id: tab.id,
         groupId,
-        title: tab.title ?? derivedTitle(primary),
+        // The tab's own name first — a rail rename is deliberate and it is
+        // THIS row the user made it on. Failing that, the pane's name, so a
+        // renamed lone terminal reads the same in the rail as in its own
+        // header. Only then the derivation.
+        title: tab.title ?? this.paneNames.get(primarySessionId) ?? derivedTitle(primary),
         color: tab.color,
         fill: tab.fill,
         primarySessionId,
@@ -2038,13 +2057,50 @@ export class WorkspaceController {
     const titles: Record<number, string> = {};
     const lone = sessionIds.length === 1 ? sessionIds[0] : undefined;
     if (lone !== undefined) {
-      titles[lone] = tab.title ?? derivedTitle(this.sessions.get(lone));
+      titles[lone] = this.paneNames.get(lone)
+        ?? tab.title
+        ?? derivedTitle(this.sessions.get(lone));
       return titles;
     }
     for (const sessionId of sessionIds) {
-      titles[sessionId] = derivedTitle(this.sessions.get(sessionId));
+      titles[sessionId] = this.paneNames.get(sessionId)
+        ?? derivedTitle(this.sessions.get(sessionId));
     }
     return titles;
+  };
+
+  /**
+   * Name a terminal, or clear the name with `null`.
+   *
+   * The name lives HERE and nowhere else: `paneTitles` is the one derivation
+   * the pane header, the rail row and the rail's hover preview all read, so a
+   * name typed into a pane header reaches all three and none of them can
+   * contradict the others about the same terminal.
+   *
+   * A blank name is a cleared name. There is no such thing as a terminal
+   * called "   ", and treating it as one would leave an empty title bar with
+   * no way back to the derivation.
+   */
+  renamePane = (sessionId: number, name: string | null): void => {
+    const next = name === null ? "" : name.trim();
+    const current = this.paneNames.get(sessionId);
+    if (next.length === 0) {
+      if (current === undefined) {
+        return;
+      }
+      this.paneNames.delete(sessionId);
+    } else {
+      if (current === next) {
+        return;
+      }
+      this.paneNames.set(sessionId, next);
+    }
+    // A pane name is display data ABOUT a session, so it rides the session
+    // revision — the one cache key both the rail models and `paneTitles` are
+    // already invalidated by. Without the bump the rename would sit behind a
+    // cached snapshot until something unrelated changed.
+    this.sessionsRevision += 1;
+    this.publish();
   };
 
   /// Where each pane of a tab is standing, keyed by session id.

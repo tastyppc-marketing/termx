@@ -1657,6 +1657,10 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     sleep={sleepController}
                     sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
                     paneTitles={controller.paneTitles(tab.id)}
+                    // Double-click a pane's title bar to name that terminal.
+                    // The name lands in the controller, which is where every
+                    // reader of it - header, rail row, hover preview - looks.
+                    onRenamePane={controller.renamePane}
                     pluginManifestFor={pluginManifestFor}
                     fontSize={settings.terminalFontSize}
                     onFontSizeWheel={adjustTerminalFontSize}

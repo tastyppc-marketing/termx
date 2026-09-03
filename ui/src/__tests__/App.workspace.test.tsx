@@ -170,6 +170,7 @@ function controllerHarness(initial = snapshot()): ControllerHarness {
     rebindResumedTab: vi.fn(),
     setResumeBootListener: vi.fn(),
     setFocusedPane: vi.fn(),
+    renamePane: vi.fn(),
   };
   const client = {
     close: vi.fn(() => order.push("client.close")),
@@ -284,6 +285,37 @@ describe("App workspace lifecycle", () => {
       await act(async () => root.unmount());
     },
   );
+
+  it("renames a terminal from its pane header through the controller", async () => {
+    // The wiring, end to end: the pane header's editor is useless unless what
+    // it commits reaches the one place that holds the name.
+    const harness = controllerHarness();
+    const controller = harness.workspace.controller as unknown as {
+      paneTitles: { mockReturnValue(value: Record<number, string>): void };
+      renamePane: ReturnType<typeof vi.fn>;
+    };
+    controller.paneTitles.mockReturnValue({ 1: "powershell \u00b7 project" });
+    const bootstrap = vi.fn(async () => harness.workspace);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<App bootstrap={bootstrap} />));
+
+    const title = container.querySelector("[data-testid='split-pane-title-1']");
+    await act(async () => {
+      title?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    const input = container.querySelector<HTMLInputElement>(
+      "[data-testid='split-pane-rename-1'] input",
+    );
+    input!.value = "Build";
+    await act(async () => {
+      input!.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+    });
+
+    expect(controller.renamePane).toHaveBeenCalledWith(1, "Build");
+    await act(async () => root.unmount());
+  });
 
   it("renders the intentional empty panel and a dead-pane placeholder for a dead tab", async () => {
     const emptyHarness = controllerHarness(snapshot(null));

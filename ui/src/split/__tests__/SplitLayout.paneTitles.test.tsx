@@ -56,7 +56,13 @@ function layoutActions(): SplitLayoutActions {
   };
 }
 
-async function renderWith(paneTitles?: Record<number, string>) {
+async function renderWith(
+  paneTitles?: Record<number, string>,
+  extra: {
+    onRenamePane?: (sessionId: number, name: string) => void;
+    actions?: SplitLayoutActions;
+  } = {},
+) {
   await act(async () =>
     root.render(
       <SplitLayout
@@ -70,11 +76,32 @@ async function renderWith(paneTitles?: Record<number, string>) {
         focusedSessionId={1}
         dismissingSessionIds={new Set()}
         onFocusPane={() => undefined}
-        actions={layoutActions()}
+        actions={extra.actions ?? layoutActions()}
         {...(paneTitles ? { paneTitles } : {})}
+        {...(extra.onRenamePane ? { onRenamePane: extra.onRenamePane } : {})}
       />,
     ),
   );
+}
+
+/// The rename input a pane header becomes, or null while it is still a label.
+function editorFor(sessionId: number): HTMLInputElement | null {
+  return container.querySelector<HTMLInputElement>(
+    `[data-testid='split-pane-rename-${sessionId}'] input`,
+  );
+}
+
+async function doubleClickTitle(sessionId: number): Promise<void> {
+  const title = container.querySelector(`[data-testid='split-pane-title-${sessionId}']`);
+  await act(async () => {
+    title?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  });
+}
+
+async function pressKey(target: EventTarget, init: KeyboardEventInit): Promise<void> {
+  await act(async () => {
+    target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...init }));
+  });
 }
 
 describe("pane title bars", () => {
@@ -94,5 +121,101 @@ describe("pane title bars", () => {
 
     expect(container.querySelector("[data-testid='split-pane-title-1']")).not.toBeNull();
     expect(container.querySelector("[data-testid='split-pane-title-2']")).toBeNull();
+  });
+});
+
+/**
+ * Naming a terminal by hand (Michael: "I want to change the terminal name").
+ *
+ * Double-click, not F2: F2 inside a terminal belongs to whatever TUI is
+ * running in it, and stealing it would break `less`, `htop` and every file
+ * manager for a rename nobody asked to reach that way.
+ */
+describe("renaming a pane from its title bar", () => {
+  it("turns the title into an editor on double-click, holding the current name", async () => {
+    await renderWith({ 1: "powershell \u00b7 project", 2: "ssh \u00b7 myvps" },
+      { onRenamePane: () => undefined });
+
+    await doubleClickTitle(1);
+
+    expect(editorFor(1)?.value).toBe("powershell \u00b7 project");
+    // Only the pane that was asked; its sibling is still a label.
+    expect(editorFor(2)).toBeNull();
+    expect(container.querySelector("[data-testid='split-pane-title-2']")).not.toBeNull();
+  });
+
+  it("commits the typed name to the caller and goes back to a label", async () => {
+    const onRenamePane = vi.fn();
+    await renderWith({ 1: "powershell \u00b7 project" }, { onRenamePane });
+    await doubleClickTitle(1);
+
+    const input = editorFor(1)!;
+    input.value = "Build";
+    await pressKey(input, { key: "Enter" });
+
+    expect(onRenamePane).toHaveBeenCalledWith(1, "Build");
+    expect(editorFor(1)).toBeNull();
+  });
+
+  it("cancels on Escape without renaming anything", async () => {
+    const onRenamePane = vi.fn();
+    await renderWith({ 1: "powershell \u00b7 project" }, { onRenamePane });
+    await doubleClickTitle(1);
+
+    const input = editorFor(1)!;
+    input.value = "Build";
+    await pressKey(input, { key: "Escape" });
+
+    expect(onRenamePane).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-testid='split-pane-title-1']")?.textContent)
+      .toBe("powershell \u00b7 project");
+  });
+
+  it("claims Escape so it does not close a menu or a flyout behind it", async () => {
+    // The `data-esc-guard` convention: an open editor owns the press, and the
+    // menubar, the settings surface and the sidebar all stand off when the
+    // focused element sits inside one.
+    await renderWith({ 1: "powershell \u00b7 project" }, { onRenamePane: () => undefined });
+
+    await doubleClickTitle(1);
+
+    const input = editorFor(1);
+    expect(input).not.toBeNull();
+    expect(input!.closest("[data-esc-guard]")).not.toBeNull();
+  });
+
+  it("keeps the pane's own shortcuts out of the editor", async () => {
+    // Ctrl+Shift+D from a rename field would split the pane behind the input
+    // and blur-commit the half-typed name with it.
+    const actions = layoutActions();
+    await renderWith({ 1: "powershell \u00b7 project" },
+      { onRenamePane: () => undefined, actions });
+    await doubleClickTitle(1);
+    editorFor(1)!.focus();
+
+    await pressKey(window, { key: "d", ctrlKey: true, shiftKey: true });
+
+    expect(actions.splitPane).not.toHaveBeenCalled();
+  });
+
+  it("still splits from the same shortcut when nothing is being renamed", async () => {
+    // The control for the test above: without it, a guard that swallowed
+    // everything would look identical to a guard that works.
+    const actions = layoutActions();
+    await renderWith({ 1: "powershell \u00b7 project" },
+      { onRenamePane: () => undefined, actions });
+
+    await pressKey(window, { key: "d", ctrlKey: true, shiftKey: true });
+
+    expect(actions.splitPane).toHaveBeenCalledWith(1, "row");
+  });
+
+  it("stays a plain label when no rename handler is wired", async () => {
+    // Every legacy caller, and the plugin panes that have no name to change.
+    await renderWith({ 1: "powershell \u00b7 project" });
+
+    await doubleClickTitle(1);
+
+    expect(editorFor(1)).toBeNull();
   });
 });

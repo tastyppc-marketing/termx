@@ -6,6 +6,7 @@ import {
   type PluginManifest,
 } from "../plugins/manifest";
 import { PluginPane } from "../plugins/PluginPane";
+import { InlineRename } from "../sidebar/InlineRename";
 import type { SplitDir, SplitNode } from "../state/layout";
 import { SleepingPane } from "../terminal/SleepingPane";
 import { useSleepingSessions, type SleepController } from "../terminal/sleep";
@@ -104,6 +105,16 @@ export interface SplitLayoutProps {
    */
   paneTitles?: Readonly<Record<number, string>>;
   /**
+   * Name the terminal in a pane (Michael: "I want to change the terminal
+   * name"). Absent leaves the title bars as plain labels, which is what every
+   * caller that has nowhere to put a name wants.
+   *
+   * Double-click only, deliberately: F2 inside a terminal belongs to whatever
+   * TUI is running in it, and claiming it would break `less`, `htop` and every
+   * file manager for a rename nobody asked to reach that way.
+   */
+  onRenamePane?: (sessionId: number, name: string) => void;
+  /**
    * Manifest lookup for plugin panes — their name, icon and panel path all come
    * from it. Absent (or null for an id) renders the pane as the dismissible
    * dead pane instead: a binding whose plugin is no longer installed degrades
@@ -157,6 +168,7 @@ export function SplitLayout({
   sessionDims,
   onLoadEarlier,
   paneTitles,
+  onRenamePane,
   pluginManifestFor,
   fontSize,
   onFontSizeWheel,
@@ -165,6 +177,8 @@ export function SplitLayout({
   const [drag, setDrag] = useState<DividerDrag | null>(null);
   const dragRef = useRef<DividerDrag | null>(null);
   const [confirmClose, setConfirmClose] = useState<number | null>(null);
+  /// The pane whose title bar is currently an editor, if any.
+  const [renaming, setRenaming] = useState<number | null>(null);
   const [closing, setClosing] = useState(false);
   const dialogOpenerRef = useRef<HTMLElement | null>(null);
   const dialogCancelRef = useRef<HTMLButtonElement | null>(null);
@@ -400,13 +414,37 @@ export function SplitLayout({
             {state.status === "live" ? (
               <>
                 {paneTitles?.[sessionId] ? (
-                  <div
-                    className="split-pane__title"
-                    data-testid={`split-pane-title-${sessionId}`}
-                    title={paneTitles[sessionId]}
-                  >
-                    {paneTitles[sessionId]}
-                  </div>
+                  renaming === sessionId && onRenamePane ? (
+                    // Esc belongs to the editor while it is open - the same
+                    // claim the window name and the settings surface make, so
+                    // cancelling a rename never also closes a menu behind it.
+                    <div
+                      className="split-pane__title split-pane__title--editing"
+                      data-testid={`split-pane-rename-${sessionId}`}
+                      data-esc-guard=""
+                    >
+                      <InlineRename
+                        value={paneTitles[sessionId]}
+                        ariaLabel="Name this terminal"
+                        onCommit={(value) => {
+                          setRenaming(null);
+                          onRenamePane(sessionId, value);
+                        }}
+                        onCancel={() => setRenaming(null)}
+                      />
+                    </div>
+                  ) : (
+                    <div
+                      className="split-pane__title"
+                      data-testid={`split-pane-title-${sessionId}`}
+                      title={paneTitles[sessionId]}
+                      {...(onRenamePane
+                        ? { onDoubleClick: () => setRenaming(sessionId) }
+                        : {})}
+                    >
+                      {paneTitles[sessionId]}
+                    </div>
+                  )
                 ) : null}
                 {sleepingSessions.has(sessionId) ? (
                   // Presentation + attachment released by unmounting the pane;

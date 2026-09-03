@@ -36,6 +36,20 @@
   user-select: none;
 }
 
+/* Renaming a terminal by hand (Michael: "I want to change the terminal
+   name"). The bar becomes the field, at the bar's own height: a title row that
+   grew on double-click would push the terminal down and reflow it. */
+.split-pane__title--editing {
+  padding: 0;
+  overflow: visible;
+}
+
+.split-pane__title--editing .inline-rename {
+  height: 100%;
+  padding: 0 7px;
+  line-height: normal;
+}
+
 /* The focused pane says so in its own title bar — one signal, in the place
    the eye is already reading, instead of a ring around the content. */
 .split-pane--focused > .split-pane__title {
