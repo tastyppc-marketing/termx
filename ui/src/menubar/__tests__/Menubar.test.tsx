@@ -410,6 +410,10 @@ describe("Menubar — focus", () => {
    */
   function typingPane(): { pane: HTMLTextAreaElement; seen: string[] } {
     const pane = document.createElement("textarea");
+    // xterm's hidden textarea IS the terminal, and the shared editable guard
+    // excludes it by this class - which is what lets the bar win against the
+    // shell while still losing to a rename field.
+    pane.className = "xterm-helper-textarea";
     document.body.append(pane);
     const seen: string[] = [];
     pane.addEventListener("keydown", (event) => seen.push(event.key));
@@ -469,6 +473,53 @@ describe("Menubar — focus", () => {
     // for the next one.
     expect(seen).toEqual(["Escape"]);
     expect(dropdown()).not.toBeNull();
+  });
+
+  /**
+   * A rename field is not the terminal. F2 on a tab, a saved session or the
+   * window name leaves an input focused; clicking a menu label deliberately
+   * leaves it focused. If the bar then claimed the arrows, `stepMenu` would
+   * focus the next label, blurring the editor and COMMITTING a half-typed
+   * name - and on the renames that carry no `data-esc-guard`, Escape would
+   * close the menu instead of cancelling the edit.
+   */
+  function renameField(): { input: HTMLInputElement; seen: string[] } {
+    const input = document.createElement("input");
+    document.body.append(input);
+    const seen: string[] = [];
+    input.addEventListener("keydown", (event) => seen.push(event.key));
+    input.focus();
+    return { input, seen };
+  }
+
+  it("leaves the arrows to a rename field the pointer left focused", async () => {
+    await mount();
+    const { input, seen } = renameField();
+    await pointerOpen(label("workspace"));
+
+    await key(input, { key: "ArrowRight" });
+    await key(input, { key: "ArrowLeft" });
+    await key(input, { key: "ArrowDown" });
+
+    expect(seen).toEqual(["ArrowRight", "ArrowLeft", "ArrowDown"]);
+    // Nothing moved: the same menu is open and no row took focus, so the
+    // editor still has the caret and the name is still being typed.
+    expect(label("workspace").className).toContain("menubar__item--open");
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("leaves Escape to a rename field, guarded or not", async () => {
+    await mount();
+    const { input, seen } = renameField();
+    await pointerOpen(label("workspace"));
+
+    await key(input, { key: "Escape" });
+
+    // An unguarded rename (a sidebar tab, a saved session) cancels on Escape.
+    // Swallowing it here would close the menu and keep the half-typed name.
+    expect(seen).toEqual(["Escape"]);
+    expect(dropdown()).not.toBeNull();
+    expect(document.activeElement).toBe(input);
   });
 
   it("returns to the label when the menu was opened from the keyboard", async () => {

@@ -25,6 +25,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { isEditableElement } from "../keyboard";
 import type { MenuRow } from "./menus";
 import "./Menubar.css";
 
@@ -181,6 +182,20 @@ export function Menubar({ menus }: MenubarProps) {
     // A panel may claim a key for itself (the Plugins rows walk their
     // placement chips with Left/Right); a claimed key never also moves the bar.
     if (event.defaultPrevented) {
+      return;
+    }
+    // An EDITOR outside the bar owns every key while it has the caret. A
+    // pointer open leaves focus wherever it was, so an inline rename (F2 on a
+    // tab, a saved session, the window name) is still taking input: claiming
+    // the arrows would step the bar, focus the next label, blur the editor and
+    // COMMIT a half-typed name, and claiming Escape would close the menu
+    // instead of cancelling the edit. So the bar claims nothing at all here -
+    // no navigation, no preventDefault, no stopPropagation.
+    //
+    // `isEditableElement` excludes xterm's hidden textarea, which is the whole
+    // point: the terminal is what the bar SHOULD win against.
+    const focused = document.activeElement;
+    if (isEditableElement(focused) && navRef.current?.contains(focused) !== true) {
       return;
     }
     if (event.key === "Escape") {
