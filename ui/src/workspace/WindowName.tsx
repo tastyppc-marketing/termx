@@ -18,6 +18,7 @@ import { SettingsStore } from "../settings/SettingsStore";
 import { useSettings } from "../settings/useSettings";
 import { MAX_NAME_LENGTH, windowNameOf } from "../state/layout";
 import type { BootstrappedWorkspace } from "./bootstrapWorkspace";
+import type { WorkspaceSnapshot } from "./WorkspaceController";
 import { useWorkspace } from "./useWorkspace";
 
 /** What an unnamed window calls itself — what every window used to say. */
@@ -31,12 +32,23 @@ export function windowTitleFor(name: string | null): string {
 export interface WindowNameProps {
   /** null until this window has been named. */
   name: string | null;
+  /**
+   * What an UNNAMED window reads as, and the editor's placeholder: the active
+   * tab's rail title, or `DEFAULT_WINDOW_NAME` when there is no tab to follow.
+   * Optional so a caller with nothing better to say still gets the old label;
+   * the header passes the followed title, and a test pins that it does.
+   */
+  fallback?: string;
   /** Commit a name, or null to go back to the default. */
   onRename(name: string | null): void;
 }
 
 /** Presentational: the label, and the editor it becomes. */
-export function WindowName({ name, onRename }: WindowNameProps) {
+export function WindowName({
+  name,
+  fallback = DEFAULT_WINDOW_NAME,
+  onRename,
+}: WindowNameProps) {
   const [editing, setEditing] = useState(false);
 
   if (editing) {
@@ -50,7 +62,10 @@ export function WindowName({ name, onRename }: WindowNameProps) {
           // Blank is a real answer here: it means "go back to the default".
           allowEmpty
           maxLength={MAX_NAME_LENGTH}
-          placeholder={DEFAULT_WINDOW_NAME}
+          // What the label reads right now, so opening the editor on an
+          // unnamed window shows what it is currently following. The VALUE
+          // stays empty: typing starts fresh, and Escape leaves it following.
+          placeholder={fallback}
           onCommit={(value) => {
             setEditing(false);
             onRename(value.length === 0 ? null : value);
@@ -76,14 +91,49 @@ export function WindowName({ name, onRename }: WindowNameProps) {
         }
       }}
     >
-      {name ?? DEFAULT_WINDOW_NAME}
+      {name ?? fallback}
     </div>
   );
 }
 
 /**
+ * The rail title of the tab this window is showing, or null when it has none.
+ *
+ * REUSED, never re-derived: the controller already resolved `tab.title` from
+ * the explicit rename, then the pane name, then the folder-derived fallback
+ * when it projected the rail row. Deriving it a second time here would let the
+ * header and the rail row beside it disagree. Groups are searched as well as
+ * the root, because `groups` carries every group in this window and each one
+ * holds its own tabs.
+ */
+export function activeTabTitle(snapshot: WorkspaceSnapshot): string | null {
+  const activeTabId = snapshot.activeTabId;
+  if (activeTabId === null) {
+    return null;
+  }
+  for (const tab of snapshot.ungroupedTabs) {
+    if (tab.id === activeTabId) {
+      return tab.title;
+    }
+  }
+  for (const group of snapshot.groups) {
+    for (const tab of group.tabs) {
+      if (tab.id === activeTabId) {
+        return tab.title;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Connected: reads this window's name out of the layout, writes renames back
  * through the controller, and keeps the OS window title in step.
+ *
+ * An unnamed window FOLLOWS its active tab. "Terminal workspace" over every
+ * window is true and useless, and the rail is hard to read at a glance; the
+ * tab you are on is the one thing an unnamed window can honestly call itself.
+ * A name the user typed always wins, and clearing it returns to following.
  */
 export function WindowNameHeader({ workspace }: { workspace: BootstrappedWorkspace }) {
   const controller = workspace.controller;
@@ -97,14 +147,18 @@ export function WindowNameHeader({ workspace }: { workspace: BootstrappedWorkspa
   const settings = useSettings(settingsStore);
   const windowId = controller.windowId;
   const name = windowNameOf(snapshot.layout, windowId);
+  const followed = activeTabTitle(snapshot);
 
   useEffect(() => {
-    void applyOsWindowTitle(windowTitleFor(name));
-  }, [name]);
+    // `windowTitleFor` still decides what null means, so a window with no name
+    // AND no tab keeps the plain "TermX" it has always had.
+    void applyOsWindowTitle(windowTitleFor(name ?? followed));
+  }, [name, followed]);
 
   return (
     <WindowName
       name={name}
+      fallback={followed ?? DEFAULT_WINDOW_NAME}
       // Off by default, and that IS the feature: the window becomes a group
       // label while the rail tab keeps naming its own terminal. The flag is
       // handed to the controller rather than spent on a second call here so
