@@ -401,6 +401,51 @@ describe("tauriWindowBus", () => {
       { kind: "pluginPanes", op: "ensure", pluginId: "showroom" },
     ]);
   });
+
+  it("carries a refused binding, and keeps only the ids that are real", async () => {
+    // The one message on this channel that runs main -> aux: main refusing a
+    // bind that would give a singleton a second panel. Every other test of it
+    // runs over `loopbackBus`, which hands objects through UNPARSED - so
+    // without this the parse branch could be deleted, the suite would stay
+    // green, and every real aux window would sit out the five-second adopt
+    // timeout showing a panel that is never coming.
+    const { transport, emitted, listeners } = fakeTransport();
+    const bus = tauriWindowBus(transport);
+    const seen: PluginPanesMutation[] = [];
+    bus.onPluginPanesMutation((mutation) => seen.push(mutation));
+    await Promise.resolve();
+
+    bus.forwardPluginPanes({
+      kind: "pluginPanes",
+      op: "rejected",
+      sessionIds: [2147483648],
+    });
+    await Promise.resolve();
+    const deliver = listeners.get(PLUGIN_PANES_MUTATION_EVENT);
+    deliver?.({
+      payload: { kind: "pluginPanes", op: "rejected", sessionIds: [2147483649] },
+    });
+    // Junk is dropped the same way `unbind` drops it: a whole message with no
+    // id list at all, and the real ids out of a partly-junk one.
+    deliver?.({ payload: { kind: "pluginPanes", op: "rejected", sessionIds: "all" } });
+    deliver?.({ payload: { kind: "pluginPanes", op: "rejected" } });
+    deliver?.({
+      payload: { kind: "pluginPanes", op: "rejected", sessionIds: [7, "x", 1.5, null] },
+    });
+
+    expect(emitted.map((entry) => entry.event)).toEqual([
+      PLUGIN_PANES_MUTATION_EVENT,
+    ]);
+    // A refusal must never be mistaken for an unbind: acting on it as one
+    // would tear the row out from under whichever window main DID accept.
+    expect(seen).toEqual([
+      // Our own forward, back through the parser the same way a real window's
+      // would arrive: the transport reaches every listener, main's included.
+      { kind: "pluginPanes", op: "rejected", sessionIds: [2147483648] },
+      { kind: "pluginPanes", op: "rejected", sessionIds: [2147483649] },
+      { kind: "pluginPanes", op: "rejected", sessionIds: [7] },
+    ]);
+  });
 });
 
 /// Main slot: tab-1 (session 1). aux-1 slot: tab-2 (session 2).
