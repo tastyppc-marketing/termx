@@ -1720,3 +1720,7 @@ Round 3 gate-committed at quiescence: **b5ebe55** (Lane P: P-RV1 toNewWindow thr
 
 ### later-42f (~17:35) — Grok re-verify #2 FAIL (1 MAJOR + 1 MINOR) → round 4 dispatched
 `RV2-grok.out`: RV1/RV2/RV3 closed. New: M-RV4 (MAJOR, Lane M) capture-phase menu keys steal from a focused inline rename (window name / sidebar tab / saved session) → arrows switch menus and blur-commit the half-typed name; fix = claim nothing while focus is in an editable element (isEditableElement, which excludes xterm-helper-textarea). P-RV4 (MINOR, Lane P) no tauriWindowBus parse test for the `rejected` op (loopbackBus skips the parser). Then gate P → M → Grok re-verify #3 (scoped to these two) → stage `.prev28` → click-test.
+
+### later-42g (~17:55) — round 4 COMMITTED, Grok re-verify #3 running
+Gate-committed at quiescence: **88c817c** (P-RV4 windowBus parse test for `rejected`, incl. main's own echo — the fake transport loops forwards back, which is why bootstrap has the explicit no-op echo branch) then **f32ba1d** (M-RV4: open-menu key handler claims nothing while focus is in an editor outside the bar, via keyboard.ts isEditableElement; round-3 terminal stand-ins now carry the real xterm-helper-textarea class). Whole tree tsc 0, vitest **149 files / 2312 tests**. Both agents idle.
+**Re-verify #3:** Grok, scoped, on `batch3-fixes-r4.diff` (dce71d6..f32ba1d), brief `RV3-reverify-batch3.md` → `RV3-grok.out` (Monitor bmaj4rrhp). PASS → `build-stage.sh` `.prev28` → click-test message. FAIL → round 5.
