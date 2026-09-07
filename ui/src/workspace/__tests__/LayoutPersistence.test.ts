@@ -137,4 +137,100 @@ describe("LayoutPersistence", () => {
     expect(setLayout).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("keeps the latest exhausted write for recovery without spinning flush", async () => {
+    let available = false;
+    let saved: unknown = null;
+    const setLayout = vi.fn(async (layout: unknown) => {
+      if (!available) throw new Error("offline");
+      saved = layout;
+    });
+    const persistence = new LayoutPersistence({ setLayout });
+    const layout = { ...emptyLayout(), windowNames: { main: "Offline edit" } };
+    persistence.record(layout, "structural");
+    await persistence.flush();
+    await persistence.flush();
+    expect(setLayout).toHaveBeenCalledTimes(2);
+    available = true;
+    persistence.retry();
+    await persistence.flush();
+    expect(saved).toMatchObject({ windowNames: { main: "Offline edit" } });
+    expect(persistence.getSnapshot()).toEqual({ saving: false, error: null });
+    persistence.dispose();
+  });
+
+  it("does not restore an old failed snapshot over a newer change", async () => {
+    const setLayout = vi.fn().mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(new Error("offline")).mockResolvedValue(undefined);
+    const persistence = new LayoutPersistence({ setLayout });
+    persistence.record({ ...emptyLayout(), windowNames: { main: "Old" } }, "structural");
+    await persistence.flush();
+    persistence.record({ ...emptyLayout(), windowNames: { main: "New" } }, "structural");
+    await persistence.flush();
+    persistence.retry();
+    await persistence.flush();
+    expect(setLayout).toHaveBeenCalledTimes(3);
+    expect(setLayout.mock.calls[2]?.[0]).toMatchObject({ windowNames: { main: "New" } });
+    persistence.dispose();
+  });
+
+  it("keeps a synchronous subscriber's newer edit after recovering an old write", async () => {
+    const setLayout = vi.fn().mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(new Error("offline")).mockResolvedValue(undefined);
+    const persistence = new LayoutPersistence({ setLayout });
+    persistence.record({ ...emptyLayout(), windowNames: { main: "Old" } }, "structural");
+    await persistence.flush();
+    let edited = false;
+    persistence.subscribe(() => {
+      if (!edited && persistence.getSnapshot().saving) {
+        edited = true;
+        persistence.record({ ...emptyLayout(), windowNames: { main: "New" } }, "structural");
+      }
+    });
+    persistence.retry();
+    await persistence.flush();
+    expect(setLayout.mock.calls.at(-1)?.[0]).toMatchObject({ windowNames: { main: "New" } });
+    persistence.dispose();
+  });
+
+  it("finishes an existing flush when disposal is followed by a failed write", async () => {
+    const first = deferred<void>();
+    const setLayout = vi.fn(() => first.promise);
+    const persistence = new LayoutPersistence({ setLayout });
+    persistence.record(emptyLayout(), "structural");
+    const flushing = persistence.flush();
+    persistence.dispose();
+    first.reject(new Error("closed"));
+    // Check the settlement state before awaiting flush so a regression cannot
+    // starve Vitest's own timeout with an endless microtask loop.
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect((persistence as unknown as { pending: unknown }).pending).toBeNull();
+    await flushing;
+    expect(setLayout).toHaveBeenCalledTimes(1);
+  });
+
+  it("remembers reconnect while the exhausted old attempt is still settling", async () => {
+    const second = deferred<void>();
+    const setLayout = vi.fn().mockRejectedValueOnce(new Error("offline"))
+      .mockImplementationOnce(() => second.promise).mockResolvedValue(undefined);
+    const persistence = new LayoutPersistence({ setLayout });
+    const layout = { ...emptyLayout(), windowNames: { main: "Recovery" } };
+    persistence.record(layout, "structural");
+    await vi.waitFor(() => expect(setLayout).toHaveBeenCalledTimes(2));
+    persistence.retry();
+    second.reject(new Error("old connection closed"));
+    await persistence.flush();
+    expect(setLayout).toHaveBeenCalledTimes(3);
+    expect(setLayout.mock.calls[2]?.[0]).toMatchObject({ windowNames: { main: "Recovery" } });
+    expect(persistence.getSnapshot()).toEqual({ saving: false, error: null });
+  });
+
+  it("does not write after a subscriber disposes while saving is announced", async () => {
+    const setLayout = vi.fn().mockResolvedValue(undefined);
+    const persistence = new LayoutPersistence({ setLayout });
+    persistence.subscribe(() => persistence.dispose());
+    persistence.record(emptyLayout(), "structural");
+    await persistence.flush();
+    expect(setLayout).not.toHaveBeenCalled();
+  });
 });

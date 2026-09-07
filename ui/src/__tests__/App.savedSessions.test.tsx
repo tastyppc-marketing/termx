@@ -174,6 +174,8 @@ function harness(options: HarnessOptions = {}) {
     sessionDims: vi.fn(() => ({})),
     paneTitles: vi.fn(() => ({})),
     sessionCwd: vi.fn(() => PANE_CWD),
+    capturedLocalConversation: vi.fn(async (): Promise<LlmSessionRecord | null> => null),
+    conversationWithLaunch: vi.fn(async (record: LlmSessionRecord) => record),
     resumedSessionKeyForTab: vi.fn(() => null),
     resumedEntries: vi.fn(() => []),
     rebindResumedTab: vi.fn(),
@@ -248,6 +250,17 @@ afterEach(() => {
 });
 
 describe("App saved-sessions integration", () => {
+  it("saves the exact pane's captured options when another conversation shares its folder", async () => {
+    const h = harness({ records: [record({ id: "unrelated", title: "Other pane" })] });
+    const launch = { v: 1 as const, provider: "claude" as const, args: ["--model", "sonnet", "--permission-mode", "plan"], cwd: PANE_CWD };
+    h.controller.capturedLocalConversation.mockResolvedValue(record({ id: "actual", title: "Actual pane", launch }));
+    const { container, unmount } = await mount(h.workspace);
+    await act(async () => query(container, "pane-save").click());
+    await act(async () => query(container, "save-session-save").click());
+    expect(h.saved.getSnapshot()[0]?.conversation).toEqual({ provider: "claude", id: "actual", title: "Actual pane", launch });
+    await unmount();
+  });
+
   it("saves a bare-shell pane: folder-tail name prefill, cwd from the controller, daemon id recorded", async () => {
     const { workspace, controller, saved } = harness();
     const { container, unmount } = await mount(workspace);

@@ -1,3 +1,4 @@
+pub mod agent_launch;
 pub mod config;
 pub mod history;
 pub mod paths;

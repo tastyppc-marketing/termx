@@ -71,7 +71,7 @@ CAPTURES_FILE = "conversation_captures_v1.jsonl"
 SESSION_ENV = "TERMX_SESSION_ID"
 DATA_DIR_ENV = "TERMX_DATA_DIR"
 # Same rule as RESUME_ID_PATTERN in ui/src/conversations/resume.ts.
-ID_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 
 
 def data_dir():

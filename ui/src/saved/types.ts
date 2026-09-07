@@ -19,6 +19,7 @@ export interface SavedSshRef {
 }
 
 export interface SavedConversationRef {
+  readonly launch?: import("../conversations/launchConfiguration").LaunchConfiguration | null;
   readonly provider: SavedProvider;
   readonly id: string;    // conversation id, [A-Za-z0-9-]+ (resumeCommand validates)
   readonly title: string; // display fallback

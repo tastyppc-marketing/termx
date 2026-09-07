@@ -78,6 +78,28 @@ const ENTRY: SavedSession = {
 };
 
 describe("parseSavedSessions", () => {
+  it("preserves original CLI settings through save, disk reload and later edits", async () => {
+    const files = fakeFiles();
+    const first = testStore(files).store;
+    await first.ready();
+    const launch = { v: 1 as const, provider: "codex" as const, cwd: "C:\\start", args: ["-c", 'model_reasoning_effort="high"', "--add-dir", "../shared", "--model", "test"] };
+    first.save({ name: "Configured", cwd: "C:\\start\\repo", conversation: { provider: "codex", id: "session-id", title: "Session", launch } });
+    await first.flush();
+    const restored = testStore(files).store;
+    await restored.ready();
+    restored.update(restored.getSnapshot()[0]!.id, { description: "Come back later" });
+    await restored.flush();
+    expect(parseSavedSessions(files.text)[0]?.conversation?.launch).toEqual(launch);
+    restored.save({ name: "Updated pin", cwd: "C:\\start\\repo", conversation: { provider: "codex", id: "session-id", title: "Session" } });
+    await restored.flush();
+    expect(parseSavedSessions(files.text)[0]?.conversation?.launch).toEqual(launch);
+  });
+
+  it("marks corrupt saved launch settings so resume cannot silently drop them", () => {
+    const parsed = parseSavedSessions(fileOf([{ ...ENTRY, conversation: { ...ENTRY.conversation!, launch: { v: 2 } as never } }]));
+    expect(parsed[0]?.conversation?.launch).toBeNull();
+  });
+
   it("returns an empty list for a missing or corrupt file", () => {
     expect(parseSavedSessions(null)).toEqual([]);
     expect(parseSavedSessions("")).toEqual([]);

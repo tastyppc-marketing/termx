@@ -95,6 +95,12 @@ fn clean_old_logs(dir: &std::path::Path, keep: std::time::Duration) {
 }
 
 fn main() -> Result<()> {
+    // Agent helpers inherit the user's terminal handles and must run before
+    // daemon argument parsing or logging. In particular, capture hooks are a
+    // silent interface and launch argv must never enter host diagnostics.
+    if let Some(code) = termx_host::agent_launch::dispatch_early(std::env::args_os().skip(1)) {
+        std::process::exit(code);
+    }
     let override_dir = parse_args_from(std::env::args().skip(1))?;
     let data_dir = paths::resolve_data_dir(override_dir.as_deref())?;
 

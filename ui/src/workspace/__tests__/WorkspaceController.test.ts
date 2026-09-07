@@ -1258,6 +1258,21 @@ describe("WorkspaceController dead-pane relaunch", () => {
     expect(h.controller.deadPaneResumeTitle(3)).toBe("Daemon work");
   });
 
+  it("refuses a valid captured identity with unusable options without falling back to a different conversation", async () => {
+    for (const launch of [null, { v: 1 as const, provider: "claude" as const, cwd: "C:\\launch", args: ["--unknown-setting", "value"] }]) {
+      const h = harness({
+        sessions: [session(1), session(2), session(3, { alive: false, pid: null })],
+        latestForCwd: (cwd) => record(cwd),
+        capturedConversationFor: () => captured({ launch }),
+      });
+      expect(await h.controller.restartPane("tab-2", 3, "resume")).toBeNull();
+      expect(h.createSession).not.toHaveBeenCalled();
+      expect(h.writes).toEqual([]);
+      expect(h.controller.getSnapshot().notice).toContain("configuration");
+      h.controller.dispose();
+    }
+  });
+
   it("never captures a live pane's resume", () => {
     const h = harness({
       sessions: [session(1)],

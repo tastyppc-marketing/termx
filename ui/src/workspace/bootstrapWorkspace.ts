@@ -12,6 +12,7 @@ import {
   parseCaptures,
   type ConversationCapture,
 } from "../conversations/captures";
+import { LAUNCHES_FILE, parseConversationLaunches } from "../conversations/launchConfiguration";
 import { conversationsFileIo, tauriSessionLister } from "../conversations/storage";
 import type { LlmSessionRecord, SessionLister } from "../conversations/types";
 import { HostClient, type HostClientConnectOptions } from "../host/client";
@@ -70,6 +71,7 @@ import { AttachmentHub } from "./AttachmentHub";
 import { firstSessionId, flattenTabIds, sessionIdsInTab } from "./layoutOperations";
 import { LayoutPersistence } from "./LayoutPersistence";
 import type { WindowBus } from "./windowBus";
+import { auxiliaryLayoutSync, mainLayoutSync } from "./layoutSync";
 import { WorkspaceController, type WorkspacePluginHost } from "./WorkspaceController";
 import { tauriRaiseWindow } from "./windowManager";
 
@@ -458,16 +460,23 @@ export async function bootstrapWorkspace(
       capturesText = null;
     }
     let captures = parseCaptures(capturesText);
+    let launches = parseConversationLaunches(null);
+    try { launches = parseConversationLaunches(await appFiles.read(LAUNCHES_FILE)); } catch { /* retain last known captures */ }
     // Overlapping refreshes: two panes exiting together start two reads, and
     // the SLOWER one may resolve last while holding the OLDER file. Only the
     // most recently started read may apply its result.
     let capturesGeneration = 0;
-    const refreshCaptures = (): void => {
+    let capturesRefresh: Promise<void> = Promise.resolve();
+    const refreshCaptures = async (): Promise<void> => {
       capturesGeneration += 1;
       const generation = capturesGeneration;
-      void readCaptures().then((next) => {
-        if (next !== null && generation === capturesGeneration) {
-          captures = next;
+      let current = Promise.all([
+        readCaptures(),
+        appFiles.read(LAUNCHES_FILE).then(parseConversationLaunches).catch(() => null),
+      ]).then(([next, nextLaunches]) => {
+        if (generation === capturesGeneration) {
+          if (next !== null) captures = next;
+          if (nextLaunches !== null) launches = nextLaunches;
           // A dead pane decides whether to offer "Resume conversation" from
           // this map, and nothing else observes it. Without the nudge the
           // pane keeps showing the plain Restart card until some unrelated
@@ -476,6 +485,14 @@ export async function bootstrapWorkspace(
           controller?.notifyCapturesChanged();
         }
       });
+      capturesRefresh = current;
+      await current;
+      // A caller must observe the newest read even when its own read was
+      // superseded. Otherwise a resume can proceed with empty/older settings.
+      while (capturesRefresh !== current) {
+        current = capturesRefresh;
+        await current;
+      }
     };
     const conversationsIo = conversationsFileIo(appFiles);
     const conversations = await loadConversationsStore({
@@ -549,45 +566,32 @@ export async function bootstrapWorkspace(
     const bootWindowId = options.windowId ?? MAIN_WINDOW_ID;
     const bus = options.windowBus ?? null;
     const daemonWriter = client;
+    const mainSync = bus !== null && bootWindowId === MAIN_WINDOW_ID
+      ? mainLayoutSync(store, bus, (layout) => persistence.record(layout, "structural"))
+      : null;
+    const auxSync = bus !== null && bootWindowId !== MAIN_WINDOW_ID
+      ? auxiliaryLayoutSync(store, bus, () => controller?.reportLayoutConflict())
+      : null;
     const layoutWriter = bus === null
       ? daemonWriter
       : bootWindowId === MAIN_WINDOW_ID
         ? {
             setLayout: async (layout: Parameters<typeof daemonWriter.setLayout>[0]) => {
               await daemonWriter.setLayout(layout);
-              await bus.broadcastLayout(layout);
+              // An older disk write may finish after a newer edit was adopted.
+              // Broadcast current authority, with receipts, never that old blob.
+              await mainSync!.broadcast();
             },
           }
         : {
-            setLayout: async (layout: Parameters<typeof daemonWriter.setLayout>[0]) => {
-              // Awaited so an aux window's flush() really covers delivery —
-              // the close path destroys the webview right after it.
-              await bus.forwardMutation({ kind: "setLayout", layout });
-            },
+            setLayout: auxSync!.setLayout,
           };
     const persistence = new LayoutPersistence(layoutWriter);
     if (bus !== null) {
       if (bootWindowId === MAIN_WINDOW_ID) {
-        // A forwarded blob is untrusted input from another window: parse it
-        // like any GetState blob and drop it on any violation — main keeps
-        // its own model, which the next broadcast re-asserts.
-        releaseOnDispose.push(bus.onMutation((mutation) => {
-          const proposed = parseLayout(mutation.layout);
-          if (proposed === null) {
-            return;
-          }
-          const adopted = store.replaceState(proposed);
-          if (adopted === proposed) {
-            persistence.record(adopted, "structural");
-          }
-        }));
+        releaseOnDispose.push(bus.onMutation(mainSync!.receive));
       } else {
-        releaseOnDispose.push(bus.onLayout((layout) => {
-          const truth = parseLayout(layout);
-          if (truth !== null) {
-            store.replaceState(truth);
-          }
-        }));
+        releaseOnDispose.push(bus.onLayout(auxSync!.receive), auxSync!.dispose);
       }
     }
     // Same single-writer rule as the layout, applied to the bindings file: the
@@ -1158,8 +1162,11 @@ export async function bootstrapWorkspace(
             (candidate) =>
               candidate.provider === capture.provider && candidate.id === capture.id,
           ) ?? null;
-        return capturedRecord(capture, indexed);
+        const launch = launches.get(`${capture.provider}:${capture.id}`);
+        return capturedRecord(launch !== undefined ? { ...capture, launch } : capture, indexed);
       },
+      refreshConversationCaptures: refreshCaptures,
+      launchConfigurationFor: (provider: string, id: string) => launches.get(`${provider}:${id}`),
       savedSessions: saved,
       pluginPanes,
       plugins: pluginHost,
@@ -1247,6 +1254,7 @@ export async function bootstrapWorkspace(
     const readyController = controller;
     connection.onConnected((_replacement, isReconnect) => {
       if (isReconnect) {
+        persistence.retry();
         // The facade is stable across sockets, so the hub re-attaches through
         // it and never has to learn which socket it is on.
         void attachments.resync(hubClient);

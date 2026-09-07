@@ -1278,7 +1278,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   // the dialog does not edit (conversation ref, daemon session id).
   const [savePrompt, setSavePrompt] = useState<SavePromptState | null>(null);
 
-  const openSaveForPane = (tabId: string, sessionId: number) => {
+  const openSaveForPane = async (tabId: string, sessionId: number) => {
     if (!savedStore) {
       return;
     }
@@ -1288,7 +1288,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     const sshInfo = controller.sshPaneInfo(sessionId);
     const conversation = sshInfo
       ? sshConversationForPane(sessionId)
-      : localConversationForPane(tabId, cwd);
+      : await localConversationForPane(tabId, cwd, sessionId);
     // save() upserts by conversation id and treats its input as the whole
     // entry, so an existing save must feed its fields back through the dialog.
     const existing = conversation
@@ -1350,18 +1350,25 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   openSaveForPaneRef.current = openSaveForPane;
 
   // A local pane's conversation, resolved by explicit resume key or cwd match.
-  const localConversationForPane = (
+  const localConversationForPane = async (
     tabId: string,
     cwd: string,
-  ): SavedConversationRef | undefined => {
+    sessionId: number,
+  ): Promise<SavedConversationRef | undefined> => {
+    const captured = await controller.capturedLocalConversation?.(sessionId);
+    if (captured) return { provider: captured.provider, id: captured.id, title: captured.title,
+      ...(captured.launch !== undefined ? { launch: captured.launch } : {}),
+    };
     const link = resolveLinkage({
       explicitKey: controller.resumedSessionKeyForTab(tabId),
       paneCwd: cwd === "" ? null : cwd,
       candidates: conversationsRecords,
     });
-    return link
-      ? { provider: link.record.provider, id: link.record.id, title: link.record.title }
-      : undefined;
+    if (!link) return undefined;
+    const record = await controller.conversationWithLaunch(link.record);
+    return { provider: record.provider, id: record.id, title: record.title,
+      ...(record.launch !== undefined ? { launch: record.launch } : {}),
+    };
   };
 
   // An SSH pane's conversation from the id captured when claude/codex started.
@@ -1381,11 +1388,13 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     return host?.user ? `SSH: ${host.user}@${target}` : `SSH: ${target}`;
   };
 
-  const openSaveForRecord = (record: LlmSessionRecord) => {
+  const openSaveForRecord = async (record: LlmSessionRecord) => {
     // The rail disables its Save button without a cwd; this is the backstop.
     if (!savedStore || record.cwd === null) {
       return;
     }
+    const recordedCwd = record.cwd;
+    record = await controller.conversationWithLaunch(record);
     const existing = savedEntries.find(
       (entry) => entry.conversation?.id === record.id,
     );
@@ -1393,7 +1402,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       prefill: {
         name: existing?.name ?? record.title,
         description: existing?.description ?? "",
-        cwd: existing?.cwd ?? record.cwd,
+        cwd: existing?.cwd ?? recordedCwd,
         conversationLabel: record.title,
         updatesExisting: existing !== undefined,
       },
@@ -1401,6 +1410,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         provider: record.provider,
         id: record.id,
         title: record.title,
+        ...(record.launch !== undefined ? { launch: record.launch } : {}),
       },
       // A rail save knows no pane, but save() replaces the whole entry — so
       // the stored reattach link must ride along or a description tweak from

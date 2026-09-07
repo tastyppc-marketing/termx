@@ -192,13 +192,16 @@ describe("resumeCommand", () => {
   });
 
   it("accepts bare alphanumeric and dashed ids", () => {
-    for (const id of ["abc", "ABC-123", "0", "a-b-c-d", "-leading-dash"]) {
+    for (const id of ["abc", "ABC-123", "0", "a-b-c-d"]) {
       expect(resumeCommand({ provider: "claude", id })).toBe(`claude --resume ${id}`);
     }
   });
 
   it("refuses every id that is not a bare [A-Za-z0-9-] token", () => {
     const hostile = [
+      "-leading-dash", // CLI flags cannot be mistaken for conversation IDs
+      "--last",
+      "--dangerously-skip-permissions",
       "",
       " ",
       "../evil",

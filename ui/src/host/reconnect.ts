@@ -193,16 +193,30 @@ export class ReconnectingHostClient<TClient extends ReconnectableClient = HostCl
           return;
         }
         settled = true;
-        // Deliberately does NOT tear the connection down: one wedged request
-        // must not blank every live pane.
         reject(
           new HostDisconnectedError(
             `The host did not answer within ${REQUEST_TIMEOUT_MS / 1_000}s`,
           ),
         );
+        // HostClient serializes requests. Retiring this exact transport drains
+        // anything queued behind the stalled call so it cannot execute later.
+        this.handleClientDeath(client, true);
       }, REQUEST_TIMEOUT_MS);
 
-      call(client).then(
+      let request: Promise<T>;
+      try {
+        request = call(client);
+      } catch (error: unknown) {
+        settled = true;
+        cancel();
+        if (isTerminalClientError(error)) {
+          this.handleClientDeath(client);
+        }
+        reject(error instanceof Error ? error : new Error("Host request failed"));
+        return;
+      }
+
+      request.then(
         (value) => {
           if (settled) {
             return;
@@ -218,7 +232,7 @@ export class ReconnectingHostClient<TClient extends ReconnectableClient = HostCl
           settled = true;
           cancel();
           if (isTerminalClientError(error)) {
-            this.handleClientDeath();
+            this.handleClientDeath(client);
           }
           reject(error instanceof Error ? error : new Error("Host request failed"));
         },
@@ -314,7 +328,7 @@ export class ReconnectingHostClient<TClient extends ReconnectableClient = HostCl
     this.client = client;
     this.stopClientErrors = client.onError((error) => {
       if (isTerminalClientError(error)) {
-        this.handleClientDeath();
+        this.handleClientDeath(client);
       }
     });
     this.attempt = 0;
@@ -352,11 +366,11 @@ export class ReconnectingHostClient<TClient extends ReconnectableClient = HostCl
   }
 
   /** The live connection died under us. */
-  private handleClientDeath(): void {
-    if (this.disposed || this.client === null) {
+  private handleClientDeath(expectedClient: TClient, close = false): void {
+    if (this.disposed || this.client !== expectedClient) {
       return;
     }
-    this.releaseClient(false);
+    this.releaseClient(close);
     if (this.frozen) {
       return;
     }

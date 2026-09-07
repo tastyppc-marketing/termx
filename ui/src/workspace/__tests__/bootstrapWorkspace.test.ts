@@ -103,6 +103,30 @@ describe("parseBootstrapHostResult", () => {
 });
 
 describe("bootstrapWorkspace", () => {
+  it("saves an offline layout edit when the host reconnects", async () => {
+    const fake = fakeClient();
+    const replacement = fakeClient();
+    const workspace = await bootstrapWorkspace({
+      invokeBootstrap: async () => ({ port: 1234, token: "token" }),
+      connect: vi.fn().mockResolvedValueOnce(fake.client).mockResolvedValue(replacement.client),
+      appFiles: { read: async () => null, write: async () => undefined },
+    });
+    try {
+      workspace.connection!.notifySuspend();
+      workspace.controller.renameWindow("main", "Offline edit");
+      await workspace.controller.flush();
+      expect(workspace.controller.getSnapshot().persistence.error).not.toBeNull();
+      workspace.connection!.retryNow();
+      await vi.waitFor(() => expect(workspace.connection!.state.phase).toBe("connected"));
+      await workspace.controller.flush();
+      expect(replacement.setLayout).toHaveBeenCalledWith(expect.objectContaining({
+        windowNames: { main: "Offline edit" },
+      }));
+    } finally {
+      workspace.controller.dispose();
+    }
+  });
+
   it("invokes native bootstrap, connects, restores, and attaches active-first sequentially", async () => {
     const state = emptyLayout();
     state.tabs.first = {
@@ -1856,6 +1880,22 @@ describe("bootstrapWorkspace plugin panes", () => {
  * and that a failed read degrades to "I do not know" instead of "no captures".
  */
 describe("bootstrapWorkspace conversation captures", () => {
+  it("reloads launch metadata without a pane exit and retains it after pane capture compaction", async () => {
+    const fake = fakeClient({ layout: null, sessions: [] });
+    let launches: string | null = null;
+    const appFiles: AppFileStore = { read: async name => name === "conversation_launches_v1.jsonl" ? launches : null, write: async () => undefined };
+    const workspace = await boot(appFiles, fake);
+    const record = { provider: "codex" as const, id: "captured-id", title: "Saved" };
+    expect(await workspace.controller.conversationWithLaunch(record)).toEqual(record);
+    const launch = { v: 1, provider: "codex", args: ["--model", "original", "--add-dir", "../shared"], cwd: "C:\\launch" };
+    launches = JSON.stringify({ v: 1, provider: "codex", id: "captured-id", launch }) + "\n";
+    expect(await workspace.controller.conversationWithLaunch(record)).toEqual({ ...record, launch });
+    workspace.controller.dispose();
+    const restarted = await boot(appFiles, fakeClient({ layout: null, sessions: [] }));
+    expect(await restarted.controller.conversationWithLaunch(record)).toEqual({ ...record, launch });
+    restarted.controller.dispose();
+  });
+
   const CAPTURED_ID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
   const OTHER_ID = "7d9e2f10-3a4b-4c5d-8e6f-102938475650";
 
@@ -2116,6 +2156,29 @@ describe("bootstrapWorkspace conversation captures", () => {
     await flush();
 
     expect(workspace.controller.deadPaneResumeTitle(3)).toBe("Captured conversation");
+  });
+
+  it("makes a superseded resume lookup await the newest configuration read", async () => {
+    let defer = false;
+    const pending: Array<(value: string) => void> = [];
+    const appFiles: AppFileStore = {
+      read: async name => name === "conversation_launches_v1.jsonl" && defer ? new Promise<string>(resolve => pending.push(resolve)) : null,
+      write: async () => undefined,
+    };
+    const workspace = await boot(appFiles, fakeClient({ layout: null, sessions: [] }));
+    defer = true;
+    const record = { provider: "codex", id: "id" };
+    let finished = false;
+    const first = workspace.controller.conversationWithLaunch(record).then(value => { finished = true; return value; });
+    const second = workspace.controller.conversationWithLaunch(record);
+    const launch = { v: 1, provider: "codex", cwd: "C:\\start", args: ["--model", "newest"] };
+    pending[0]!("");
+    await flush();
+    expect(finished).toBe(false);
+    pending[1]!(JSON.stringify({ v: 1, ...record, launch }));
+    expect(await first).toEqual({ ...record, launch });
+    expect(await second).toEqual({ ...record, launch });
+    workspace.controller.dispose();
   });
 
   describe("boot-time compaction", () => {

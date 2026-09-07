@@ -8,13 +8,21 @@ import { isValidPluginId } from "../plugins/manifest";
 /// this bus, main validates + persists, and the merged truth fans back out to
 /// every window as a broadcast.
 ///
-/// v1 of the mutation protocol is deliberately coarse: one mutation kind
-/// carrying the ENTIRE proposed layout. Coarse is safe because window slots
-/// partition ownership — an aux window only ever rewrites its own slot plus
-/// explicit cross-window moves — and simultaneous edits to different slots
-/// converge because main re-broadcasts the merged truth.
+/// Proposals carry their base and a per-workspace sequence. Sync metadata is
+/// bus-only: the persisted layout remains v3.
+export type LayoutMutation = {
+  kind: "setLayout";
+  layout: JsonValue;
+  base?: JsonValue;
+  origin?: string;
+  sequence?: number;
+};
 
-export type LayoutMutation = { kind: "setLayout"; layout: JsonValue };
+export interface LayoutSyncMetadata {
+  authority: string;
+  revision: number;
+  receipts: Record<string, { sequence: number; rejected: boolean }>;
+}
 
 /**
  * Aux → main for the plugin pane bindings (plugin spec §4), the same shape of
@@ -62,7 +70,7 @@ export interface WindowBus {
    * webview. */
   forwardMutation(mutation: LayoutMutation): Promise<void>;
   /** Main → all: the layout changed; here is the new blob. */
-  broadcastLayout(layout: JsonValue): Promise<void>;
+  broadcastLayout(layout: JsonValue, sync?: LayoutSyncMetadata): Promise<void>;
   /**
    * Main → all: the plugin pane bindings changed; here is the whole map
    * (plugin spec §4). This channel carries main's authoritative truth only —
@@ -77,7 +85,7 @@ export interface WindowBus {
    */
   forwardPluginPanes(mutation: PluginPanesMutation): Promise<void>;
   onMutation(handler: (mutation: LayoutMutation) => void): () => void;
-  onLayout(handler: (layout: JsonValue) => void): () => void;
+  onLayout(handler: (layout: JsonValue, sync?: LayoutSyncMetadata) => void): () => void;
   onPluginPanes(handler: (state: JsonValue) => void): () => void;
   onPluginPanesMutation(handler: (mutation: PluginPanesMutation) => void): () => void;
   /**
@@ -287,7 +295,7 @@ export function tauriWindowBus(
       }
     },
     forwardMutation: (mutation) => mutations.send(mutation),
-    broadcastLayout: (layout) => layouts.send(layout),
+    broadcastLayout: (layout, sync) => layouts.send(sync ? { layout, sync } : layout),
     broadcastPluginPanes: (state) => pluginPanes.send(state),
     forwardPluginPanes: (mutation) => pluginPaneMutations.send(mutation),
     onPluginPanesMutation: (handler) =>
@@ -318,7 +326,22 @@ export function tauriWindowBus(
         }
       }),
     onLayout: (handler) =>
-      layouts.subscribe((payload) => handler(payload as JsonValue)),
+      layouts.subscribe((payload) => {
+        if (typeof payload === "object" && payload !== null && "sync" in payload) {
+          const envelope = payload as { layout: JsonValue; sync: LayoutSyncMetadata };
+          const sync = envelope.sync;
+          if (!sync || typeof sync.authority !== "string" || !sync.authority ||
+            !Number.isSafeInteger(sync.revision) || sync.revision < 0 ||
+            typeof sync.receipts !== "object" || sync.receipts === null ||
+            Array.isArray(sync.receipts) ||
+            !Object.values(sync.receipts).every((receipt) => receipt &&
+              Number.isSafeInteger(receipt.sequence) && receipt.sequence > 0 &&
+              typeof receipt.rejected === "boolean")) return;
+          handler(envelope.layout, sync);
+        } else {
+          handler(payload as JsonValue);
+        }
+      }),
   };
 }
 
@@ -326,7 +349,7 @@ export function tauriWindowBus(
 /// Delivery is synchronous.
 export function loopbackBus(): WindowBus {
   const mutationHandlers = new Set<(mutation: LayoutMutation) => void>();
-  const layoutHandlers = new Set<(layout: JsonValue) => void>();
+  const layoutHandlers = new Set<(layout: JsonValue, sync?: LayoutSyncMetadata) => void>();
   const pluginPaneHandlers = new Set<(state: JsonValue) => void>();
   const pluginPaneMutationHandlers = new Set<
     (mutation: PluginPanesMutation) => void
@@ -344,10 +367,10 @@ export function loopbackBus(): WindowBus {
         }
       }
     },
-    async broadcastLayout(layout) {
+    async broadcastLayout(layout, sync) {
       for (const handler of [...layoutHandlers]) {
         try {
-          handler(layout);
+          handler(layout, sync);
         } catch {
           // One bad subscriber must not silence the others.
         }

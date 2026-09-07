@@ -12,6 +12,7 @@
  */
 
 import type { AppFileName, AppFileStore } from "../native/appFiles";
+import { parseLaunchConfiguration } from "../conversations/launchConfiguration";
 import {
   type SavedConversationRef,
   type SavedProvider,
@@ -110,7 +111,9 @@ function parseConversation(value: unknown): SavedConversationRef | undefined {
     return undefined;
   }
   const title = requiredText(value.title);
-  return { provider: provider as SavedProvider, id, title: title ?? id };
+  return { provider: provider as SavedProvider, id, title: title ?? id,
+    ...(value.launch !== undefined ? { launch: parseLaunchConfiguration(value.launch, provider as string) } : {}),
+  };
 }
 
 /**
@@ -229,7 +232,14 @@ class SavedSessions implements SavedSessionsStoreHandle {
     lastDaemonSessionId?: number;
   }): SavedSession => {
     const stamp = this.now();
-    const conversation = input.conversation;
+    let conversation = input.conversation;
+    // Re-saving a pin must not erase captured options just because a current
+    // index/remote lookup has only identity. Explicit invalidity (null) wins.
+    if (conversation && conversation.launch === undefined) {
+      const previous = this.saved.find(entry => entry.conversation?.provider === conversation!.provider
+        && entry.conversation.id === conversation!.id && entry.ssh?.host === input.ssh?.host)?.conversation;
+      if (previous?.launch !== undefined) conversation = { ...conversation, launch: previous.launch };
+    }
     const fields = {
       name: input.name,
       ...(input.description !== undefined && input.description.length > 0

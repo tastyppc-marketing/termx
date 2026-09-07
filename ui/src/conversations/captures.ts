@@ -21,12 +21,14 @@
 
 import { RESUME_ID_PATTERN } from "./resume";
 import { LLM_PROVIDERS, type LlmProvider, type LlmSessionRecord } from "./types";
+import { parseLaunchConfiguration, type LaunchConfiguration } from "./launchConfiguration";
 
 /** Already in the Rust storage allowlist (src-tauri/src/storage.rs). */
 export const CAPTURES_FILE = "conversation_captures_v1.jsonl";
 
 /** One `<TermX pane, conversation>` pairing, as written by the hook. */
 export interface ConversationCapture {
+  launch?: LaunchConfiguration | null;
   /** The `TERMX_SESSION_ID` the agent CLI started under. */
   termxSessionId: number;
   provider: LlmProvider;
@@ -83,6 +85,7 @@ function parseCaptureLine(text: string): ConversationCapture | null {
     termxSessionId,
     provider,
     id,
+    ...(raw.launch !== undefined ? { launch: parseLaunchConfiguration(raw.launch, provider) } : {}),
     cwd: typeof raw.cwd === "string" && raw.cwd.length > 0 ? raw.cwd : null,
     atMs:
       typeof raw.atMs === "number" && Number.isFinite(raw.atMs) && raw.atMs >= 0
@@ -207,10 +210,11 @@ export function capturedRecord(
   indexed: LlmSessionRecord | null,
 ): LlmSessionRecord {
   if (indexed !== null) {
-    return { ...indexed, cwd: capture.cwd ?? indexed.cwd };
+    return { ...indexed, cwd: capture.cwd ?? indexed.cwd, ...(capture.launch !== undefined ? { launch: capture.launch } : {}) };
   }
   return {
     provider: capture.provider,
+    ...(capture.launch !== undefined ? { launch: capture.launch } : {}),
     id: capture.id,
     title: CAPTURED_TITLE,
     cwd: capture.cwd,

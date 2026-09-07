@@ -8,11 +8,15 @@
  * persisted as `conversations_v1.json`.
  */
 
+import type { LaunchConfiguration } from "./launchConfiguration";
+
 export const LLM_PROVIDERS = ["claude", "codex"] as const;
 
 export type LlmProvider = (typeof LLM_PROVIDERS)[number];
 
 export interface LlmSessionRecord {
+  /** Absent for older sessions; null marks a corrupt captured configuration. */
+  launch?: LaunchConfiguration | null;
   provider: LlmProvider;
   id: string;
   title: string;

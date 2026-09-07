@@ -79,7 +79,12 @@ fn validate_cwd(cwd: Option<&Path>) -> Result<Option<PathBuf>> {
 /// so CLIs, CLAUDE.md rules, and hooks running inside the spawned shell can
 /// detect they are inside TermX (spec §7). Independent of
 /// `shell_integration` — this always runs, unlike the cmd PROMPT hook above.
-fn stamp_termx_env(env: &mut Vec<(String, String)>, id: SessionId) {
+fn stamp_termx_env(
+    env: &mut Vec<(String, String)>,
+    id: SessionId,
+    host_exe: &Path,
+    data_dir: &Path,
+) {
     env.push(("TERMX".to_string(), "1".to_string()));
     env.push(("TERMX_SESSION_ID".to_string(), id.to_string()));
     // The cross-tool convention on top of the TERMX-specific pair: CLIs that
@@ -89,6 +94,14 @@ fn stamp_termx_env(env: &mut Vec<(String, String)>, id: SessionId) {
     env.push((
         "TERM_PROGRAM_VERSION".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
+    ));
+    env.push((
+        "TERMX_HOST_EXE".to_string(),
+        host_exe.display().to_string(),
+    ));
+    env.push((
+        "TERMX_DATA_DIR".to_string(),
+        data_dir.display().to_string(),
     ));
 }
 
@@ -173,7 +186,8 @@ impl Registry {
         // CLIs/hooks that read TERMX_SESSION_ID must see it from process
         // birth, independent of shell_integration (spec §7).
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        stamp_termx_env(&mut prof.env, id);
+        let host_exe = std::env::current_exe().context("resolving termx-host executable")?;
+        stamp_termx_env(&mut prof.env, id, &host_exe, &self.data_dir);
         // history_bytes: 0 means no writer at all, so the eviction path keeps
         // its pre-history cost. A spill file we cannot create costs history,
         // never the session.
@@ -1078,7 +1092,12 @@ mod tests {
     #[test]
     fn stamp_termx_env_appends_marker_and_session_id() {
         let mut env = vec![("PROMPT".to_string(), "$P$G".to_string())];
-        stamp_termx_env(&mut env, 42);
+        stamp_termx_env(
+            &mut env,
+            42,
+            Path::new(r"C:\TermX\termx-host.exe"),
+            Path::new(r"D:\TermXData"),
+        );
         assert_eq!(
             env,
             vec![
@@ -1090,6 +1109,11 @@ mod tests {
                     "TERM_PROGRAM_VERSION".to_string(),
                     env!("CARGO_PKG_VERSION").to_string(),
                 ),
+                (
+                    "TERMX_HOST_EXE".to_string(),
+                    r"C:\TermX\termx-host.exe".to_string(),
+                ),
+                ("TERMX_DATA_DIR".to_string(), r"D:\TermXData".to_string()),
             ],
             "TERMX vars must be appended, not replace existing profile env"
         );
@@ -1119,6 +1143,30 @@ mod tests {
             seen.contains(&marker),
             "TERMX/TERMX_SESSION_ID not observed in real spawned session; saw {seen:?}"
         );
+        reg.close_session(info.id);
+        assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn launcher_paths_reach_a_real_spawned_session() {
+        let (tmp, reg) = test_registry();
+        let (info, s) = reg
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
+        s.write_input(b"echo HX:%TERMX_HOST_EXE%\r\necho DD:%TERMX_DATA_DIR%\r\n")
+            .unwrap();
+        let host = std::env::current_exe().unwrap().display().to_string();
+        let data = tmp.path().display().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut seen = String::new();
+        while std::time::Instant::now() < deadline
+            && !(seen.contains(&format!("HX:{host}")) && seen.contains(&format!("DD:{data}")))
+        {
+            seen = String::from_utf8_lossy(&s.snapshot().1).into_owned();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(seen.contains(&format!("HX:{host}")), "host exe stamp missing: {seen:?}");
+        assert!(seen.contains(&format!("DD:{data}")), "data dir stamp missing: {seen:?}");
         reg.close_session(info.id);
         assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }

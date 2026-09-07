@@ -19,7 +19,10 @@ export class LayoutPersistence {
   private readonly listeners = new Set<() => void>();
   private snapshot: LayoutPersistenceSnapshot = { saving: false, error: null };
   private pending: PendingWrite | null = null;
+  // Retained for reconnect, but not runnable work: an offline flush must end.
+  private failedLayout: Layout | null = null;
   private inFlight: Promise<void> | null = null;
+  private recoveryGeneration = 0;
   private activeTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
 
@@ -37,6 +40,7 @@ export class LayoutPersistence {
       return;
     }
     this.pending = { layout, attempts: 0 };
+    this.failedLayout = null;
     this.clearActiveTimer();
     if (kind === "active_tab") {
       this.activeTimer = setTimeout(() => {
@@ -54,14 +58,25 @@ export class LayoutPersistence {
     }
     this.clearActiveTimer();
     this.startPump();
-    while (this.inFlight || this.pending) {
+    while (!this.disposed && (this.inFlight || this.pending)) {
+      this.clearActiveTimer();
+      this.startPump();
       const active = this.inFlight;
       if (active) {
         await active;
-      } else {
-        this.startPump();
-        await Promise.resolve();
       }
+    }
+  }
+
+  retry(): void {
+    if (this.disposed) {
+      return;
+    }
+    // A reconnect can precede the rejection from the retired connection.
+    // Each signal permits one new bounded batch after that write settles.
+    this.recoveryGeneration++;
+    if (this.failedLayout !== null && !this.pending && !this.inFlight) {
+      this.record(this.failedLayout, "structural");
     }
   }
 
@@ -72,6 +87,7 @@ export class LayoutPersistence {
     this.disposed = true;
     this.clearActiveTimer();
     this.pending = null;
+    this.failedLayout = null;
     this.listeners.clear();
   }
 
@@ -81,21 +97,35 @@ export class LayoutPersistence {
     }
     const current = this.pending;
     this.pending = null;
+    const generation = this.recoveryGeneration;
+    // Reserve ownership BEFORE notifying subscribers or calling the writer:
+    // either can synchronously record a newer layout or dispose this instance.
+    let complete!: () => void;
+    this.inFlight = new Promise<void>((resolve) => { complete = resolve; });
     this.setSnapshot({ ...this.snapshot, saving: true });
-    const running = this.runWrite(current);
-    this.inFlight = running;
+    if (this.disposed) {
+      this.inFlight = null;
+      complete();
+      return;
+    }
+    void this.runWrite(current, generation).then(complete, complete);
   }
 
-  private async runWrite(current: PendingWrite): Promise<void> {
+  private async runWrite(current: PendingWrite, generation: number): Promise<void> {
     let failed = false;
     try {
       await this.writer.setLayout(serializeLayout(current.layout));
+      if (this.disposed) return;
       this.setSnapshot({ saving: true, error: null });
     } catch {
+      if (this.disposed) return;
       failed = true;
-      if (current.attempts < 1 && this.pending === null) {
+      if (this.pending === null && this.recoveryGeneration > generation) {
+        this.pending = { layout: current.layout, attempts: 0 };
+      } else if (current.attempts < 1 && this.pending === null) {
         this.pending = { ...current, attempts: current.attempts + 1 };
-      } else if (current.attempts >= 1) {
+      } else if (current.attempts >= 1 && this.pending === null) {
+        this.failedLayout = current.layout;
         this.setSnapshot({
           saving: true,
           error: "Unable to save the workspace layout.",
@@ -103,6 +133,7 @@ export class LayoutPersistence {
       }
     } finally {
       this.inFlight = null;
+      if (this.disposed) return;
       if (!this.disposed && this.pending && this.activeTimer === null) {
         this.startPump();
       }

@@ -88,6 +88,23 @@ describe("loopbackBus", () => {
 });
 
 describe("tauriWindowBus", () => {
+  it("round-trips bus-only receipt metadata and rejects malformed envelopes", async () => {
+    const { transport, emitted, listeners } = fakeTransport();
+    const bus = tauriWindowBus(transport);
+    const receive = vi.fn();
+    bus.onLayout(receive);
+    await bus.ready();
+    const sync = { authority: "main-instance", revision: 4,
+      receipts: { aux: { sequence: 2, rejected: false } } };
+    await bus.broadcastLayout({ version: 3 }, sync);
+    expect(emitted[0]).toEqual({ event: LAYOUT_STATE_EVENT, payload: { layout: { version: 3 }, sync } });
+    expect(receive).toHaveBeenCalledWith({ version: 3 }, sync);
+    receive.mockClear();
+    listeners.get(LAYOUT_STATE_EVENT)?.({ payload: { layout: {}, sync: { ...sync, receipts: { aux: null } } } });
+    listeners.get(LAYOUT_STATE_EVENT)?.({ payload: { layout: {}, sync: { ...sync, revision: -1 } } });
+    expect(receive).not.toHaveBeenCalled();
+  });
+
   function fakeTransport() {
     const emitted: Array<{ event: string; payload: unknown }> = [];
     const listeners = new Map<string, (event: { payload: unknown }) => void>();
@@ -644,10 +661,11 @@ describe("single-writer wiring over the bus", () => {
     options: {
       seed?: Partial<Record<AppFileName, string>>;
       pluginPane?: boolean;
+      bus?: WindowBus;
     } = {},
   ) {
     const seed = options.seed ?? {};
-    const bus = loopbackBus();
+    const bus = options.bus ?? loopbackBus();
     const mainFake = fakeClient(tornLayout(options.pluginPane));
     const auxFake = fakeClient(tornLayout(options.pluginPane));
     const mainFiles = fakeAppFiles(seed);
@@ -683,6 +701,85 @@ describe("single-writer wiring over the bus", () => {
     expect(main.controller.getSnapshot().layout.tabs["tab-2"]!.title).toBe(
       "renamed",
     );
+  });
+
+  it("preserves overlapping edits made to different windows' tabs", async () => {
+    const { main, aux } = await pair();
+    try {
+      main.controller.renameTab("tab-1", "Main edit");
+      aux.controller.renameTab("tab-2", "Aux edit");
+      await aux.controller.flush();
+      await main.controller.flush();
+      for (const workspace of [main, aux]) {
+        expect(workspace.controller.getSnapshot().layout.tabs["tab-1"]!.title).toBe("Main edit");
+        expect(workspace.controller.getSnapshot().layout.tabs["tab-2"]!.title).toBe("Aux edit");
+      }
+    } finally {
+      main.controller.dispose();
+      aux.controller.dispose();
+    }
+  });
+
+  it("retains newer local edits when an older receipt arrives", async () => {
+    const wire = loopbackBus();
+    const deliveries: Array<() => Promise<void>> = [];
+    const bus: WindowBus = {
+      ...wire,
+      broadcastLayout: (...args) => {
+        deliveries.push(() => wire.broadcastLayout(...args));
+        return Promise.resolve();
+      },
+    };
+    const { main, aux } = await pair({ bus });
+    try {
+      aux.controller.renameTab("tab-2", "First");
+      aux.controller.renameTab("tab-2", "Newest");
+      main.controller.renameTab("tab-1", "Main edit");
+      await main.controller.flush();
+      for (let i = 0; i < 20; i++) {
+        while (deliveries.length) await deliveries.shift()!();
+        await Promise.resolve();
+      }
+      await aux.controller.flush();
+      await main.controller.flush();
+      while (deliveries.length) await deliveries.shift()!();
+      for (const workspace of [main, aux]) {
+        expect(workspace.controller.getSnapshot().layout.tabs["tab-1"]!.title).toBe("Main edit");
+        expect(workspace.controller.getSnapshot().layout.tabs["tab-2"]!.title).toBe("Newest");
+      }
+    } finally {
+      main.controller.dispose();
+      aux.controller.dispose();
+    }
+  });
+
+  it("rejects stale edits of a deleted tab visibly without resurrecting it", async () => {
+    const wire = loopbackBus();
+    const deliveries: Array<() => Promise<void>> = [];
+    const bus: WindowBus = {
+      ...wire,
+      broadcastLayout: (...args) => {
+        deliveries.push(() => wire.broadcastLayout(...args));
+        return Promise.resolve();
+      },
+    };
+    const { main, aux } = await pair({ bus });
+    try {
+      // Capture the stale aux edit before main can broadcast its deletion.
+      const closing = main.controller.closePane("tab-2", 2);
+      await closing;
+      aux.controller.renameTab("tab-2", "Stale rename");
+      while (deliveries.length) await deliveries.shift()!();
+      await aux.controller.flush();
+      await main.controller.flush();
+      while (deliveries.length) await deliveries.shift()!();
+      expect(main.controller.getSnapshot().layout.tabs["tab-2"]).toBeUndefined();
+      expect(aux.controller.getSnapshot().layout.tabs["tab-2"]).toBeUndefined();
+      expect(aux.controller.getSnapshot().notice).toMatch(/another window/i);
+    } finally {
+      main.controller.dispose();
+      aux.controller.dispose();
+    }
   });
 
   it(

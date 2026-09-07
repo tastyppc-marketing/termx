@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HostClient } from "../client";
+import { HostClient } from "../client";
 import {
   ANTI_FLAP_FLOOR_MS,
   AUTH_BACKOFF_MS,
@@ -73,6 +73,82 @@ class FakeClient {
   asHostClient(): HostClient {
     return this as unknown as HostClient;
   }
+}
+
+/** A controlled transport that exercises the real HostClient request queue. */
+class ControlledWebSocket {
+  binaryType: BinaryType = "blob";
+  readyState = 0;
+  readonly sent: Array<string | ArrayBufferLike | Blob | ArrayBufferView> = [];
+  closeCalls = 0;
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject | null) {
+    if (!listener) {
+      return;
+    }
+    const eventListener: EventListener = typeof listener === "function"
+      ? listener
+      : (event) => listener.handleEvent(event);
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(eventListener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null) {
+    if (!listener || typeof listener !== "function") {
+      return;
+    }
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+    if (this.readyState !== 1) {
+      throw new Error("socket is not open");
+    }
+    this.sent.push(data);
+  }
+
+  close() {
+    this.closeCalls += 1;
+    if (this.readyState === 3) {
+      return;
+    }
+    this.readyState = 3;
+    this.emit("close", new Event("close"));
+  }
+
+  open() {
+    this.readyState = 1;
+    this.emit("open", new Event("open"));
+  }
+
+  receiveJson(message: Record<string, unknown>) {
+    this.emit("message", new MessageEvent("message", { data: JSON.stringify(message) }));
+  }
+
+  sentJson(): Array<Record<string, unknown>> {
+    return this.sent
+      .filter((message): message is string => typeof message === "string")
+      .map((message) => JSON.parse(message) as Record<string, unknown>);
+  }
+
+  private emit(type: string, event: Event) {
+    for (const listener of [...(this.listeners.get(type) ?? [])]) {
+      listener(event);
+    }
+  }
+}
+
+async function connectControlled(socket: ControlledWebSocket): Promise<HostClient> {
+  const pending = HostClient.connect({
+    port: 43_123,
+    token: "timeout-test-token",
+    webSocketFactory: () => socket as never,
+  });
+  socket.open();
+  socket.receiveJson({ type: "auth_ok", version: "0.1.0", sessions: [] });
+  return pending;
 }
 
 async function flush() {
@@ -288,9 +364,10 @@ describe("ReconnectingHostClient requests", () => {
     machine.dispose();
   });
 
-  it("gives up on a request the local daemon never answers", async () => {
+  it("retires the connection when the local daemon never answers", async () => {
     const clock = createClock();
-    const machine = start(scriptedConnect([new FakeClient()]), clock);
+    const client = new FakeClient();
+    const machine = start(scriptedConnect([client]), clock);
     await flush();
 
     const pending = machine.request(() => new Promise<never>(() => undefined));
@@ -304,7 +381,151 @@ describe("ReconnectingHostClient requests", () => {
     clock.advance(1);
     await flush();
     await expect(pending).rejects.toBeInstanceOf(HostDisconnectedError);
+    expect(client.closeCalls).toBe(1);
+    expect(machine.state).toMatchObject({ phase: "reconnecting" });
     machine.dispose();
+  });
+
+  it("closes a timed-out real client before its queued command can be sent", async () => {
+    const clock = createClock();
+    const firstSocket = new ControlledWebSocket();
+    const secondSocket = new ControlledWebSocket();
+    const firstClient = await connectControlled(firstSocket);
+    const connect = vi.fn(() => connectControlled(secondSocket));
+    const machine = ReconnectingHostClient.start({
+      initialClient: firstClient,
+      connect,
+      now: clock.now,
+      schedule: clock.schedule,
+    });
+
+    const getState = machine.request((client) => client.getState());
+    const closeSession = machine.request((client) => client.closeSession(7));
+    const attachment = firstClient.attach(7);
+    void getState.catch(() => undefined);
+    void closeSession.catch(() => undefined);
+    void attachment.catch(() => undefined);
+    expect(firstSocket.sentJson().map((message) => message.type)).toEqual([
+      "auth",
+      "get_state",
+      "attach",
+    ]);
+
+    clock.advance(REQUEST_TIMEOUT_MS);
+    await flush();
+
+    await expect(getState).rejects.toThrow(/did not answer within 120s/);
+    await expect(closeSession).rejects.toBeInstanceOf(Error);
+    await expect(attachment).rejects.toThrow(/Host connection closed/);
+    expect(firstSocket.closeCalls).toBe(1);
+    expect(machine.state).toMatchObject({ phase: "reconnecting" });
+
+    // A reply already in flight may arrive after the deadline. It must not
+    // release the old HostClient queue and transmit CloseSession.
+    firstSocket.receiveJson({ type: "state", layout: null, sessions: [] });
+    expect(firstSocket.sentJson().map((message) => message.type)).toEqual([
+      "auth",
+      "get_state",
+      "attach",
+    ]);
+
+    clock.advance(RECONNECT_BACKOFF_MS[0]);
+    await flush();
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(machine.state).toEqual({ phase: "connected" });
+
+    const fresh = machine.request((client) => client.getState());
+    secondSocket.receiveJson({ type: "state", layout: { fresh: true }, sessions: [] });
+    await expect(fresh).resolves.toEqual({ layout: { fresh: true }, sessions: [] });
+    machine.dispose();
+  });
+
+  it("does not let an obsolete request rejection retire its replacement client", async () => {
+    const clock = createClock();
+    const first = new FakeClient();
+    const second = new FakeClient();
+    const machine = start(scriptedConnect([first, second]), clock);
+    await flush();
+
+    let rejectOld!: (error: Error) => void;
+    const stale = machine.request(() => new Promise<never>((_resolve, reject) => {
+      rejectOld = reject;
+    }));
+    void stale.catch(() => undefined);
+    first.die();
+    clock.advance(ANTI_FLAP_FLOOR_MS);
+    await flush();
+    expect(machine.currentClient).toBe(second.asHostClient());
+
+    rejectOld(new Error("Host connection closed"));
+    await flush();
+
+    await expect(stale).rejects.toThrow(/Host connection closed/);
+    expect(second.closeCalls).toBe(0);
+    expect(machine.currentClient).toBe(second.asHostClient());
+    machine.dispose();
+  });
+
+  it("does not let an obsolete request deadline retire its replacement client", async () => {
+    const clock = createClock();
+    const first = new FakeClient();
+    const second = new FakeClient();
+    const machine = start(scriptedConnect([first, second]), clock);
+    await flush();
+
+    const stale = machine.request(() => new Promise<never>(() => undefined));
+    void stale.catch(() => undefined);
+    first.die();
+    clock.advance(ANTI_FLAP_FLOOR_MS);
+    await flush();
+    expect(machine.currentClient).toBe(second.asHostClient());
+
+    clock.advance(REQUEST_TIMEOUT_MS - ANTI_FLAP_FLOOR_MS);
+    await flush();
+
+    await expect(stale).rejects.toThrow(/did not answer within 120s/);
+    expect(second.closeCalls).toBe(0);
+    expect(machine.currentClient).toBe(second.asHostClient());
+    machine.dispose();
+  });
+
+  it("cancels the deadline when the request callback throws synchronously", async () => {
+    const clock = createClock();
+    const client = new FakeClient();
+    const machine = start(scriptedConnect([client]), clock);
+    await flush();
+
+    const failure = new Error("invalid request arguments");
+    await expect(machine.request(() => {
+      throw failure;
+    })).rejects.toBe(failure);
+
+    expect(clock.pendingCount()).toBe(0);
+    clock.advance(REQUEST_TIMEOUT_MS);
+    expect(client.closeCalls).toBe(0);
+    expect(machine.state).toEqual({ phase: "connected" });
+    machine.dispose();
+  });
+
+  it("disposal closes a real client and drains an outstanding request deadline", async () => {
+    const clock = createClock();
+    const socket = new ControlledWebSocket();
+    const client = await connectControlled(socket);
+    const machine = ReconnectingHostClient.start({
+      initialClient: client,
+      connect: () => Promise.reject(new Error("disposed machine must not reconnect")),
+      now: clock.now,
+      schedule: clock.schedule,
+    });
+    const pending = machine.request((live) => live.getState());
+    void pending.catch(() => undefined);
+
+    machine.dispose();
+    await flush();
+
+    await expect(pending).rejects.toThrow(/Host connection closed/);
+    expect(socket.closeCalls).toBe(1);
+    expect(clock.pendingCount()).toBe(0);
   });
 
   it("treats a terminal request rejection as the connection dying", async () => {

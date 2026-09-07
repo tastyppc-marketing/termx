@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// than growing a second storage API. The ssh file holds secrets, but it needs
 /// no special handling HERE — encryption happens renderer-side (src/ssh.rs's
 /// DPAPI commands) before the bytes ever reach this module.
-pub const ALLOWED_FILES: [&str; 9] = [
+pub const ALLOWED_FILES: [&str; 10] = [
     "settings_v1.json",
     "ui_state_v1.json",
     "sessions_index_v1.json",
@@ -33,6 +33,7 @@ pub const ALLOWED_FILES: [&str; 9] = [
     // READS it — the hook owns the writes — so the atomic-rename write path
     // here exists for symmetry, not because anything in the UI uses it.
     "conversation_captures_v1.jsonl",
+    "conversation_launches_v1.jsonl",
 ];
 
 /// Keeps concurrent temp files distinct within one process (two debounced
@@ -117,7 +118,7 @@ mod tests {
     const SETTINGS: &str = "settings_v1.json";
 
     #[test]
-    fn allowlist_is_exactly_the_nine_app_files() {
+    fn allowlist_is_exactly_the_ten_app_files() {
         assert_eq!(
             ALLOWED_FILES,
             [
@@ -130,6 +131,7 @@ mod tests {
                 "plugins_v1.json",
                 "plugin_panes_v1.json",
                 "conversation_captures_v1.jsonl",
+                "conversation_launches_v1.jsonl",
             ]
         );
     }

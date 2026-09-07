@@ -83,6 +83,7 @@ function harness(options: {
   /** The daemon's busy-probe answer. Omitted = a client without the method
    * (an older daemon), "reject" = the probe call fails. */
   probe?: { alive: boolean; busy: boolean } | "reject";
+  refreshConversationCaptures?: () => Promise<void>;
 } = {}) {
   const exitListeners = new Set<
     (event: { sessionId: number; exitCode: number | null }) => void
@@ -176,6 +177,7 @@ function harness(options: {
     settings: { getSnapshot: () => ({ ...DEFAULT_SETTINGS, ...options.settings }) },
     dirExists,
     savedSessions: { touchDaemonSession },
+    refreshConversationCaptures: options.refreshConversationCaptures,
   });
 
   return {
@@ -221,6 +223,68 @@ async function resumeAndSettle(
  * shell is idle must reattach and type nothing.
  */
 describe("WorkspaceController.resumeSaved probe verdicts", () => {
+  function invocation(command: string | Uint8Array) {
+    const token = String(command).trim().split(" ").at(-1)!;
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(token.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0))));
+  }
+
+  const configured = saved({ conversation: { provider: "claude", id: CLAUDE_ID, title: "Configured",
+    launch: { v: 1, provider: "claude", cwd: "C:\\original", args: ["--model", "sonnet", "--permission-mode", "plan", "--add-dir", "../shared"] },
+  } });
+
+  it("restores all saved options in a fresh cmd pane using the original launch cwd", async () => {
+    const h = harness({ settings: { defaultProfile: "cmd" } });
+    await resumeAndSettle(h, configured);
+    expect(h.writes[0]?.[1]).toContain('"%TERMX_HOST_EXE%" --agent-json ');
+    expect(invocation(h.writes[0]![1])).toEqual({ v: 1, provider: "claude", cwd: "C:\\original", args: ["--resume", CLAUDE_ID, ...configured.conversation!.launch!.args] });
+    h.controller.dispose();
+  });
+
+  it("uses the actual idle pane's shell and never sends settings into a busy pane", async () => {
+    for (const busy of [false, true]) {
+      const h = harness({ sessions: [session(7, { profile: "cmd" })], layout: layoutWithTab("existing-tab", 7), probe: { alive: true, busy } });
+      await h.controller.resumeSaved({ ...configured, lastDaemonSessionId: 7 });
+      expect(h.createSession).not.toHaveBeenCalled();
+      if (busy) expect(h.writes).toEqual([]);
+      else {
+        expect(h.writes[0]?.[1]).toContain('"%TERMX_HOST_EXE%" --agent-json ');
+        expect(invocation(h.writes[0]![1]).args).toEqual(["--resume", CLAUDE_ID, ...configured.conversation!.launch!.args]);
+      }
+      h.controller.dispose();
+    }
+  });
+
+  it("checks busy state after refreshing settings before typing into an existing pane", async () => {
+    let finish!: () => void;
+    const probe = { alive: true, busy: false };
+    const h = harness({ sessions: [session(7)], layout: layoutWithTab("existing-tab", 7), probe,
+      refreshConversationCaptures: () => new Promise<void>(resolve => { finish = resolve; }),
+    });
+    const resuming = h.controller.resumeSaved(saved({ lastDaemonSessionId: 7 }));
+    probe.busy = true;
+    finish();
+    await resuming;
+    expect(h.writes).toEqual([]);
+    expect(h.createSession).not.toHaveBeenCalled();
+    h.controller.dispose();
+  });
+
+  it("keeps command encoding and the created profile together when settings change during the folder probe", async () => {
+    const settings: { defaultProfile: TermxSettings["defaultProfile"] } = { defaultProfile: "powershell" };
+    let finish!: (exists: boolean) => void;
+    const h = harness({ settings, dirExists: () => new Promise<boolean>(resolve => { finish = resolve; }) });
+    const resuming = h.controller.resumeSaved(configured);
+    await settleMicrotasks();
+    settings.defaultProfile = "cmd";
+    finish(true);
+    await settleMicrotasks();
+    h.controller.reportSessionCwd(50, configured.cwd, true);
+    await resuming;
+    expect(h.createSession).toHaveBeenCalledWith(expect.objectContaining({ profile: "powershell" }));
+    expect(h.writes[0]?.[1]).toContain("& $env:TERMX_HOST_EXE --agent-json ");
+    h.controller.dispose();
+  });
+
   it("reattaches untouched when the probe says the shell is busy", async () => {
     const h = harness({
       sessions: [session(7)],

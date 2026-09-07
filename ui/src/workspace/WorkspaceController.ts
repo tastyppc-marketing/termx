@@ -437,6 +437,8 @@ export interface WorkspaceControllerOptions {
    * installed (and in every legacy fixture) the folder fallback is unchanged.
    */
   capturedConversationFor?: (sessionId: number) => LlmSessionRecord | null;
+  refreshConversationCaptures?: () => Promise<void>;
+  launchConfigurationFor?: (provider: string, id: string) => import("../conversations/launchConfiguration").LaunchConfiguration | null | undefined;
   savedSessions?: SavedSessionsRecorder;
   /**
    * Stored ssh passwords (ssh-sessions spec §2). Absent — or a policy that
@@ -719,6 +721,8 @@ export class WorkspaceController {
   private readonly capturedConversationFor?: (
     sessionId: number,
   ) => LlmSessionRecord | null;
+  private readonly refreshConversationCaptures?: () => Promise<void>;
+  private readonly launchConfigurationFor?: WorkspaceControllerOptions["launchConfigurationFor"];
   private readonly savedSessions: SavedSessionsRecorder | null;
   private readonly sshPasswords:
     | { passwordFor(alias: string): Promise<string | null> }
@@ -888,6 +892,8 @@ export class WorkspaceController {
     this.savedSessions = options.savedSessions ?? null;
     this.conversations = options.conversations;
     this.capturedConversationFor = options.capturedConversationFor;
+    this.refreshConversationCaptures = options.refreshConversationCaptures;
+    this.launchConfigurationFor = options.launchConfigurationFor;
     this.sshPasswords = options.sshPasswords ?? null;
     this.sshHosts = options.sshHosts ?? null;
     this.pluginPanes = options.pluginPanes
@@ -1682,9 +1688,11 @@ export class WorkspaceController {
       }
     }
 
-    const command = resumeCommand(record);
+    record = await this.conversationWithLaunch(record);
+    const profile = this.settings.getSnapshot().defaultProfile;
+    const command = resumeCommand(record, profile);
     if (command === null) {
-      this.setNotice("That session cannot be resumed: its id is not valid.");
+      this.setNotice(record.launch === undefined ? "That session cannot be resumed: its id is not valid." : "That session's captured launch configuration cannot be restored.");
       return { kind: "refused" };
     }
 
@@ -1701,7 +1709,6 @@ export class WorkspaceController {
       return { kind: "refused" };
     }
 
-    const profile = this.settings.getSnapshot().defaultProfile;
     let created: SessionInfo;
     try {
       created = await this.createSessionDownChain(
@@ -1798,6 +1805,9 @@ export class WorkspaceController {
   /// default directory is never a fallback here.
   resumeSaved = async (entry: SavedSession): Promise<void> => {
     this.setNotice(null);
+    if (entry.conversation && !entry.ssh) {
+      entry = { ...entry, conversation: await this.conversationWithLaunch(entry.conversation) };
+    }
 
     const recordedSessionId = entry.lastDaemonSessionId;
     if (
@@ -1824,12 +1834,19 @@ export class WorkspaceController {
           }
         }
         if (verdict === "resume_in_place") {
+          if (existingTabId === null && await this.aliveSaveVerdict(entry, recordedSessionId) !== "resume_in_place") {
+            this.recordDaemonSession(entry, recordedSessionId);
+            return;
+          }
           // The shell is idle at its prompt in the saved folder — no prompt
           // wait is needed or possible (its report already happened).
-          const command = resumeCommand(entry.conversation!);
+          const currentSession = this.sessions.get(recordedSessionId);
+          if (!currentSession?.alive) return;
+          const configured = entry.conversation!;
+          const command = resumeCommand(configured, currentSession.profile);
           if (command === null) {
             this.setNotice(
-              "That session cannot be resumed: its id is not valid.",
+              configured.launch === undefined ? "That session cannot be resumed: its id is not valid." : "That session's captured launch configuration cannot be restored.",
             );
             return;
           }
@@ -1855,15 +1872,14 @@ export class WorkspaceController {
       // the wrong folder, so it no longer counts as the saved session.
     }
 
-    // The command is built from the provider and id ALONE, and only after
-    // `resumeCommand` validates the id — a corrupt store row is refused here,
-    // before a terminal exists.
+    // Validate identity and captured settings before creating a terminal.
     const conversation = entry.conversation;
+    const profile = this.settings.getSnapshot().defaultProfile;
     let command: string | null = null;
     if (conversation) {
-      command = resumeCommand(conversation);
+      command = entry.ssh ? remoteResumeCommand(conversation) : resumeCommand(conversation, profile);
       if (command === null) {
-        this.setNotice("That session cannot be resumed: its id is not valid.");
+        this.setNotice(conversation.launch === undefined ? "That session cannot be resumed: its id is not valid." : "That session's captured launch configuration cannot be restored.");
         return;
       }
     }
@@ -1883,7 +1899,6 @@ export class WorkspaceController {
       return;
     }
 
-    const profile = this.settings.getSnapshot().defaultProfile;
     let created: SessionInfo;
     try {
       created = await this.createSessionDownChain(profile, [entry.cwd]);
@@ -2437,6 +2452,20 @@ export class WorkspaceController {
     this.publish();
   };
 
+  /** Refresh the append-only capture files before a save/resume: an agent can
+   * finish while its parent shell (and therefore its TermX pane) stays alive. */
+  capturedLocalConversation = async (sessionId: number): Promise<LlmSessionRecord | null> => {
+    await this.refreshConversationCaptures?.();
+    return this.capturedConversationFor?.(sessionId) ?? null;
+  };
+
+  conversationWithLaunch = async <T extends { provider: string; id: string; launch?: import("../conversations/launchConfiguration").LaunchConfiguration | null }>(record: T): Promise<T> => {
+    if (record.launch !== undefined) return record;
+    await this.refreshConversationCaptures?.();
+    const launch = this.launchConfigurationFor?.(record.provider, record.id);
+    return launch === undefined ? record : { ...record, launch };
+  };
+
   /// The conversation a dead pane's "Resume conversation" would bring back:
   /// the conversation THAT pane ran when a capture recorded it, else the
   /// newest resumable conversation in the pane's directory, else null (no
@@ -2463,14 +2492,14 @@ export class WorkspaceController {
       return null;
     }
     const captured = this.capturedConversationFor?.(deadSessionId) ?? null;
-    if (captured !== null && resumeCommand(captured) !== null) {
+    if (captured !== null && resumeCommand({ provider: captured.provider, id: captured.id }) !== null) {
       return captured;
     }
     if (!dead?.cwd || !this.conversations) {
       return null;
     }
     const record = this.conversations.latestForCwd(dead.cwd);
-    if (record === null || resumeCommand(record) === null) {
+    if (record === null || resumeCommand({ provider: record.provider, id: record.id }) === null) {
       return null;
     }
     return record;
@@ -2526,8 +2555,14 @@ export class WorkspaceController {
       : (dead?.cwd ?? this.capturedConversationFor?.(deadSessionId)?.cwd ?? null);
     // Resolved BEFORE the shell exists, so a resume that has nothing to
     // resume degrades to a restart without ever arming a wait.
-    const record = mode === "resume" ? this.deadPaneConversation(deadSessionId) : null;
-    const command = record === null ? null : resumeCommand(record);
+    if (mode === "resume") await this.refreshConversationCaptures?.();
+    const candidate = mode === "resume" ? this.deadPaneConversation(deadSessionId) : null;
+    const record = candidate === null ? null : await this.conversationWithLaunch(candidate);
+    const command = record === null ? null : resumeCommand(record, profile);
+    if (record !== null && command === null) {
+      this.setNotice("That session's captured launch configuration cannot be restored.");
+      return null;
+    }
     let created: SessionInfo;
     try {
       created = await this.createSessionDownChain(
@@ -4664,6 +4699,10 @@ export class WorkspaceController {
       return false;
     }
     return sessionIdsInTab(tab).some((id) => this.sessions.get(id)?.alive === true);
+  }
+
+  reportLayoutConflict(): void {
+    this.setNotice("Another window changed this part of the workspace. Its latest layout was restored; please try your edit again.");
   }
 
   private setNotice(notice: string | null): void {

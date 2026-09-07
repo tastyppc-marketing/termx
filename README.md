@@ -16,6 +16,9 @@ Design spec: `docs/superpowers/specs/2026-07-17-termx-design.md`
 Plans: `docs/superpowers/plans/`
 Backlog: `BACKLOG.md`
 
+Conversation launch capture and resume setup:
+[Resume with original launch settings](docs/resume-launch-settings.md).
+
 ## Dev
 
 Requires Rust (stable). This machine currently builds with the
