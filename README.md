@@ -19,6 +19,8 @@ Backlog: `BACKLOG.md`
 Conversation launch capture and resume setup:
 [Resume with original launch settings](docs/resume-launch-settings.md).
 
+Pane controls: [Maximize a split pane](docs/pane-maximize.md).
+
 ## Dev
 
 Requires Rust (stable). This machine currently builds with the

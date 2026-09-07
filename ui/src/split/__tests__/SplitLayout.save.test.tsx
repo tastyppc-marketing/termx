@@ -85,10 +85,12 @@ describe("SplitLayout pane save button", () => {
   it("renders no save button without the callback", async () => {
     await renderLayout(actions());
     expect(saveButtons()).toHaveLength(0);
-    // The rest of the toolbar is untouched.
-    expect(
+    // Omitting Save must not remove the other pane actions.
+    const labels = Array.from(
       container.querySelectorAll("[data-testid='split-pane-1'] .split-pane__toolbar button"),
-    ).toHaveLength(3);
+      (button) => button.getAttribute("aria-label"),
+    );
+    expect(labels).toEqual(expect.arrayContaining(["Split right", "Split down", "Close pane"]));
   });
 
   it("renders one save button per live pane when the callback is given", async () => {

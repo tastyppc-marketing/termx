@@ -180,6 +180,10 @@ export function SplitLayout({
   /// The pane whose title bar is currently an editor, if any.
   const [renaming, setRenaming] = useState<number | null>(null);
   const [closing, setClosing] = useState(false);
+  // Maximize is local presentation, never a replacement for the saved tree.
+  // Keeping the pane sections mounted preserves terminal and iframe state.
+  const [maximizedSessionId, setMaximizedSessionId] = useState<number | null>(null);
+  const pendingFocusRef = useRef<number | null>(null);
   const dialogOpenerRef = useRef<HTMLElement | null>(null);
   const dialogCancelRef = useRef<HTMLButtonElement | null>(null);
   const dialogConfirmRef = useRef<HTMLButtonElement | null>(null);
@@ -187,6 +191,30 @@ export function SplitLayout({
   const installDrag = (next: DividerDrag | null) => {
     dragRef.current = next;
     setDrag(next);
+  };
+
+  const maximizePane = (sessionId: number) => {
+    const current = dragRef.current;
+    if (current) {
+      try {
+        current.element.releasePointerCapture(current.pointerId);
+      } catch {
+        // Capture may already be gone.
+      }
+      installDrag(null);
+    }
+    onFocusPane(sessionId);
+    setMaximizedSessionId(sessionId);
+  };
+
+  const restoreSplit = (focusContents = false) => {
+    if (focusContents) pendingFocusRef.current = maximizedSessionId;
+    setMaximizedSessionId(null);
+  };
+
+  const splitPane = (sessionId: number, dir: SplitDir) => {
+    restoreSplit();
+    actions.splitPane(sessionId, dir);
   };
 
   const requestClose = (sessionId: number) => {
@@ -236,26 +264,34 @@ export function SplitLayout({
         return;
       }
       const key = event.key.toLowerCase();
-      if (key !== "d" && key !== "e" && key !== "w" && key !== "j") {
+      if (key !== "d" && key !== "e" && key !== "w" && key !== "j" && key !== "enter") {
         return;
       }
+      if (key === "enter" && paneSessionIds.length < 2) return;
       // Shortcuts stay live inside xterm (its hidden textarea IS the terminal)
       // but must not fire from rename fields, search boxes, or other editors —
       // opening the confirm dialog from a rename would blur-commit it.
       const active = document.activeElement;
       if (
         active instanceof HTMLElement &&
-        !active.classList.contains("xterm-helper-textarea") &&
-        (active instanceof HTMLInputElement ||
-          active instanceof HTMLTextAreaElement ||
-          active.isContentEditable)
+        (active.closest("[role='dialog'], [data-esc-guard]") ||
+          (!active.classList.contains("xterm-helper-textarea") &&
+            (active instanceof HTMLInputElement ||
+              active instanceof HTMLTextAreaElement ||
+              active.isContentEditable)))
       ) {
         return;
       }
       event.preventDefault();
       event.stopPropagation();
+      // Holding the shortcut must neither toggle repeatedly nor leak Enter
+      // into xterm, where the repeated key could submit unfinished input.
+      if (key === "enter" && event.repeat) return;
       const focusedState = paneStates[focusedSessionId] ?? MISSING_PANE;
-      if (key === "j") {
+      if (key === "enter") {
+        if (maximizedSessionId === null) maximizePane(focusedSessionId);
+        else restoreSplit(active instanceof HTMLElement && !!active.closest(".split-maximized-bar"));
+      } else if (key === "j") {
         // The focused pane's TerminalPane owns the input marks; route by id.
         window.dispatchEvent(
           new CustomEvent("termx:jump-last-input", {
@@ -265,7 +301,7 @@ export function SplitLayout({
       } else if (key === "w") {
         requestClose(focusedSessionId);
       } else if (focusedState.status === "live") {
-        actions.splitPane(focusedSessionId, key === "d" ? "row" : "col");
+        splitPane(focusedSessionId, key === "d" ? "row" : "col");
       }
     };
     window.addEventListener("keydown", handleKey, true);
@@ -370,14 +406,85 @@ export function SplitLayout({
     [rects],
   );
   const sleepingSessions = useSleepingSessions(sleep, paneSessionIds, visible);
+  const previousPaneIdsRef = useRef(paneSessionIds);
+  const maximized = maximizedSessionId !== null && paneSessionIds.length > 1 &&
+    paneSessionIds.includes(maximizedSessionId) && paneSessionIds.includes(focusedSessionId);
+
+  useEffect(() => {
+    const addedPane = paneSessionIds.some((id) => !previousPaneIdsRef.current.includes(id));
+    previousPaneIdsRef.current = paneSessionIds;
+    if (maximizedSessionId !== null && maximizedSessionId !== focusedSessionId &&
+        !addedPane && paneSessionIds.includes(maximizedSessionId) &&
+        paneSessionIds.includes(focusedSessionId)) {
+      // App may have tried to focus this pane while it was still inert. Focus
+      // its contents after the selected section has actually been revealed.
+      pendingFocusRef.current = focusedSessionId;
+    }
+    setMaximizedSessionId((current) => {
+      if (current === null) return null;
+      // A close/restart or a layout received from another window may remove
+      // the selected pane. Reveal the resulting tree instead of hiding it.
+      if (addedPane || paneSessionIds.length < 2 || !paneSessionIds.includes(current) ||
+          !paneSessionIds.includes(focusedSessionId)) return null;
+      return focusedSessionId;
+    });
+  }, [focusedSessionId, paneSessionIds]);
+
+  useEffect(() => {
+    const sessionId = pendingFocusRef.current;
+    if (!visible || sessionId === null ||
+        (maximizedSessionId !== null && maximizedSessionId !== sessionId)) return;
+    pendingFocusRef.current = null;
+    const pane = containerRef.current?.querySelector<HTMLElement>(
+      `[data-session-id='${sessionId}']`,
+    );
+    const contents = pane?.querySelector<HTMLElement>(
+      ".xterm-helper-textarea, iframe, .dead-pane__action, .plugin-pane__action",
+    );
+    (contents ?? pane)?.focus();
+  }, [maximizedSessionId, visible]);
+
+  const paneLabel = (sessionId: number) => {
+    const state = paneStates[sessionId];
+    if (state?.status === "plugin" && state.pluginId) {
+      return pluginManifestFor?.(state.pluginId)?.name ?? state.pluginId;
+    }
+    return paneTitles?.[sessionId] || `Pane ${sessionId}`;
+  };
 
   return (
     <div
-      ref={containerRef}
       className="split-layout"
       data-testid={`split-layout-${tabId}`}
       data-pane-count={rects.panes.length}
+      data-maximized={maximized || undefined}
     >
+      {maximized ? (
+        <div className="split-maximized-bar" aria-label="Maximized pane controls">
+          <span className="split-maximized-bar__label">Maximized</span>
+          <select
+            aria-label="Switch pane"
+            title="Switch pane"
+            value={maximizedSessionId}
+            onChange={(event) => {
+              const sessionId = Number(event.currentTarget.value);
+              pendingFocusRef.current = sessionId;
+              maximizePane(sessionId);
+            }}
+          >
+            {paneSessionIds.map((sessionId) => (
+              <option key={sessionId} value={sessionId}>{paneLabel(sessionId)}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            aria-label="Restore split view"
+            title="Restore split view (Ctrl+Shift+Enter)"
+            onClick={() => restoreSplit(true)}
+          >Restore split view</button>
+        </div>
+      ) : null}
+      <div className="split-layout__panes" ref={containerRef}>
       {rects.panes.map(({ sessionId, box }) => {
         const state = paneStates[sessionId] ?? MISSING_PANE;
         const focused = sessionId === focusedSessionId;
@@ -396,13 +503,27 @@ export function SplitLayout({
           plugin && state.pluginId !== undefined
             ? pluginManifestFor?.(state.pluginId) ?? null
             : null;
+        const hidden = maximized && sessionId !== maximizedSessionId;
+        const maximizeButton = paneSessionIds.length > 1 ? (
+          <button
+            type="button"
+            aria-label={maximized ? "Restore split view" : "Maximize pane"}
+            title={maximized ? "Restore split view (Ctrl+Shift+Enter)" : "Maximize pane (Ctrl+Shift+Enter)"}
+            aria-pressed={maximized && sessionId === maximizedSessionId}
+            onClick={() => maximized ? restoreSplit() : maximizePane(sessionId)}
+          >{maximized ? "▧" : "⛶"}</button>
+        ) : null;
         return (
           <section
             key={sessionId}
             className={`split-pane${focused ? " split-pane--focused" : ""}`}
-            style={boxStyle(box)}
+            style={hidden ? { display: "none" } : maximized
+              ? boxStyle({ left: 0, top: 0, width: 1, height: 1 }) : boxStyle(box)}
             data-testid={`split-pane-${sessionId}`}
             data-session-id={sessionId}
+            aria-hidden={hidden || undefined}
+            inert={hidden}
+            tabIndex={-1}
             aria-label={
               plugin
                 ? `${manifest?.name ?? state.pluginId ?? "Plugin"} pane`
@@ -478,19 +599,20 @@ export function SplitLayout({
                   />
                 )}
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
+                  {maximizeButton}
                   <button
                     type="button"
                     aria-label="Split right"
                     title={splittable ? "Split right (Ctrl+Shift+D)" : "Split limit reached"}
                     disabled={!splittable}
-                    onClick={() => actions.splitPane(sessionId, "row")}
+                    onClick={() => splitPane(sessionId, "row")}
                   >◫</button>
                   <button
                     type="button"
                     aria-label="Split down"
                     title={splittable ? "Split down (Ctrl+Shift+E)" : "Split limit reached"}
                     disabled={!splittable}
-                    onClick={() => actions.splitPane(sessionId, "col")}
+                    onClick={() => splitPane(sessionId, "col")}
                   >⊟</button>
                   {actions.popOutPane && root.kind === "split" ? (
                     <button
@@ -530,10 +652,10 @@ export function SplitLayout({
                   onRelaunch={() => void actions.relaunchPlugin?.(sessionId)}
                   onDismiss={() => void actions.dismissPane(sessionId)}
                 />
-                {/* A panel has no shell to end and cannot be split, so its
-                    toolbar is the close button alone — `requestClose` routes a
-                    non-live pane straight to dismiss, with no dialog. */}
+                {/* A panel has no shell to end and cannot be split.
+                    `requestClose` dismisses it directly, with no dialog. */}
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
+                  {maximizeButton}
                   <button
                     type="button"
                     aria-label="Close pane"
@@ -543,6 +665,7 @@ export function SplitLayout({
                 </div>
               </>
             ) : (
+              <>
               <DeadPane
                 exitCode={state.exitCode}
                 known={state.status === "dead"}
@@ -554,6 +677,12 @@ export function SplitLayout({
                 onResume={() => void actions.restartPane(sessionId, "resume")}
                 onNewSession={() => void actions.restartPane(sessionId, "fresh")}
               />
+              {maximizeButton ? (
+                <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
+                  {maximizeButton}
+                </div>
+              ) : null}
+              </>
             )}
           </section>
         );
@@ -570,9 +699,11 @@ export function SplitLayout({
               `split-divider--${divider.dir}`,
               dragging ? "split-divider--dragging" : "",
             ].filter(Boolean).join(" ")}
-            style={dividerStyle(divider)}
+            style={maximized ? { display: "none" } : dividerStyle(divider)}
             role="separator"
-            tabIndex={0}
+            tabIndex={maximized ? -1 : 0}
+            aria-hidden={maximized || undefined}
+            inert={maximized}
             aria-orientation={divider.dir === "row" ? "vertical" : "horizontal"}
             aria-label="Resize panes"
             aria-valuenow={Math.round(first * 100)}
@@ -594,6 +725,7 @@ export function SplitLayout({
           />
         );
       })}
+      </div>
       {confirmClose !== null ? (
         <div className="split-dialog-backdrop">
           <div

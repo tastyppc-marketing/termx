@@ -13,6 +13,11 @@ paths, custom wrappers and shells started before the updated host can bypass
 capture. The native helper launches a fixed provider with an argument array;
 saved values are never evaluated as shell code.
 
+After updating the binaries, reopen the UI for its new controls. Capture also
+requires restarting the background host: after finishing active work, close
+TermX with **Stop everything**, then reopen it and create new shell panes.
+Closing with **Keep running** deliberately retains the old host and shells.
+
 ## Install the capture hooks
 
 Build the updated host, then run from the repository root:
