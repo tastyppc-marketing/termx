@@ -604,12 +604,35 @@
   opacity: 0.58;
 }
 
+/* The open terminal keeps a narrow right-edge marker even when Ctrl-click
+   removes it from the selection. The palette stripe stays on the left. */
+.sidebar-tab--active::after {
+  position: absolute;
+  inset: 4px 0 4px auto;
+  width: 2px;
+  background: var(--sidebar-accent);
+  content: "";
+  pointer-events: none;
+}
+
 .sidebar-tab--error {
   border-color:
     color-mix(in srgb, var(--error) 20%, transparent)
     color-mix(in srgb, var(--error) 20%, transparent)
     color-mix(in srgb, var(--error) 20%, transparent)
     var(--tab-color);
+}
+
+.sidebar-tab--selected,
+.sidebar-tab--selected:hover {
+  background: color-mix(in srgb, var(--sidebar-accent) 24%, var(--sidebar-bg));
+  border-top-color: color-mix(in srgb, var(--sidebar-accent) 48%, transparent);
+  border-right-color: color-mix(in srgb, var(--sidebar-accent) 48%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--sidebar-accent) 48%, transparent);
+}
+
+.sidebar-tab--selected.sidebar-tab--ended {
+  opacity: 0.85;
 }
 
 .sidebar-tab__content {

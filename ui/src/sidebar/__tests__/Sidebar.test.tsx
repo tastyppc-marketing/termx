@@ -261,6 +261,8 @@ function pointer(
     button?: number;
     pointerId?: number;
     isPrimary?: boolean;
+    ctrlKey?: boolean;
+    shiftKey?: boolean;
   } = {},
 ): Event {
   const event = new MouseEvent(type, {
@@ -268,6 +270,8 @@ function pointer(
     clientX: options.x ?? 0,
     clientY: options.y ?? 0,
     button: options.button ?? 0,
+    ctrlKey: options.ctrlKey,
+    shiftKey: options.shiftKey,
   });
   Object.defineProperties(event, {
     pointerId: { value: options.pointerId ?? 7 },
@@ -428,6 +432,208 @@ function nestedWorkspace(): WorkspaceSnapshot {
     layout,
   );
 }
+
+describe("Sidebar tab selection", () => {
+  function selectionWorkspace() {
+    const snapshot = workspace();
+    const extraTabs = ["tab-4", "tab-5", "tab-6"].map((id) => ({
+      kind: "tab" as const,
+      tab: tabModel(id, null),
+    }));
+    return { ...snapshot, rootItems: [...snapshot.rootItems, ...extraTabs] };
+  }
+
+  function row(id: string) {
+    return container.querySelector<HTMLElement>(`[data-tab-id='${id}']`)!;
+  }
+
+  function selected() {
+    return [...container.querySelectorAll("[role='tab'][aria-selected='true']")]
+      .map((node) => node.getAttribute("data-tab-id"));
+  }
+
+  async function click(id: string, modifiers: MouseEventInit = {}) {
+    await act(async () => row(id).dispatchEvent(new MouseEvent("click", {
+      bubbles: true, ...modifiers,
+    })));
+  }
+
+  it("Shift-click selects the visible range across groups from the active tab", async () => {
+    const sidebarActions = await renderSidebar(selectionWorkspace());
+    await click("tab-5", { shiftKey: true });
+
+    expect(selected()).toEqual(["tab-1", "tab-2", "tab-4", "tab-5"]);
+    for (const list of container.querySelectorAll("[role='tablist']")) {
+      expect(list.getAttribute("aria-multiselectable")).toBe("true");
+    }
+    expect(row("tab-5").classList.contains("sidebar-tab--selected")).toBe(true);
+    expect(row("tab-1").getAttribute("aria-current")).toBe("page");
+    expect(row("tab-5").hasAttribute("aria-current")).toBe(false);
+    expect(sidebarActions.activateTab).not.toHaveBeenCalled();
+  });
+
+  it("keeps the anchor when growing, shrinking, and reversing a Shift range", async () => {
+    await renderSidebar(selectionWorkspace());
+    await click("tab-4");
+    await click("tab-6", { shiftKey: true });
+    expect(selected()).toEqual(["tab-4", "tab-5", "tab-6"]);
+    await click("tab-5", { shiftKey: true });
+    expect(selected()).toEqual(["tab-4", "tab-5"]);
+    await click("tab-1", { shiftKey: true });
+    expect(selected()).toEqual(["tab-1", "tab-2", "tab-4"]);
+  });
+
+  it.each(["ctrlKey", "metaKey"])("%s toggles individual tabs without changing the open terminal", async (modifier) => {
+    const sidebarActions = await renderSidebar(selectionWorkspace());
+    await click("tab-5", { [modifier]: true });
+    expect(selected()).toEqual(["tab-1", "tab-5"]);
+    await click("tab-2", { [modifier]: true });
+    await click("tab-5", { [modifier]: true });
+    expect(selected()).toEqual(["tab-1", "tab-2"]);
+    await click("tab-1", { [modifier]: true });
+    expect(selected()).toEqual(["tab-2"]);
+    expect(row("tab-1").classList.contains("sidebar-tab--active")).toBe(true);
+    expect(row("tab-1").classList.contains("sidebar-tab--selected")).toBe(false);
+    expect(sidebarActions.activateTab).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+Shift adds a range from the most recently Ctrl-clicked tab", async () => {
+    await renderSidebar(selectionWorkspace());
+    await click("tab-4", { ctrlKey: true });
+    await click("tab-6", { ctrlKey: true, shiftKey: true });
+    expect(selected()).toEqual(["tab-1", "tab-4", "tab-5", "tab-6"]);
+  });
+
+  it("plain click and Enter return to a single selected tab and activate it", async () => {
+    const sidebarActions = await renderSidebar(selectionWorkspace());
+    await click("tab-5", { shiftKey: true });
+    await click("tab-2");
+    expect(selected()).toEqual(["tab-2"]);
+    expect(sidebarActions.activateTab).toHaveBeenLastCalledWith("tab-2");
+    await click("tab-6", { ctrlKey: true });
+    await act(async () => key(row("tab-1"), "Enter"));
+    expect(selected()).toEqual(["tab-1"]);
+    expect(sidebarActions.activateTab).toHaveBeenLastCalledWith("tab-1");
+  });
+
+  it("preserves selection on workspace refresh, and follows activation elsewhere", async () => {
+    const sidebarActions = await renderSidebar(selectionWorkspace());
+    await click("tab-5", { shiftKey: true });
+    await renderSidebar(selectionWorkspace(), sidebarActions);
+    expect(selected()).toEqual(["tab-1", "tab-2", "tab-4", "tab-5"]);
+    await renderSidebar({ ...selectionWorkspace(), activeTabId: "tab-4" }, sidebarActions);
+    expect(selected()).toEqual(["tab-4"]);
+    await click("tab-6", { shiftKey: true });
+    expect(selected()).toEqual(["tab-4", "tab-5", "tab-6"]);
+  });
+
+  it("drops hidden selections and falls back to the active tab when the anchor is hidden", async () => {
+    const sidebarActions = await renderSidebar(selectionWorkspace());
+    await click("tab-2", { ctrlKey: true });
+    const collapsed = selectionWorkspace();
+    const work = collapsed.rootItems[1];
+    if (work.kind !== "group") throw new Error("fixture changed");
+    Object.assign(work.group, { collapsed: true });
+    await renderSidebar(collapsed, sidebarActions);
+    expect(selected()).toEqual(["tab-1"]);
+    await click("tab-5", { shiftKey: true });
+    expect(selected()).toEqual(["tab-1", "tab-4", "tab-5"]);
+    await renderSidebar(selectionWorkspace(), sidebarActions);
+    expect(selected()).toEqual(["tab-1", "tab-4", "tab-5"]);
+  });
+
+  it("forgets removed tabs and anchors even if a tab with the same ID later reappears", async () => {
+    const snapshot = selectionWorkspace();
+    const sidebarActions = await renderSidebar(snapshot);
+    await click("tab-5", { ctrlKey: true });
+    await renderSidebar({
+      ...snapshot,
+      rootItems: snapshot.rootItems.filter((item) => item.kind !== "tab" || item.tab.id !== "tab-5"),
+    }, sidebarActions);
+    await renderSidebar(snapshot, sidebarActions);
+    expect(selected()).toEqual(["tab-1"]);
+    await click("tab-6", { shiftKey: true });
+    expect(selected()).toEqual(["tab-1", "tab-2", "tab-4", "tab-5", "tab-6"]);
+  });
+
+  it.each(["ctrlKey", "shiftKey"])("%s gestures do not begin a drag or rename", async (modifier) => {
+    const sidebarActions = await renderSidebar(selectionWorkspace());
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true, value: () => null,
+    });
+    await act(async () => {
+      row("tab-5").dispatchEvent(pointer("pointerdown", { [modifier]: true }));
+      row("tab-5").dispatchEvent(pointer("pointermove", { x: 100, y: 100 }));
+      row("tab-5").dispatchEvent(pointer("pointerup", { x: 100, y: 100 }));
+    });
+    expect(HTMLElement.prototype.setPointerCapture).not.toHaveBeenCalled();
+    await click("tab-5", { [modifier]: true });
+    await act(async () => row("tab-5").dispatchEvent(new MouseEvent("dblclick", {
+      bubbles: true, [modifier]: true,
+    })));
+    expect(container.querySelector("input")).toBeNull();
+    expect(sidebarActions.moveItem).not.toHaveBeenCalled();
+    expect(selected()).toContain("tab-5");
+  });
+
+  it("leaves selection alone when clicking close buttons or the rename editor", async () => {
+    const sidebarActions = await renderSidebar(selectionWorkspace());
+    await click("tab-5", { ctrlKey: true });
+    await act(async () => key(row("tab-5"), "F2"));
+    await act(async () => row("tab-5").querySelector("input")!.dispatchEvent(new MouseEvent("click", {
+      bubbles: true, ctrlKey: true,
+    })));
+    expect(selected()).toEqual(["tab-1", "tab-5"]);
+    await act(async () => key(row("tab-5").querySelector("input")!, "Escape"));
+    await act(async () => row("tab-2").querySelector("button")!.click());
+    expect(selected()).toEqual(["tab-1", "tab-5"]);
+    expect(sidebarActions.dismissDeadTab).toHaveBeenCalledWith("tab-2");
+    expect(sidebarActions.activateTab).not.toHaveBeenCalled();
+  });
+
+  it("supports Shift+arrow ranges and Ctrl+Space toggles without activating tabs", async () => {
+    const sidebarActions = await renderSidebar(selectionWorkspace());
+    await act(async () => {
+      row("tab-1").focus();
+      row("tab-1").dispatchEvent(new KeyboardEvent("keydown", {
+        key: "ArrowDown", shiftKey: true, bubbles: true,
+      }));
+    });
+    expect(selected()).toEqual(["tab-1", "tab-2"]);
+    expect(document.activeElement).toBe(row("tab-2"));
+    await act(async () => row("tab-2").dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowDown", shiftKey: true, bubbles: true,
+    })));
+    expect(selected()).toEqual(["tab-1", "tab-2", "tab-4"]);
+    await act(async () => row("tab-4").dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowUp", shiftKey: true, bubbles: true,
+    })));
+    expect(selected()).toEqual(["tab-1", "tab-2"]);
+    await act(async () => row("tab-2").dispatchEvent(new KeyboardEvent("keydown", {
+      key: " ", ctrlKey: true, bubbles: true,
+    })));
+    expect(selected()).toEqual(["tab-1"]);
+    expect(sidebarActions.activateTab).not.toHaveBeenCalled();
+  });
+
+  it.each(["tab", "group"])("accepts a modified click after a %s drag that never delivered its click event", async (source) => {
+    await renderSidebar(selectionWorkspace());
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true, value: () => null,
+    });
+    await act(async () => {
+      const dragged = source === "tab" ? row("tab-1") : groupHeader("group-1");
+      dragged.dispatchEvent(pointer("pointerdown"));
+      dragged.dispatchEvent(pointer("pointermove", { x: 100, y: 100 }));
+      dragged.dispatchEvent(pointer("pointerup", { x: 100, y: 100 }));
+      // Reparenting a dragged row can unmount it before the browser's click.
+      row("tab-5").dispatchEvent(pointer("pointerdown", { ctrlKey: true }));
+      row("tab-5").dispatchEvent(pointer("pointerup", { ctrlKey: true }));
+    });
+    await click("tab-5", { ctrlKey: true });
+    expect(selected()).toEqual(["tab-1", "tab-5"]);
+  });
+});
 
 describe("Sidebar nested groups", () => {
   it("renders a three-level tree with per-level aria-levels and group colors", async () => {

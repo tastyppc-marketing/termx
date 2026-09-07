@@ -396,6 +396,11 @@ export function Sidebar({
   const [menu, setMenu] = useState<SidebarMenu | null>(null);
   const [menuPanel, setMenuPanel] = useState<MenuPanel>("root");
   const [focusedTabId, setFocusedTabId] = useState<string | null>(snapshot.activeTabId);
+  const [selectedTabIds, setSelectedTabIds] = useState<ReadonlySet<string>>(
+    () => new Set(snapshot.activeTabId ? [snapshot.activeTabId] : []),
+  );
+  const selectionAnchorRef = useRef<string | null>(snapshot.activeTabId);
+  const selectionActiveTabRef = useRef(snapshot.activeTabId);
   const tabRefs = useRef(new Map<string, HTMLDivElement>());
   const groupRefs = useRef(new Map<string, HTMLElement>());
   const restoreFocusRef = useRef<RenameTarget | null>(null);
@@ -436,6 +441,28 @@ export function Sidebar({
     return out;
   }, [snapshot.rootItems]);
   const visibleTabIds = useMemo(() => visibleTabs.map((tab) => tab.id), [visibleTabs]);
+
+  useLayoutEffect(() => {
+    const visible = new Set(visibleTabIds);
+    const activeId = snapshot.activeTabId && visible.has(snapshot.activeTabId)
+      ? snapshot.activeTabId
+      : null;
+    // Tab shortcuts and other launchers start a fresh selection. Ordinary
+    // workspace/activity updates must leave the user's selection intact.
+    if (selectionActiveTabRef.current !== snapshot.activeTabId) {
+      selectionActiveTabRef.current = snapshot.activeTabId;
+      selectionAnchorRef.current = activeId;
+      setSelectedTabIds(new Set(activeId ? [activeId] : []));
+      return;
+    }
+    if (!selectionAnchorRef.current || !visible.has(selectionAnchorRef.current)) {
+      selectionAnchorRef.current = activeId;
+    }
+    setSelectedTabIds((previous) => {
+      const next = new Set([...previous].filter((id) => visible.has(id)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [snapshot.activeTabId, visibleTabIds]);
 
   /// Saved rows, most recently touched first — a resume or a re-save is what
   /// the user is working on, so it rises. Names break ties so the order is
@@ -877,6 +904,40 @@ export function Sidebar({
     }
   };
 
+  const selectSingleTab = (tabId: string) => {
+    selectionAnchorRef.current = tabId;
+    setSelectedTabIds(new Set([tabId]));
+    actions.activateTab(tabId);
+  };
+
+  const selectTab = (
+    event: Pick<MouseEvent, "ctrlKey" | "metaKey" | "shiftKey">,
+    tabId: string,
+  ) => {
+    const additive = event.ctrlKey || event.metaKey;
+    if (event.shiftKey) {
+      const anchor = selectionAnchorRef.current ?? tabId;
+      const anchorIndex = visibleTabIds.indexOf(anchor);
+      const endIndex = visibleTabIds.indexOf(tabId);
+      const startIndex = anchorIndex >= 0 ? anchorIndex : endIndex;
+      const range = visibleTabIds.slice(
+        Math.min(startIndex, endIndex), Math.max(startIndex, endIndex) + 1,
+      );
+      selectionAnchorRef.current = visibleTabIds[startIndex] ?? tabId;
+      setSelectedTabIds((previous) => new Set(additive ? [...previous, ...range] : range));
+    } else if (additive) {
+      selectionAnchorRef.current = tabId;
+      setSelectedTabIds((previous) => {
+        const next = new Set(previous);
+        if (next.has(tabId)) next.delete(tabId);
+        else next.add(tabId);
+        return next;
+      });
+    } else {
+      selectSingleTab(tabId);
+    }
+  };
+
   const handleTabKey = (event: KeyboardEvent<HTMLDivElement>, tab: SidebarTabModel) => {
     if (event.target !== event.currentTarget) {
       return;
@@ -885,16 +946,21 @@ export function Sidebar({
     if (event.key === "ArrowDown" && index >= 0 && index < visibleTabIds.length - 1) {
       event.preventDefault();
       const nextId = visibleTabIds[index + 1]!;
+      if (event.shiftKey) selectTab(event, nextId);
       setFocusedTabId(nextId);
       tabRefs.current.get(nextId)?.focus();
     } else if (event.key === "ArrowUp" && index > 0) {
       event.preventDefault();
       const previousId = visibleTabIds[index - 1]!;
+      if (event.shiftKey) selectTab(event, previousId);
       setFocusedTabId(previousId);
       tabRefs.current.get(previousId)?.focus();
+    } else if (event.key === " " && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      selectTab(event, tab.id);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      actions.activateTab(tab.id);
+      selectSingleTab(tab.id);
     } else if (event.key === "F2") {
       event.preventDefault();
       beginTabRename(tab);
@@ -932,6 +998,7 @@ export function Sidebar({
   /// `depth` is its nesting level, 1 at the root.
   const renderTab = (tab: SidebarTabModel, index: number, depth: number) => {
     const active = tab.id === snapshot.activeTabId;
+    const selected = selectedTabIds.has(tab.id);
     const glyph = pluginGlyph(tab);
     const ended = tab.status === "dead" || tab.status === "missing";
     const renaming = renameTarget?.kind === "tab" && renameTarget.id === tab.id;
@@ -946,6 +1013,7 @@ export function Sidebar({
         className={[
           "sidebar-tab",
           active ? "sidebar-tab--active" : "",
+          selected ? "sidebar-tab--selected" : "",
           ended ? "sidebar-tab--ended" : "",
           tab.status === "attach_error" ? "sidebar-tab--error" : "",
           tab.fill === "off" ? "" : `sidebar-tab--fill-${tab.fill}`,
@@ -954,7 +1022,8 @@ export function Sidebar({
         /// against any group wash behind it.
         style={{ "--tab-color": resolveTabColor(theme, tab.color) } as CSSProperties}
         role="tab"
-        aria-selected={active}
+        aria-selected={selected}
+        aria-current={active ? "page" : undefined}
         tabIndex={focusedTabId === tab.id || (!focusedTabId && active) ? 0 : -1}
         data-tab-id={tab.id}
         data-group-id={tab.groupId ?? ""}
@@ -968,6 +1037,10 @@ export function Sidebar({
         onPointerDown={(event) => {
           /// The row is being clicked or dragged, not read.
           closePaneFlyout();
+          // A group drag or reparented row may never deliver its trailing
+          // click. Only suppress a click from that gesture, not this new one.
+          if (event.button === 0 && event.isPrimary) suppressClickRef.current = false;
+          if (event.shiftKey || event.ctrlKey || event.metaKey) return;
           startDrag(event, {
             item: { kind: "tab", id: tab.id },
             containerId: tab.groupId,
@@ -991,12 +1064,13 @@ export function Sidebar({
             event.preventDefault();
             return;
           }
-          if (event.target === event.currentTarget || !(event.target as HTMLElement).closest("button")) {
-            actions.activateTab(tab.id);
+          if (!(event.target as HTMLElement).closest("button, input, textarea, select, [contenteditable]")) {
+            selectTab(event, tab.id);
           }
         }}
         onDoubleClick={(event: MouseEvent<HTMLDivElement>) => {
-          if (!(event.target as HTMLElement).closest("button")) {
+          if (!event.shiftKey && !event.ctrlKey && !event.metaKey &&
+            !(event.target as HTMLElement).closest("button, input, textarea, select, [contenteditable]")) {
             event.preventDefault();
             beginTabRename(tab);
           }
@@ -1164,6 +1238,7 @@ export function Sidebar({
             className="sidebar-group__tabs"
             role="tablist"
             aria-label={`${group.name} terminals`}
+            aria-multiselectable="true"
             data-drop-kind="tab-container"
             data-drop-group-id={group.id}
             data-drop-index={group.items.length}
@@ -1954,6 +2029,7 @@ export function Sidebar({
           className="sidebar__root"
           role="tablist"
           aria-label="Terminals"
+          aria-multiselectable="true"
           data-drop-kind="tab-container"
           data-drop-group-id=""
           data-drop-index={snapshot.rootItems.length}
