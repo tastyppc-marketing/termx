@@ -1,6 +1,6 @@
 # TermX cross-harness collaboration
 
-Date: 2026-09-08. Status: proposed architecture for review; runtime capability proofs and implementation have not started.
+Date: 2026-09-08. Status: architecture approved by the user; the first Windows feasibility milestone demonstrated agent-chosen cross-harness context reads, discussion, and idle wake. Production broker/UI implementation and the remaining runtime gates are still open. See [observed results](../reports/2026-09-08-swarm-windows-proof.md).
 
 Baseline: `41a72fc28936fe9a1f4c4b6b4458cb7225225657`. The unchanged application is backed up on GitHub at `backup/pre-swarm-2026-09-08`.
 
@@ -33,7 +33,7 @@ An example interaction:
 
 ### Claude Code
 
-Official documentation describes local Windows cross-session messaging and support across providers, including third-party routes, from recent versions. An idle recipient starts a turn; a busy recipient receives between tool calls. Inbound policy can accept, hold, or refuse. Local inspection found installed 2.1.263 and live registry records from several versions, with peer protocol metadata. Bundled code contains an authenticated per-session named-pipe inbox and peer-origin queue entries. This is promising for Astra routing, but the external wire adapter and receipt behavior still need isolated tests. Do not substitute installed CLI version for the actual receiving process version. [Claude cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)
+Official documentation describes local Windows cross-session messaging and support across providers, including third-party routes, from recent versions. An idle recipient starts a turn; a busy recipient receives between tool calls. Inbound policy can accept, hold, or refuse. Local inspection found installed 2.1.263 and live registry records from several versions, with peer protocol metadata. The isolated proof subsequently verified authenticated named-pipe delivery, peer provenance, idle wake, and draft preservation on 2.1.263 with scoped `accept` policy. Other policies and the user's custom Astra route remain unverified. Do not substitute installed CLI version for the actual receiving process version. [Claude cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)
 
 The main unresolved Claude issue is enabling unattended receipt for an arbitrary existing session whose inbound policy would hold the message. An existing compatible policy can work; a launch-scoped setting can support future sessions. Do not silently alter user-wide inbound settings, use an own-child credential to disguise a peer, or change ordinary tool permissions.
 
@@ -41,7 +41,7 @@ The main unresolved Claude issue is enabling unattended receipt for an arbitrary
 
 Installed Codex 0.153.4 provides `codex queue --thread ... --message ... --remote ...`. Version-matched generated schemas include queue add/start, live-thread rejoin, `canAcceptDirectInput`, and steering with an expected turn ID. Queue add and queue start are separate operations. Official documentation describes app-server connections, live thread operations, and MCP reload. [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 
-On this Windows machine, daemon lifecycle commands report Unix-only support, `codex agents` requires `--remote`, and the inspected app-server processes use private stdio connections without an observed public control endpoint. Therefore arbitrary existing Windows TUI wake-up is **unproven**. Prove attachment to the actual owning runtime first. A new app-server that resumes the same stored conversation is not an acceptable substitute for reaching the original live session.
+On this Windows machine, daemon lifecycle commands report Unix-only support, `codex agents` requires `--remote`, and the inspected ordinary app-server processes use private stdio connections without an observed public control endpoint. The isolated proof nevertheless showed native `codex queue` waking the original ordinary TUI after its first saved turn; an empty unsaved conversation was rejected. Treat CLI queue delivery and attachable RPC control as distinct capabilities. A new app-server that resumes the same stored conversation is not an acceptable substitute for reaching the original live session.
 
 ### Common tool interface
 
@@ -171,15 +171,17 @@ No state claims comprehension. Socket write success, a terminal echo, a live PID
 
 Prefer small, coalesced **inbox changed** wake notifications that cause the agent to fetch authoritative messages. Message content stays individually durable and is never discarded by notification coalescing. This reduces duplicate prompt text and works with harness inbox pressure. If the selected integration cannot fetch yet, use a clearly attributed message envelope and retain its weaker receipt semantics.
 
+The observed Codex CLI queue records input with user role. On that path, send only a fixed broker-authored wake notice and fetch peer content through the scoped mailbox tool; peer-controlled message bodies, display names, and topics must not be interpolated into the wake notice. A visible peer label in an ordinary user message is not a native provenance boundary. The full-body fallback above cannot be advertised as equivalent on this path until its source-trust and approval behavior is proved.
+
 ## 8. Delivery and adapter contract
 
 Every adapter reports independently whether it supports exact binding, context reading, tool access, active-turn delivery, idle wake-up, queue reconciliation, and receipt observation. A generic “connected” flag is insufficient.
 
 - **Claude:** use its native peer inbox for the exact selected live session. Verify endpoint, process identity, target session ID, protocol version, and proper peer credential. Respect inbound accept/hold/refuse. Do not steal the own-child exemption or manufacture human provenance. Capability and session-scoped setup are part of enrollment.
-- **Codex:** connect only to the actual owning runtime. Verify loaded thread and direct-input capability. Rejoin only that already-loaded thread when needed for subscriptions. Prefer supported queue semantics; steering requires the expected active turn. Omit model, effort, cwd, permission, and collaboration-mode overrides. Prove idle queue draining and multi-client approval ownership before shipping automatic delivery.
+- **Codex:** target only the verified original live conversation. For ordinary TUIs, the native CLI queue is a separately characterized receive path and does not imply an attachable RPC endpoint. For RPC adapters, connect only to the actual owning runtime, verify loaded thread and direct-input capability, and rejoin only that already-loaded thread when needed for subscriptions. Prefer supported queue semantics; steering requires the expected active turn. Omit model, effort, cwd, permission, and collaboration-mode overrides. Prove each offered path's idle queue draining and approval ownership before shipping automatic delivery.
 - **Other harnesses:** use the same tools and context adapter contract. Advertise cooperative-only or unavailable capabilities truthfully until a receive/wake integration is implemented and tested.
 
-For Windows Codex, first try to prove a supported endpoint for an ordinary existing TUI. If none exists, test an opt-in locally owned app-server plus native `codex --remote` launch that preserves the user's setup. Explain the required handoff; never start a second writer to the same conversation or silently replace a running agent. A cooperative mailbox is useful but does not satisfy the full autonomous-wake acceptance criterion by itself.
+For Windows Codex, prefer the observed native CLI queue path where the ordinary TUI and saved conversation can be verified. If RPC control is required, test an opt-in locally owned app-server plus native `codex --remote` launch that preserves the user's setup as a separate capability. Explain the required handoff; never start a second writer to the same conversation or silently replace a running agent. A cooperative mailbox is useful but does not satisfy the full autonomous-wake acceptance criterion by itself.
 
 Pause commits a new policy revision, stops new routing and peer operations, and preserves history/backlog. It does not kill agents or cancel their unrelated work. Already delivered content cannot be recalled; cancel only proven broker-owned native queue entries when the adapter supports it. Removal/rebinding invalidates old connection generations and prevents pending mail from landing in an unrelated replacement or any successor without the explicit continuation transaction in section 4.
 
@@ -264,11 +266,13 @@ Estimated implementation scope after Stage 0: roughly 35–55 production/build f
 
 ## 13. Decisions and remaining proof obligations
 
+The first runtime experiments changed one activation assumption: on installed Windows Codex 0.153.4, `codex queue` can deliver to the ordinary existing TUI after a conversation has saved history, without launching a remote TUI. An empty unsaved conversation was rejected. Prefer this verified native CLI receive path where applicable; do not infer an externally attachable owner RPC endpoint from it. Scoped MCP tools demonstrated the common read/send surface after a deliberate setup handoff, while shared-runtime dynamic tools demonstrated per-thread caller identity. These paths need production adapter contracts and the remaining failure/policy tests in the [proof report](../reports/2026-09-08-swarm-windows-proof.md).
+
 Settled by the user's request: autonomous discretionary collaboration after activation; peer context inspection; arbitrary useful message volume; no fixed workflow; preservation of harness/model choices; staged development with strong stability work.
 
 Recommended architecture: companion broker, exact peer bindings, durable messages, source-bound context reads, common MCP/CLI tools, native receive adapters, and visible user controls.
 
-Runtime proofs still required: ordinary Codex Windows TUI attachment/wake-up, same-owner multi-client semantics, thread-authenticated tool identity when processes are shared, session-scoped Claude no-prompt enrollment, and adapter receipt/deduplication behavior. These are concrete first-stage experiments, not assumed capabilities.
+Runtime proofs still required include tool activation in arbitrary already-running sessions, full launch/configuration parity (including Claude/Astra), the remaining inbound and approval policy matrix, and failure/retry/rebinding behavior. Ordinary Codex wake-up and shared-runtime per-thread dynamic-tool routing have observed evidence; headless runtime tests do not establish remote-TUI composer or approval ownership behavior. The report separates these tested capabilities from the remaining gates.
 
 Research artifacts: `.superpowers/swarm-research/{core,claude,codex}.md`, local CLI evidence, and version-matched Codex protocol schemas. No current session was messaged, restarted, or reconfigured during research.
 
