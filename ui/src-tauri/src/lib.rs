@@ -6,12 +6,14 @@ mod folders;
 mod llm_sessions;
 mod outputs;
 mod paths;
+mod pane_agent_status;
 mod plugins;
 mod power;
 mod reveal;
 mod ssh;
 mod storage;
 mod transcript;
+mod updates;
 
 pub use bootstrap::{bootstrap_host, bootstrap_with, BootstrapOptions, BootstrapResult};
 
@@ -44,6 +46,11 @@ pub fn run() {
             ssh::ssh_probe,
             folders::list_dirs,
             reveal::open_folder,
+            pane_agent_status::pane_agent_status,
+            pane_agent_status::mark_model_ambiguous,
+            pane_agent_status::compact_conversation_captures,
+            updates::check_for_updates,
+            updates::open_update_release,
             llm_sessions::list_llm_sessions,
             llm_sessions::generate_session_note,
             llm_sessions::generate_session_bundle,

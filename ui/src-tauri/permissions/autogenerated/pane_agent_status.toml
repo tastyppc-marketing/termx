@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pane-agent-status"
+description = "Enables the pane_agent_status command without any pre-configured scope."
+commands.allow = ["pane_agent_status"]
+
+[[permission]]
+identifier = "deny-pane-agent-status"
+description = "Denies the pane_agent_status command without any pre-configured scope."
+commands.deny = ["pane_agent_status"]

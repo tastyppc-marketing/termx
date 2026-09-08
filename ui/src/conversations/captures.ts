@@ -28,7 +28,15 @@ export const CAPTURES_FILE = "conversation_captures_v1.jsonl";
 
 /** One `<TermX pane, conversation>` pairing, as written by the hook. */
 export interface ConversationCapture {
+  /** This exact launch shared a transcript with another live writer. */
+  modelAmbiguous?: boolean;
   launch?: LaunchConfiguration | null;
+  /** Metadata from this invocation; never taken from the durable resume baseline. */
+  model?: string | null;
+  transcriptPath?: string | null;
+  launcherPid?: number;
+  /** Decimal Windows FILETIME. A JS number would lose process identity bits. */
+  launcherCreatedAt?: string;
   /** The `TERMX_SESSION_ID` the agent CLI started under. */
   termxSessionId: number;
   provider: LlmProvider;
@@ -52,6 +60,17 @@ function isProvider(value: unknown): value is LlmProvider {
 /** Host session ids are u32s; anything else cannot name a pane. */
 function isSessionId(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function optionalModel(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0
+    && [...value].length <= 128 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
+    ? value : null;
+}
+
+function isProcessCreationTime(value: unknown): value is string {
+  return typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value)
+    && BigInt(value) <= 18_446_744_073_709_551_615n;
 }
 
 /**
@@ -85,7 +104,16 @@ function parseCaptureLine(text: string): ConversationCapture | null {
     termxSessionId,
     provider,
     id,
+    ...(raw.modelAmbiguous===true ? {modelAmbiguous:true} : {}),
     ...(raw.launch !== undefined ? { launch: parseLaunchConfiguration(raw.launch, provider) } : {}),
+    ...(raw.model !== undefined ? { model: optionalModel(raw.model) } : {}),
+    ...(raw.transcriptPath !== undefined ? { transcriptPath:
+      typeof raw.transcriptPath === "string" && raw.transcriptPath.length > 0
+      && new TextEncoder().encode(raw.transcriptPath).length <= 24 * 1024
+      && !raw.transcriptPath.includes("\0") ? raw.transcriptPath : null } : {}),
+    ...(typeof raw.launcherPid === "number" && Number.isInteger(raw.launcherPid)
+      && raw.launcherPid > 0 && raw.launcherPid <= 0xffff_ffff ? { launcherPid: raw.launcherPid } : {}),
+    ...(isProcessCreationTime(raw.launcherCreatedAt) ? { launcherCreatedAt: raw.launcherCreatedAt } : {}),
     cwd: typeof raw.cwd === "string" && raw.cwd.length > 0 ? raw.cwd : null,
     atMs:
       typeof raw.atMs === "number" && Number.isFinite(raw.atMs) && raw.atMs >= 0
@@ -115,11 +143,25 @@ export function parseCaptures(text: string | null): Map<number, ConversationCapt
       continue;
     }
     const previous = captures.get(capture.termxSessionId);
-    if (previous === undefined || capture.atMs >= previous.atMs) {
+    if (previous === undefined || replacesCapture(previous,capture)) {
       captures.set(capture.termxSessionId, capture);
     }
   }
   return captures;
+}
+
+/** Both hook generations may run for one SessionStart. Preserve the native
+ * launch record regardless of which duplicate hook finishes first. Its process
+ * identity must still pass the native live check; never borrow it for another ID. */
+function replacesCapture(previous: ConversationCapture, next: ConversationCapture): boolean {
+  if (previous.provider===next.provider && previous.id===next.id
+    && previous.launcherPid && previous.launcherCreatedAt
+    && previous.launcherPid===next.launcherPid && previous.launcherCreatedAt===next.launcherCreatedAt) {
+    const previousNative=previous.launch!==undefined;
+    const nextNative=next.launch!==undefined;
+    if(previousNative!==nextNative) return nextNative;
+  }
+  return next.atMs>=previous.atMs;
 }
 
 /**
@@ -167,7 +209,7 @@ export function compactCaptures(
   if (text.length <= COMPACT_THRESHOLD_BYTES) {
     return null;
   }
-  const winners = new Map<number, { atMs: number; line: string }>();
+  const winners = new Map<number, { capture: ConversationCapture; atMs: number; line: string }>();
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (line.length === 0) {
@@ -185,8 +227,8 @@ export function compactCaptures(
     }
     const previous = winners.get(capture.termxSessionId);
     // `>=` matches parseCaptures: on a tie the later line is the later run.
-    if (previous === undefined || capture.atMs >= previous.atMs) {
-      winners.set(capture.termxSessionId, { atMs: capture.atMs, line });
+    if (previous === undefined || replacesCapture(previous.capture,capture)) {
+      winners.set(capture.termxSessionId, { capture, atMs: capture.atMs, line });
     }
   }
   const kept = [...winners.values()].sort((left, right) => left.atMs - right.atMs);

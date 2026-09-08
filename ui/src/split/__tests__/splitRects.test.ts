@@ -115,6 +115,46 @@ describe("computeRects", () => {
     const rects = computeRects(inner, { node: inner, fraction: 0.3 });
     expect(rects.dividers[0]?.position).toBeCloseTo(0.3);
   });
+
+  it("contracts hidden branches while retaining the original resize node and path", () => {
+    const inner: SplitBranch = {
+      kind: "split", dir: "col", sizes: [0.4, 0.6],
+      children: [pane(2), pane(3)],
+    };
+    const tree: SplitNode = {
+      kind: "split", dir: "row", sizes: [0.35, 0.65],
+      children: [pane(1), inner],
+    };
+    const before = structuredClone(tree);
+    const rects = computeRects(tree, undefined, new Set([1]));
+    expect(rects.panes).toEqual([
+      { sessionId: 2, box: { left: 0, top: 0, width: 1, height: 0.4 } },
+      { sessionId: 3, box: { left: 0, top: 0.4, width: 1, height: 0.6 } },
+    ]);
+    expect(rects.dividers).toHaveLength(1);
+    expect(rects.dividers[0]).toMatchObject({ path: [1], box: FULL, position: 0.4 });
+    expect(rects.dividers[0]?.node).toBe(inner);
+    expect(tree).toEqual(before);
+    const preview = computeRects(tree, { node: inner, fraction: 0.7 }, new Set([1]));
+    expect(preview.panes[0]?.box.height).toBe(0.7);
+    expect(preview.dividers[0]?.path).toEqual([1]);
+  });
+
+  it("contracts a fully hidden subtree and omits every hidden divider", () => {
+    const tree: SplitNode = {
+      kind: "split", dir: "row", sizes: [0.35, 0.65],
+      children: [pane(1), {
+        kind: "split", dir: "col", sizes: [0.4, 0.6],
+        children: [pane(2), pane(3)],
+      }],
+    };
+    expect(computeRects(tree, undefined, new Set([2, 3]))).toEqual({
+      panes: [{ sessionId: 1, box: FULL }], dividers: [],
+    });
+    expect(computeRects(tree, undefined, new Set([1, 2, 3]))).toEqual({
+      panes: [], dividers: [],
+    });
+  });
 });
 
 describe("pathToSplitNode", () => {

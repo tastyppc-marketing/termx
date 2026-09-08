@@ -657,15 +657,22 @@ async fn handle_conn(
                     }
                     ClientMsg::ProbeSession { session_id } => {
                         let (alive, busy) = registry.probe(session_id);
+                        let (at_prompt, prompt_id) = registry.prompt_status(session_id);
                         send_ctl(
                             &out_tx,
                             &HostMsg::SessionProbe {
                                 session_id,
                                 alive,
                                 busy,
+                                at_prompt,
+                                prompt_id,
                             },
                         )
                         .await;
+                    }
+                    ClientMsg::ChangeDirectory { session_id, expected_pid, prompt_id, cwd } => {
+                        let accepted = registry.change_directory(session_id, expected_pid, &prompt_id, &cwd);
+                        send_ctl(&out_tx, &HostMsg::DirectoryChanged { session_id, accepted }).await;
                     }
                     ClientMsg::ListSessions => {
                         send_ctl(
@@ -766,6 +773,40 @@ async fn handle_conn(
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[tokio::test]
+    async fn guarded_directory_request_refuses_input_that_races_after_the_probe() {
+        let _serial = crate::HEAVY_PTY_TEST.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (rt, _sd) = boot(tmp.path()).await;
+        let mut ws = connect(&rt).await;
+        auth(&mut ws, &rt).await;
+        let id = create_session(&mut ws, Some("powershell"), true).await;
+        send_json(&mut ws, &ClientMsg::ListSessions).await;
+        let pid = match next_json(&mut ws).await {
+            HostMsg::Sessions { sessions } => sessions.iter().find(|info| info.id == id).unwrap().pid.unwrap(),
+            other => panic!("expected sessions, got {other:?}"),
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        let prompt_id = loop {
+            send_json(&mut ws, &ClientMsg::ProbeSession { session_id: id }).await;
+            if let HostMsg::SessionProbe { at_prompt: Some(true), prompt_id: Some(prompt_id), .. } = next_json(&mut ws).await { break prompt_id; }
+            assert!(tokio::time::Instant::now() < deadline, "no trusted PSReadLine prompt");
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        };
+        ws.send(input_frame(id, b"Write-Output pending_user_input")).await.unwrap();
+        send_json(&mut ws, &ClientMsg::ChangeDirectory { session_id: id, expected_pid: pid,
+            prompt_id, cwd: tmp.path().to_string_lossy().into_owned() }).await;
+        assert!(matches!(next_json(&mut ws).await, HostMsg::DirectoryChanged { accepted: false, .. }));
+        send_json(&mut ws, &ClientMsg::ListSessions).await;
+        match next_json(&mut ws).await {
+            HostMsg::Sessions { sessions } => assert!(sessions.iter().find(|info| info.id == id).unwrap().alive),
+            other => panic!("expected sessions, got {other:?}"),
+        }
+        ws.send(input_frame(id, b"\rexit\r")).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        shutdown_and_drain(&mut ws).await;
+    }
 
     /// Boots a server on an ephemeral port inside the test runtime.
     async fn boot(tmp: &std::path::Path) -> (RuntimeInfo, tokio::sync::watch::Sender<bool>) {

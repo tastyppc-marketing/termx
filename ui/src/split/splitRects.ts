@@ -77,10 +77,11 @@ export function pathToSplitNode(
 export function computeRects(
   root: SplitNode,
   override?: FractionOverride,
+  hiddenSessionIds: ReadonlySet<number> = new Set(),
 ): SplitRects {
   const panes: PaneRect[] = [];
   const dividers: DividerRect[] = [];
-  walk(root, { left: 0, top: 0, width: 1, height: 1 }, [], override, panes, dividers);
+  walk(root, { left: 0, top: 0, width: 1, height: 1 }, [], override, hiddenSessionIds, panes, dividers);
   panes.sort((a, b) => a.sessionId - b.sessionId);
   return { panes, dividers };
 }
@@ -90,11 +91,21 @@ function walk(
   box: FractionBox,
   path: number[],
   override: FractionOverride | undefined,
+  hiddenSessionIds: ReadonlySet<number>,
   panes: PaneRect[],
   dividers: DividerRect[],
 ): void {
   if (node.kind === "pane") {
-    panes.push({ sessionId: node.sessionId, box });
+    if (!hiddenSessionIds.has(node.sessionId)) panes.push({ sessionId: node.sessionId, box });
+    return;
+  }
+  const firstVisible = hasVisiblePane(node.children[0], hiddenSessionIds);
+  const secondVisible = hasVisiblePane(node.children[1], hiddenSessionIds);
+  if (!firstVisible || !secondVisible) {
+    // Contract geometry only. Descend the original tree/path so surviving
+    // dividers still preview and persist the exact split they came from.
+    if (firstVisible) walk(node.children[0], box, [...path, 0], override, hiddenSessionIds, panes, dividers);
+    if (secondVisible) walk(node.children[1], box, [...path, 1], override, hiddenSessionIds, panes, dividers);
     return;
   }
   const fraction =
@@ -111,12 +122,13 @@ function walk(
       box,
       position: box.left + firstWidth,
     });
-    walk(node.children[0], { ...box, width: firstWidth }, [...path, 0], override, panes, dividers);
+    walk(node.children[0], { ...box, width: firstWidth }, [...path, 0], override, hiddenSessionIds, panes, dividers);
     walk(
       node.children[1],
       { ...box, left: box.left + firstWidth, width: box.width - firstWidth },
       [...path, 1],
       override,
+      hiddenSessionIds,
       panes,
       dividers,
     );
@@ -130,14 +142,21 @@ function walk(
       box,
       position: box.top + firstHeight,
     });
-    walk(node.children[0], { ...box, height: firstHeight }, [...path, 0], override, panes, dividers);
+    walk(node.children[0], { ...box, height: firstHeight }, [...path, 0], override, hiddenSessionIds, panes, dividers);
     walk(
       node.children[1],
       { ...box, top: box.top + firstHeight, height: box.height - firstHeight },
       [...path, 1],
       override,
+      hiddenSessionIds,
       panes,
       dividers,
     );
   }
+}
+
+function hasVisiblePane(node: SplitNode, hidden: ReadonlySet<number>): boolean {
+  return node.kind === "pane"
+    ? !hidden.has(node.sessionId)
+    : hasVisiblePane(node.children[0], hidden) || hasVisiblePane(node.children[1], hidden);
 }

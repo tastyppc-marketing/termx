@@ -181,6 +181,34 @@ afterEach(() => {
 });
 
 describe("finished-work attention", () => {
+  it("keeps a minimized pane out of attention acknowledgements until it is restored", async () => {
+    const state = snapshot([tab("tab-1", "attention")]);
+    state.layout.tabs["tab-1"]!.split = {
+      kind: "split", dir: "row", sizes: [0.5, 0.5],
+      children: [{ kind: "pane", sessionId: 1 }, { kind: "pane", sessionId: 2 }],
+    };
+    const splitState = { ...state, paneStates: {
+      ...state.paneStates, 2: { status: "live" as const, exitCode: null },
+    } };
+    const { workspace, publish } = harness(splitState);
+    const container = await mount(workspace);
+    await focus();
+    const seen = vi.mocked(workspace.controller.markTabSeen);
+    const minimize = container.querySelector<HTMLButtonElement>(
+      '[data-session-id="2"] button[aria-label="Minimize pane"]',
+    )!;
+    expect(minimize).not.toBeNull();
+    await act(async () => minimize.click());
+    seen.mockClear();
+    await act(async () => publish({ ...splitState }));
+    expect(seen).toHaveBeenCalledWith("tab-1", [1]);
+    expect(seen.mock.calls.every(([, ids]) => ids?.includes(2) === false)).toBe(true);
+    const restore = container.querySelector<HTMLButtonElement>('.split-minimized-shelf button')!;
+    expect(restore).not.toBeNull();
+    await act(async () => restore.click());
+    expect(seen).toHaveBeenLastCalledWith("tab-1", [1, 2]);
+  });
+
   it("flashes the taskbar when a pane finishes while the window is in the background", async () => {
     const { workspace, publish } = harness(snapshot([tab("tab-1", "active")]));
     await mount(workspace);

@@ -80,6 +80,7 @@ struct CwdScanner {
     /// Unconsumed tail: a partial intro at a chunk edge, or an intro whose
     /// terminator has not arrived yet. Empty when idle.
     pending: Vec<u8>,
+    intro: Vec<u8>,
 }
 
 impl CwdScanner {
@@ -89,22 +90,30 @@ impl CwdScanner {
     const MAX_PENDING: usize = 4096;
 
     fn new() -> Self {
-        Self { pending: Vec::new() }
+        Self::with_intro(Self::INTRO.to_vec())
+    }
+
+    fn with_intro(intro: Vec<u8>) -> Self {
+        Self { pending: Vec::new(), intro }
     }
 
     /// Feed the next chunk of (DSR-stripped) pty output. Returns the LAST
     /// complete report's payload, when the chunk completed at least one.
     fn feed(&mut self, chunk: &[u8]) -> Option<String> {
+        self.feed_all(chunk).pop()
+    }
+
+    fn feed_all(&mut self, chunk: &[u8]) -> Vec<String> {
         self.pending.extend_from_slice(chunk);
-        let mut last: Option<String> = None;
+        let mut reports = Vec::new();
         loop {
-            let Some(start) = find_subslice(&self.pending, Self::INTRO) else {
+            let Some(start) = find_subslice(&self.pending, &self.intro) else {
                 // No intro: keep only a tail that could be one split mid-way.
-                let keep = partial_suffix_len(&self.pending, Self::INTRO);
+                let keep = partial_suffix_len(&self.pending, &self.intro);
                 self.pending.drain(..self.pending.len() - keep);
-                return last;
+                return reports;
             };
-            let body = start + Self::INTRO.len();
+            let body = start + self.intro.len();
             // Scan for the terminator: BEL, or ST (ESC \). Any other ESC in
             // the payload means this was not a well-formed report — abandon
             // the intro and rescan from the ESC that interrupted it.
@@ -135,7 +144,7 @@ impl CwdScanner {
                     let payload = &self.pending[body..payload_end];
                     if !payload.is_empty() {
                         if let Ok(path) = std::str::from_utf8(payload) {
-                            last = Some(path.to_string());
+                            reports.push(path.to_string());
                         }
                     }
                     self.pending.drain(..seq_end);
@@ -152,7 +161,7 @@ impl CwdScanner {
                         self.pending.drain(..body);
                     } else {
                         self.pending.drain(..start);
-                        return last;
+                        return reports;
                     }
                 }
             }
@@ -424,6 +433,103 @@ impl WriterQueues {
 /// None while running; Some(exit_code) after the child exits.
 pub type ExitState = Option<Option<u32>>;
 
+#[derive(Default)]
+struct PromptState {
+    token: String,
+    ready: u64,
+    accepted: u64,
+    submissions: std::collections::VecDeque<Submission>,
+    partial: bool,
+    edited: bool,
+    cancelled: bool,
+    poisoned: bool,
+    reading: bool,
+}
+
+enum Submission { Text, Edited, Blank(u64) }
+
+impl PromptState {
+    fn new(token: String) -> Self { Self { token, ..Self::default() } }
+    fn input(&mut self, data: &[u8]) {
+        if data.is_empty() { return; }
+        self.reading = false;
+        self.cancelled = false;
+        // PSReadLine's bracketed paste inserts a single editable buffer. Its
+        // embedded newlines are not queued command submissions. Only recognize
+        // the complete framing while this reader is known to own the input.
+        if self.ready > self.accepted && self.submissions.is_empty() && !self.poisoned
+            && data.starts_with(b"\x1b[200~") && data.ends_with(b"\x1b[201~") {
+            let body = &data[6..data.len() - 6];
+            if !body.contains(&0x1b) && !body.contains(&0) {
+                self.edited = true; self.partial = true; return;
+            }
+        }
+        // Normal readline navigation edits a line but never accepts it. Keep
+        // tracking its eventual Enter rather than disabling this shell forever.
+        if matches!(data, b"\x1b[A" | b"\x1b[B" | b"\x1b[C" | b"\x1b[D" | b"\x1b[H" | b"\x1b[F" | b"\x1b[3~") {
+            self.edited = true; self.partial = true; return;
+        }
+        for &byte in data {
+            self.cancelled = false;
+            match byte {
+                b'\r' | b'\n' => {
+                    if self.submissions.len() >= 1024 { self.poisoned = true; }
+                    else {
+                        self.submissions.push_back(if self.edited { Submission::Edited }
+                            else if self.partial { Submission::Text }
+                            else { Submission::Blank(if self.ready > self.accepted { self.ready } else { 0 }) });
+                    }
+                    self.partial = false; self.edited = false;
+                }
+                3 => { self.cancelled = true; self.partial = true; self.edited = true; }
+                8 | 9 | 127 => { self.edited = true; self.partial = true; }
+                0..=31 => { self.poisoned = true; self.partial = true; }
+                _ => self.partial = true,
+            }
+        }
+    }
+    fn marker(&mut self, payload: &str) {
+        let mut parts = payload.split(';');
+        let kind = parts.next().unwrap_or_default();
+        let sequence = parts.next().unwrap_or_default();
+        let empty = parts.next() == Some("E");
+        let Ok(sequence) = sequence.parse::<u64>() else { self.poisoned = true; return; };
+        if kind == "R" && self.cancelled && self.submissions.is_empty()
+            && self.ready.checked_add(1) == Some(sequence) {
+            self.accepted = self.ready;
+            self.partial = false; self.edited = false; self.cancelled = false;
+        }
+        match kind {
+            "R" if sequence > 0 && self.accepted.checked_add(1) == Some(sequence)
+                && self.ready == self.accepted => {
+                self.ready = sequence;
+                self.reading = true;
+            }
+            "A" if sequence == self.ready && sequence > self.accepted => {
+                self.accepted = sequence;
+                self.reading = false;
+                // A clean blank submitted at this observed read generation can
+                // reconcile earlier nonblank input consumed by Read-Host. The
+                // hook confirms the actual returned command was blank; no old
+                // blank/edited submission or later input may impersonate it.
+                let blank_recovery = empty && !self.partial
+                    && matches!(self.submissions.back(), Some(Submission::Blank(generation)) if *generation == sequence)
+                    && self.submissions.iter().take(self.submissions.len().saturating_sub(1))
+                        .all(|submission| matches!(submission, Submission::Text));
+                if blank_recovery { self.submissions.clear(); }
+                else if self.submissions.pop_front().is_none() && !self.cancelled { self.poisoned = true; }
+            }
+            // Replay/redraw of an already-seen marker cannot clear input.
+            "R" if sequence == self.ready => {}
+            _ => self.poisoned = true,
+        }
+    }
+    fn identity(&self) -> Option<String> {
+        (self.reading && !self.poisoned && !self.partial && self.submissions.is_empty() && self.ready > 0)
+            .then(|| format!("{}:{}", self.token, self.ready))
+    }
+}
+
 pub struct Session {
     ring: Arc<Mutex<RingBuffer>>,
     tx_out: broadcast::Sender<OutputChunk>,
@@ -434,6 +540,8 @@ pub struct Session {
     exit_rx: watch::Receiver<ExitState>,
     reader_error: Arc<Mutex<Option<String>>>,
     kill_error: Arc<Mutex<Option<String>>>,
+    prompt: Arc<Mutex<PromptState>>,
+    directory_supported: bool,
 }
 
 /// Largest single input frame accepted. Input rides a COUNT-bounded channel
@@ -507,6 +615,10 @@ impl Session {
         for (key, value) in &profile.env {
             cmd.env(key, value);
         }
+        let prompt_token = format!("{:032x}", rand::random::<u128>());
+        cmd.env("TERMX_PROMPT_TOKEN", &prompt_token);
+        let directory_supported = profile.args.iter().any(|arg| arg.contains("function global:PSConsoleHostReadLine"));
+        let prompt = Arc::new(Mutex::new(PromptState::new(prompt_token.clone())));
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }
@@ -554,6 +666,7 @@ impl Session {
         let tx_r = tx_out.clone();
         let reader_error = Arc::new(Mutex::new(None));
         let reader_error_r = Arc::clone(&reader_error);
+        let prompt_r = Arc::clone(&prompt);
         let (reader_done_tx, reader_done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             struct ReaderDone(std::sync::mpsc::Sender<()>);
@@ -570,6 +683,7 @@ impl Session {
             // registry hears only actual directory CHANGES.
             let mut cwd_scanner = on_cwd.as_ref().map(|_| CwdScanner::new());
             let mut last_cwd: Option<String> = None;
+            let mut prompt_scanner = CwdScanner::with_intro(format!("\x1b]9;79;{prompt_token};").into_bytes());
             // RefCell, not a captured `mut`: `publish` is handed to
             // `answer_dsr_then_publish` by value on every read, which requires
             // it to stay Copy — so its spill state is borrowed, not owned.
@@ -618,6 +732,11 @@ impl Session {
                     Ok(n) => {
                         let (clean, queries, new_carry) = strip_dsr(&carry, &buf[..n]);
                         carry = new_carry;
+                        let markers = prompt_scanner.feed_all(&clean);
+                        if !markers.is_empty() {
+                            let mut state = prompt_r.lock().unwrap();
+                            for marker in markers { state.marker(&marker); }
+                        }
                         if let (Some(scanner), Some(report)) =
                             (cwd_scanner.as_mut(), on_cwd.as_ref())
                         {
@@ -658,6 +777,8 @@ impl Session {
             exit_rx,
             reader_error,
             kill_error,
+            prompt,
+            directory_supported,
         })
     }
 
@@ -671,7 +792,30 @@ impl Session {
         // Accepted race: while the child is dying but before the waiter closes
         // the queues, a frame may still be accepted. Input to a dying shell is
         // lost either way; once teardown begins, enqueue fails immediately.
+        let mut prompt = self.prompt.lock().unwrap();
+        prompt.input(data);
         self.writer_queues.try_send_data(data.to_vec())
+    }
+
+    pub fn prompt_status(&self) -> (Option<bool>, Option<String>) {
+        if !self.directory_supported { return (None, None); }
+        let id = if self.exited().is_none() { self.prompt.lock().unwrap().identity() } else { None };
+        (Some(id.is_some()), id)
+    }
+
+    /// Guard verification and enqueue share the same lock as every ordinary
+    /// terminal input write. The prompt identity is consumed exactly once.
+    pub fn change_directory(&self, expected_pid: u32, prompt_id: &str, cwd: &str) -> bool {
+        if !self.directory_supported || self.child_pid != Some(expected_pid)
+            || cwd.is_empty() || cwd.len() > 24 * 1024 || cwd.chars().any(char::is_control)
+            || !Path::new(cwd).is_absolute() || !Path::new(cwd).is_dir() { return false; }
+        let command = format!("Microsoft.PowerShell.Management\\Set-Location -LiteralPath '{}'\r", cwd.replace('\'', "''"));
+        let mut prompt = self.prompt.lock().unwrap();
+        if prompt.identity().as_deref() != Some(prompt_id)
+            || self.process_identity.as_ref().is_none_or(|process| !process.is_running())
+            || self.has_child_processes() { return false; }
+        prompt.input(command.as_bytes());
+        self.writer_queues.try_send_data(command.into_bytes()).is_ok()
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -795,6 +939,163 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prompt_guard_tracks_acceptance_and_never_reuses_a_dirty_prompt() {
+        let mut prompt = super::PromptState::new("secret".into());
+        prompt.marker("R;1");
+        assert_eq!(prompt.identity().as_deref(), Some("secret:1"));
+        prompt.input(b"Start-Sleep 10\r");
+        assert_eq!(prompt.identity(), None);
+        prompt.marker("A;1");
+        assert_eq!(prompt.identity(), None, "accepted command may be an in-process builtin");
+        prompt.marker("R;2");
+        assert_eq!(prompt.identity().as_deref(), Some("secret:2"));
+        prompt.input(b"Read-Host");
+        prompt.marker("R;2");
+        assert_eq!(prompt.identity(), None, "a repeated marker cannot erase unfinished input");
+    }
+
+    #[test]
+    fn prompt_guard_does_not_credit_early_or_multiple_queued_commands_as_idle() {
+        let mut prompt = super::PromptState::new("secret".into());
+        prompt.input(b"Start-Sleep 1\rRead-Host\r");
+        prompt.marker("R;1");
+        assert_eq!(prompt.identity(), None);
+        prompt.marker("A;1");
+        prompt.marker("R;2");
+        assert_eq!(prompt.identity(), None, "a second queued command is still pending");
+        prompt.marker("A;2");
+        assert_eq!(prompt.identity(), None);
+        prompt.marker("R;3");
+        assert_eq!(prompt.identity().as_deref(), Some("secret:3"));
+    }
+
+    #[test]
+    fn prompt_guard_refuses_unknown_control_input_and_unmatched_markers() {
+        for input in [b"\x00".as_slice(), b"\x04", b"\x1b[unknown"] {
+            let mut prompt = super::PromptState::new("secret".into());
+            prompt.marker("R;1");
+            prompt.input(input);
+            prompt.marker("A;1");
+            prompt.marker("R;2");
+            assert_eq!(prompt.identity(), None);
+        }
+        let mut prompt = super::PromptState::new("secret".into());
+        prompt.marker("R;2");
+        assert_eq!(prompt.identity(), None);
+    }
+
+    #[test]
+    fn prompt_guard_recovers_from_history_edits_and_explicit_cancel_at_a_fresh_prompt() {
+        let mut prompt = super::PromptState::new("secret".into());
+        prompt.marker("R;1");
+        prompt.input(b"\x1b[A");
+        assert_eq!(prompt.identity(), None);
+        prompt.input(b"\r");
+        prompt.marker("A;1;T");
+        prompt.marker("R;2");
+        assert_eq!(prompt.identity().as_deref(), Some("secret:2"));
+        prompt.input(b"claude\r");
+        prompt.marker("A;2;T");
+        prompt.input(b"\x03");
+        assert_eq!(prompt.identity(), None);
+        prompt.marker("R;3");
+        assert_eq!(prompt.identity().as_deref(), Some("secret:3"));
+        prompt.input(b"\x1b[200~Write-Output one\nWrite-Output two\x1b[201~");
+        assert_eq!(prompt.identity(), None);
+        prompt.input(b"\r"); prompt.marker("A;3;T"); prompt.marker("R;4");
+        assert_eq!(prompt.identity().as_deref(), Some("secret:4"));
+    }
+
+    #[test]
+    fn prompt_guard_blank_recovery_cannot_skip_queued_blank_or_later_input() {
+        let mut prompt = super::PromptState::new("secret".into());
+        prompt.marker("R;1");
+        prompt.input(b"Read-Host\r"); prompt.marker("A;1;T");
+        prompt.input(b"answer\r"); prompt.marker("R;2");
+        assert_eq!(prompt.identity(), None);
+        prompt.input(b"\r"); prompt.marker("A;2;E"); prompt.marker("R;3");
+        assert_eq!(prompt.identity().as_deref(), Some("secret:3"));
+        let mut prompt = super::PromptState::new("secret".into());
+        prompt.input(b"\rRead-Host\r"); prompt.marker("R;1");
+        prompt.input(b"\r"); prompt.marker("A;1;E"); prompt.marker("R;2");
+        assert_eq!(prompt.identity(), None, "an earlier blank cannot acknowledge the recovery Enter");
+    }
+
+    #[test]
+    fn prompt_guard_changes_directory_once_and_refuses_running_powershell_builtins() {
+        let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("folder with ' and [brackets]");
+        std::fs::create_dir(&target).unwrap();
+        let current = Arc::new(Mutex::new(String::new()));
+        let observed = Arc::clone(&current);
+        let profile = profiles::resolve("powershell", true).unwrap();
+        let s = Session::spawn_with_history(&profile, Some(tmp.path()), 120, 30, 1024 * 1024,
+            None, Some(Box::new(move |cwd| *observed.lock().unwrap() = cwd.to_string()))).unwrap();
+        fn wait_prompt(s: &Session, after: u64) -> String {
+            let deadline = std::time::Instant::now() + Duration::from_secs(25);
+            loop {
+                if s.prompt.lock().unwrap().ready > after {
+                    if let Some(id) = s.prompt_status().1 { return id; }
+                }
+                assert!(std::time::Instant::now() < deadline,
+                    "no trusted prompt; output: {}", String::from_utf8_lossy(&s.snapshot().1));
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        }
+        let first = wait_prompt(&s, 0);
+        assert!(!s.change_directory(s.pid().unwrap().wrapping_add(1), &first, &target.to_string_lossy()));
+        assert!(s.change_directory(s.pid().unwrap(), &first, &target.to_string_lossy()));
+        assert!(!s.change_directory(s.pid().unwrap(), &first, &target.to_string_lossy()));
+        let second = wait_prompt(&s, 1);
+        assert_eq!(*current.lock().unwrap(), target.to_string_lossy());
+        s.write_input(b"Start-Sleep -Milliseconds 800\r").unwrap();
+        assert!(!s.has_child_processes(), "the builtin is invisible to the child-process probe");
+        assert!(!s.change_directory(s.pid().unwrap(), &second, &tmp.path().to_string_lossy()));
+        let third = wait_prompt(&s, 2);
+        s.write_input(b"Read-Host -Prompt 'TermX read host safety'\r").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while s.prompt.lock().unwrap().accepted < 3 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert!(!s.has_child_processes());
+        assert!(!s.change_directory(s.pid().unwrap(), &third, &tmp.path().to_string_lossy()));
+        assert!(s.exited().is_none(), "refusing must leave the original shell running");
+        s.write_input(b"answer\r").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while s.prompt.lock().unwrap().ready < 4 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert_eq!(s.prompt_status().1, None, "builtin-consumed input must not be guessed away");
+        s.write_input(b"\r").unwrap();
+        wait_prompt(&s, 4);
+        // Real history navigation edits the buffer; Enter then a fresh prompt
+        // must restore the chooser rather than poison this session permanently.
+        s.write_input(b"Write-Output termx_history_recovery\r").unwrap();
+        wait_prompt(&s, 5);
+        s.write_input(b"\x1b[A").unwrap();
+        s.write_input(b"\r").unwrap();
+        wait_prompt(&s, 6);
+        s.write_input(b"Start-Sleep -Seconds 3\r").unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        s.write_input(b"\x03").unwrap();
+        wait_prompt(&s, 7);
+        assert!(s.exited().is_none());
+        s.write_input(b"exit\r").unwrap();
+        assert!(s.wait_exit_blocking(Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn prompt_scanner_keeps_all_ready_and_accepted_markers_in_stream_order() {
+        let mut scanner = super::CwdScanner::with_intro(b"\x1b]9;79;secret;".to_vec());
+        assert!(scanner.feed_all(b"\x1b]9;79;sec").is_empty());
+        assert_eq!(scanner.feed_all(b"ret;R;1\x1b\\noise\x1b]9;79;secret;A;1\x07\x1b]9;79;secret;R;2\x1b\\"),
+            vec!["R;1", "A;1", "R;2"]);
+    }
+
     use super::*;
     use crate::profiles;
 

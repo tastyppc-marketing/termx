@@ -17,6 +17,7 @@ import type {
 } from "../terminal/TerminalPane";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { canSplitPane } from "../workspace/layoutOperations";
+import type { PaneActivityModel } from "../workspace/paneActivity";
 import type { PaneSessionState } from "../workspace/WorkspaceController";
 import { DeadPane } from "./DeadPane";
 import { dividerFraction, sizesFromFraction } from "./splitMath";
@@ -69,6 +70,10 @@ export interface SplitLayoutProps {
   /** Dead panes with a relaunch in flight; defaults to none. */
   restartingSessionIds?: ReadonlySet<number>;
   onFocusPane(sessionId: number): void;
+  /** Session activity for minimized restore chips; viewing siblings does not acknowledge it. */
+  paneActivity?: Readonly<Record<number, PaneActivityModel>>;
+  /** Panes actually on screen, excluding minimized/maximized-away panes and hidden tabs. */
+  onVisiblePanesChange?: (sessionIds: readonly number[]) => void;
   onSessionCwd?: (sessionId: number, path: string, live: boolean) => void;
   /** OSC 9;77 deliverable report (polish P4); fires for live output only. */
   onSessionOutput?: (sessionId: number, path: string) => void;
@@ -158,6 +163,8 @@ export function SplitLayout({
   dismissingSessionIds,
   restartingSessionIds,
   onFocusPane,
+  paneActivity,
+  onVisiblePanesChange,
   onSessionCwd,
   onSessionOutput,
   onSessionBell,
@@ -183,6 +190,11 @@ export function SplitLayout({
   // Maximize is local presentation, never a replacement for the saved tree.
   // Keeping the pane sections mounted preserves terminal and iframe state.
   const [maximizedSessionId, setMaximizedSessionId] = useState<number | null>(null);
+  // Freeze each minimized pane at its last measured size. Its terminal or
+  // iframe stays mounted and attached even as siblings and the shelf resize.
+  const [minimizedPanes, setMinimizedPanes] = useState<ReadonlyMap<number, CSSProperties>>(
+    () => new Map(),
+  );
   const pendingFocusRef = useRef<number | null>(null);
   const dialogOpenerRef = useRef<HTMLElement | null>(null);
   const dialogCancelRef = useRef<HTMLButtonElement | null>(null);
@@ -193,7 +205,7 @@ export function SplitLayout({
     setDrag(next);
   };
 
-  const maximizePane = (sessionId: number) => {
+  const cancelActiveDrag = () => {
     const current = dragRef.current;
     if (current) {
       try {
@@ -203,6 +215,20 @@ export function SplitLayout({
       }
       installDrag(null);
     }
+  };
+
+  const revealPane = (sessionId: number) => {
+    setMinimizedPanes((current) => {
+      if (!current.has(sessionId)) return current;
+      const next = new Map(current);
+      next.delete(sessionId);
+      return next;
+    });
+  };
+
+  const maximizePane = (sessionId: number) => {
+    cancelActiveDrag();
+    revealPane(sessionId);
     onFocusPane(sessionId);
     setMaximizedSessionId(sessionId);
   };
@@ -215,6 +241,30 @@ export function SplitLayout({
   const splitPane = (sessionId: number, dir: SplitDir) => {
     restoreSplit();
     actions.splitPane(sessionId, dir);
+  };
+
+  const minimizePane = (sessionId: number) => {
+    const remaining = paneSessionIds.filter((id) => id !== sessionId && !minimizedIds.has(id));
+    if (remaining.length === 0 || minimizedIds.has(sessionId)) return;
+    const pane = containerRef.current?.querySelector<HTMLElement>(`[data-session-id='${sessionId}']`);
+    const measured = pane?.getBoundingClientRect();
+    cancelActiveDrag();
+    setMinimizedPanes((current) => new Map(current).set(sessionId, {
+      left: 0, top: 0, width: measured?.width ?? 0, height: measured?.height ?? 0,
+      visibility: "hidden", pointerEvents: "none",
+    }));
+    setMaximizedSessionId(null);
+    const nextFocus = remaining.includes(focusedSessionId) ? focusedSessionId : remaining[0];
+    pendingFocusRef.current = nextFocus;
+    onFocusPane(nextFocus);
+  };
+
+  const restorePane = (sessionId: number) => {
+    cancelActiveDrag();
+    revealPane(sessionId);
+    pendingFocusRef.current = sessionId;
+    onFocusPane(sessionId);
+    if (maximized) setMaximizedSessionId(sessionId);
   };
 
   const requestClose = (sessionId: number) => {
@@ -392,23 +442,72 @@ export function SplitLayout({
     actions.resizePane(divider.path, sizesFromFraction(first));
   };
 
+  const allRects = useMemo(() => computeRects(root), [root]);
+  const paneSessionIds = useMemo(
+    () => allRects.panes.map((pane) => pane.sessionId),
+    [allRects],
+  );
+  const minimizedIds = useMemo(() => {
+    const ids = new Set(paneSessionIds.filter((id) => minimizedPanes.has(id)));
+    // A remote close can remove the last visible pane. Reveal one survivor
+    // immediately, before effects, so a tab never renders an empty workspace.
+    if (ids.size === paneSessionIds.length) {
+      ids.delete(paneSessionIds.includes(focusedSessionId) ? focusedSessionId : paneSessionIds[0]);
+    }
+    return ids;
+  }, [paneSessionIds, minimizedPanes, focusedSessionId]);
   const rects = useMemo(
     () =>
       computeRects(
         root,
         drag !== null ? { node: drag.node, fraction: drag.fraction } : undefined,
+        minimizedIds,
       ),
-    [root, drag],
+    [root, drag, minimizedIds],
   );
-
-  const paneSessionIds = useMemo(
-    () => rects.panes.map((pane) => pane.sessionId),
+  const projectedBoxes = useMemo(
+    () => new Map(rects.panes.map((pane) => [pane.sessionId, pane.box])),
     [rects],
   );
   const sleepingSessions = useSleepingSessions(sleep, paneSessionIds, visible);
   const previousPaneIdsRef = useRef(paneSessionIds);
   const maximized = maximizedSessionId !== null && paneSessionIds.length > 1 &&
-    paneSessionIds.includes(maximizedSessionId) && paneSessionIds.includes(focusedSessionId);
+    paneSessionIds.includes(maximizedSessionId) && paneSessionIds.includes(focusedSessionId) &&
+    !minimizedIds.has(maximizedSessionId);
+
+  useEffect(() => {
+    // Prune removed IDs and permanently reveal the fallback survivor. This
+    // prevents a future split/restart from reviving old minimization state.
+    setMinimizedPanes((current) => {
+      if (current.size === minimizedIds.size) return current;
+      return new Map([...current].filter(([id]) => minimizedIds.has(id)));
+    });
+  }, [minimizedIds]);
+
+  useEffect(() => {
+    if (minimizedPanes.has(focusedSessionId)) {
+      cancelActiveDrag();
+      pendingFocusRef.current = focusedSessionId;
+      revealPane(focusedSessionId);
+    }
+    // Only a changed focus request reveals a minimized pane. Activity and
+    // unrelated parent renders must never acknowledge or restore one.
+  }, [focusedSessionId]);
+
+  useEffect(() => {
+    if (paneSessionIds.includes(focusedSessionId)) return;
+    const survivor = rects.panes[0]?.sessionId;
+    if (survivor === undefined) return;
+    pendingFocusRef.current = survivor;
+    onFocusPane(survivor);
+  }, [focusedSessionId, paneSessionIds]);
+
+  const visibleKey = !visible ? "" : maximized
+    ? String(maximizedSessionId) : rects.panes.map((pane) => pane.sessionId).join(",");
+  const visibleIds = useMemo(() => visibleKey === "" ? [] : visibleKey.split(",").map(Number), [visibleKey]);
+  useEffect(() => {
+    onVisiblePanesChange?.(visibleIds);
+  }, [visibleIds, onVisiblePanesChange]);
 
   useEffect(() => {
     const addedPane = paneSessionIds.some((id) => !previousPaneIdsRef.current.includes(id));
@@ -432,7 +531,7 @@ export function SplitLayout({
 
   useEffect(() => {
     const sessionId = pendingFocusRef.current;
-    if (!visible || sessionId === null ||
+    if (!visible || sessionId === null || minimizedIds.has(sessionId) ||
         (maximizedSessionId !== null && maximizedSessionId !== sessionId)) return;
     pendingFocusRef.current = null;
     const pane = containerRef.current?.querySelector<HTMLElement>(
@@ -442,7 +541,7 @@ export function SplitLayout({
       ".xterm-helper-textarea, iframe, .dead-pane__action, .plugin-pane__action",
     );
     (contents ?? pane)?.focus();
-  }, [maximizedSessionId, visible]);
+  }, [maximizedSessionId, minimizedIds, focusedSessionId, visible]);
 
   const paneLabel = (sessionId: number) => {
     const state = paneStates[sessionId];
@@ -456,7 +555,7 @@ export function SplitLayout({
     <div
       className="split-layout"
       data-testid={`split-layout-${tabId}`}
-      data-pane-count={rects.panes.length}
+      data-pane-count={paneSessionIds.length}
       data-maximized={maximized || undefined}
     >
       {maximized ? (
@@ -485,7 +584,7 @@ export function SplitLayout({
         </div>
       ) : null}
       <div className="split-layout__panes" ref={containerRef}>
-      {rects.panes.map(({ sessionId, box }) => {
+      {allRects.panes.map(({ sessionId, box }) => {
         const state = paneStates[sessionId] ?? MISSING_PANE;
         const focused = sessionId === focusedSessionId;
         const splittable = state.status === "live" && canSplitPane(root, sessionId);
@@ -503,7 +602,17 @@ export function SplitLayout({
           plugin && state.pluginId !== undefined
             ? pluginManifestFor?.(state.pluginId) ?? null
             : null;
-        const hidden = maximized && sessionId !== maximizedSessionId;
+        const minimized = minimizedIds.has(sessionId);
+        const hidden = minimized || (maximized && sessionId !== maximizedSessionId);
+        const minimizeButton = paneSessionIds.length > 1 ? (
+          <button
+            type="button"
+            aria-label="Minimize pane"
+            title={minimizedIds.size < paneSessionIds.length - 1 ? "Minimize pane" : "Keep at least one pane visible"}
+            disabled={minimizedIds.size >= paneSessionIds.length - 1}
+            onClick={() => minimizePane(sessionId)}
+          >−</button>
+        ) : null;
         const maximizeButton = paneSessionIds.length > 1 ? (
           <button
             type="button"
@@ -517,8 +626,8 @@ export function SplitLayout({
           <section
             key={sessionId}
             className={`split-pane${focused ? " split-pane--focused" : ""}`}
-            style={hidden ? { display: "none" } : maximized
-              ? boxStyle({ left: 0, top: 0, width: 1, height: 1 }) : boxStyle(box)}
+            style={minimized ? minimizedPanes.get(sessionId) : hidden ? { display: "none" } : maximized
+              ? boxStyle({ left: 0, top: 0, width: 1, height: 1 }) : boxStyle(projectedBoxes.get(sessionId) ?? box)}
             data-testid={`split-pane-${sessionId}`}
             data-session-id={sessionId}
             aria-hidden={hidden || undefined}
@@ -529,8 +638,8 @@ export function SplitLayout({
                 ? `${manifest?.name ?? state.pluginId ?? "Plugin"} pane`
                 : `Terminal pane ${sessionId}`
             }
-            onFocusCapture={() => onFocusPane(sessionId)}
-            onPointerDownCapture={() => onFocusPane(sessionId)}
+            onFocusCapture={() => { if (!hidden) onFocusPane(sessionId); }}
+            onPointerDownCapture={() => { if (!hidden) onFocusPane(sessionId); }}
           >
             {state.status === "live" ? (
               <>
@@ -599,6 +708,7 @@ export function SplitLayout({
                   />
                 )}
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
+                  {minimizeButton}
                   {maximizeButton}
                   <button
                     type="button"
@@ -655,6 +765,7 @@ export function SplitLayout({
                 {/* A panel has no shell to end and cannot be split.
                     `requestClose` dismisses it directly, with no dialog. */}
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
+                  {minimizeButton}
                   {maximizeButton}
                   <button
                     type="button"
@@ -677,8 +788,9 @@ export function SplitLayout({
                 onResume={() => void actions.restartPane(sessionId, "resume")}
                 onNewSession={() => void actions.restartPane(sessionId, "fresh")}
               />
-              {maximizeButton ? (
+              {maximizeButton || minimizeButton ? (
                 <div className="split-pane__toolbar" role="toolbar" aria-label="Pane actions">
+                  {minimizeButton}
                   {maximizeButton}
                 </div>
               ) : null}
@@ -726,6 +838,34 @@ export function SplitLayout({
         );
       })}
       </div>
+      {minimizedIds.size > 0 ? (
+        <div className="split-minimized-shelf" role="toolbar" aria-label="Minimized panes">
+          <span className="split-minimized-shelf__label">Minimized</span>
+          {paneSessionIds.filter((id) => minimizedIds.has(id)).map((sessionId) => {
+            const activity = paneActivity?.[sessionId];
+            const status = paneActivityLabel(activity);
+            const label = paneLabel(sessionId);
+            return (
+              <button
+                key={sessionId}
+                type="button"
+                className="split-minimized-shelf__chip"
+                data-testid={`restore-pane-${sessionId}`}
+                aria-label={`Restore ${label} — ${status}`}
+                title={`Restore ${label} — ${status}`}
+                onClick={() => restorePane(sessionId)}
+              >
+                <span className="split-minimized-shelf__activity" data-activity={activity?.activity ?? "idle"} aria-hidden="true" />
+                <span className="split-minimized-shelf__name">{label}</span>
+                {activity?.activity === "attention" ? (
+                  <span className="split-minimized-shelf__finished">{status.replace(" — needs a look", "")}</span>
+                ) : null}
+                <span aria-hidden="true">↗</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       {confirmClose !== null ? (
         <div className="split-dialog-backdrop">
           <div
@@ -779,6 +919,21 @@ export function SplitLayout({
       ) : null}
     </div>
   );
+}
+
+function paneActivityLabel(state: PaneActivityModel | undefined): string {
+  if (state?.activity === "attention") {
+    const at = state.attentionSince;
+    if (at !== null && Number.isFinite(at)) {
+      const when = new Date(at);
+      const clock = `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
+      return `Finished at ${clock} — needs a look`;
+    }
+    return "Finished — needs a look";
+  }
+  if (state?.activity === "unread") return "Unread output";
+  if (state?.activity === "active") return "Terminal active";
+  return "No recent output";
 }
 
 function boxStyle(box: FractionBox): CSSProperties {

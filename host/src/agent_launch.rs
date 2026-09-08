@@ -20,6 +20,8 @@ const MAX_PROCESS_ANCESTORS: usize = 32;
 const MAX_CAPTURE_INPUT_BYTES: usize = 64 * 1024;
 const CAPTURES_FILE: &str = "conversation_captures_v1.jsonl";
 const LAUNCHES_FILE: &str = "conversation_launches_v1.jsonl";
+const CAPTURE_LOCK_FILE: &str = "conversation_captures_v1.lock";
+const MAX_CAPTURE_LOG_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -64,6 +66,8 @@ struct LaunchStamp {
     args: Vec<String>,
     cwd: String,
     launcher_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launcher_created_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,6 +88,8 @@ struct CapturePayload {
     session_id: String,
     cwd: Option<String>,
     source: String,
+    model: Option<serde_json::Value>,
+    transcript_path: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -104,6 +110,13 @@ struct CaptureRecord {
     cwd: Option<String>,
     at_ms: u64,
     launch: LaunchConfiguration,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_path: Option<String>,
+    launcher_pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launcher_created_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -279,6 +292,7 @@ fn launch_with_paths(invocation: AgentInvocation, path_var: &std::ffi::OsStr) ->
         args: invocation.args.clone(),
         cwd: cwd.display().to_string(),
         launcher_pid: std::process::id(),
+        launcher_created_at: launcher_creation_time(std::process::id()),
     };
     let stamp_token = encode_token(&stamp)?;
     let mut child = std::process::Command::new(&resolved.program)
@@ -331,6 +345,14 @@ fn capture_from_parts(
         id: payload.session_id,
         cwd,
         at_ms,
+        model: payload.model.as_ref().and_then(serde_json::Value::as_str)
+            .filter(|model| !model.trim().is_empty() && model.chars().count() <= 128
+                && !model.chars().any(char::is_control)).map(str::to_string),
+        transcript_path: payload.transcript_path.as_ref().and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty() && path.len() <= MAX_ARG_BYTES && !path.contains('\0'))
+            .map(str::to_string),
+        launcher_pid: stamp.launcher_pid,
+        launcher_created_at: None,
         launch: LaunchConfiguration {
             v: 1,
             provider,
@@ -341,15 +363,128 @@ fn capture_from_parts(
 }
 
 fn append_capture(data_dir: &Path, record: &CaptureRecord) -> Result<()> {
+    append_capture_with_liveness(data_dir, record, |pid, created| {
+        launcher_creation_time(pid).as_deref() == Some(created)
+    })
+}
+
+fn append_capture_with_liveness(
+    data_dir: &Path,
+    record: &CaptureRecord,
+    mut is_live: impl FnMut(u32, &str) -> bool,
+) -> Result<()> {
     std::fs::create_dir_all(data_dir).context("creating capture data directory")?;
-    let mut line = serde_json::to_vec(record).context("encoding conversation capture")?;
-    if line.len() > MAX_CAPTURE_INPUT_BYTES {
-        bail!("conversation capture is too large");
+    let _lock = capture_lock(data_dir)?;
+    let capture_path = data_dir.join(CAPTURES_FILE);
+    let text = read_capture_log(&capture_path)?;
+    let mut launches: HashMap<(u64, u32, String), serde_json::Value> = HashMap::new();
+    let mut incoming = serde_json::to_value(record).context("encoding conversation capture")?;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
+        let Some(pane) = value.get("termxSessionId").and_then(serde_json::Value::as_u64)
+            .filter(|pane| *pane <= u64::from(u32::MAX)) else { continue; };
+        if value.get("v").and_then(serde_json::Value::as_u64).is_some_and(|v| v != 1)
+            || !matches!(value.get("provider").and_then(serde_json::Value::as_str), Some("claude" | "codex"))
+            || !value.get("id").and_then(serde_json::Value::as_str).is_some_and(valid_conversation_id) {
+            continue;
+        }
+        // A later same-launch hook cannot erase already-recorded ambiguity,
+        // even if a different pane's capture has since won the current index.
+        if same_captured_launch(&value, &incoming) && value.get("modelAmbiguous").and_then(serde_json::Value::as_bool) == Some(true) {
+            incoming["modelAmbiguous"] = true.into();
+        }
+        if value.get("provider") != incoming.get("provider") || value.get("id") != incoming.get("id") {
+            continue;
+        }
+        let Some((pid, created)) = captured_identity(&value) else { continue; };
+        let identity = (pane, pid, created.to_owned());
+        // A nested/newer conversation can replace the pane's visible capture
+        // while an older launcher is still alive. Check each exact invocation.
+        match launches.get(&identity) {
+            Some(previous) if !capture_replaces(previous, &value) => {}
+            _ => { launches.insert(identity, value); }
+        }
     }
-    line.push(b'\n');
+    let mut updates = Vec::new();
+    for previous in launches.values() {
+        if previous.get("termxSessionId") == incoming.get("termxSessionId") && same_captured_launch(previous, &incoming) {
+            continue;
+        }
+        let Some((pid, created)) = captured_identity(previous) else { continue; };
+        if is_live(pid, created) {
+            let mut peer = previous.clone();
+            peer["modelAmbiguous"] = true.into();
+            updates.push(peer);
+            incoming["modelAmbiguous"] = true.into();
+        }
+    }
+    let line = capture_json_line(&incoming)?;
+    // The original launch log remains append-only and receives the incoming
+    // native record only. Peer annotations preserve every rich/raw field and
+    // only add modelAmbiguous in the pane capture log.
+    let mut batch = Vec::new();
+    for peer in updates { batch.extend(capture_json_line(&peer)?); }
+    batch.extend_from_slice(&line);
     append_line(&data_dir.join(LAUNCHES_FILE), &line, true)?;
-    append_line(&data_dir.join(CAPTURES_FILE), &line, false)?;
+    append_line(&capture_path, &batch, true)?;
     Ok(())
+}
+
+fn captured_identity(value: &serde_json::Value) -> Option<(u32, &str)> {
+    let pid = value.get("launcherPid")?.as_u64().filter(|pid| *pid > 0 && *pid <= u64::from(u32::MAX))? as u32;
+    let created = value.get("launcherCreatedAt")?.as_str()?;
+    if created.is_empty() || created.len() > 20 || !created.bytes().all(|byte| byte.is_ascii_digit())
+        || created.parse::<u64>().ok()? == 0 { return None; }
+    Some((pid, created))
+}
+
+fn same_captured_launch(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    left.get("provider") == right.get("provider") && left.get("id") == right.get("id")
+        && captured_identity(left).is_some() && captured_identity(left) == captured_identity(right)
+}
+
+fn capture_replaces(previous: &serde_json::Value, next: &serde_json::Value) -> bool {
+    if same_captured_launch(previous, next) && previous.get("launch").is_some() != next.get("launch").is_some() {
+        return next.get("launch").is_some();
+    }
+    next.get("atMs").and_then(serde_json::Value::as_u64).unwrap_or(0)
+        >= previous.get("atMs").and_then(serde_json::Value::as_u64).unwrap_or(0)
+}
+
+fn capture_json_line(value: &serde_json::Value) -> Result<Vec<u8>> {
+    let mut line = serde_json::to_vec(value).context("encoding capture annotation")?;
+    if line.len() > MAX_CAPTURE_INPUT_BYTES { bail!("conversation capture is too large"); }
+    line.push(b'\n');
+    Ok(line)
+}
+
+fn read_capture_log(path: &Path) -> Result<String> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(error).context("opening capture log"),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_CAPTURE_LOG_BYTES + 1).read_to_end(&mut bytes).context("reading capture log")?;
+    if bytes.len() as u64 > MAX_CAPTURE_LOG_BYTES { bail!("capture log exceeds the bounded overlap scan"); }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Persistent lock-file handle, not file existence, owns the lock. A crashed
+/// hook releases the handle automatically; later hooks never delete the log.
+fn capture_lock(data_dir: &Path) -> Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match std::fs::OpenOptions::new().read(true).write(true).create(true).share_mode(0)
+            .open(data_dir.join(CAPTURE_LOCK_FILE)) {
+            Ok(file) => return Ok(file),
+            Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => return Err(error).context("locking capture transaction"),
+        }
+    }
 }
 
 fn process_snapshot() -> Result<Vec<ProcessRow>> {
@@ -604,7 +739,7 @@ fn capture_silently(provider: Provider) {
     let Ok(rows) = process_snapshot() else {
         return;
     };
-    let Some(record) = capture_from_parts(
+    let Some(mut record) = capture_from_parts(
         provider,
         &payload,
         &pane_id,
@@ -615,7 +750,31 @@ fn capture_silently(provider: Provider) {
     ) else {
         return;
     };
+    record.launcher_created_at = launcher_creation_time(record.launcher_pid);
     let _ = append_capture(&data_dir, &record);
+}
+
+/// Query the exact launcher identity without relying on PID permanence. The
+/// status reader will verify this timestamp and every live ancestry edge.
+fn launcher_creation_time(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, WaitForSingleObject,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() { return None; }
+    let mut created: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    let valid = unsafe {
+        GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0
+            && WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    };
+    unsafe { CloseHandle(handle); }
+    let timestamp = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    (valid && timestamp > 0).then(|| timestamp.to_string())
 }
 
 fn now_ms() -> u64 {
@@ -904,6 +1063,7 @@ fn main() {
             args: vec!["--model".into(), "opus".into()],
             cwd: r"C:\launch".into(),
             launcher_pid: 10,
+            launcher_created_at: None,
         };
         let token = encode_token(&stamp).unwrap();
         let payload = br#"{"session_id":"abc-123","cwd":"C:\\hook","source":"startup"}"#;
@@ -933,6 +1093,167 @@ fn main() {
             55,
         )
         .is_none());
+    }
+
+    #[test]
+    fn capture_preserves_bounded_opaque_runtime_metadata_without_guessing_models() {
+        let stamp = LaunchStamp { v: 1, provider: Provider::Claude, args: vec!["--model".into(), "opus".into()], cwd: r"C:\launch".into(), launcher_pid: 10, launcher_created_at: None };
+        let token = encode_token(&stamp).unwrap();
+        let rows = valid_rows(Provider::Claude, 10, 40);
+        let payload = br#"{"session_id":"abc-123","source":"startup","model":"gpt-6-astra","transcript_path":"C:\\sessions\\one.jsonl"}"#;
+        let record = capture_from_parts(Provider::Claude, payload, "7", &token, 40, &rows, 55).unwrap();
+        let json = serde_json::to_value(record).unwrap();
+        assert_eq!(json["model"], "gpt-6-astra");
+        assert_eq!(json["transcriptPath"], r"C:\sessions\one.jsonl");
+        assert_eq!(json["launcherPid"], 10);
+        for model in [serde_json::json!("x".repeat(129)), serde_json::json!("bad\nmodel"), serde_json::json!(42), serde_json::Value::Null] {
+            let payload = serde_json::to_vec(&serde_json::json!({"session_id":"abc-123", "source":"startup", "model": model})).unwrap();
+            let record = capture_from_parts(Provider::Claude, &payload, "7", &token, 40, &rows, 55).unwrap();
+            assert!(serde_json::to_value(record).unwrap().get("model").is_none_or(serde_json::Value::is_null));
+        }
+    }
+
+    #[test]
+    fn capture_reads_the_current_process_creation_identity_without_rounding() {
+        let first = launcher_creation_time(std::process::id()).unwrap();
+        assert_eq!(launcher_creation_time(std::process::id()).as_deref(), Some(first.as_str()));
+        assert!(first.parse::<u64>().unwrap() > 9_007_199_254_740_991);
+        assert_eq!(launcher_creation_time(0), None);
+    }
+
+    fn overlap_record(pane: u32, pid: u32, at_ms: u64) -> CaptureRecord {
+        CaptureRecord {
+            v: 1, termx_session_id: pane, provider: Provider::Claude, id: "shared-123".into(),
+            cwd: Some(r"C:\same-folder".into()), at_ms,
+            launch: LaunchConfiguration { v: 1, provider: Provider::Claude, args: vec!["--model".into(), format!("model-{pane}")], cwd: Some(r"C:\same-folder".into()) },
+            model: Some(format!("model-{pane}")), transcript_path: Some(r"C:\sessions\shared-123.jsonl".into()),
+            launcher_pid: pid, launcher_created_at: Some(format!("13400000000000{pid:04}")),
+        }
+    }
+
+    #[test]
+    fn source_overlap_remains_marked_when_the_second_launcher_exits_before_any_ui_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        use std::os::windows::process::CommandExt;
+        // This isolated helper exits naturally. No UI reader runs until after
+        // its exit, reproducing the short-lived overlapping invocation.
+        let mut child = std::process::Command::new(std::env::var_os("ComSpec").unwrap())
+            .args(["/D", "/C", "ping -n 2 127.0.0.1 >nul"])
+            .creation_flags(0x0800_0000).spawn().unwrap();
+        let pid = std::process::id();
+        let mut a = overlap_record(1, pid, 1000);
+        a.launcher_created_at = launcher_creation_time(pid);
+        let mut b = overlap_record(2, child.id(), 2000);
+        b.launcher_created_at = launcher_creation_time(child.id());
+        assert!(b.launcher_created_at.is_some());
+        append_capture(tmp.path(), &a).unwrap();
+        append_capture(tmp.path(), &b).unwrap();
+        assert!(child.wait().unwrap().success());
+        // Reading only after both source writes models a UI which never saw
+        // the overlap live. Persisted flags must be sufficient by themselves.
+        let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
+        let rows: Vec<serde_json::Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        for pane in [1, 2] {
+            let row = rows.iter().rev().find(|row| row["termxSessionId"] == pane).unwrap();
+            assert_eq!(row["modelAmbiguous"], true);
+            assert_eq!(row["launch"]["args"][0], "--model");
+        }
+    }
+
+    #[test]
+    fn source_overlap_serializes_simultaneous_hooks_and_preserves_duplicate_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut workers = Vec::new();
+        for pane in [1, 2] {
+            let path = tmp.path().to_path_buf();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                let capture = overlap_record(pane, pane + 100, u64::from(pane) * 1000);
+                barrier.wait();
+                append_capture_with_liveness(&path, &capture, |_, _| true).unwrap();
+            }));
+        }
+        for worker in workers { worker.join().unwrap(); }
+        // Subsequent duplicate native hooks arrive after the peer has exited.
+        // They must inherit the persistent flag rather than relying on liveness.
+        for pane in [1, 2] {
+            let duplicate = overlap_record(pane, pane + 100, 9000);
+            append_capture_with_liveness(tmp.path(), &duplicate, |_, _| false).unwrap();
+        }
+        let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
+        let rows: Vec<serde_json::Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        for pane in [1, 2] {
+            let row = rows.iter().rev().find(|row| row["termxSessionId"] == pane).unwrap();
+            assert_eq!(row["modelAmbiguous"], true);
+        }
+    }
+
+    #[test]
+    fn source_overlap_does_not_flag_nonoverlapping_resumes_or_same_launch_duplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = overlap_record(1, 101, 1000);
+        append_capture_with_liveness(tmp.path(), &a, |_, _| true).unwrap();
+        append_capture_with_liveness(tmp.path(), &a, |_, _| true).unwrap();
+        let b = overlap_record(2, 202, 2000);
+        append_capture_with_liveness(tmp.path(), &b, |_, _| false).unwrap();
+        let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
+        assert!(!text.contains("modelAmbiguous"));
+    }
+
+    #[test]
+    fn source_overlap_retains_rich_native_peer_fields_over_a_later_legacy_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = overlap_record(1, 101, 1000);
+        append_capture_with_liveness(tmp.path(), &a, |_, _| true).unwrap();
+        let mut legacy = serde_json::to_value(&a).unwrap();
+        legacy.as_object_mut().unwrap().remove("launch");
+        legacy["atMs"] = 9000.into();
+        legacy["cwd"] = r"C:\wrong-duplicate".into();
+        append_line(&tmp.path().join(CAPTURES_FILE), &capture_json_line(&legacy).unwrap(), false).unwrap();
+        append_capture_with_liveness(tmp.path(), &overlap_record(2, 202, 2000), |_, _| true).unwrap();
+        let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
+        let peer: serde_json::Value = text.lines().rev().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["termxSessionId"] == 1).unwrap();
+        assert_eq!(peer["modelAmbiguous"], true);
+        assert_eq!(peer["cwd"], r"C:\same-folder");
+        assert_eq!(peer["model"], "model-1");
+        assert_eq!(peer["launch"]["args"][1], "model-1");
+        assert_eq!(peer["atMs"], 1000);
+    }
+
+    #[test]
+    fn source_overlap_checks_live_older_launches_after_a_pane_records_another_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = overlap_record(1, 101, 1000);
+        append_capture_with_liveness(tmp.path(), &a, |_, _| false).unwrap();
+        let mut nested = overlap_record(1, 303, 2000);
+        nested.id = "another-conversation".into();
+        append_capture_with_liveness(tmp.path(), &nested, |_, _| false).unwrap();
+        append_capture_with_liveness(tmp.path(), &overlap_record(2, 202, 3000), |pid, _| pid == 101).unwrap();
+        let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
+        let rows: Vec<serde_json::Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        for pane in [1, 2] {
+            let row = rows.iter().rev().find(|row| row["termxSessionId"] == pane && row["id"] == "shared-123").unwrap();
+            assert_eq!(row["modelAmbiguous"], true);
+        }
+        assert!(!rows.iter().any(|row| row["id"] == "another-conversation" && row["modelAmbiguous"] == true));
+    }
+
+    #[test]
+    fn source_overlap_lock_wait_and_log_read_are_bounded_without_overwriting_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = capture_lock(tmp.path()).unwrap();
+        let start = std::time::Instant::now();
+        assert!(append_capture_with_liveness(tmp.path(), &overlap_record(1, 101, 1000), |_, _| true).is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        drop(lock);
+        let path = tmp.path().join(CAPTURES_FILE);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_CAPTURE_LOG_BYTES + 1).unwrap();
+        drop(file);
+        assert!(append_capture_with_liveness(tmp.path(), &overlap_record(1, 101, 1000), |_, _| true).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_CAPTURE_LOG_BYTES + 1);
     }
 
     #[test]

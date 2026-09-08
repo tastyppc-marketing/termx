@@ -29,6 +29,28 @@ Copy both exes into one folder. That folder is the product.
 - Drop an empty `portable.flag` beside the exes → data lives in `data\` inside
   the folder (fully self-contained, clean first launch).
 
+## Published updates
+
+The status bar reads the running package version and checks the private
+`tastyppc-marketing/termx` GitHub release catalog using the existing `gh` login.
+No release, authentication/network failure, and up-to-date are separate states.
+Checks run at startup and every six hours while the bar is enabled; click the
+status to check again. An available update opens its GitHub release page for
+download. TermX does not install updates or restart terminals automatically.
+
+For a stable `v0.2.0` release, upload **TermX-0.2.0-windows-x64-portable.zip**
+(or `arm64` for that architecture). The ZIP must contain both `termx-ui.exe`
+and `termx-host.exe` together; it may include the `TermX.exe` UI alias. Do not
+include `data/`, credentials, personal settings, or executable backups. Use the
+exact `TermX-{version}-windows-{x64|arm64}-portable.zip` asset name, with an
+uploaded, nonempty asset. Drafts, prereleases, source ZIPs, and individual EXEs
+are deliberately not advertised as complete updates.
+
+Version 0.2.0 adds a per-tab minimized-pane shelf and focused-session status.
+New model metadata and safe directory changes need the new host and newly
+instrumented sessions. Replace the portable pair after completing active work;
+reopening only the UI keeps the old daemon and its sessions running.
+
 ## WARNING: never ship a bare-cargo UI build
 
 `cargo build --release` inside `ui/src-tauri` WITHOUT the Tauri CLI (or without

@@ -16,6 +16,7 @@ const REQUEST_CONTEXTS = new Set([
   "get_state",
   "read_history",
   "probe_session",
+  "change_directory",
 ]);
 
 /** One backward page of spilled scrollback. */
@@ -29,7 +30,8 @@ type ReplyType =
   | "layout_saved"
   | "state"
   | "history"
-  | "session_probe";
+  | "session_probe"
+  | "directory_changed";
 
 export interface HostClientConnectOptions {
   port: number;
@@ -51,6 +53,8 @@ export interface CreateSessionOptions {
 export interface SessionProbe {
   alive: boolean;
   busy: boolean;
+  at_prompt?: boolean;
+  prompt_id?: string | null;
 }
 
 export interface HostState {
@@ -323,7 +327,27 @@ export class HostClient {
         if (message.type !== "session_probe") {
           throw new Error("unreachable reply type");
         }
-        return { alive: message.alive, busy: message.busy };
+        return { alive: message.alive, busy: message.busy,
+          ...(message.at_prompt !== undefined ? { at_prompt: message.at_prompt } : {}),
+          ...(message.prompt_id !== undefined ? { prompt_id: message.prompt_id } : {}),
+        };
+      },
+    );
+  }
+
+  /** The daemon atomically refuses if this exact idle prompt has changed. */
+  changeDirectory(sessionId: number, expectedPid: number, promptId: string, cwd: string): Promise<boolean> {
+    assertSessionId(sessionId);
+    assertSessionId(expectedPid);
+    if (expectedPid === 0 || !promptId || promptId.length > 128 || !cwd || cwd.length > 24 * 1024
+      || /[\u0000-\u001f\u007f-\u009f]/u.test(cwd)) throw new TypeError("Invalid guarded directory request");
+    return this.request(
+      { type: "change_directory", session_id: sessionId, expected_pid: expectedPid, prompt_id: promptId, cwd },
+      "change_directory", "directory_changed",
+      (message) => {
+        if (message.type !== "directory_changed") throw new Error("unreachable reply type");
+        if (message.session_id !== sessionId) throw new Error("Directory reply named a different session");
+        return message.accepted;
       },
     );
   }
@@ -661,6 +685,7 @@ export class HostClient {
       case "state":
       case "history":
       case "session_probe":
+      case "directory_changed":
         this.receiveReply(message);
         return;
       case "session_closed":
@@ -975,7 +1000,11 @@ function parseHostMessage(text: string): HostMsg {
         session_id: u32Field(value, "session_id"),
         alive: booleanField(value, "alive"),
         busy: booleanField(value, "busy"),
+        ...(value.at_prompt !== undefined ? { at_prompt: booleanField(value, "at_prompt") } : {}),
+        ...(value.prompt_id !== undefined ? { prompt_id: nullableStringField(value, "prompt_id") } : {}),
       };
+    case "directory_changed":
+      return { type: value.type, session_id: u32Field(value, "session_id"), accepted: booleanField(value, "accepted") };
     case "error":
       return {
         type: value.type,

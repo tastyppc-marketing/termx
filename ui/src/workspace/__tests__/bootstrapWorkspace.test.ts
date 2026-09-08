@@ -88,6 +88,18 @@ function fakeClient(options: {
 }
 
 describe("parseBootstrapHostResult", () => {
+  it("forwards focused status and guarded directory actions through the reconnecting client",async()=>{
+    const fake=fakeClient({sessions:[session(1)]});
+    const probe=vi.fn(async()=>({alive:true,busy:false,at_prompt:true,prompt_id:"test:1"}));
+    const change=vi.fn(async()=>true);
+    fake.client.probeSession=probe;fake.client.changeDirectory=change;
+    const workspace=await bootstrapWorkspace({invokeBootstrap:async()=>({port:3210,token:"token-value"}),connect:async()=>fake.client});
+    try {
+      expect(await workspace.controller.probePane(1)).toMatchObject({at_prompt:true,prompt_id:"test:1"});
+      expect(await workspace.client.changeDirectory!(1,9001,"test:1","C:\\new")).toBe(true);
+      expect(change).toHaveBeenCalledWith(1,9001,"test:1","C:\\new");
+    } finally {workspace.controller.dispose();workspace.client.close();}
+  });
   it("accepts only a valid loopback bootstrap shape", () => {
     expect(parseBootstrapHostResult({ port: 4242, token: "secret" })).toEqual({
       port: 4242,

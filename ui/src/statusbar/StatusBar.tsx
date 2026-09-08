@@ -12,6 +12,7 @@
  */
 
 import { useRef } from "react";
+import type { UpdateState } from "../updates/types";
 import "./StatusBar.css";
 
 export interface StatusBarProps {
@@ -27,9 +28,19 @@ export interface StatusBarProps {
    * honour.
    */
   onOpenCwd?: (cwd: string) => void;
+  model?: { provider: string; model: string | null } | null;
+  appVersion?: string;
+  onChangeDirectory?: () => void;
+  directoryDisabledReason?: string;
+  changingDirectory?: boolean;
+  update?: UpdateState;
+  onCheckUpdates?: () => void;
+  onOpenUpdate?: () => void;
 }
 
-export function StatusBar({ cwd, profile, sshHost, onOpenCwd }: StatusBarProps) {
+export function StatusBar({ cwd, profile, sshHost, onOpenCwd, model, appVersion,
+  onChangeDirectory, directoryDisabledReason, changingDirectory,
+  update, onCheckUpdates, onOpenUpdate }: StatusBarProps) {
   const pathRef = useRef<HTMLButtonElement | null>(null);
 
   const chips = (
@@ -47,20 +58,16 @@ export function StatusBar({ cwd, profile, sshHost, onOpenCwd }: StatusBarProps) 
     </span>
   );
 
-  if (cwd === null || !onOpenCwd) {
-    return (
-      <footer className="status-bar" data-testid="status-bar">
-        <span className="status-bar__cwd" title={cwd ?? undefined}>
-          {cwd ?? "—"}
-        </span>
-        {chips}
-      </footer>
-    );
-  }
-
+  const available = update?.kind === "checked" && update.result.status === "available";
+  const updateLabel = update?.kind === "checking" ? "Checking updates…"
+    : update?.kind === "error" ? "Updates unavailable"
+    : update?.kind === "checked" ? update.result.status === "available"
+      ? `Update ${update.result.latestVersion}`
+      : update.result.status === "no-release" ? "No published release" : "Up to date"
+    : "Check updates";
   return (
     <footer className="status-bar" data-testid="status-bar">
-      <button
+      {cwd !== null && onOpenCwd ? <button
         ref={pathRef}
         type="button"
         className="status-bar__cwd status-bar__cwd--action"
@@ -73,8 +80,24 @@ export function StatusBar({ cwd, profile, sshHost, onOpenCwd }: StatusBarProps) 
         }}
       >
         {cwd}
-      </button>
+      </button> : <span className="status-bar__cwd" title={cwd ?? undefined}>{cwd ?? "—"}</span>}
+      {onChangeDirectory ? <button type="button" className="status-bar__action"
+        data-testid="status-bar-change-directory"
+        title={directoryDisabledReason ?? "Choose a folder for this terminal"}
+        disabled={Boolean(directoryDisabledReason) || changingDirectory}
+        onClick={onChangeDirectory}>{changingDirectory ? "Opening…" : "Open folder…"}</button> : null}
+      {model ? <span className="status-bar__model" data-testid="status-bar-model"
+        title={`${model.provider} · ${model.model ?? "Model unavailable"}`}>
+        {model.provider} · {model.model ?? "Model unavailable"}
+      </span> : null}
       {chips}
+      {appVersion ? <span className="status-bar__version" data-testid="status-bar-version">TermX {appVersion}</span> : null}
+      {onCheckUpdates || onOpenUpdate ? <button type="button"
+        className={`status-bar__action${available ? " status-bar__action--update" : ""}`}
+        data-testid="status-bar-update" disabled={update?.kind === "checking"}
+        title={update?.kind === "error" ? `${update.message}. Click to retry.`
+          : available ? "Open the GitHub release to download the update" : "Check GitHub for a TermX update"}
+        onClick={available ? onOpenUpdate : onCheckUpdates}>{updateLabel}</button> : null}
     </footer>
   );
 }

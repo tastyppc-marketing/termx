@@ -38,6 +38,12 @@ const POWERSHELL_OSC9_HOOK: &str = "$global:__termxPrompt = $function:prompt; fu
 /// customization the user's profile installed.
 const POWERSHELL_AGENT_WRAPPERS: &str = "if (-not (Get-Command claude -CommandType Alias,Function -ErrorAction SilentlyContinue)) { function global:claude { $j = ConvertTo-Json -Compress -InputObject ([ordered]@{v=1;provider='claude';args=[string[]]@($args)}); $t = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)).TrimEnd('=').Replace('+','-').Replace('/','_'); & $env:TERMX_HOST_EXE --agent-json $t } }; if (-not (Get-Command codex -CommandType Alias,Function -ErrorAction SilentlyContinue)) { function global:codex { $j = ConvertTo-Json -Compress -InputObject ([ordered]@{v=1;provider='codex';args=[string[]]@($args)}); $t = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)).TrimEnd('=').Replace('+','-').Replace('/','_'); & $env:TERMX_HOST_EXE --agent-json $t } }";
 
+// Prompt() itself can run arbitrary user code and is not the input boundary.
+// Emit ready only when entering PSReadLine, and accepted only when it returns.
+// Without PSReadLine or on a customized unsupported host, emit nothing: the
+// guarded directory chooser must remain unavailable rather than guess idle.
+const POWERSHELL_INPUT_HOOK: &str = "try { Import-Module PSReadLine -ErrorAction Stop; $global:__termxReadLine = $function:PSConsoleHostReadLine; if ($global:__termxReadLine -and $env:TERMX_PROMPT_TOKEN -and (Get-Command PSConsoleHostReadLine).ModuleName -eq 'PSReadLine') { $global:__termxReadLineN = 0; function global:PSConsoleHostReadLine { $global:__termxReadLineN++; $e = [string][char]27; $p = $e + ']9;79;' + $env:TERMX_PROMPT_TOKEN + ';'; [Console]::Write($p + 'R;' + $global:__termxReadLineN + $e + [string][char]92); $line = & $global:__termxReadLine; $k = if ([string]::IsNullOrEmpty($line)) { 'E' } else { 'T' }; [Console]::Write($p + 'A;' + $global:__termxReadLineN + ';' + $k + $e + [string][char]92); return $line } } } catch {}";
+
 /// cmd has no prompt function to wrap, so PROMPT itself carries the sequence
 /// (`$E` is cmd's VT escape, `$P` the cwd) and still renders the default
 /// `path>` prompt after it.
@@ -69,7 +75,7 @@ pub fn resolve_with_env(
                 args.push("-NoExit".into());
                 args.push("-Command".into());
                 args.push(format!(
-                    "{POWERSHELL_OSC9_HOOK}; {POWERSHELL_AGENT_WRAPPERS}"
+                    "{POWERSHELL_OSC9_HOOK}; {POWERSHELL_AGENT_WRAPPERS}; {POWERSHELL_INPUT_HOOK}"
                 ));
             }
             Ok(Profile {

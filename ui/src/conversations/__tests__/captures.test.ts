@@ -32,6 +32,41 @@ function line(overrides: Record<string, unknown> = {}): string {
 }
 
 describe("parseCaptures", () => {
+  it("keeps native runtime metadata when a duplicate legacy hook finishes later, including compaction", () => {
+    const identity={launcherPid:44,launcherCreatedAt:"134330888880000001"};
+    const native=line({...identity,model:"exact-model",launch:{v:1,provider:"claude",args:[],cwd:"C:\\old"}});
+    const legacy=line({...identity,atMs:1001});
+    for(const lines of [[native,legacy],[legacy,native]]) {
+      const text=lines.join("\n");
+      expect(parseCaptures(text).get(3)).toMatchObject({launcherPid:44,model:"exact-model",atMs:1000});
+      const compacted=compactCaptures(`${" ".repeat(512*1024)}\n${text}\n`)!;
+      expect(parseCaptures(compacted).get(3)?.launcherPid).toBe(44);
+    }
+    expect(parseCaptures([native,line({atMs:1002,id:ID_B})].join("\n")).get(3)?.launcherPid).toBeUndefined();
+    expect(parseCaptures([native,line({atMs:100000,cwd:"C:\\current"})].join("\n")).get(3)).toMatchObject({atMs:100000,cwd:"C:\\current"});
+  });
+  it("preserves exact runtime identity and opaque model for same-folder panes", () => {
+    const captures = parseCaptures([
+      line({ model: "gpt-6-astra", transcriptPath: "C:\\sessions\\one.jsonl", launcherPid: 44, launcherCreatedAt: "134330888880000001" }),
+      line({ termxSessionId: 4, id: ID_B, model: "opus", launcherPid: 45, launcherCreatedAt: "134330888880000002" }),
+    ].join("\n"));
+    expect(captures.get(3)).toMatchObject({ model: "gpt-6-astra", transcriptPath: "C:\\sessions\\one.jsonl", launcherPid: 44, launcherCreatedAt: "134330888880000001" });
+    expect(captures.get(4)).toMatchObject({ model: "opus", launcherPid: 45, launcherCreatedAt: "134330888880000002" });
+  });
+
+  it("drops invalid runtime metadata without destroying a resumable legacy capture", () => {
+    for (const model of ["", "x".repeat(129), "gpt\n6", 42]) {
+      expect(parseCaptures(line({ model })).get(3)).toMatchObject({ id: ID_A, model: null });
+    }
+    expect(parseCaptures(line({ model: "x".repeat(128) })).get(3)?.model).toHaveLength(128);
+    const capture = parseCaptures(line({ launcherPid: 0x1_0000_0000, launcherCreatedAt: "18446744073709551616", transcriptPath: "bad\0path" })).get(3);
+    expect(capture?.id).toBe(ID_A);
+    expect(capture?.launcherPid).toBeUndefined();
+    expect(capture?.launcherCreatedAt).toBeUndefined();
+    expect(capture?.transcriptPath).toBeNull();
+    expect(parseCaptures(line()).get(3)).not.toHaveProperty("model");
+  });
+
   it("reads one capture per TermX session id", () => {
     const captures = parseCaptures([line(), line({ termxSessionId: 4, id: ID_B })].join("\n"));
 

@@ -10,7 +10,9 @@ import {
   openFolderHere as openFolderFromTab,
   pickFolderAndCreateSession,
 } from "../native/folderSession";
-import type { FolderPicker } from "../native/dialog";
+import { pickFolder as pickNativeFolder, type FolderPicker } from "../native/dialog";
+import { directoryCommand } from "../native/directoryCommand";
+import type { PaneActivityModel } from "./paneActivity";
 import {
   RESUME_FIXED_DELAY_MS,
   RESUME_PROMPT_TIMEOUT_MS,
@@ -104,7 +106,8 @@ export type WorkspaceHostClient = Pick<
    * daemon's parse error becomes — reads as "busy", and busy means reattach
    * and type nothing, the pre-probe behavior.
    */
-  probeSession?(sessionId: number): Promise<{ alive: boolean; busy: boolean }>;
+  probeSession?(sessionId: number): Promise<import("../host/client").SessionProbe>;
+  changeDirectory?: HostClient["changeDirectory"];
 };
 
 export interface WorkspaceAttachmentHub {
@@ -437,6 +440,9 @@ export interface WorkspaceControllerOptions {
    * installed (and in every legacy fixture) the folder fallback is unchanged.
    */
   capturedConversationFor?: (sessionId: number) => LlmSessionRecord | null;
+  rawCaptureFor?: (sessionId: number) => import("../conversations/captures").ConversationCapture | null;
+  markCaptureAmbiguous?: (capture: import("../conversations/captures").ConversationCapture) => Promise<void>;
+  probeCapturedAgent?: typeof import("../native/paneAgentStatus").tauriPaneAgentStatus;
   refreshConversationCaptures?: () => Promise<void>;
   launchConfigurationFor?: (provider: string, id: string) => import("../conversations/launchConfiguration").LaunchConfiguration | null | undefined;
   savedSessions?: SavedSessionsRecorder;
@@ -712,6 +718,7 @@ export class WorkspaceController {
   private readonly persistence: WorkspacePersistence;
   private readonly generateId: () => string;
   private readonly pickFolder?: FolderPicker;
+  private directoryChangeInFlight = false;
   private readonly settings: SettingsReader;
   private readonly uiState: UiStateStore;
   private readonly dirExists: DirExists;
@@ -722,6 +729,10 @@ export class WorkspaceController {
     sessionId: number,
   ) => LlmSessionRecord | null;
   private readonly refreshConversationCaptures?: () => Promise<void>;
+  private readonly rawCaptureFor?: WorkspaceControllerOptions["rawCaptureFor"];
+  private readonly markCaptureAmbiguous?: WorkspaceControllerOptions["markCaptureAmbiguous"];
+  private readonly probeCapturedAgent?: WorkspaceControllerOptions["probeCapturedAgent"];
+  private readonly ambiguousLaunches=new Set<string>();
   private readonly launchConfigurationFor?: WorkspaceControllerOptions["launchConfigurationFor"];
   private readonly savedSessions: SavedSessionsRecorder | null;
   private readonly sshPasswords:
@@ -876,6 +887,8 @@ export class WorkspaceController {
       ...(rawClient.probeSession
         ? { probeSession: (sessionId: number) => rawClient.probeSession!(sessionId) }
         : {}),
+      ...(rawClient.changeDirectory ? {changeDirectory: (sessionId:number,pid:number,promptId:string,cwd:string)=>
+        rawClient.changeDirectory!(sessionId,pid,promptId,cwd)} : {}),
     };
     this.windowId = options.windowId ?? MAIN_WINDOW_ID;
     this.measurePane = options.measurePane ?? measurePaneElement;
@@ -892,6 +905,9 @@ export class WorkspaceController {
     this.savedSessions = options.savedSessions ?? null;
     this.conversations = options.conversations;
     this.capturedConversationFor = options.capturedConversationFor;
+    this.rawCaptureFor = options.rawCaptureFor;
+    this.markCaptureAmbiguous=options.markCaptureAmbiguous;
+    this.probeCapturedAgent=options.probeCapturedAgent;
     this.refreshConversationCaptures = options.refreshConversationCaptures;
     this.launchConfigurationFor = options.launchConfigurationFor;
     this.sshPasswords = options.sshPasswords ?? null;
@@ -2037,6 +2053,109 @@ export class WorkspaceController {
   sessionCwd = (sessionId: number): string | null =>
     this.sessions.get(sessionId)?.cwd ?? null;
 
+  /** The live shell identity used by native focused-session status checks. */
+  sessionPid = (sessionId: number): number | null =>
+    this.sessions.get(sessionId)?.pid ?? null;
+
+  /** Current launch metadata; never substitute the saved original resume configuration. */
+  rawConversationCapture = async (sessionId: number) => {
+    if (this.disposed || !this.sessions.get(sessionId)?.alive) return null;
+    await this.refreshConversationCaptures?.();
+    const capture=this.disposed ? null : this.rawCaptureFor?.(sessionId) ?? null;
+    if (!capture) return null;
+    const launchKey=(entry: typeof capture)=>`${entry.termxSessionId}:${entry.launcherPid}:${entry.launcherCreatedAt}`;
+    if(capture.modelAmbiguous || this.ambiguousLaunches.has(launchKey(capture))) return {...capture,model:null,transcriptPath:null};
+    // "Open anyway" can run the same conversation in two panes. Its transcript
+    // has no per-launch writer identity, so newer model rows cannot be assigned
+    // to either pane. Preserve the process proof, but show model unavailable.
+    for (const other of this.sessions.values()) {
+      if(other.id===sessionId || !other.alive) continue;
+      const shared=this.rawCaptureFor?.(other.id);
+      if(shared?.provider===capture.provider && shared.id===capture.id && other.pid) {
+        const pid=this.sessionPid(sessionId);
+        if(!pid || !this.probeCapturedAgent) continue;
+        const active=await Promise.all([
+          this.probeCapturedAgent(pid,capture),this.probeCapturedAgent(other.pid,shared),
+        ]);
+        if(this.disposed) return null;
+        if(active.every(Boolean)) {
+          for(const ambiguous of [capture,shared]) {
+            this.ambiguousLaunches.add(launchKey(ambiguous));
+            await this.markCaptureAmbiguous?.({...ambiguous,modelAmbiguous:true}).catch(()=>{});
+          }
+          return {...capture,model:null,transcriptPath:null};
+        }
+      }
+    }
+    return capture;
+  };
+
+  /** Unknown/old hosts never count as idle. Polling this must not raise notices. */
+  probePane = async (sessionId: number): Promise<import("../host/client").SessionProbe | null> => {
+    const session = this.sessions.get(sessionId);
+    if (this.disposed || !session?.alive || !this.client.probeSession) return null;
+    try {
+      const result = await this.client.probeSession(sessionId);
+      const current = this.sessions.get(sessionId);
+      return !this.disposed && current?.alive && current.pid === session.pid ? result : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Choose a directory for this idle shell, without creating a new session. */
+  changeDirectory = async (sessionId: number): Promise<boolean> => {
+    if (this.directoryChangeInFlight || this.disposed) return false;
+    const original = this.sessions.get(sessionId);
+    const validTarget = () => {
+      const current = this.sessions.get(sessionId);
+      const attached = this.attachments.getSnapshot().sessions[sessionId];
+      return !this.disposed && original?.alive && current?.alive
+        && current.pid === original.pid && current.profile === original.profile
+        && current.profile === "powershell" && original.pid !== null && Boolean(this.client.changeDirectory)
+        && !this.sshPaneInfo(sessionId) && !attached?.suspended && !attached?.exited
+        && this.focusedPane(null)?.sessionId === sessionId;
+    };
+    if (!validTarget()) return false;
+    this.directoryChangeInFlight = true;
+    try {
+      const before = await this.probePane(sessionId);
+      if (!before?.alive || before.busy || !before.at_prompt || !before.prompt_id || !validTarget()) {
+        this.setNotice("Return to this terminal's shell prompt before changing folders.");
+        return false;
+      }
+      const folder = await pickNativeFolder({
+        title: "Open folder in this terminal", defaultPath: original!.cwd ?? undefined,
+      }, this.pickFolder);
+      if (folder === null || !validTarget()) return false;
+      const command = directoryCommand(original!.profile, folder);
+      if (command === null) {
+        this.setNotice("That folder name cannot be entered safely in this shell. Try PowerShell.");
+        return false;
+      }
+      if (!await this.dirExists(folder)) {
+        this.setNotice("That folder is no longer available.");
+        return false;
+      }
+      const after = await this.probePane(sessionId);
+      if (!after?.alive || after.busy || !after.at_prompt || after.prompt_id!==before.prompt_id || !validTarget()) {
+        this.setNotice("The terminal changed while choosing a folder. Return to its shell prompt and try again.");
+        return false;
+      }
+      // The host atomically consumes this exact idle prompt identity. Ordinary
+      // input queued after our last check wins and causes the folder action to
+      // be refused; no Ctrl+C and no arbitrary script travels over this seam.
+      const sent = await this.client.changeDirectory!(sessionId,original!.pid!,before.prompt_id,folder);
+      if (!sent) this.setNotice("The shell is no longer at the same clear prompt. Try again after it is ready.");
+      return sent;
+    } catch {
+      if (!this.disposed) this.setNotice("The folder could not be opened in this terminal.");
+      return false;
+    } finally {
+      this.directoryChangeInFlight = false;
+    }
+  };
+
   /// A pane's terminal rang its bell (xterm's parser saw a real BEL, not an
   /// OSC terminator). Routed to the attachment hub's attention mark.
   noteBell = (sessionId: number): void => {
@@ -2044,15 +2163,29 @@ export class WorkspaceController {
   };
 
   /// The user is looking at this tab (it is active and the window has focus):
-  /// deliver every pane's attention mark.
-  markTabSeen = (tabId: string): void => {
+  /// deliver visible panes' attention marks. Hidden/minimized panes retain theirs.
+  markTabSeen = (tabId: string, visibleSessionIds?: readonly number[]): void => {
     const tab = this.store.getState().tabs[tabId];
     if (!tab) {
       return;
     }
     for (const sessionId of sessionIdsInTab(tab)) {
+      if (visibleSessionIds && !visibleSessionIds.includes(sessionId)) continue;
       this.attachments.markSeen?.(sessionId);
     }
+  };
+
+  paneActivity = (tabId: string): Readonly<Record<number, PaneActivityModel>> => {
+    const tab = this.store.getState().tabs[tabId];
+    if (!tab) return {};
+    const sessions = this.attachments.getSnapshot().sessions;
+    return Object.fromEntries(sessionIdsInTab(tab).map((id) => {
+      const pane = sessions[id];
+      return [id, {
+        activity: pane?.settled ? "attention" : pane?.unread ? "unread" : pane?.active ? "active" : "idle",
+        attentionSince: pane?.settled ? pane.settledAt ?? null : null,
+      } satisfies PaneActivityModel];
+    }));
   };
 
   /// A display name per pane, for the split view's own title bars.

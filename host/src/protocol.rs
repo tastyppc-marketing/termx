@@ -72,6 +72,12 @@ pub enum ClientMsg {
     ProbeSession {
         session_id: SessionId,
     },
+    ChangeDirectory {
+        session_id: SessionId,
+        expected_pid: u32,
+        prompt_id: String,
+        cwd: String,
+    },
     SetLayout {
         layout: serde_json::Value,
     },
@@ -124,6 +130,14 @@ pub enum HostMsg {
         session_id: SessionId,
         alive: bool,
         busy: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_prompt: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
+    },
+    DirectoryChanged {
+        session_id: SessionId,
+        accepted: bool,
     },
     /// Ack that SetLayout was applied AND durably persisted; persist failures
     /// come back as Error{context:"set_layout"} instead of silence.

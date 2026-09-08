@@ -975,6 +975,32 @@ describe("HostClient scrollback history", () => {
 });
 
 describe("HostClient session probe", () => {
+  it("refuses an old host's unsupported directory command without sending terminal input", async () => {
+    const { client, socket } = await connect();
+    const changing = client.changeDirectory(7, 77, "secret:3", "C:\\target");
+    await flushPromises();
+    socket.receiveJson({ type: "error", context: "parse", message: "unknown variant `change_directory`" });
+    await expect(changing).rejects.toThrow(/change_directory/);
+    const sessions = client.listSessions();
+    await flushPromises();
+    socket.receiveJson({ type: "sessions", sessions: [SESSION] });
+    await expect(sessions).resolves.toEqual([SESSION]);
+    expect(sentJson(socket).map(message => message.type)).toEqual(["auth", "change_directory", "list_sessions"]);
+  });
+
+  it("preserves prompt evidence and sends an atomic directory request", async () => {
+    const { client, socket } = await connect();
+    const probing = client.probeSession(7);
+    await flushPromises();
+    socket.receiveJson({ type: "session_probe", session_id: 7, alive: true, busy: false, at_prompt: true, prompt_id: "secret:3" });
+    await expect(probing).resolves.toEqual({ alive: true, busy: false, at_prompt: true, prompt_id: "secret:3" });
+    const changing = client.changeDirectory(7, 77, "secret:3", "C:\\target");
+    await flushPromises();
+    expect(sentJson(socket).at(-1)).toEqual({ type: "change_directory", session_id: 7, expected_pid: 77, prompt_id: "secret:3", cwd: "C:\\target" });
+    socket.receiveJson({ type: "directory_changed", session_id: 7, accepted: false });
+    await expect(changing).resolves.toBe(false);
+  });
+
   it("asks the host and decodes its answer", async () => {
     const { client, socket } = await connect();
 

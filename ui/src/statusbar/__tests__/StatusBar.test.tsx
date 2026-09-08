@@ -12,6 +12,7 @@ let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -27,6 +28,45 @@ async function render(ui: React.ReactElement) {
 }
 
 describe("StatusBar", () => {
+  it("shows the focused model and running app version without changing the model name", async () => {
+    await render(<StatusBar cwd="C:\\work" profile="powershell" sshHost={null}
+      model={{ provider: "codex", model: "gpt-6-astra" }} appVersion="0.2.0" />);
+    expect(container.querySelector('[data-testid="status-bar-model"]')?.textContent).toBe("codex · gpt-6-astra");
+    expect(container.querySelector('[data-testid="status-bar-version"]')?.textContent).toBe("TermX 0.2.0");
+  });
+
+  it("offers a separate folder chooser and disables it with the shell status", async () => {
+    const onChangeDirectory = vi.fn();
+    await render(<StatusBar cwd="C:\\work" profile="powershell" sshHost={null} onChangeDirectory={onChangeDirectory} />);
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="status-bar-change-directory"]')!;
+    await click(button);
+    expect(onChangeDirectory).toHaveBeenCalledOnce();
+    await render(<StatusBar cwd="C:\\work" profile="powershell" sshHost={null}
+      onChangeDirectory={onChangeDirectory} directoryDisabledReason="Return to the shell prompt" />);
+    expect(button.disabled).toBe(true);
+    expect(button.title).toBe("Return to the shell prompt");
+  });
+
+  it("does not invent a model when a known provider has no model metadata", async () => {
+    await render(<StatusBar cwd={null} profile={null} sshHost={null} model={{ provider: "claude", model: null }} />);
+    expect(container.querySelector('[data-testid="status-bar-model"]')?.textContent).toBe("claude · Model unavailable");
+  });
+
+  it("offers the available release and keeps check failures distinct from up to date", async () => {
+    const onCheckUpdates = vi.fn(); const onOpenUpdate = vi.fn();
+    await render(<StatusBar cwd={null} profile={null} sshHost={null} onCheckUpdates={onCheckUpdates}
+      onOpenUpdate={onOpenUpdate} update={{ kind: "checked", result: {
+        status: "available", currentVersion: "0.2.0", latestVersion: "0.3.0", releaseTag: "v0.3.0",
+      } }} />);
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="status-bar-update"]')!;
+    expect(button.textContent).toContain("Update 0.3.0"); await click(button);
+    expect(onOpenUpdate).toHaveBeenCalledOnce(); expect(onCheckUpdates).not.toHaveBeenCalled();
+    await render(<StatusBar cwd={null} profile={null} sshHost={null} onCheckUpdates={onCheckUpdates}
+      update={{ kind: "error", message: "GitHub could not be reached" }} />);
+    expect(button.textContent).toBe("Updates unavailable");
+    expect(button.title).toContain("GitHub could not be reached");
+    await click(button); expect(onCheckUpdates).toHaveBeenCalledOnce();
+  });
   it("shows the focused pane's working directory in full", async () => {
     const cwd = "C:\\Users\\mjfos\\code\\seo-service-builder\\output\\fetterplaceco";
     await render(<StatusBar cwd={cwd} profile="powershell" sshHost={null} />);

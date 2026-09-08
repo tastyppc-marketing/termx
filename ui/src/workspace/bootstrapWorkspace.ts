@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { tauriPaneAgentStatus } from "../native/paneAgentStatus";
 import { dataDir } from "@tauri-apps/api/path";
 import {
   ConversationsStore,
@@ -90,7 +91,7 @@ export type BootstrapWorkspaceClient = Pick<
   // Optional so existing fixtures keep type-checking: a client without
   // `shutdown` degrades stop-all to a plain window close, never a crash (spec
   // §15), and one without `readHistory` simply never offers earlier output.
-  Partial<Pick<HostClient, "shutdown" | "readHistory">>;
+  Partial<Pick<HostClient, "shutdown" | "readHistory" | "probeSession" | "changeDirectory">>;
 
 export interface BootstrapWorkspaceOptions {
   invokeBootstrap?: () => Promise<unknown>;
@@ -174,6 +175,18 @@ class ReconnectingWorkspaceClient implements BootstrapWorkspaceClient {
 
   closeSession: BootstrapWorkspaceClient["closeSession"] = (sessionId) =>
     this.connection.request((client) => client.closeSession(sessionId));
+
+  probeSession: HostClient["probeSession"] = (sessionId) =>
+    this.connection.request(client=>{
+      if(!client.probeSession) throw new Error("This host cannot probe a session");
+      return client.probeSession(sessionId);
+    });
+
+  changeDirectory: HostClient["changeDirectory"] = (sessionId,pid,promptId,cwd) =>
+    this.connection.request(client=>{
+      if(!client.changeDirectory) return Promise.resolve(false);
+      return client.changeDirectory(sessionId,pid,promptId,cwd);
+    });
 
   getState: BootstrapWorkspaceClient["getState"] = () =>
     this.connection.request((client) => client.getState());
@@ -551,7 +564,8 @@ export async function bootstrapWorkspace(
         : compactCaptures(capturesText, new Set(sessionIdsInLayout(reconciled.layout)));
       if (compacted !== null) {
         try {
-          await appFiles.write(CAPTURES_FILE, compacted);
+          if(options.appFiles) await appFiles.write(CAPTURES_FILE,compacted);
+          else await invoke("compact_conversation_captures",{expected:capturesText,replacement:compacted});
         } catch {
           // Next boot tries again.
         }
@@ -1166,6 +1180,14 @@ export async function bootstrapWorkspace(
         return capturedRecord(launch !== undefined ? { ...capture, launch } : capture, indexed);
       },
       refreshConversationCaptures: refreshCaptures,
+      rawCaptureFor: (sessionId: number) => captures.get(sessionId) ?? null,
+      probeCapturedAgent:tauriPaneAgentStatus,
+      markCaptureAmbiguous:async(capture: import("../conversations/captures").ConversationCapture)=>{
+        await invoke("mark_model_ambiguous",{capture});
+        const current=captures.get(capture.termxSessionId);
+        if(current?.launcherPid===capture.launcherPid && current?.launcherCreatedAt===capture.launcherCreatedAt)
+          captures.set(capture.termxSessionId,capture);
+      },
       launchConfigurationFor: (provider: string, id: string) => launches.get(`${provider}:${id}`),
       savedSessions: saved,
       pluginPanes,

@@ -63,6 +63,35 @@
   user-select: none;
 }
 
+.status-bar__action {
+  appearance: none;
+  border: 0;
+  padding: 4px 0;
+  background: none;
+  font: inherit;
+  color: var(--text-sub);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.status-bar__action:hover, .status-bar__action--update { color: var(--accent); }
+.status-bar__action:disabled { opacity: 0.5; cursor: default; }
+.status-bar__action:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.status-bar__version { color: var(--text-sub); white-space: nowrap; }
+.status-bar__model {
+  color: var(--text-main);
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 32%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 800px) {
+  .status-bar { gap: 8px; padding: 0 8px; flex-wrap: wrap; flex-basis: auto; line-height: 1.3; }
+  .status-bar__cwd { flex-basis: 35%; }
+  .status-bar__model { max-width: 45%; }
+}
+
 .status-bar__chip {
   color: var(--text-sub);
   letter-spacing: 0.04em;

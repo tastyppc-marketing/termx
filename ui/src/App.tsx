@@ -100,6 +100,8 @@ import {
   type ViewerGeometry,
 } from "./viewer/viewerState";
 import { StatusBar } from "./statusbar/StatusBar";
+import { useFocusedPaneStatus } from "./statusbar/useFocusedPaneStatus";
+import { useUpdates } from "./updates/useUpdates";
 import { ViewerHost, type ViewerApi } from "./viewer/ViewerHost";
 import {
   bootstrapWorkspace,
@@ -446,6 +448,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
     () => Object.values(snapshot.layout.tabs),
     [snapshot.layout.tabs],
   );
+  const visiblePanesByTab = useRef(new Map<string, readonly number[]>());
 
   // ---- Attention delivery (spec: "tell me when it's done") ----
   // Looking at a tab (it is active AND the window has OS focus) delivers its
@@ -465,7 +468,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   }, []);
   useEffect(() => {
     if (windowFocused && activeTabId) {
-      controller.markTabSeen?.(activeTabId);
+      controller.markTabSeen?.(activeTabId, visiblePanesByTab.current.get(activeTabId) ?? []);
     }
   }, [controller, windowFocused, activeTabId, snapshot]);
 
@@ -587,6 +590,21 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const focusedPaneExists =
     focusedSessionId !== null &&
     snapshot.paneStates[focusedSessionId] !== undefined;
+  const paneStatus=useFocusedPaneStatus(controller,focusedSessionId,
+    focusedSessionId !== null && focusedPaneLive ? controller.sessionPid?.(focusedSessionId) ?? null : null,
+    settings.statusBar);
+  const updates=useUpdates(settings.statusBar);
+  const [changingDirectory,setChangingDirectory]=useState(false);
+  const statusFocusedId=useRef(focusedSessionId);
+  statusFocusedId.current=focusedSessionId;
+  const focusedProfile=focusedSessionId !== null ? controller.sessionProfile?.(focusedSessionId) : null;
+  const focusedRemote=focusedSessionId !== null ? controller.sshPaneInfo?.(focusedSessionId) : null;
+  const directoryDisabledReason=!focusedPaneLive ? "Select a live terminal"
+    : focusedRemote ? "Folder selection is available for local terminals"
+    : focusedProfile !== "powershell" ? "Folder selection requires an integrated PowerShell terminal"
+    : !paneStatus.probe?.alive ? "Checking whether the shell is idle"
+    : paneStatus.probe.at_prompt===undefined ? "Open a new PowerShell terminal after restarting TermX to enable folder selection"
+    : paneStatus.probe.busy || !paneStatus.probe.at_prompt ? "Return to a clear shell prompt" : undefined;
   const liveOutputs = useSyncExternalStore(
     outputsStore.subscribe,
     () =>
@@ -1667,6 +1685,14 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
                     sleep={sleepController}
                     sessionDims={controller.sessionDims(sessionIdsInSplit(tab.split))}
                     paneTitles={controller.paneTitles(tab.id)}
+                    paneActivity={controller.paneActivity?.(tab.id)}
+                    onVisiblePanesChange={(ids) => {
+                      if (ids.length) visiblePanesByTab.current.set(tab.id, ids);
+                      else visiblePanesByTab.current.delete(tab.id);
+                      if (windowFocused && tab.id === activeTabId) {
+                        controller.markTabSeen?.(tab.id, ids);
+                      }
+                    }}
                     // Double-click a pane's title bar to name that terminal.
                     // The name lands in the controller, which is where every
                     // reader of it - header, rail row, hover preview - looks.
@@ -1838,6 +1864,21 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
       </div>
       {settings.statusBar ? (
         <StatusBar
+          model={paneStatus.model}
+          appVersion={updates.version}
+          update={updates.update}
+          onCheckUpdates={() => void updates.check()}
+          onOpenUpdate={() => void updates.open()}
+          changingDirectory={changingDirectory}
+          directoryDisabledReason={directoryDisabledReason}
+          onChangeDirectory={() => {
+            if (focusedSessionId===null || changingDirectory) return;
+            setChangingDirectory(true);
+            const target=focusedSessionId;
+            void controller.changeDirectory?.(target).then(accepted=>{
+              if(accepted && statusFocusedId.current===target) focusPaneContents(target);
+            }).finally(()=>setChangingDirectory(false));
+          }}
           cwd={
             focusedSessionId !== null
               ? controller.sessionCwd?.(focusedSessionId) ?? null

@@ -64,6 +64,79 @@
   border-color: var(--accent);
 }
 
+.split-minimized-shelf {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 8px;
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-sub);
+  font-size: 11px;
+}
+
+.split-minimized-shelf__label {
+  flex: 0 0 auto;
+  padding-right: 2px;
+}
+
+.split-minimized-shelf__chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  max-width: min(360px, 80vw);
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-main);
+  font: inherit;
+  cursor: pointer;
+}
+
+.split-minimized-shelf__chip:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.split-minimized-shelf__name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.split-minimized-shelf__finished {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.split-minimized-shelf__activity {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-sub);
+}
+
+.split-minimized-shelf__activity[data-activity="active"] {
+  background: var(--ok);
+}
+
+.split-minimized-shelf__activity[data-activity="unread"] {
+  background: var(--accent);
+}
+
+.split-minimized-shelf__activity[data-activity="attention"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
 .split-pane {
   position: absolute;
   display: flex;

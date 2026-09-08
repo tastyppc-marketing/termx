@@ -73,6 +73,14 @@ describe("multi-window capability (Phase 1)", () => {
 });
 
 describe("status bar folder actions", () => {
+  it("grants model status and release actions in every window", () => {
+    expect(capability.permissions).toContain("allow-pane-agent-status");
+    expect(capability.permissions).toContain("allow-mark-model-ambiguous");
+    expect(capability.permissions).toContain("allow-compact-conversation-captures");
+    expect(capability.permissions).toContain("allow-check-for-updates");
+    expect(capability.permissions).toContain("allow-open-update-release");
+    expect(capability.permissions).toContain("dialog:allow-open");
+  });
   it(
     "grants open-folder — clicking the status bar path invokes it, and the " +
       "wrapper swallows a denied invoke, so without the grant the click is " +

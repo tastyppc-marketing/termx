@@ -62,6 +62,7 @@ same default ui/src-tauri/src/paths.rs resolves. Nothing is hardcoded.
 """
 
 import json
+import base64
 import os
 import re
 import sys
@@ -113,6 +114,23 @@ def capture_line(payload, session_id):
         "cwd": cwd if isinstance(cwd, str) and cwd else None,
         "atMs": int(time.time() * 1000),
     }
+    # Both hook generations can be installed. The exact launch identity lets
+    # the reader retain the richer native record without mistaking a genuinely
+    # later resume of this conversation for a duplicate hook invocation.
+    try:
+        token = os.environ.get("TERMX_AGENT_LAUNCH", "")
+        if 0 < len(token) <= 65536:
+            stamp = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+            pid = stamp.get("launcherPid")
+            created = stamp.get("launcherCreatedAt")
+            if (stamp.get("provider") == "claude" and isinstance(pid, int)
+                    and 0 < pid <= 0xffffffff and isinstance(created, str)
+                    and created.isascii() and created.isdigit()
+                    and 0 < len(created) <= 20 and 0 < int(created) <= 0xffffffffffffffff):
+                record["launcherPid"] = pid
+                record["launcherCreatedAt"] = created
+    except (ValueError, TypeError, AttributeError):
+        pass
     # ensure_ascii keeps the line to one byte per character for a non-ASCII
     # path, so an append can never interleave a partial multi-byte sequence.
     return json.dumps(record, ensure_ascii=True, separators=(",", ":"))
@@ -152,8 +170,21 @@ def main():
     # mixed both would be needlessly hard to diff and reason about. The parser
     # tolerates either, so this is about keeping the file honest, not correct.
     path = os.path.join(directory, CAPTURES_FILE)
-    with open(path, "a", encoding="utf-8", newline="") as handle:
-        handle.write(line + "\n")
+    # Native capture/compaction takes this lock with Windows share_mode(0).
+    # Keeping any handle open participates in that exclusion without another
+    # locking protocol; parallel legacy appenders may coexist safely.
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            lock = open(os.path.join(directory, "conversation_captures_v1.lock"), "a+b")
+            break
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.02)
+    with lock:
+        with open(path, "a", encoding="utf-8", newline="") as handle:
+            handle.write(line + "\n")
 
 
 if __name__ == "__main__":

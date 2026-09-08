@@ -403,6 +403,15 @@ impl Registry {
         (alive, busy)
     }
 
+    pub fn prompt_status(&self, id: SessionId) -> (Option<bool>, Option<String>) {
+        self.get(id).map(|session| session.prompt_status()).unwrap_or((None, None))
+    }
+
+    pub fn change_directory(&self, id: SessionId, expected_pid: u32, prompt_id: &str, cwd: &str) -> bool {
+        !self.shutting_down.load(Ordering::SeqCst) && self.get(id)
+            .is_some_and(|session| session.change_directory(expected_pid, prompt_id, cwd))
+    }
+
     /// Returns the persist result so callers can tell the client whether the
     /// layout is actually durable (a silent persist failure here would lose
     /// the user's tab/group arrangement on the next restart).
