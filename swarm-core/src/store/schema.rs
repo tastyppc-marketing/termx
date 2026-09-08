@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -54,12 +54,12 @@ pub(super) fn validate_identity(
     Ok(())
 }
 
-pub(super) fn validate_current_schema(
+pub(super) fn validate_recognized_schema(
     connection: &Connection,
     path: &Path,
     identity: &DatabaseIdentity,
 ) -> Result<(), StoreError> {
-    if identity.schema_version != SCHEMA_VERSION {
+    if identity.schema_version == 0 {
         return Ok(());
     }
 
@@ -79,6 +79,9 @@ pub(super) fn validate_current_schema(
 
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(SCHEMA_V1)?;
+    if identity.schema_version >= 2 {
+        expected.execute_batch(MIGRATION_V2)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -114,14 +117,19 @@ fn migrate_with_final_sql(
     if identity.schema_version == SCHEMA_VERSION {
         return Ok(());
     }
-    let authority_id = AuthorityId::generate();
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(SCHEMA_V1)?;
-    transaction.execute(
-        "INSERT INTO authority_metadata(singleton, authority_id, created_at_millis) VALUES (1, ?1, unixepoch('subsec') * 1000)",
-        [authority_id.as_str()],
-    )?;
-    transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+    if identity.schema_version == 0 {
+        let authority_id = AuthorityId::generate();
+        transaction.execute_batch(SCHEMA_V1)?;
+        transaction.execute(
+            "INSERT INTO authority_metadata(singleton, authority_id, created_at_millis) VALUES (1, ?1, unixepoch('subsec') * 1000)",
+            [authority_id.as_str()],
+        )?;
+        transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+    }
+    if identity.schema_version < 2 {
+        transaction.execute_batch(MIGRATION_V2)?;
+    }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
         transaction.execute_batch(sql)?;
@@ -261,6 +269,26 @@ CREATE INDEX deliveries_by_recipient ON recipient_deliveries(recipient_peer_id, 
 CREATE INDEX attempts_unfinished ON delivery_attempts(recipient_peer_id, started_at_millis) WHERE completed_at_millis IS NULL;
 "#;
 
+const MIGRATION_V2: &str = r#"
+ALTER TABLE recipient_deliveries ADD COLUMN delivery_generation INTEGER NOT NULL DEFAULT 1 CHECK (delivery_generation >= 1);
+
+CREATE TABLE mailbox_cursors (
+    cursor_id TEXT PRIMARY KEY,
+    authority_id TEXT NOT NULL REFERENCES authority_metadata(authority_id),
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    binding_revision INTEGER NOT NULL CHECK (binding_revision >= 1),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    snapshot_high_sequence INTEGER NOT NULL CHECK (snapshot_high_sequence >= 0),
+    position_sequence INTEGER NOT NULL CHECK (position_sequence >= 0 AND position_sequence <= snapshot_high_sequence),
+    created_at_millis INTEGER NOT NULL,
+    expires_at_millis INTEGER NOT NULL CHECK (expires_at_millis >= created_at_millis),
+    FOREIGN KEY (peer_id, binding_revision) REFERENCES peer_bindings(peer_id, binding_revision)
+) STRICT;
+
+CREATE INDEX mailbox_cursors_by_scope ON mailbox_cursors(group_id, peer_id, expires_at_millis);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +339,63 @@ mod tests {
             )
             .unwrap();
         assert_eq!(migrated_tables, 0);
+    }
+
+    #[test]
+    fn recognized_version_one_migrates_transactionally_without_losing_data() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO authority_metadata(singleton,authority_id,created_at_millis) VALUES (1,'a_00112233445566778899aabbccddeeff',1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        let identity = DatabaseIdentity {
+            application_id: APPLICATION_ID,
+            schema_version: 1,
+            has_objects: true,
+        };
+
+        migrate(&mut connection, identity).unwrap();
+
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT authority_id FROM authority_metadata", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "a_00112233445566778899aabbccddeeff"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('recipient_deliveries') WHERE name='delivery_generation'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='mailbox_cursors'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
     }
 }

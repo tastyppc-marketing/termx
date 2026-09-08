@@ -1,19 +1,23 @@
+mod message;
+mod policy;
+mod query;
 mod schema;
 
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 
 use crate::error::StoreError;
-use crate::model::AuthorityId;
+use crate::model::{AuthorityId, GroupId, PeerPrincipal, Revision};
 
 pub use schema::{APPLICATION_ID, SCHEMA_VERSION};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Store {
-    connection: Connection,
+    pub(super) connection: Connection,
+    pub(super) authority_id: AuthorityId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,9 +43,12 @@ impl Store {
         let mut connection = Connection::open(&path)?;
         configure_connection(&connection)?;
         schema::migrate(&mut connection, identity)?;
-        validate_authority(&connection)?;
+        let authority_id = validate_authority(&connection)?;
         verify_pragmas(&connection)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            authority_id,
+        })
     }
 
     pub fn inspect(&self) -> Result<StoreInspection, StoreError> {
@@ -111,7 +118,7 @@ fn inspect_existing_identity(path: &Path) -> Result<schema::DatabaseIdentity, St
         has_objects: object_count != 0,
     };
     schema::validate_identity(path, &identity)?;
-    schema::validate_current_schema(&connection, path, &identity)?;
+    schema::validate_recognized_schema(&connection, path, &identity)?;
     Ok(identity)
 }
 
@@ -123,7 +130,7 @@ fn configure_connection(connection: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn validate_authority(connection: &Connection) -> Result<(), StoreError> {
+fn validate_authority(connection: &Connection) -> Result<AuthorityId, StoreError> {
     let authority = connection
         .query_row(
             "SELECT authority_id FROM authority_metadata WHERE singleton = 1",
@@ -136,8 +143,78 @@ fn validate_authority(connection: &Connection) -> Result<(), StoreError> {
             }
             other => StoreError::Sqlite(other),
         })?;
-    AuthorityId::parse(&authority)?;
-    Ok(())
+    Ok(AuthorityId::parse(&authority)?)
+}
+
+pub(super) struct AuthorizedPeer {
+    pub policy_revision: Revision,
+}
+
+pub(super) fn authorize_peer(
+    transaction: &Transaction<'_>,
+    authority_id: &AuthorityId,
+    principal: &PeerPrincipal,
+    group_id: &GroupId,
+) -> Result<AuthorizedPeer, StoreError> {
+    if principal.authority_id != *authority_id {
+        return Err(StoreError::AuthorityMismatch);
+    }
+    let binding = transaction
+        .query_row(
+            "SELECT p.current_binding_revision, b.live FROM peers p JOIN peer_bindings b ON b.peer_id=p.peer_id AND b.binding_revision=p.current_binding_revision WHERE p.peer_id=?1",
+            [principal.peer_id.as_str()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .optional()?;
+    let Some((current_revision, live)) = binding else {
+        return Err(StoreError::Unauthorized {
+            reason: "unknown peer",
+        });
+    };
+    if current_revision != principal.binding_revision.as_sql_i64() {
+        return Err(StoreError::StaleBinding);
+    }
+    if !live {
+        return Err(StoreError::BindingOffline);
+    }
+    let group = transaction
+        .query_row(
+            "SELECT policy_revision, paused FROM groups WHERE group_id=?1 AND authority_id=?2",
+            [group_id.as_str(), authority_id.as_str()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .optional()?;
+    let Some((policy_revision, paused)) = group else {
+        return Err(StoreError::NotFound { kind: "group" });
+    };
+    if paused {
+        return Err(StoreError::GroupPaused);
+    }
+    let member = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM group_memberships WHERE group_id=?1 AND peer_id=?2 AND removed_policy_revision IS NULL)",
+        [group_id.as_str(), principal.peer_id.as_str()],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !member {
+        return Err(StoreError::Unauthorized {
+            reason: "peer is not an active group member",
+        });
+    }
+    Ok(AuthorizedPeer {
+        policy_revision: Revision::new(u64::try_from(policy_revision).map_err(|_| {
+            StoreError::Unauthorized {
+                reason: "invalid stored policy revision",
+            }
+        })?)?,
+    })
+}
+
+pub(super) fn now_millis(transaction: &Transaction<'_>) -> Result<i64, StoreError> {
+    Ok(transaction.query_row(
+        "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 fn verify_pragmas(connection: &Connection) -> Result<(), StoreError> {

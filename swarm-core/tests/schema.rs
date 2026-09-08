@@ -5,8 +5,9 @@ use std::fs;
 use rusqlite::Connection;
 use termx_swarm_core::error::StoreError;
 use termx_swarm_core::model::{
-    sqlite_i64, AuthorityId, GroupId, PeerId, Revision, SendMessageRequest,
-    MAX_CANONICAL_PAYLOAD_BYTES, MAX_MESSAGE_BODY_BYTES,
+    sqlite_i64, AuthorityId, FrozenRecipient, GroupId, MessageCommitOutcome, MessageId, PeerId,
+    Revision, SendMessageRequest, SendReceipt, MAX_CANONICAL_PAYLOAD_BYTES, MAX_MESSAGE_BODY_BYTES,
+    MAX_RECIPIENTS_PER_MESSAGE,
 };
 use termx_swarm_core::store::{Store, APPLICATION_ID, SCHEMA_VERSION};
 
@@ -18,7 +19,7 @@ fn new_store_initializes_complete_schema_and_authority() {
 
     assert_eq!(inspection.application_id, APPLICATION_ID);
     assert_eq!(inspection.schema_version, SCHEMA_VERSION);
-    assert_eq!(inspection.table_count, 10);
+    assert_eq!(inspection.table_count, 11);
     assert!(inspection.integrity_ok);
     assert_ne!(inspection.authority_id.as_str(), "");
 }
@@ -419,4 +420,44 @@ fn escape_heavy_max_body_fits_explicit_canonical_payload_bound() {
     transaction.execute("INSERT INTO groups(group_id,authority_id,policy_revision,label,paused,created_at_millis) VALUES (?1,?2,1,'group',0,1)", [group_id.as_str(), &authority_id]).unwrap();
     transaction.execute("INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,topic,committed_at_millis) VALUES ('m_00112233445566778899aabbccddeeff',?1,1,?2,1,'escape-boundary',?3,?4,?5,1)", rusqlite::params![group_id.as_str(), peer_id.as_str(), canonical, request.body, request.topic]).expect("schema accepts canonical JSON for an accepted escape-heavy body");
     transaction.commit().unwrap();
+}
+
+#[test]
+fn recipient_limit_rejects_an_unbounded_send_receipt() {
+    let recipients = (0..=MAX_RECIPIENTS_PER_MESSAGE)
+        .map(|index| PeerId::parse(&format!("p_{index:032x}")).unwrap())
+        .collect();
+    let request = SendMessageRequest {
+        group_id: GroupId::generate(),
+        client_key: "recipient-bound".to_owned(),
+        recipients,
+        body: "bounded".to_owned(),
+        topic: None,
+        reply_to: None,
+    };
+
+    assert!(request.validate().is_err());
+}
+
+#[test]
+fn maximum_recipient_receipt_fits_the_canonical_frame_bound() {
+    let recipients = (0..MAX_RECIPIENTS_PER_MESSAGE)
+        .map(|index| FrozenRecipient {
+            peer_id: PeerId::parse(&format!("p_{index:032x}")).unwrap(),
+            binding_revision: Revision::new(i64::MAX as u64).unwrap(),
+            generation: Revision::new(i64::MAX as u64).unwrap(),
+        })
+        .collect();
+    let receipt = SendReceipt {
+        message_id: MessageId::generate(),
+        group_id: GroupId::generate(),
+        group_sequence: i64::MAX as u64,
+        sender_peer_id: PeerId::generate(),
+        sender_binding_revision: Revision::new(i64::MAX as u64).unwrap(),
+        recipients,
+        committed_at_millis: i64::MAX,
+        outcome: MessageCommitOutcome::Saved,
+    };
+
+    assert!(serde_json::to_vec(&receipt).unwrap().len() <= MAX_CANONICAL_PAYLOAD_BYTES);
 }
