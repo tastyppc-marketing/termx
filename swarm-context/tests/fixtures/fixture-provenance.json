@@ -1,0 +1,110 @@
+{
+  "schema": "termx.context-fixture-copy/v1",
+  "authority": "synthetic_structural_shapes_only",
+  "adversarial_catalog_sha256": "4317c430cbc82dc83624bdc9ff1b4195c990b99a7e014dc5993846638cdc9b2c",
+  "structural_manifest_sha256": "9d4b71ec8293cceeac56024671d9fcf8f69a4088bbc7c8fc5d714d5dffe9ba47",
+  "files": [
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\catalog.json",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\catalog.json",
+      "bytes": 6889,
+      "sha256": "4317c430cbc82dc83624bdc9ff1b4195c990b99a7e014dc5993846638cdc9b2c"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\broker-provenance.json",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\broker-provenance.json",
+      "bytes": 774,
+      "sha256": "6b5052f38f2cc146f40c5af3c8ab24a86ff8e1c435a4289586e10ee4d9d48fe4"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\expected\\byte-edge-cases.expected.json",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\expected\\byte-edge-cases.expected.json",
+      "bytes": 4486,
+      "sha256": "cf3f844470db6730e864e1ff9db63754fb477343bdb8034b510e3a0626086728"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\expected\\claude.expected.json",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\expected\\claude.expected.json",
+      "bytes": 3751,
+      "sha256": "acace6cc9fa4aa7d3ce5be96d91d4a56485c8489e6f871e63dad4841ab0e2b2b"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\expected\\codex.expected.json",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\expected\\codex.expected.json",
+      "bytes": 2951,
+      "sha256": "eed3042a4912918f21317413cd29ed3e3429962ab6b0b94909b3bd59ad5d24bd"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\expected\\provenance.expected.json",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\expected\\provenance.expected.json",
+      "bytes": 2298,
+      "sha256": "49b242343e9e8e9df8774abc17721a4282907895522722996883c4e4f0039b4f"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\expected\\virtual-bounds.expected.json",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\expected\\virtual-bounds.expected.json",
+      "bytes": 782,
+      "sha256": "922d8add6707a169fdfad41f30880001ca0c7f466f6f823b198db1fc1ce39e6f"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\fixtures\\claude-adversarial.jsonl",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\fixtures\\claude-adversarial.jsonl",
+      "bytes": 4140,
+      "sha256": "8222a396b4be5515517aabdfd49e5d57b2c54b73897746596f83c7dd0e12460e"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\fixtures\\codex-adversarial.jsonl",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\fixtures\\codex-adversarial.jsonl",
+      "bytes": 2123,
+      "sha256": "bd7338e77809ebfda4de0a711b4321dff040c7b91c670efb2e15383b5a6c6867"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\fixtures\\incomplete-final-append.jsonl.bin",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\fixtures\\incomplete-final-append.jsonl.bin",
+      "bytes": 293,
+      "sha256": "bcfd3203e7c3c18c42a93a41bf36fd1b575f1833851c23229e8f6b6498d954c2"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\fixtures\\invalid-utf8.jsonl.bin",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\fixtures\\invalid-utf8.jsonl.bin",
+      "bytes": 570,
+      "sha256": "6ec1c83f82b3b8ee8618d57eb9a6b36027b1e49644858d3fe9044e40324830a9"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\fixtures\\malformed-json.jsonl.bin",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\fixtures\\malformed-json.jsonl.bin",
+      "bytes": 512,
+      "sha256": "a8a34d94ac8960c96ee70d026282ae99a6dd4b6488b324bad42fbee3a431e7ad"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\fixtures\\provenance-adversarial.jsonl",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\fixtures\\provenance-adversarial.jsonl",
+      "bytes": 3314,
+      "sha256": "f39618171ce36814c985d39a1f572cadbe23c25b31367a6f7105da014e57074c"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\.superpowers\\sdd\\2026-09-08-swarm-context-fixtures\\fixtures\\virtual-bounds.json",
+      "destination": "swarm-context\\tests\\fixtures\\adversarial\\original\\fixtures\\virtual-bounds.json",
+      "bytes": 633,
+      "sha256": "c2b01ca8490a25f477e7a7f9f8fb247b1d8fd8039d3184679077a58961609377"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\retired\\test-artifacts\\swarm-core\\context-structural-fixtures-20260908T144115686689Z\\manifest.json",
+      "destination": "swarm-context\\tests\\fixtures\\structural\\original\\manifest.json",
+      "bytes": 1584,
+      "sha256": "9d4b71ec8293cceeac56024671d9fcf8f69a4088bbc7c8fc5d714d5dffe9ba47"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\retired\\test-artifacts\\swarm-core\\context-structural-fixtures-20260908T144115686689Z\\claude.jsonl",
+      "destination": "swarm-context\\tests\\fixtures\\structural\\original\\claude.jsonl",
+      "bytes": 91891,
+      "sha256": "fadef212361b586a5f8f6301f9628e8f60de04215dc2b9a5c77bc826288753ec"
+    },
+    {
+      "source": "C:\\Dev\\TermX\\.worktrees\\swarm-proof\\retired\\test-artifacts\\swarm-core\\context-structural-fixtures-20260908T144115686689Z\\codex.jsonl",
+      "destination": "swarm-context\\tests\\fixtures\\structural\\original\\codex.jsonl",
+      "bytes": 28334,
+      "sha256": "a4fe91f370836d990dfcd2d4ddfe81344021f5ba978a832b7eeb4b805acf04f3"
+    }
+  ]
+}

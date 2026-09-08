@@ -1,0 +1,29 @@
+{
+  "schema": "termx.context-fixture-summary-delta/v1",
+  "authority": "root_decision_21759966_phase_a",
+  "changes": [
+    {
+      "provider": "claude",
+      "original": "swarm-context\\tests\\fixtures\\adversarial\\original\\expected\\claude.expected.json",
+      "original_sha256": "acace6cc9fa4aa7d3ce5be96d91d4a56485c8489e6f871e63dad4841ab0e2b2b",
+      "derived": "swarm-context\\tests\\fixtures\\adversarial\\derived\\expected\\claude.expected.json",
+      "derived_sha256": "31fff804b36144c062ae8bebf0c60f4905ccf1f736ac1dc23f860d04450beb86",
+      "removed_json_pointers": [
+        "/records/3/summary"
+      ],
+      "semantic_change": "remove_argument_derived_tool_call_summary_only"
+    },
+    {
+      "provider": "codex",
+      "original": "swarm-context\\tests\\fixtures\\adversarial\\original\\expected\\codex.expected.json",
+      "original_sha256": "eed3042a4912918f21317413cd29ed3e3429962ab6b0b94909b3bd59ad5d24bd",
+      "derived": "swarm-context\\tests\\fixtures\\adversarial\\derived\\expected\\codex.expected.json",
+      "derived_sha256": "98bc702a2c080936188131624e8dce1534c2d451384d978e53779ee141ac8e2b",
+      "removed_json_pointers": [
+        "/records/2/summary"
+      ],
+      "semantic_change": "remove_argument_derived_tool_call_summary_only"
+    }
+  ],
+  "unchanged_oracle": "all fields other than the two listed JSON pointers"
+}

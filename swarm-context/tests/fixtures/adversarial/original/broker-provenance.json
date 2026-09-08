@@ -1,0 +1,23 @@
+{
+  "schema": "termx.context-fixture.broker-provenance/v1",
+  "projection_principal": "peer_fixture_alpha",
+  "projection_group": "group_fixture_alpha",
+  "attestations": [
+    {
+      "case_id": "nested-other-group-context",
+      "provider": "claude",
+      "session_id": "33333333-3333-4333-8333-333333333333",
+      "native_call_id": "toolu_fixture_nested_001",
+      "native_result_record_id": "30000000-0000-4000-8000-000000000002",
+      "capture_kind": "termx_context_page",
+      "source_group": "group_fixture_beta",
+      "source_reference": "ctxref_fixture_beta_001",
+      "fresh_projection_authorization": "absent"
+    }
+  ],
+  "explicitly_unattested_cases": [
+    "copied-envelope-prose",
+    "spoofed-shell-marker",
+    "ambiguous-cli-wrapped-context"
+  ]
+}

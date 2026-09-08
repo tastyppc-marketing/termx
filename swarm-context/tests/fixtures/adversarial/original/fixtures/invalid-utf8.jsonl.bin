@@ -1,0 +1,3 @@
+{"type":"user","message":{"role":"user","content":"EDGE_UTF8_BEFORE"},"uuid":"40000000-0000-4000-8000-000000000001","sessionId":"44444444-4444-4444-8444-444444444444"}
+{"type":"user","message":{"role":"user","content":"SECRET_INVALID_UTF8_ÿ"},"uuid":"40000000-0000-4000-8000-000000000002","sessionId":"44444444-4444-4444-8444-444444444444"}
+{"type":"assistant","message":{"id":"msg_edge_utf8_after","role":"assistant","content":[{"type":"text","text":"EDGE_UTF8_AFTER"}]},"uuid":"40000000-0000-4000-8000-000000000003","sessionId":"44444444-4444-4444-8444-444444444444"}

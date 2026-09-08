@@ -1,0 +1,21 @@
+{
+  "schema": "termx.context-fixture.virtual-bounds/v1",
+  "limits_are_fixture_candidates_pending_rust_api": true,
+  "proposed_max_record_utf8_bytes": 1048576,
+  "proposed_max_json_nesting": 64,
+  "cases": [
+    {
+      "case_id": "virtual-nesting-limit",
+      "encoding": "nested_single_key_objects",
+      "logical_nesting": 65,
+      "leaf": "VIRTUAL_NESTING_PUBLIC"
+    },
+    {
+      "case_id": "virtual-oversize-record",
+      "encoding": "repeat_single_utf8_byte",
+      "repeat_byte": "X",
+      "repeat_count": 1048577,
+      "logical_sha256": "4753eb5ebf81a0819d509b21da5964a802ae63e6d39efffb174ad371d8c16b4b"
+    }
+  ]
+}

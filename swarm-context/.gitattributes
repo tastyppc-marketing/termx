@@ -1,0 +1,2 @@
+# Fixture manifests and byte-range oracles require exact bytes on every platform.
+tests/fixtures/** -text
