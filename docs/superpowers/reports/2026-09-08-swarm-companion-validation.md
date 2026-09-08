@@ -140,8 +140,38 @@ Release rlib SHA-256:
 `2ca659258a0e0e925d01dc725e2968cd9e4cbbe03b7d12a2418151a8f150cb04`.
 
 Grok implemented this scope; independent review returned Spec PASS / Quality
-APPROVED. The future core adapter still needs a client-owned bound/getter for
-opaque retained metadata. Reserved on-wire bytes are not a heap-size estimate.
+APPROVED. The client-owned metadata getter was completed in the follow-up below.
+Reserved on-wire bytes are not a heap-size estimate.
 The host must also bind one send token to one request, destination and committed
 immutable response. This generic transport primitive alone does not provide
 protected context publication or complete the host runtime.
+
+
+## Credit metadata follow-up
+
+The independently approved follow-up at `0343d1b` moves endpoint ownership from
+the shared reservation to the sole send token. Credit-only handles now retain
+exactly two fixed allocations: the reservation and its shared budget mutex.
+`FrameCreditHandle::owned_heap_bytes()` reports their checked, padded Arc layout
+sum, conservatively charging the full shared allocations to every handle. The
+measured bound is 96 heap bytes plus 8 inline bytes on the audited Rust 1.97,
+x64 Windows target. This is allocation-request accounting, not RSS or a stable
+Rust ABI; the assumptions require review on toolchain or target changes.
+
+Grok implemented the change and SOL independently returned Spec PASS / Quality
+APPROVED. The frozen source passed 60 top-level tests, seven doctests, package
+formatting, strict all-target Clippy and a release build. All five native exits
+were zero, from 20:34:53 through 20:35:45 UTC on 2026-09-08. The meaningful RED
+regression showed the old credit handle retaining the endpoint; the final tests
+prove endpoint release and exact last-owner credit release.
+
+Evidence: `retired/test-artifacts/swarm-client/reserved-metadata-20260908T2025363860332Z/final`.
+Manifest SHA-256: `8f1bb705d0c3f4dab873a315345ce18a57c46b97f74c7f2b9925e8f85e12185b`.
+Root verified 14 raw/committed inputs, ten logs, test counts and three release
+artifacts, and retained exact sources and both reports. Release rlib SHA-256:
+`a0def2a7c116f776158a677b4e32dcda705c455db7d55a6250a65d72285efa19`.
+
+The host adapter remains Task 3 work: bind a private destination/request slot to
+the single-use token, delegate this getter through the core guard, and separately
+account for connection state, queues, futures and retained response buffers.
+No live executable or conversation was changed by this validation.
