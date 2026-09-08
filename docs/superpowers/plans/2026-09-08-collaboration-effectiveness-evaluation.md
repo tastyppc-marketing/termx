@@ -46,6 +46,8 @@ Keep structured observations:
 
 Do not sum repeated cumulative usage snapshots as though they were separate calls. Record unavailable accounting rather than inventing a number. Report the pair's combined usage. Additional cached prompt context and harness setup are real overhead and should remain visible. Dollar estimates require verified pricing for the actual route; tokens alone are not a dollar cost.
 
+Use the [offline response-accounting helper](../../../tools/swarm-evaluation/README.md#accounting-from-finalized-owned-sources) only for finalized owned sources. The observed Claude format repeats usage across assistant blocks; the observed Codex format provides per-response records alongside cumulative counters that reset on resume. A valid per-source result does not establish complete run coverage. Record harness/schema versions and an owned source inventory, verify delegated-call coverage and whether parent/descendant counters overlap, and report total-run or pair accounting as unavailable if that cannot be established. Preserve valid per-source categories separately rather than silently assuming missing usage is zero.
+
 Do not export private reasoning. Use only authorized recorded user/assistant text, permitted tool evidence, broker events, and final artifacts. A quoted message ID in a tool result is not a delivery receipt. Label an observed contribution as such; a public trace does not prove what a model would have independently thought later.
 
 ## Scoring and comparison

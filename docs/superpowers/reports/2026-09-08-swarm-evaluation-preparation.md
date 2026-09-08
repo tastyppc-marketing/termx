@@ -45,3 +45,19 @@ contamination remains a limitation. No model permissions are changed to hide it.
 
 These checks establish fixture readiness. They do not establish model quality,
 general productivity gains, statistical superiority, or long-project reliability.
+
+The independently reviewed [accounting helper](../../../tools/swarm-evaluation/README.md#accounting-from-finalized-owned-sources)
+also passed ten targeted tests and read the two earlier owned feasibility
+sources without exporting transcript text. Ruff 0.15.10 reported no issues in
+the copied collector and tests. Those sources demonstrated repeated
+Claude usage records for one response and Codex cumulative resets on resume.
+The helper instead counts distinct native response IDs, preserves separate
+counter categories and labels its result `recognized_source_usage`.
+
+This validates accounting for recognized records in selected finalized sources,
+not complete run or billing coverage. Delegated calls and overlapping rollups
+need a verified source inventory before any combined-cost comparison. Retained
+evidence at `usage-accounting-1788871750898463000` binds helper/output hashes,
+commands, Python runtime, repository checkpoint and native exit statuses; earlier
+artifacts remain intact. These were offline reads of existing synthetic traces,
+not new model runs or comparative results.

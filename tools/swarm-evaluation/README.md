@@ -38,3 +38,37 @@ The four cases are a review task, asynchronous repair, a multi-file cursor
 compatibility change, and a straightforward sorting control. As of 2026-09-08,
 the fixtures have passed independent preparation review. No comparative model
 runs or collaboration-superiority results are claimed.
+
+## Accounting from finalized owned sources
+
+The offline collector reads an explicitly selected synthetic evaluation JSONL
+source and verifies its expected conversation. It makes no model calls, changes
+no source files, and exports counters and provenance metadata without transcript
+text. For example:
+
+```powershell
+python -B tools/swarm-evaluation/usage_accounting.py --harness codex --source 'C:\owned-evaluation\rollout.jsonl' --conversation-id '<owned-thread-id>'
+python -B tools/swarm-evaluation/usage_accounting.py --harness claude --source 'C:\owned-evaluation\conversation.jsonl' --conversation-id '<owned-session-id>'
+python -B -m unittest discover -s tools/swarm-evaluation -p test_usage_accounting.py
+```
+
+Use a finalized source; its returned hash binds the bytes read and is not a live
+snapshot guarantee. The collector counts distinct native response IDs. Claude
+can repeat one response's usage in several assistant records; Codex cumulative
+counters can reset on resume. Repeated identical response observations count
+once, while conflicting/missing/malformed accounting returns `unavailable` and a
+nonzero exit. It does not fall back to cumulative snapshots or guess a zero.
+
+Success is labeled `recognized_source_usage`, with explicit coverage fields.
+It covers recognized response records in that selected source, including its
+recorded setup and resumes. Full-run usage, delegated calls, provider billing,
+and overlap between sources remain unverified. Before reporting a pair's total,
+record harness/schema versions and an owned source inventory, and verify whether
+parent and descendant counters are disjoint or overlapping rollups. If that
+coverage cannot be established, preserve the per-source results and report
+run-level accounting as unavailable. Keep native counter categories separate;
+they can overlap and must not all be added together. No dollar estimate is made.
+
+The input record limit is 16 MiB. Retained memory grows with distinct response
+IDs; decoding also uses memory for one record and its Python objects. This
+offline diagnostic is not a broker memory bound or a private-context reader.
