@@ -1,6 +1,7 @@
 mod continuation;
 mod delivery;
 mod message;
+mod page_size;
 mod policy;
 mod query;
 mod schema;

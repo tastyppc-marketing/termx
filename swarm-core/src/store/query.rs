@@ -44,8 +44,11 @@ impl Store {
         };
 
         let now = now_millis(&transaction)?;
+        // The recipient-order index skips other recipients' retained history.
+        // Historical order rows convey no eligibility: join the exact current
+        // binding/generation, and include both acknowledged and unresolved rows.
         let mut statement = transaction.prepare(
-            "SELECT m.message_id,m.group_sequence,m.sender_peer_id,m.sender_binding_revision,m.client_key,m.body,m.topic,m.reply_to_message_id,d.delivery_generation,a.fetched_at_millis,a.acknowledged_at_millis FROM messages m JOIN current_deliveries d ON d.message_id=m.message_id LEFT JOIN acknowledgements a ON a.message_id=d.message_id AND a.recipient_peer_id=d.recipient_peer_id AND a.binding_revision=d.recipient_binding_revision AND a.generation=d.delivery_generation WHERE m.group_id=?1 AND d.recipient_peer_id=?2 AND d.recipient_binding_revision=?3 AND m.group_sequence>?4 AND m.group_sequence<=?5 ORDER BY m.group_sequence LIMIT ?6",
+            "SELECT m.message_id,m.group_sequence,m.sender_peer_id,m.sender_binding_revision,m.client_key,m.body,m.topic,m.reply_to_message_id,d.delivery_generation,a.fetched_at_millis,a.acknowledged_at_millis FROM recipient_ack_order o JOIN current_deliveries d ON d.message_id=o.message_id AND d.recipient_peer_id=o.recipient_peer_id AND d.recipient_binding_revision=o.binding_revision AND d.delivery_generation=o.generation JOIN messages m ON m.message_id=o.message_id LEFT JOIN acknowledgements a ON a.message_id=d.message_id AND a.recipient_peer_id=d.recipient_peer_id AND a.binding_revision=d.recipient_binding_revision AND a.generation=d.delivery_generation WHERE o.group_id=?1 AND o.recipient_peer_id=?2 AND o.binding_revision=?3 AND o.group_sequence>?4 AND o.group_sequence<=?5 AND m.group_id=o.group_id AND m.group_sequence=o.group_sequence ORDER BY o.group_sequence LIMIT ?6",
         )?;
         let mut rows = statement.query_map(
             params![
@@ -74,6 +77,14 @@ impl Store {
         )?;
         let mut messages = Vec::new();
         let sizing_cursor = MailboxCursor::generate();
+        // IDs have fixed serialized length. Reserve the same full Some(cursor)
+        // envelope as before, even when this ultimately becomes the last page.
+        let mut sizing = super::page_size::PageSize::new(&MailboxPage {
+            messages: Vec::new(),
+            next_cursor: Some(sizing_cursor),
+            snapshot_high_sequence: u64::try_from(snapshot_high)
+                .map_err(|_| StoreError::InvalidCursor)?,
+        })?;
         let mut more_exists = false;
         for row in &mut rows {
             if messages.len() == request.max_items {
@@ -85,26 +96,16 @@ impl Store {
             if entry.receipt.fetched_at_millis.is_none() {
                 entry.receipt.fetched_at_millis = Some(now);
             }
-            messages.push(entry);
-            let candidate = MailboxPage {
-                messages: messages.clone(),
-                next_cursor: Some(sizing_cursor.clone()),
-                snapshot_high_sequence: u64::try_from(snapshot_high)
-                    .map_err(|_| StoreError::InvalidCursor)?,
-            };
-            let page_bytes = serde_json::to_vec(&candidate)
-                .map_err(|error| {
-                    crate::error::ValidationError::CanonicalSerialization(error.to_string())
-                })?
-                .len();
+            let page_bytes = sizing.with_entry(&entry)?;
             if page_bytes > MAX_MAILBOX_PAGE_BYTES {
-                messages.pop();
                 if messages.is_empty() {
                     return Err(StoreError::PageItemTooLarge);
                 }
                 more_exists = true;
                 break;
             }
+            sizing.accept(page_bytes);
+            messages.push(entry);
         }
         drop(rows);
         drop(statement);
@@ -376,6 +377,63 @@ mod tests {
             true,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn empty_recipient_mailbox_has_bounded_vm_work_amid_other_deliveries() {
+        let path = retained_path("sparse-mailbox-vm-bound");
+        let mut store = Store::open(path).unwrap();
+        let owner = store.trusted_owner();
+        let alice = store.enroll_peer(&owner, binding("sparse-alice")).unwrap();
+        let bob = store.enroll_peer(&owner, binding("sparse-bob")).unwrap();
+        let group = store
+            .create_group(
+                &owner,
+                "sparse",
+                BTreeSet::from([alice.record.peer_id.clone(), bob.record.peer_id.clone()]),
+            )
+            .unwrap();
+        seed_acknowledged_prefix(
+            &mut store,
+            &group.group_id,
+            alice.record.peer_id.as_str(),
+            bob.record.peer_id.as_str(),
+            5_000,
+        );
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&callbacks);
+        store
+            .connection
+            .progress_handler(
+                100,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+        let page = store
+            .read_mailbox(
+                &bob.principal,
+                crate::model::MailboxPageRequest {
+                    group_id: group.group_id,
+                    cursor: None,
+                    max_items: 128,
+                },
+            )
+            .unwrap();
+        store
+            .connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
+        assert!(page.messages.is_empty() && page.next_cursor.is_none());
+        assert_eq!(page.snapshot_high_sequence, 5_001);
+        let observed = callbacks.load(Ordering::Relaxed);
+        eprintln!("empty sparse mailbox: {observed} callbacks at 100 VM instructions");
+        assert!(
+            observed <= 10,
+            "empty recipient examined unrelated retained history: {observed} callbacks"
+        );
     }
 
     #[test]

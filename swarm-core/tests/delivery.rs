@@ -1178,6 +1178,94 @@ fn delayed_reconciled_completion_cannot_change_a_new_attempt_or_successor_genera
 }
 
 #[test]
+fn mailbox_projection_keeps_mixed_generations_acks_and_frozen_snapshot() {
+    let mut f = Fixture::new("mailbox-mixed-generations");
+    let historical = f.send("historical");
+    f.store
+        .acknowledge_message(&f.bob.principal, &f.group.group_id, &historical.message_id)
+        .unwrap();
+    let old = f.send("old");
+    let bob2 = f
+        .store
+        .continue_peer(
+            &f.owner,
+            f.continuation(&f.bob, "bob2"),
+            "first",
+            f.policies(),
+        )
+        .unwrap();
+    let fresh = f.send("fresh");
+    let bob3 = f
+        .store
+        .continue_peer(
+            &f.owner,
+            f.continuation(&bob2, "bob3"),
+            "second",
+            f.policies(),
+        )
+        .unwrap();
+    let future = f.send("future");
+    f.store
+        .acknowledge_message(&bob3.principal, &f.group.group_id, &fresh.message_id)
+        .unwrap();
+    let request = MailboxPageRequest {
+        group_id: f.group.group_id.clone(),
+        cursor: None,
+        max_items: 1,
+    };
+    assert!(matches!(
+        f.store.read_mailbox(&f.bob.principal, request.clone()),
+        Err(StoreError::StaleBinding)
+    ));
+    let first = f
+        .store
+        .read_mailbox(&bob3.principal, request.clone())
+        .unwrap();
+    assert_eq!(first.snapshot_high_sequence, 4);
+    assert_eq!(first.messages.len(), 1);
+    assert_eq!(first.messages[0].message.message_id, old.message_id);
+    assert_eq!(first.messages[0].receipt.generation.get(), 3);
+    assert!(first.messages[0].receipt.acknowledged_at_millis.is_none());
+    f.send("after-snapshot");
+    let second = f
+        .store
+        .read_mailbox(
+            &bob3.principal,
+            MailboxPageRequest {
+                cursor: first.next_cursor,
+                ..request.clone()
+            },
+        )
+        .unwrap();
+    assert_eq!(second.snapshot_high_sequence, 4);
+    assert_eq!(second.messages.len(), 1);
+    assert_eq!(second.messages[0].message.message_id, fresh.message_id);
+    assert_eq!(second.messages[0].receipt.generation.get(), 2);
+    assert!(second.messages[0].receipt.acknowledged_at_millis.is_some());
+    let third = f
+        .store
+        .read_mailbox(
+            &bob3.principal,
+            MailboxPageRequest {
+                cursor: second.next_cursor,
+                ..request
+            },
+        )
+        .unwrap();
+    assert_eq!(third.snapshot_high_sequence, 4);
+    assert_eq!(third.messages.len(), 1);
+    assert_eq!(third.messages[0].message.message_id, future.message_id);
+    assert_eq!(third.messages[0].receipt.generation.get(), 1);
+    assert!(third.next_cursor.is_none());
+    assert_eq!(
+        f.store
+            .send_message(&f.alice.principal, f.request("old"))
+            .unwrap(),
+        old
+    );
+}
+
+#[test]
 fn mixed_generation_ack_gap_spans_current_binding_and_old_ack_replay_never_regresses() {
     let mut f = Fixture::new("mixed-generation-watermark");
     let old = f.send("old");
