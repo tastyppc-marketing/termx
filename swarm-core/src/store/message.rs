@@ -7,6 +7,8 @@ use crate::model::{
 };
 
 use super::policy::revision_from_sql;
+use super::revision::bump_delivery;
+use super::source::{authorize_attachment, AuthorizedAttachment};
 use super::{authorize_peer, now_millis, Store};
 
 impl Store {
@@ -49,6 +51,14 @@ impl Store {
             });
         }
         validate_reply(&transaction, principal, &request)?;
+        // Citations are authorized against current source state at commit
+        // time and frozen with the cited epoch; later transitions never
+        // rewrite them.
+        let attachments = request
+            .attachments
+            .iter()
+            .map(|attachment| authorize_attachment(&transaction, &request.group_id, attachment))
+            .collect::<Result<Vec<AuthorizedAttachment>, StoreError>>()?;
         let group_sequence = transaction.query_row(
             "SELECT next_sequence FROM groups WHERE group_id=?1",
             [request.group_id.as_str()],
@@ -67,7 +77,7 @@ impl Store {
         let message_id = MessageId::generate();
         let now = now_millis(&transaction)?;
         transaction.execute(
-            "INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,topic,reply_to_message_id,committed_at_millis) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,topic,reply_to_message_id,committed_at_millis,thread_root_message_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,COALESCE((SELECT p.thread_root_message_id FROM messages p WHERE p.message_id=?10),?1))",
             params![
                 message_id.as_str(),
                 request.group_id.as_str(),
@@ -111,6 +121,23 @@ impl Store {
                 params![message_id.as_str(), reply_to.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64()],
             )?;
         }
+        for (ordinal, attachment) in attachments.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO message_source_references(source_reference_id,message_id,ordinal,source_id,source_kind,owner_peer_id,registration_epoch,snapshot_reference,attached_at_millis) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    crate::model::SourceReferenceId::generate().as_str(),
+                    message_id.as_str(),
+                    ordinal as i64,
+                    attachment.source_id.as_str(),
+                    attachment.source_kind,
+                    attachment.owner_peer_id.as_str(),
+                    attachment.registration_epoch,
+                    attachment.snapshot_reference,
+                    now,
+                ],
+            )?;
+        }
+        bump_delivery(&transaction)?;
         let receipt = SendReceipt {
             message_id,
             group_id: request.group_id,

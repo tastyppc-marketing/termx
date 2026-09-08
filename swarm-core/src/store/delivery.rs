@@ -1,6 +1,7 @@
 use super::{
     authorize_peer, now_millis,
     policy::{read_binding, revision_from_sql},
+    revision::bump_delivery,
     Store,
 };
 use crate::{
@@ -29,6 +30,7 @@ impl Store {
         tx.execute("INSERT INTO broker_runs VALUES (?1,?2)", params![next, now])?;
         tx.execute("UPDATE current_deliveries SET route_state='uncertain' WHERE last_attempt_id IN (SELECT attempt_id FROM delivery_attempts WHERE completed_at_millis IS NULL)",[])?;
         let count=tx.execute("UPDATE delivery_attempts SET outcome='uncertain',completed_at_millis=?1,recovered_uncertain_at_millis=COALESCE(recovered_uncertain_at_millis,?1) WHERE completed_at_millis IS NULL",[now])?;
+        bump_delivery(&tx)?;
         tx.commit()?;
         self.run_revision = Some(revision);
         Ok(count)
@@ -164,6 +166,7 @@ impl Store {
             ],
         )?;
         tx.execute("UPDATE current_deliveries SET route_state='in_flight',last_attempt_id=?1 WHERE message_id=?2 AND recipient_peer_id=?3",params![attempt_id.as_str(),candidate.message_id.as_str(),candidate.recipient_peer_id.as_str()])?;
+        bump_delivery(&tx)?;
         tx.commit()?;
         Ok(DeliveryTicket {
             attempt_id,
@@ -223,6 +226,7 @@ impl Store {
         // from changing a transferred row or a later retry. ACK/fetch evidence is untouched.
         tx.execute("UPDATE current_deliveries SET route_state=?1 WHERE last_attempt_id=?2 AND EXISTS(SELECT 1 FROM delivery_attempts a WHERE a.attempt_id=?2 AND a.message_id=current_deliveries.message_id AND a.recipient_peer_id=current_deliveries.recipient_peer_id AND a.binding_revision=current_deliveries.recipient_binding_revision AND a.generation=current_deliveries.delivery_generation)",params![state,id.as_str()])?;
         let result = load_status(&tx, id)?;
+        bump_delivery(&tx)?;
         tx.commit()?;
         Ok(result)
     }
@@ -263,6 +267,7 @@ impl Store {
             ],
         )?;
         tx.execute("UPDATE current_deliveries SET route_state='ready' WHERE last_attempt_id=?1 AND route_state IN ('held','uncertain') AND EXISTS(SELECT 1 FROM delivery_attempts a WHERE a.attempt_id=?1 AND a.message_id=current_deliveries.message_id AND a.recipient_peer_id=current_deliveries.recipient_peer_id AND a.binding_revision=current_deliveries.recipient_binding_revision AND a.generation=current_deliveries.delivery_generation)",[evidence.attempt_id.as_str()])?;
+        bump_delivery(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -342,6 +347,7 @@ mod tests {
             body: "persist".into(),
             topic: None,
             reply_to: None,
+            attachments: Vec::new(),
         };
         store.connection.commit_hook(Some(|| true)).unwrap();
         assert!(store

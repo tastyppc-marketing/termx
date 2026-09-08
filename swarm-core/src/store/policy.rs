@@ -8,6 +8,7 @@ use crate::model::{
     PeerMetadataUpdate, PeerPrincipal, Revision, VerifiedBinding,
 };
 
+use super::revision::bump_inventory;
 use super::{now_millis, Store};
 
 impl Store {
@@ -50,6 +51,7 @@ impl Store {
                 now,
             ],
         )?;
+        bump_inventory(&transaction)?;
         transaction.commit()?;
         let record = PeerBindingRecord {
             peer_id: peer_id.clone(),
@@ -133,6 +135,7 @@ impl Store {
             ],
         )?;
         let record = read_binding(&transaction, peer_id, current)?;
+        bump_inventory(&transaction)?;
         transaction.commit()?;
         Ok(record)
     }
@@ -169,6 +172,7 @@ impl Store {
                 [group_id.as_str(), peer_id.as_str()],
             )?;
         }
+        bump_inventory(&transaction)?;
         transaction.commit()?;
         Ok(record)
     }
@@ -221,6 +225,7 @@ impl Store {
             policy_revision: next,
             ..group
         };
+        bump_inventory(&transaction)?;
         transaction.commit()?;
         Ok(result)
     }
@@ -252,6 +257,7 @@ impl Store {
             paused,
             ..group
         };
+        bump_inventory(&transaction)?;
         transaction.commit()?;
         Ok(result)
     }

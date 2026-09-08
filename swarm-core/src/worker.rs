@@ -54,6 +54,20 @@ pub enum Command {
         String,
         BTreeMap<GroupId, Revision>,
     ),
+    // Task 2 companion integration.
+    WhoAmI(PeerPrincipal, WhoAmIRequest),
+    ListPeers(PeerPrincipal, ListPeersRequest),
+    PublishStatus(PeerPrincipal, StatusRequest),
+    ReadMailboxAfter(PeerPrincipal, MailboxAfterRequest),
+    ReadThread(PeerPrincipal, ThreadPageRequest),
+    ReadOutgoing(PeerPrincipal, OutgoingPageRequest),
+    ResolveAttachment(PeerPrincipal, GroupId, SourceReferenceId),
+    RegisterSource(OwnerPrincipal, VerifiedSourceDescriptor),
+    TransitionSource(OwnerPrincipal, SourceTransition),
+    AcquireContextGrant(PeerPrincipal, GroupId, SourceId),
+    ValidateContextGrant(PeerPrincipal, ContextGrantLease, PublicationIdentity),
+    OwnerSnapshot(OwnerPrincipal, OwnerSnapshotRequest),
+    StateRevisions(OwnerPrincipal),
     #[cfg(test)]
     #[allow(private_interfaces)]
     TestHook(Box<dyn TestHook>),
@@ -73,6 +87,17 @@ pub enum Response {
     Candidates(Vec<DeliveryCandidate>),
     Ticket(DeliveryTicket),
     Attempt(AttemptStatus),
+    SelfView(SelfView),
+    Peers(PeerPage),
+    Status(StatusRecord),
+    Thread(ThreadPage),
+    Outgoing(OutgoingPage),
+    Attachment(AttachmentView),
+    Source(SourceRegistration),
+    Lease(ContextGrantLease),
+    Commitment(PublicationCommitment),
+    Snapshot(OwnerSnapshotPage),
+    Revisions(StateRevisions),
     Unit,
 }
 #[derive(Clone, Debug, serde::Serialize)]
@@ -156,9 +181,9 @@ pub struct Metrics {
     /// End-to-end latency buckets: <=1,4,16,64,256,1024,4096ms, overflow.
     pub latency_buckets: [u64; 8],
     /// Same buckets partitioned by `OPERATION_NAMES`; fixed storage.
-    pub operation_latency_buckets: [[u64; 8]; 18],
+    pub operation_latency_buckets: [[u64; 8]; 31],
 }
-pub const OPERATION_NAMES: [&str; 18] = [
+pub const OPERATION_NAMES: [&str; 31] = [
     "trusted_owner",
     "inspect",
     "recover",
@@ -177,6 +202,19 @@ pub const OPERATION_NAMES: [&str; 18] = [
     "complete",
     "reconcile",
     "continue",
+    "whoami",
+    "list_peers",
+    "publish_status",
+    "mailbox_after",
+    "thread",
+    "outgoing",
+    "resolve_attachment",
+    "register_source",
+    "transition_source",
+    "acquire_context_grant",
+    "validate_context_grant",
+    "owner_snapshot",
+    "state_revisions",
 ];
 struct State {
     queue: VecDeque<Envelope>,
@@ -483,14 +521,69 @@ impl Response {
             Self::Saved(receipt) => receipt.recipients.capacity().saturating_mul(256),
             Self::Mailbox(page) => page.messages.iter().fold(
                 page.messages.capacity().saturating_mul(4096),
-                |size, entry| {
-                    size.saturating_add(entry.message.body.capacity())
-                        .saturating_add(entry.message.client_key.capacity())
-                        .saturating_add(option_capacity(&entry.message.topic))
-                },
+                |size, entry| size.saturating_add(message_bytes(&entry.message)),
             ),
             Self::Candidates(candidates) => candidates.capacity().saturating_mul(512),
             Self::Ticket(ticket) => record_bytes(ticket.recipient_binding()),
+            Self::Thread(page) => page.messages.iter().fold(
+                page.messages.capacity().saturating_mul(4096),
+                |size, entry| size.saturating_add(message_bytes(&entry.message)),
+            ),
+            Self::Outgoing(page) => state_entries_bytes(&page.messages),
+            Self::SelfView(view) => view.memberships.iter().fold(
+                view.memberships
+                    .capacity()
+                    .saturating_mul(1024)
+                    .saturating_add(view.harness.capacity())
+                    .saturating_add(option_capacity(&view.model_metadata)),
+                |size, membership| {
+                    size.saturating_add(membership.label.capacity())
+                        .saturating_add(status_bytes(&membership.status))
+                },
+            ),
+            Self::Peers(page) => {
+                page.peers
+                    .iter()
+                    .fold(page.peers.capacity().saturating_mul(1024), |size, peer| {
+                        size.saturating_add(peer.harness.capacity())
+                            .saturating_add(option_capacity(&peer.model_metadata))
+                            .saturating_add(status_bytes(&peer.status))
+                            .saturating_add(peer.sources.capacity().saturating_mul(512))
+                    })
+            }
+            Self::Status(status) => option_capacity(&status.status),
+            Self::Attachment(view) => option_capacity(&view.attachment.snapshot_reference)
+                .saturating_add(view.attachment.source_kind.capacity()),
+            Self::Source(registration) => registration_bytes(registration),
+            Self::Lease(lease) => lease.estimated_bytes(),
+            Self::Commitment(commitment) => commitment.response_reference().len(),
+            Self::Snapshot(OwnerSnapshotPage::Peers(page)) => {
+                page.peers
+                    .iter()
+                    .fold(page.peers.capacity().saturating_mul(2048), |size, peer| {
+                        size.saturating_add(record_bytes(&peer.binding))
+                            .saturating_add(peer.memberships.iter().fold(
+                                peer.memberships.capacity().saturating_mul(512),
+                                |size, m| size.saturating_add(status_bytes(&m.status)),
+                            ))
+                            .saturating_add(
+                                peer.sources.iter().fold(
+                                    peer.sources.capacity().saturating_mul(1024),
+                                    |size, s| size.saturating_add(registration_bytes(s)),
+                                ),
+                            )
+                    })
+            }
+            Self::Snapshot(OwnerSnapshotPage::Groups(page)) => page.groups.iter().fold(
+                page.groups.capacity().saturating_mul(1024),
+                |size, group| {
+                    size.saturating_add(group.group.label.capacity())
+                        .saturating_add(group.members.capacity().saturating_mul(64))
+                },
+            ),
+            Self::Snapshot(OwnerSnapshotPage::Messages(page)) => {
+                state_entries_bytes(&page.messages)
+            }
             Self::Inspection(i) => {
                 i.sqlite_version.capacity() + i.journal_mode.capacity() + i.synchronous.capacity()
             }
@@ -498,6 +591,36 @@ impl Response {
         };
         4096usize.saturating_add(extra)
     }
+}
+fn message_bytes(message: &MessageRecord) -> usize {
+    message
+        .body
+        .capacity()
+        .saturating_add(message.client_key.capacity())
+        .saturating_add(option_capacity(&message.topic))
+        .saturating_add(message.attachments.iter().fold(
+            message.attachments.capacity().saturating_mul(256),
+            |size, attachment| {
+                size.saturating_add(attachment.source_kind.capacity())
+                    .saturating_add(option_capacity(&attachment.snapshot_reference))
+            },
+        ))
+}
+fn state_entries_bytes(entries: &[MessageStateEntry]) -> usize {
+    entries
+        .iter()
+        .fold(entries.len().saturating_mul(4096), |size, entry| {
+            size.saturating_add(message_bytes(&entry.message))
+                .saturating_add(entry.recipients.capacity().saturating_mul(256))
+        })
+}
+fn registration_bytes(registration: &SourceRegistration) -> usize {
+    registration
+        .conversation_id
+        .capacity()
+        .saturating_add(registration.source_kind.capacity())
+        .saturating_add(registration.object_identity.capacity())
+        .saturating_add(registration.evidence_reference.capacity())
 }
 fn record_bytes(record: &PeerBindingRecord) -> usize {
     record
@@ -528,6 +651,19 @@ impl Command {
             Self::Complete(..) => 15,
             Self::Reconcile(..) => 16,
             Self::Continue(..) => 17,
+            Self::WhoAmI(..) => 18,
+            Self::ListPeers(..) => 19,
+            Self::PublishStatus(..) => 20,
+            Self::ReadMailboxAfter(..) => 21,
+            Self::ReadThread(..) => 22,
+            Self::ReadOutgoing(..) => 23,
+            Self::ResolveAttachment(..) => 24,
+            Self::RegisterSource(..) => 25,
+            Self::TransitionSource(..) => 26,
+            Self::AcquireContextGrant(..) => 27,
+            Self::ValidateContextGrant(..) => 28,
+            Self::OwnerSnapshot(..) => 29,
+            Self::StateRevisions(..) => 30,
             #[cfg(test)]
             Self::TestHook(..) => return None,
         })
@@ -563,6 +699,25 @@ impl Command {
                 Response::Unit
             }
             Self::Continue(o, e, i, p) => Response::Enrolled(store.continue_peer(&o, e, &i, p)?),
+            Self::WhoAmI(p, r) => Response::SelfView(store.whoami(&p, r)?),
+            Self::ListPeers(p, r) => Response::Peers(store.list_peers(&p, r)?),
+            Self::PublishStatus(p, r) => Response::Status(store.publish_status(&p, r)?),
+            Self::ReadMailboxAfter(p, r) => Response::Mailbox(store.read_mailbox_after(&p, r)?),
+            Self::ReadThread(p, r) => Response::Thread(store.read_thread(&p, r)?),
+            Self::ReadOutgoing(p, r) => Response::Outgoing(store.read_outgoing(&p, r)?),
+            Self::ResolveAttachment(p, g, s) => {
+                Response::Attachment(store.resolve_attachment(&p, &g, &s)?)
+            }
+            Self::RegisterSource(o, d) => Response::Source(store.register_source(&o, d)?),
+            Self::TransitionSource(o, t) => Response::Source(store.transition_source(&o, t)?),
+            Self::AcquireContextGrant(p, g, s) => {
+                Response::Lease(store.acquire_context_grant(&p, &g, &s)?)
+            }
+            Self::ValidateContextGrant(p, l, i) => {
+                Response::Commitment(store.validate_context_grant(&p, l, i)?)
+            }
+            Self::OwnerSnapshot(o, r) => Response::Snapshot(store.owner_snapshot(&o, r)?),
+            Self::StateRevisions(o) => Response::Revisions(store.state_revisions(&o)?),
             #[cfg(test)]
             Self::TestHook(hook) => {
                 hook.run(store);
@@ -580,7 +735,24 @@ impl Command {
                 .capacity()
                 .saturating_add(r.client_key.capacity())
                 .saturating_add(option_capacity(&r.topic))
-                .saturating_add(r.recipients.len().saturating_mul(256)),
+                .saturating_add(r.recipients.len().saturating_mul(256))
+                .saturating_add(
+                    r.attachments
+                        .iter()
+                        .fold(r.attachments.capacity().saturating_mul(128), |size, a| {
+                            size.saturating_add(option_capacity(&a.snapshot_reference))
+                        }),
+                ),
+            Self::PublishStatus(_, r) => option_capacity(&r.status),
+            Self::RegisterSource(_, d) => d.estimated_bytes(),
+            Self::TransitionSource(
+                _,
+                SourceTransition::Reestablish { descriptor, .. }
+                | SourceTransition::Replace { descriptor, .. },
+            ) => descriptor.estimated_bytes(),
+            Self::ValidateContextGrant(_, lease, identity) => lease
+                .estimated_bytes()
+                .saturating_add(identity.response_reference.capacity()),
             Self::CreateGroup(_, label, members) => label
                 .capacity()
                 .saturating_add(members.len().saturating_mul(256)),
@@ -601,7 +773,12 @@ impl Command {
     }
     fn response_bytes(&self) -> usize {
         match self {
-            Self::Mailbox(..) => 32 * 1024 * 1024,
+            Self::Mailbox(..)
+            | Self::ReadMailboxAfter(..)
+            | Self::ReadThread(..)
+            | Self::ReadOutgoing(..)
+            | Self::OwnerSnapshot(_, OwnerSnapshotRequest::Messages { .. }) => 32 * 1024 * 1024,
+            Self::WhoAmI(..) | Self::ListPeers(..) | Self::OwnerSnapshot(..) => 8 * 1024 * 1024,
             Self::Send(..) => 2 * 1024 * 1024,
             Self::Candidates(..) => 128 * 1024,
             _ => 64 * 1024,

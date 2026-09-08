@@ -76,6 +76,9 @@ opaque_id!(DeliveryAttemptId, "d_");
 opaque_id!(SourceReferenceId, "s_");
 opaque_id!(MailboxCursor, "c_");
 
+mod views;
+pub use views::*;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Revision(u64);
@@ -161,6 +164,11 @@ pub struct SendMessageRequest {
     pub body: String,
     pub topic: Option<String>,
     pub reply_to: Option<MessageId>,
+    /// Source-reference attachments. Serialized only when non-empty so that
+    /// every canonical payload committed before schema 8 keeps its exact bytes
+    /// and historical retries still compare equal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SourceAttachment>,
 }
 
 /// Process identity evidence accepted by the trusted broker boundary.
@@ -328,6 +336,7 @@ impl SendMessageRequest {
         if let Some(topic) = &self.topic {
             validate_nonempty("topic", topic, MAX_TOPIC_BYTES)?;
         }
+        validate_attachments(&self.attachments)?;
         self.canonical_json()?;
         Ok(())
     }
@@ -397,7 +406,11 @@ impl SourceReferenceRecord {
     }
 }
 
-fn validate_nonempty(field: &'static str, value: &str, max: usize) -> Result<(), ValidationError> {
+pub(crate) fn validate_nonempty(
+    field: &'static str,
+    value: &str,
+    max: usize,
+) -> Result<(), ValidationError> {
     if value.is_empty() {
         return Err(ValidationError::Empty { field });
     }
@@ -407,7 +420,11 @@ fn validate_nonempty(field: &'static str, value: &str, max: usize) -> Result<(),
     Ok(())
 }
 
-fn validate_max(field: &'static str, value: &str, max: usize) -> Result<(), ValidationError> {
+pub(crate) fn validate_max(
+    field: &'static str,
+    value: &str,
+    max: usize,
+) -> Result<(), ValidationError> {
     if value.len() > max {
         return Err(ValidationError::TooLong { field, max });
     }
@@ -447,6 +464,8 @@ pub struct MessageRecord {
     pub body: String,
     pub topic: Option<String>,
     pub reply_to: Option<MessageId>,
+    /// Immutable opaque source references attached at commit time.
+    pub attachments: Vec<AttachmentRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

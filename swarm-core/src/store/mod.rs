@@ -1,10 +1,15 @@
 mod continuation;
 mod delivery;
+mod discovery;
 mod message;
+mod navigation;
+mod owner_view;
 mod page_size;
 mod policy;
 mod query;
+mod revision;
 mod schema;
+mod source;
 
 use std::path::Path;
 use std::time::Duration;
@@ -54,6 +59,18 @@ impl Store {
             authority_id,
             run_revision: None,
         })
+    }
+
+    /// Installs a bundled-SQLite progress handler on the store's own connection.
+    /// Diagnostic/measurement seam for owned tests: counts VM work per read.
+    /// Not a resource control and never routed to peers.
+    pub fn progress_handler(
+        &self,
+        num_ops: i32,
+        handler: Option<Box<dyn FnMut() -> bool + Send + 'static>>,
+    ) -> Result<(), StoreError> {
+        self.connection.progress_handler(num_ops, handler)?;
+        Ok(())
     }
 
     pub fn inspect(&self) -> Result<StoreInspection, StoreError> {
@@ -212,6 +229,38 @@ pub(super) fn authorize_peer(
             }
         })?)?,
     })
+}
+
+pub(super) struct AuthenticatedSelf {
+    pub live: bool,
+}
+
+/// Self resolution without a group: authority and exact current binding only.
+/// An offline binding still resolves itself; a superseded binding never does.
+pub(super) fn authenticate_self(
+    transaction: &Transaction<'_>,
+    authority_id: &AuthorityId,
+    principal: &PeerPrincipal,
+) -> Result<AuthenticatedSelf, StoreError> {
+    if principal.authority_id != *authority_id {
+        return Err(StoreError::AuthorityMismatch);
+    }
+    let binding = transaction
+        .query_row(
+            "SELECT p.current_binding_revision, b.live FROM peers p JOIN peer_bindings b ON b.peer_id=p.peer_id AND b.binding_revision=p.current_binding_revision WHERE p.peer_id=?1",
+            [principal.peer_id.as_str()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .optional()?;
+    let Some((current_revision, live)) = binding else {
+        return Err(StoreError::Unauthorized {
+            reason: "unknown peer",
+        });
+    };
+    if current_revision != principal.binding_revision.as_sql_i64() {
+        return Err(StoreError::StaleBinding);
+    }
+    Ok(AuthenticatedSelf { live })
 }
 
 pub(super) fn now_millis(transaction: &Transaction<'_>) -> Result<i64, StoreError> {

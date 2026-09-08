@@ -67,6 +67,7 @@ async fn abandoned_reply_commits_and_shutdown_drains() {
         body: "synthetic".into(),
         topic: None,
         reply_to: None,
+        attachments: Vec::new(),
     };
     drop(
         admit(&client, || {

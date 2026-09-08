@@ -198,6 +198,7 @@ fn controlled_child() {
         body: "synthetic retained crash message".into(),
         topic: None,
         reply_to: None,
+        attachments: Vec::new(),
     };
     drop(store);
     let runtime = tokio::runtime::Builder::new_current_thread()

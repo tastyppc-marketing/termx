@@ -69,6 +69,7 @@ impl Fixture {
             body: format!("body-{key}"),
             topic: None,
             reply_to: None,
+            attachments: Vec::new(),
         }
     }
     fn send(&mut self, key: &str) -> SendReceipt {
@@ -392,6 +393,7 @@ fn continuation_moves_only_known_unreceived_backlog_and_preserves_original_retry
         body: "cannot inherit old context".into(),
         topic: None,
         reply_to: Some(fetched.message_id.clone()),
+        attachments: Vec::new(),
     };
     assert!(matches!(
         f.store.send_message(&successor.principal, old_reply),

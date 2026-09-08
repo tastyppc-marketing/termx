@@ -352,6 +352,7 @@ async fn sqlite_full_and_readonly_never_claim_saved_or_acknowledged() {
         body: "x".repeat(1024 * 1024),
         topic: None,
         reply_to: None,
+        attachments: Vec::new(),
     };
     submit(&client, || Command::TestHook(Box::new(Fault::Full)))
         .await
@@ -457,6 +458,7 @@ async fn timeout_after_enqueue_is_unknown_but_does_not_cancel_send() {
         body: "synthetic".into(),
         topic: None,
         reply_to: None,
+        attachments: Vec::new(),
     };
     let (held, release) = gate(&client, false).await;
     let pending = client
@@ -535,6 +537,7 @@ async fn near_limit_escaped_unicode_pages_stay_within_response_reservations() {
             body: body.clone(),
             topic: None,
             reply_to: None,
+            attachments: Vec::new(),
         };
         let Response::Saved(saved) = submit(&client, || {
             Command::Send(sender.principal.clone(), request.clone())
@@ -604,6 +607,7 @@ async fn eight_clients_serialize_atomic_sends_and_deduplicated_retries() {
                     body: "synthetic concurrent message".into(),
                     topic: None,
                     reply_to: None,
+                    attachments: Vec::new(),
                 };
                 let mut original = None;
                 for _ in 0..2 {
@@ -683,6 +687,7 @@ async fn worker_reopen_is_passive_and_explicit_recovery_runs_on_owned_thread() {
         body: "synthetic".into(),
         topic: None,
         reply_to: None,
+        attachments: Vec::new(),
     };
     submit(&client, || {
         Command::Send(sender.principal.clone(), request.clone())
@@ -752,4 +757,108 @@ async fn worker_reopen_is_passive_and_explicit_recovery_runs_on_owned_thread() {
     };
     assert_eq!(status.outcome, Some(AttemptOutcome::Uncertain));
     reopened.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn companion_reads_reserve_their_page_bound_and_leave_a_small_response_slot() {
+    let (worker, client, owner, sender, recipient, group) = fixture("companion-reservations").await;
+    assert_eq!(OPERATION_NAMES.len(), 31);
+    // A 32 MiB message-page reservation plus an 8 MiB metadata-page
+    // reservation, both unpolled, leave the default 64 MiB response budget
+    // unable to admit a second message page but still able to admit small
+    // control operations.
+    let thread = submit(&client, || {
+        Command::ReadThread(
+            recipient.principal.clone(),
+            ThreadPageRequest {
+                group_id: group.group_id.clone(),
+                root: MessageId::generate(),
+                navigation: MailboxNavigation::After { after_sequence: 0 },
+                max_items: 1,
+            },
+        )
+    })
+    .await;
+    let peers = submit(&client, || {
+        Command::ListPeers(
+            recipient.principal.clone(),
+            ListPeersRequest {
+                group_id: group.group_id.clone(),
+                after_peer: None,
+                max_items: 8,
+            },
+        )
+    })
+    .await;
+    submit(&client, || Command::TrustedOwner)
+        .await
+        .await
+        .unwrap();
+    assert!(matches!(
+        admit(&client, || Command::ReadMailboxAfter(
+            recipient.principal.clone(),
+            MailboxAfterRequest {
+                group_id: group.group_id.clone(),
+                navigation: MailboxNavigation::After { after_sequence: 0 },
+                max_items: 1
+            }
+        ))
+        .await,
+        Err(AdmissionError::ResponseBytes)
+    ));
+    let metrics = client.metrics();
+    assert_eq!(metrics.max_response_reservation, 32 * 1024 * 1024);
+    assert!(metrics.response_reserved_bytes >= 40 * 1024 * 1024);
+    let Response::SelfView(view) = submit(&client, || {
+        Command::WhoAmI(
+            sender.principal.clone(),
+            WhoAmIRequest {
+                after_group: None,
+                max_items: 8,
+            },
+        )
+    })
+    .await
+    .await
+    .unwrap() else {
+        panic!("self view")
+    };
+    assert_eq!(view.memberships.len(), 1);
+    assert!(matches!(
+        thread.await,
+        Err(OperationError::Store(StoreError::NotFound { .. }))
+    ));
+    let Response::Peers(page) = peers.await.unwrap() else {
+        panic!("peer page")
+    };
+    assert_eq!(page.peers.len(), 2);
+    let Response::Revisions(revisions) = submit(&client, || Command::StateRevisions(owner.clone()))
+        .await
+        .await
+        .unwrap()
+    else {
+        panic!("revisions")
+    };
+    assert!(revisions.inventory_revision.get() > 1);
+    worker.shutdown().await.unwrap();
+    let metrics = client.metrics();
+    assert_eq!(metrics.responses, 0);
+    assert_eq!(metrics.response_reserved_bytes, 0);
+    for (index, name) in [
+        (18, "whoami"),
+        (19, "list_peers"),
+        (22, "thread"),
+        (30, "state_revisions"),
+    ] {
+        assert_eq!(OPERATION_NAMES[index], name);
+        assert_eq!(
+            metrics.operation_latency_buckets[index].iter().sum::<u64>(),
+            1,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        metrics.operation_latency_buckets[21].iter().sum::<u64>(),
+        0,
+        "rejected read never ran"
+    );
 }

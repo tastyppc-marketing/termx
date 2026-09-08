@@ -40,6 +40,7 @@ fn send(group_id: &GroupId, key: &str, recipients: &[&PeerId], body: &str) -> Se
         body: body.to_owned(),
         topic: None,
         reply_to: None,
+        attachments: Vec::new(),
     }
 }
 

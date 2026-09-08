@@ -152,6 +152,7 @@ impl Model {
             body: format!("synthetic {}", self.step),
             topic: None,
             reply_to: None,
+            attachments: Vec::new(),
         };
         let allowed = self.allowed(g, 0) && recipients.iter().all(|p| self.members[g].contains(p));
         let result = call(&self.client, || {

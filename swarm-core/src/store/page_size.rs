@@ -1,15 +1,16 @@
 //! Exact serialization work is linear in the entries, including JSON escaping.
 
-use crate::{error::ValidationError, model::MailboxPage};
+use crate::error::ValidationError;
 use serde::Serialize;
 
+/// Sizes a page whose serialized form is an envelope containing exactly one
+/// JSON array of entries. `new` receives the envelope with an empty array.
 pub(super) struct PageSize {
     bytes: usize,
     entries: usize,
 }
 impl PageSize {
-    pub(super) fn new(empty_envelope: &MailboxPage) -> Result<Self, ValidationError> {
-        debug_assert!(empty_envelope.messages.is_empty());
+    pub(super) fn new(empty_envelope: &impl Serialize) -> Result<Self, ValidationError> {
         Ok(Self {
             bytes: serialized_size(empty_envelope)?,
             entries: 0,

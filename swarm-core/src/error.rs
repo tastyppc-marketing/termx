@@ -72,6 +72,20 @@ pub enum StoreError {
     StaleCursor,
     #[error("one mailbox item cannot fit in the bounded page envelope")]
     PageItemTooLarge,
+    #[error(
+        "navigation position {position} is beyond the snapshot high watermark {snapshot_high}"
+    )]
+    InvalidPosition { position: u64, snapshot_high: u64 },
+    #[error("owner snapshot revision was stale (expected {expected}, actual {actual})")]
+    StaleSnapshot { expected: u64, actual: u64 },
+    #[error("source registration epoch was stale (expected {expected}, actual {actual})")]
+    StaleSourceEpoch { expected: u64, actual: u64 },
+    #[error("source is unavailable: {reason}")]
+    SourceUnavailable { reason: &'static str },
+    #[error("context lease was already consumed by a committed response")]
+    LeaseConsumed,
+    #[error("response identity was already committed for publication")]
+    ResponseAlreadyCommitted,
     #[error("validation failed: {0}")]
     Validation(#[from] ValidationError),
     #[error("SQLite error: {0}")]

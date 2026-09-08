@@ -1,3 +1,4 @@
+use super::revision::{bump_delivery, bump_inventory};
 use super::{now_millis, policy::read_binding, Store};
 use crate::{
     error::{StoreError, ValidationError},
@@ -138,6 +139,8 @@ impl Store {
             // predecessor watermarks remain available for reconciliation/audit.
             tx.execute("INSERT INTO binding_acknowledgement_watermarks(group_id,recipient_peer_id,binding_revision,contiguous_group_sequence,updated_at_millis) SELECT DISTINCT group_id,recipient_peer_id,binding_revision,0,?1 FROM recipient_ack_order WHERE group_id=?2 AND recipient_peer_id=?3 AND binding_revision=?4",params![now,group.as_str(),old.peer_id.as_str(),next.as_sql_i64()])?;
         }
+        bump_inventory(&tx)?;
+        bump_delivery(&tx)?;
         tx.commit()?;
         Ok(EnrolledPeer {
             record: successor,

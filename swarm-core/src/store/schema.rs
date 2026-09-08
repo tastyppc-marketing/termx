@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -97,6 +97,9 @@ pub(super) fn validate_recognized_schema(
     if identity.schema_version >= 7 {
         expected.execute_batch(MIGRATION_V7)?;
     }
+    if identity.schema_version >= 8 {
+        expected.execute_batch(MIGRATION_V8)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -159,6 +162,9 @@ fn migrate_with_final_sql(
     }
     if identity.schema_version < 7 {
         transaction.execute_batch(MIGRATION_V7)?;
+    }
+    if identity.schema_version < 8 {
+        transaction.execute_batch(MIGRATION_V8)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
@@ -530,6 +536,109 @@ const MIGRATION_V7: &str = r#"
 CREATE INDEX current_delivery_mailbox ON current_deliveries(group_id,recipient_peer_id,recipient_binding_revision,group_sequence);
 "#;
 
+// Task 2: bounded thread/outgoing navigation, read-kind bound cursors, owner
+// state revisions, caller-owned status, source registrations with a distinct
+// authorization epoch, immutable attachments and single-use publication
+// commitments. Additive only; every historical row and cursor keeps its meaning.
+const MIGRATION_V8: &str = r#"
+ALTER TABLE messages ADD COLUMN thread_root_message_id TEXT;
+WITH RECURSIVE roots(message_id, root) AS (
+    SELECT message_id, message_id FROM messages WHERE reply_to_message_id IS NULL
+    UNION ALL
+    SELECT m.message_id, roots.root FROM messages m JOIN roots ON m.reply_to_message_id = roots.message_id
+)
+UPDATE messages SET thread_root_message_id = (SELECT root FROM roots WHERE roots.message_id = messages.message_id);
+UPDATE messages SET thread_root_message_id = message_id WHERE thread_root_message_id IS NULL;
+CREATE INDEX messages_by_thread ON messages(group_id, thread_root_message_id, group_sequence);
+CREATE INDEX messages_by_sender ON messages(group_id, sender_peer_id, group_sequence);
+CREATE INDEX messages_by_reply ON messages(reply_to_message_id);
+CREATE TRIGGER messages_thread_root AFTER INSERT ON messages WHEN NEW.thread_root_message_id IS NULL BEGIN
+    UPDATE messages SET thread_root_message_id = COALESCE((SELECT p.thread_root_message_id FROM messages p WHERE p.message_id = NEW.reply_to_message_id), NEW.message_id) WHERE message_id = NEW.message_id;
+END;
+
+ALTER TABLE mailbox_cursors ADD COLUMN read_kind TEXT NOT NULL DEFAULT 'mailbox' CHECK (read_kind IN ('mailbox', 'thread', 'outgoing'));
+ALTER TABLE mailbox_cursors ADD COLUMN selector TEXT CHECK (selector IS NULL OR length(CAST(selector AS BLOB)) BETWEEN 1 AND 256);
+
+CREATE TABLE owner_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    inventory_revision INTEGER NOT NULL CHECK (inventory_revision >= 1),
+    delivery_revision INTEGER NOT NULL CHECK (delivery_revision >= 1)
+) STRICT;
+INSERT INTO owner_state(singleton, inventory_revision, delivery_revision) VALUES (1, 1, 1);
+
+CREATE TABLE peer_statuses (
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    membership_policy_revision INTEGER NOT NULL CHECK (membership_policy_revision >= 1),
+    binding_revision INTEGER NOT NULL CHECK (binding_revision >= 1),
+    status_text TEXT CHECK (status_text IS NULL OR length(CAST(status_text AS BLOB)) BETWEEN 1 AND 4096),
+    status_revision INTEGER NOT NULL CHECK (status_revision >= 1),
+    updated_at_millis INTEGER NOT NULL,
+    PRIMARY KEY (group_id, peer_id),
+    FOREIGN KEY (peer_id, binding_revision) REFERENCES peer_bindings(peer_id, binding_revision)
+) STRICT;
+
+CREATE TABLE source_registrations (
+    source_id TEXT PRIMARY KEY,
+    peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    binding_revision INTEGER NOT NULL CHECK (binding_revision >= 1),
+    conversation_id TEXT NOT NULL CHECK (length(CAST(conversation_id AS BLOB)) BETWEEN 1 AND 4096),
+    source_kind TEXT NOT NULL CHECK (length(CAST(source_kind AS BLOB)) BETWEEN 1 AND 256),
+    resolver_key TEXT NOT NULL CHECK (length(CAST(resolver_key AS BLOB)) BETWEEN 1 AND 4096),
+    object_identity TEXT NOT NULL CHECK (length(CAST(object_identity AS BLOB)) BETWEEN 1 AND 4096),
+    evidence_reference TEXT NOT NULL CHECK (length(CAST(evidence_reference AS BLOB)) BETWEEN 1 AND 4096),
+    state TEXT NOT NULL CHECK (state IN ('active', 'withdrawn', 'replaced')),
+    registration_epoch INTEGER NOT NULL CHECK (registration_epoch >= 1),
+    replaced_by_source_id TEXT REFERENCES source_registrations(source_id),
+    registered_at_millis INTEGER NOT NULL,
+    transitioned_at_millis INTEGER NOT NULL,
+    FOREIGN KEY (peer_id, binding_revision) REFERENCES peer_bindings(peer_id, binding_revision)
+) STRICT;
+CREATE INDEX source_registrations_by_peer ON source_registrations(peer_id, source_id);
+
+CREATE TABLE source_registration_history (
+    source_id TEXT NOT NULL REFERENCES source_registrations(source_id),
+    registration_epoch INTEGER NOT NULL CHECK (registration_epoch >= 1),
+    state TEXT NOT NULL CHECK (state IN ('active', 'withdrawn', 'replaced')),
+    peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    binding_revision INTEGER NOT NULL CHECK (binding_revision >= 1),
+    resolver_key TEXT NOT NULL CHECK (length(CAST(resolver_key AS BLOB)) BETWEEN 1 AND 4096),
+    object_identity TEXT NOT NULL CHECK (length(CAST(object_identity AS BLOB)) BETWEEN 1 AND 4096),
+    evidence_reference TEXT NOT NULL CHECK (length(CAST(evidence_reference AS BLOB)) BETWEEN 1 AND 4096),
+    transitioned_at_millis INTEGER NOT NULL,
+    PRIMARY KEY (source_id, registration_epoch)
+) STRICT;
+
+CREATE TABLE message_source_references (
+    source_reference_id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL REFERENCES messages(message_id),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    source_id TEXT NOT NULL REFERENCES source_registrations(source_id),
+    source_kind TEXT NOT NULL CHECK (length(CAST(source_kind AS BLOB)) BETWEEN 1 AND 256),
+    owner_peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    registration_epoch INTEGER NOT NULL CHECK (registration_epoch >= 1),
+    snapshot_reference TEXT CHECK (snapshot_reference IS NULL OR length(CAST(snapshot_reference AS BLOB)) BETWEEN 1 AND 4096),
+    attached_at_millis INTEGER NOT NULL,
+    UNIQUE (message_id, ordinal)
+) STRICT;
+
+CREATE TABLE publication_commitments (
+    commitment_id TEXT PRIMARY KEY,
+    lease_id TEXT NOT NULL UNIQUE,
+    response_reference TEXT NOT NULL UNIQUE CHECK (length(CAST(response_reference AS BLOB)) BETWEEN 1 AND 4096),
+    authority_id TEXT NOT NULL REFERENCES authority_metadata(authority_id),
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    caller_peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    caller_binding_revision INTEGER NOT NULL CHECK (caller_binding_revision >= 1),
+    source_id TEXT NOT NULL REFERENCES source_registrations(source_id),
+    source_owner_binding_revision INTEGER NOT NULL CHECK (source_owner_binding_revision >= 1),
+    registration_epoch INTEGER NOT NULL CHECK (registration_epoch >= 1),
+    reserved_bytes INTEGER NOT NULL CHECK (reserved_bytes >= 1),
+    committed_at_millis INTEGER NOT NULL
+) STRICT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -759,6 +868,7 @@ mod tests {
             body: "accepted by schema v2".to_owned(),
             topic: Some("preserved".to_owned()),
             reply_to: None,
+            attachments: Vec::new(),
         };
         let canonical_payload =
             String::from_utf8(legacy_request.canonical_json().unwrap()).unwrap();
@@ -893,6 +1003,7 @@ mod tests {
                     body: "acknowledge me".to_owned(),
                     topic: None,
                     reply_to: None,
+                    attachments: Vec::new(),
                 },
             )
             .unwrap();
@@ -939,6 +1050,7 @@ mod tests {
                     body: "must remain outside the frozen snapshot".to_owned(),
                     topic: None,
                     reply_to: None,
+                    attachments: Vec::new(),
                 },
             )
             .unwrap();
@@ -1599,5 +1711,236 @@ mod reconciled_projection_migration_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod v8_migration_tests {
+    use super::*;
+    use crate::{model::*, store::Store};
+    use rusqlite::params;
+
+    const AUTHORITY: &str = "a_00000000000000000000000000000001";
+    const GROUP: &str = "g_00000000000000000000000000000001";
+    const SENDER: &str = "p_00000000000000000000000000000001";
+    const RECIPIENT: &str = "p_00000000000000000000000000000002";
+    const ROOT: &str = "m_00000000000000000000000000000001";
+    const OTHER_ROOT: &str = "m_00000000000000000000000000000002";
+    const REPLY: &str = "m_00000000000000000000000000000003";
+    const NESTED: &str = "m_00000000000000000000000000000004";
+    const CURSOR: &str = "c_00000000000000000000000000000007";
+
+    /// Exact v7 database with a reply chain and a retained v7 mailbox cursor.
+    fn fixture(name: &str) -> (std::path::PathBuf, Connection) {
+        let (path, mut connection) = super::v3_migration_tests::fixture(name);
+        connection.execute_batch(MIGRATION_V4).unwrap();
+        connection.execute_batch(MIGRATION_V5).unwrap();
+        connection.execute_batch(MIGRATION_V6).unwrap();
+        connection.execute_batch(MIGRATION_V7).unwrap();
+        connection.pragma_update(None, "user_version", 7).unwrap();
+        let tx = connection.transaction().unwrap();
+        for (message, sequence, reply_to) in [(REPLY, 3, ROOT), (NESTED, 4, REPLY)] {
+            tx.execute(
+                "INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,topic,reply_to_message_id,committed_at_millis) VALUES(?1,?2,?3,?4,1,?5,'{}','reply',NULL,?6,1)",
+                params![message, GROUP, sequence, SENDER, format!("key-{sequence}"), reply_to],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO recipient_deliveries(message_id,recipient_peer_id,recipient_binding_revision,saved_at_millis,delivery_generation) VALUES(?1,?2,1,1,1)",
+                params![message, RECIPIENT],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO recipient_ack_order VALUES(?1,?2,?3,?4,1,1,0)",
+                params![message, RECIPIENT, GROUP, sequence],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "UPDATE groups SET next_sequence=5 WHERE group_id=?1",
+            [GROUP],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO mailbox_cursors(cursor_id,authority_id,group_id,peer_id,binding_revision,policy_revision,snapshot_high_sequence,position_sequence,created_at_millis,expires_at_millis) VALUES(?1,?2,?3,?4,1,1,4,1,1,9223372036854775807)",
+            params![CURSOR, AUTHORITY, GROUP, RECIPIENT],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        (path, connection)
+    }
+
+    #[test]
+    fn exact_v7_migrates_to_v8_with_backfilled_thread_roots_and_usable_legacy_cursor() {
+        let (path, connection) = fixture("v7-to-v8");
+        drop(connection);
+        let mut store = Store::open(&path).unwrap();
+        let inspection = store.inspect().unwrap();
+        assert_eq!(inspection.schema_version, 8);
+        assert_eq!(inspection.table_count, 28);
+        assert!(inspection.integrity_ok);
+        for (message, expected_root) in [
+            (ROOT, ROOT),
+            (OTHER_ROOT, OTHER_ROOT),
+            (REPLY, ROOT),
+            (NESTED, ROOT),
+        ] {
+            let root: String = store
+                .connection
+                .query_row(
+                    "SELECT thread_root_message_id FROM messages WHERE message_id=?1",
+                    [message],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(root, expected_root, "{message}");
+        }
+        let (kind, selector): (String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT read_kind,selector FROM mailbox_cursors WHERE cursor_id=?1",
+                [CURSOR],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), selector), ("mailbox", None));
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT inventory_revision,delivery_revision FROM owner_state",
+                    [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                )
+                .unwrap(),
+            (1, 1)
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+
+        // The retained v7 cursor keeps its exact frozen meaning through the new
+        // navigation entry point, and thread reads see backfilled roots.
+        let recipient = PeerPrincipal::new(
+            AuthorityId::parse(AUTHORITY).unwrap(),
+            PeerId::parse(RECIPIENT).unwrap(),
+            Revision::new(1).unwrap(),
+        );
+        let group = GroupId::parse(GROUP).unwrap();
+        let page = store
+            .read_mailbox_after(
+                &recipient,
+                MailboxAfterRequest {
+                    group_id: group.clone(),
+                    navigation: MailboxNavigation::Cursor(MailboxCursor::parse(CURSOR).unwrap()),
+                    max_items: 8,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|e| e.message.group_sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(page.snapshot_high_sequence, 4);
+        let thread = store
+            .read_thread(
+                &recipient,
+                ThreadPageRequest {
+                    group_id: group.clone(),
+                    root: MessageId::parse(ROOT).unwrap(),
+                    navigation: MailboxNavigation::After { after_sequence: 0 },
+                    max_items: 8,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            thread
+                .messages
+                .iter()
+                .map(|e| e.message.message_id.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            vec![ROOT.to_owned(), REPLY.to_owned(), NESTED.to_owned()]
+        );
+        // The insert trigger keeps roots for raw inserts without the column.
+        store
+            .connection
+            .execute(
+                "INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,reply_to_message_id,committed_at_millis) VALUES('m_00000000000000000000000000000005',?1,5,?2,1,'key-5','{}','raw',?3,1)",
+                params![GROUP, SENDER, NESTED],
+            )
+            .unwrap();
+        let raw_root: String = store
+            .connection
+            .query_row(
+                "SELECT thread_root_message_id FROM messages WHERE message_id='m_00000000000000000000000000000005'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_root, ROOT);
+    }
+
+    #[test]
+    fn late_v8_migration_failure_keeps_exact_v7_schema_and_data() {
+        let (path, mut connection) = fixture("v7-to-v8-rollback");
+        let before = schema_manifest(&connection).unwrap();
+        let identity = DatabaseIdentity {
+            application_id: APPLICATION_ID,
+            schema_version: 7,
+            has_objects: true,
+        };
+        assert!(migrate_with_final_sql(
+            &mut connection,
+            identity,
+            Some("INSERT INTO owner_state(singleton,inventory_revision,delivery_revision) VALUES(1,1,1)")
+        )
+        .is_err());
+        assert_eq!(schema_manifest(&connection).unwrap(), before);
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name IN ('owner_state','source_registrations','publication_commitments','messages_by_thread')",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT position_sequence FROM mailbox_cursors WHERE cursor_id=?1",
+                    [CURSOR],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        let store = Store::open(path).unwrap();
+        assert_eq!(store.inspect().unwrap().schema_version, 8);
+        assert!(store.inspect().unwrap().integrity_ok);
     }
 }

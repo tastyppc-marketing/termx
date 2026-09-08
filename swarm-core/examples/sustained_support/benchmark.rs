@@ -135,6 +135,7 @@ pub async fn run(client: &Client, fixture: &Fixture) {
                         body: body.clone(),
                         topic: Some("\"\\\n\u{1f980}".into()),
                         reply_to: None,
+                        attachments: Vec::new(),
                     },
                 )
             })

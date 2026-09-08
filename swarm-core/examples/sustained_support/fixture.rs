@@ -101,6 +101,7 @@ impl Fixture {
             body: body(sequence),
             topic: None,
             reply_to: None,
+            attachments: Vec::new(),
         }
     }
     pub fn mailbox(

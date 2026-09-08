@@ -19,7 +19,7 @@ fn new_store_initializes_complete_schema_and_authority() {
 
     assert_eq!(inspection.application_id, APPLICATION_ID);
     assert_eq!(inspection.schema_version, SCHEMA_VERSION);
-    assert_eq!(inspection.table_count, 22);
+    assert_eq!(inspection.table_count, 28);
     assert!(inspection.integrity_ok);
     assert_ne!(inspection.authority_id.as_str(), "");
 }
@@ -360,6 +360,7 @@ fn serialized_send_request_rejects_sender_claims_and_validates_limits() {
         body: "x".repeat(MAX_MESSAGE_BODY_BYTES + 1),
         topic: None,
         reply_to: None,
+        attachments: Vec::new(),
     };
     assert!(request.validate().is_err());
 }
@@ -401,6 +402,7 @@ fn escape_heavy_max_body_fits_explicit_canonical_payload_bound() {
         body: "\u{0000}".repeat(MAX_MESSAGE_BODY_BYTES),
         topic: Some("\\\"\u{0001}".repeat(100)),
         reply_to: None,
+        attachments: Vec::new(),
     };
 
     request.validate().expect("valid bounded request");
@@ -434,6 +436,7 @@ fn recipient_limit_rejects_an_unbounded_send_receipt() {
         body: "bounded".to_owned(),
         topic: None,
         reply_to: None,
+        attachments: Vec::new(),
     };
 
     assert!(request.validate().is_err());
