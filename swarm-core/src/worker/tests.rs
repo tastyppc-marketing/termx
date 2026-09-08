@@ -761,7 +761,7 @@ async fn worker_reopen_is_passive_and_explicit_recovery_runs_on_owned_thread() {
 #[tokio::test]
 async fn companion_reads_reserve_their_page_bound_and_leave_a_small_response_slot() {
     let (worker, client, owner, sender, recipient, group) = fixture("companion-reservations").await;
-    assert_eq!(OPERATION_NAMES.len(), 31);
+    assert_eq!(OPERATION_NAMES.len(), 37);
     // A 32 MiB message-page reservation plus an 8 MiB metadata-page
     // reservation, both unpolled, leave the default 64 MiB response budget
     // unable to admit a second message page but still able to admit small

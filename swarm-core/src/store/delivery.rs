@@ -10,6 +10,8 @@ use crate::{
 };
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
+const DELIVERY_CANDIDATES_SQL: &str = "SELECT message_id,delivery_generation,notification_revision,last_attempt_id FROM current_deliveries INDEXED BY current_delivery_candidates WHERE group_id=?1 AND recipient_peer_id=?2 AND recipient_binding_revision=?3 AND route_state='ready' AND fetched_at_millis IS NULL AND acknowledged_at_millis IS NULL AND replied_by_message_id IS NULL ORDER BY group_sequence LIMIT ?4";
+
 impl Store {
     /// Explicit trusted broker-run transition. The caller MUST establish exclusive
     /// run ownership and prior process exit before invoking this, and invoke it
@@ -30,9 +32,11 @@ impl Store {
         tx.execute("INSERT INTO broker_runs VALUES (?1,?2)", params![next, now])?;
         tx.execute("UPDATE current_deliveries SET route_state='uncertain' WHERE last_attempt_id IN (SELECT attempt_id FROM delivery_attempts WHERE completed_at_millis IS NULL)",[])?;
         let count=tx.execute("UPDATE delivery_attempts SET outcome='uncertain',completed_at_millis=?1,recovered_uncertain_at_millis=COALESCE(recovered_uncertain_at_millis,?1) WHERE completed_at_millis IS NULL",[now])?;
+        let notice_count=tx.execute("UPDATE notice_attempts SET outcome='uncertain',completed_at_millis=?1,recovered_uncertain_at_millis=COALESCE(recovered_uncertain_at_millis,?1) WHERE completed_at_millis IS NULL",[now])?;
         bump_delivery(&tx)?;
         tx.commit()?;
         self.run_revision = Some(revision);
+        self.last_notice_recovered = notice_count;
         Ok(count)
     }
 
@@ -74,7 +78,7 @@ impl Store {
             ) => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        let mut stmt=tx.prepare("SELECT message_id,delivery_generation,notification_revision,last_attempt_id FROM current_deliveries WHERE group_id=?1 AND recipient_peer_id=?2 AND recipient_binding_revision=?3 AND route_state='ready' AND fetched_at_millis IS NULL AND acknowledged_at_millis IS NULL AND replied_by_message_id IS NULL ORDER BY group_sequence LIMIT ?4")?;
+        let mut stmt = tx.prepare(DELIVERY_CANDIDATES_SQL)?;
         let rows = stmt.query_map(
             params![
                 group.as_str(),
@@ -483,6 +487,44 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
+        const ORIGINAL_UNPINNED_SQL: &str = "SELECT message_id,delivery_generation,notification_revision,last_attempt_id FROM current_deliveries WHERE group_id=?1 AND recipient_peer_id=?2 AND recipient_binding_revision=?3 AND route_state='ready' AND fetched_at_millis IS NULL AND acknowledged_at_millis IS NULL AND replied_by_message_id IS NULL ORDER BY group_sequence LIMIT ?4";
+        let explain = |sql: &str| {
+            let mut statement = store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            statement
+                .query_map(
+                    params![
+                        group.group_id.as_str(),
+                        bob.record.peer_id.as_str(),
+                        bob.record.revision.as_sql_i64(),
+                        1
+                    ],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let original_plan = explain(ORIGINAL_UNPINNED_SQL);
+        let pinned_plan = explain(DELIVERY_CANDIDATES_SQL);
+        eprintln!("original BODY candidate SQL: {ORIGINAL_UNPINNED_SQL}");
+        eprintln!("original BODY candidate plan after schema 10: {original_plan:?}");
+        eprintln!("pinned BODY candidate SQL: {DELIVERY_CANDIDATES_SQL}");
+        eprintln!("pinned BODY candidate plan after schema 10: {pinned_plan:?}");
+        assert!(
+            pinned_plan
+                .iter()
+                .any(|detail| detail.contains("current_delivery_candidates")),
+            "BODY candidate query did not use its exact eligible-row index: {pinned_plan:?}"
+        );
+        assert!(
+            pinned_plan
+                .iter()
+                .all(|detail| !detail.contains("TEMP B-TREE")),
+            "BODY candidate query introduced temporary ordering: {pinned_plan:?}"
+        );
         let count = Arc::new(AtomicUsize::new(0));
         let hook = count.clone();
         store

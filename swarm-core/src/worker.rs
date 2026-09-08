@@ -48,6 +48,12 @@ pub enum Command {
     Attempt(OwnerPrincipal, DeliveryAttemptId),
     Complete(OwnerPrincipal, DeliveryAttemptId, AttemptOutcome),
     Reconcile(OwnerPrincipal, VerifiedNotSubmitted),
+    NoticeGaps(OwnerPrincipal, Option<NoticeGapCursor>, usize),
+    BeginNotice(OwnerPrincipal, NoticeCandidate),
+    NoticeAttempt(OwnerPrincipal, NoticeAttemptId),
+    CompleteNotice(OwnerPrincipal, NoticeAttemptId, AttemptOutcome),
+    ReconcileNotice(OwnerPrincipal, VerifiedNoticeNotSubmitted),
+    RecordNoticeReceipt(OwnerPrincipal, VerifiedNoticeReceipt),
     Continue(
         OwnerPrincipal,
         VerifiedContinuation,
@@ -87,6 +93,9 @@ pub enum Response {
     Candidates(Vec<DeliveryCandidate>),
     Ticket(DeliveryTicket),
     Attempt(AttemptStatus),
+    NoticeCandidates(NoticeCandidatePage),
+    NoticeTicket(NoticeTicket),
+    NoticeAttempt(NoticeAttemptStatus),
     SelfView(SelfView),
     Peers(PeerPage),
     Status(StatusRecord),
@@ -157,6 +166,33 @@ pub enum WorkerError {
     Panicked,
 }
 /// Lightweight counters only: no integrity scan and no retained per-operation log.
+#[derive(Clone, Debug)]
+pub struct OperationLatencyBuckets([[u64; 8]; 37]);
+impl Default for OperationLatencyBuckets {
+    fn default() -> Self {
+        Self([[0; 8]; 37])
+    }
+}
+impl std::ops::Index<usize> for OperationLatencyBuckets {
+    type Output = [u64; 8];
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+impl std::ops::IndexMut<usize> for OperationLatencyBuckets {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.0[index]
+    }
+}
+impl serde::Serialize for OperationLatencyBuckets {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde::Serialize::serialize(self.0.as_slice(), serializer)
+    }
+}
+
 #[derive(Default, Clone, Debug, serde::Serialize)]
 pub struct Metrics {
     pub accepted: u64,
@@ -178,12 +214,14 @@ pub struct Metrics {
     /// Largest delivered value's conservative heap-capacity estimate, distinct
     /// from its worst-case reservation and from serialized wire length.
     pub max_response_estimated_bytes: usize,
+    /// Notice submissions fenced as uncertain by explicit trusted recovery.
+    pub notice_attempts_recovered_uncertain: u64,
     /// End-to-end latency buckets: <=1,4,16,64,256,1024,4096ms, overflow.
     pub latency_buckets: [u64; 8],
     /// Same buckets partitioned by `OPERATION_NAMES`; fixed storage.
-    pub operation_latency_buckets: [[u64; 8]; 31],
+    pub operation_latency_buckets: OperationLatencyBuckets,
 }
-pub const OPERATION_NAMES: [&str; 31] = [
+pub const OPERATION_NAMES: [&str; 37] = [
     "trusted_owner",
     "inspect",
     "recover",
@@ -215,6 +253,12 @@ pub const OPERATION_NAMES: [&str; 31] = [
     "validate_context_grant",
     "owner_snapshot",
     "state_revisions",
+    "notice_gaps",
+    "begin_notice",
+    "notice_attempt",
+    "complete_notice",
+    "reconcile_notice",
+    "record_notice_receipt",
 ];
 struct State {
     queue: VecDeque<Envelope>,
@@ -491,6 +535,7 @@ fn run(shared: &Arc<Shared>, store: &mut Store) {
         };
         let Some(envelope) = envelope else { return };
         let operation = envelope.command.operation_index();
+        let is_recover = matches!(&envelope.command, Command::Recover(..));
         let result = envelope
             .command
             .execute(store)
@@ -509,6 +554,11 @@ fn run(shared: &Arc<Shared>, store: &mut Store) {
             m.requests -= 1;
             m.request_bytes -= envelope.request_bytes;
             m.store_errors += u64::from(result.is_err());
+            if is_recover && result.is_ok() {
+                m.notice_attempts_recovered_uncertain = m
+                    .notice_attempts_recovered_uncertain
+                    .saturating_add(store.last_notice_recovered() as u64);
+            }
             m.max_response_estimated_bytes = m.max_response_estimated_bytes.max(response_bytes);
             let millis = envelope.started.elapsed().as_millis();
             let bucket = [1, 4, 16, 64, 256, 1024, 4096]
@@ -547,6 +597,20 @@ impl Response {
             ),
             Self::Candidates(candidates) => candidates.capacity().saturating_mul(512),
             Self::Ticket(ticket) => record_bytes(ticket.recipient_binding()),
+            Self::NoticeCandidates(page) => page.estimated_retained_bytes(),
+            Self::NoticeTicket(ticket) => ticket
+                .candidate
+                .estimated_retained_bytes()
+                .saturating_add(record_bytes(ticket.recipient_binding())),
+            Self::NoticeAttempt(status) => status.receipt().map_or(0, |receipt| {
+                receipt
+                    .native_record_kind
+                    .capacity()
+                    .saturating_add(receipt.provenance_reference.capacity())
+                    .saturating_add(receipt.enrolled_source_identity.capacity())
+                    .saturating_add(receipt.enrolled_generation.capacity())
+                    .saturating_add(receipt.native_item_identity.capacity())
+            }),
             Self::Thread(page) => page.messages.iter().fold(
                 page.messages.capacity().saturating_mul(4096),
                 |size, entry| size.saturating_add(message_bytes(&entry.message)),
@@ -687,6 +751,12 @@ impl Command {
             Self::ValidateContextGrant(..) => 28,
             Self::OwnerSnapshot(..) => 29,
             Self::StateRevisions(..) => 30,
+            Self::NoticeGaps(..) => 31,
+            Self::BeginNotice(..) => 32,
+            Self::NoticeAttempt(..) => 33,
+            Self::CompleteNotice(..) => 34,
+            Self::ReconcileNotice(..) => 35,
+            Self::RecordNoticeReceipt(..) => 36,
             #[cfg(test)]
             Self::TestHook(..) => return None,
         })
@@ -720,6 +790,25 @@ impl Command {
             Self::Reconcile(o, e) => {
                 store.reconcile_not_submitted(&o, e)?;
                 Response::Unit
+            }
+            Self::NoticeGaps(owner, cursor, limit) => {
+                Response::NoticeCandidates(store.notice_gaps(&owner, cursor.as_ref(), limit)?)
+            }
+            Self::BeginNotice(owner, candidate) => {
+                Response::NoticeTicket(store.begin_notice(&owner, &candidate)?)
+            }
+            Self::NoticeAttempt(owner, attempt) => {
+                Response::NoticeAttempt(store.notice_attempt(&owner, &attempt)?)
+            }
+            Self::CompleteNotice(owner, attempt, outcome) => {
+                Response::NoticeAttempt(store.complete_notice(&owner, &attempt, outcome)?)
+            }
+            Self::ReconcileNotice(owner, evidence) => {
+                store.reconcile_notice_not_submitted(&owner, evidence)?;
+                Response::Unit
+            }
+            Self::RecordNoticeReceipt(owner, evidence) => {
+                Response::NoticeAttempt(store.record_notice_receipt(&owner, evidence)?)
             }
             Self::Continue(o, e, i, p) => Response::Enrolled(store.continue_peer(&o, e, &i, p)?),
             Self::WhoAmI(p, r) => Response::SelfView(store.whoami(&p, r)?),
@@ -791,6 +880,22 @@ impl Command {
                 .saturating_add(intent.capacity())
                 .saturating_add(policies.len().saturating_mul(256)),
             Self::Reconcile(_, e) => e.evidence_reference.capacity(),
+            Self::NoticeGaps(_, cursor, _) => cursor.as_ref().map_or(0, |cursor| {
+                cursor
+                    .after_peer
+                    .as_str()
+                    .len()
+                    .saturating_add(cursor.after_group.as_str().len())
+                    .saturating_add(128)
+            }),
+            Self::BeginNotice(_, candidate) => candidate.estimated_retained_bytes(),
+            Self::ReconcileNotice(_, evidence) => evidence.evidence_reference.capacity(),
+            Self::RecordNoticeReceipt(_, evidence) => record_bytes(&evidence.recipient_binding)
+                .saturating_add(evidence.native_record_kind.capacity())
+                .saturating_add(evidence.provenance_reference.capacity())
+                .saturating_add(evidence.enrolled_source_identity.capacity())
+                .saturating_add(evidence.enrolled_generation.capacity())
+                .saturating_add(evidence.native_item_identity.capacity()),
             _ => 0,
         };
         4096usize.saturating_add(extra)

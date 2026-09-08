@@ -3,6 +3,7 @@ mod delivery;
 mod discovery;
 mod message;
 mod navigation;
+mod notice;
 mod owner_view;
 mod page_size;
 mod policy;
@@ -27,6 +28,7 @@ pub struct Store {
     pub(super) connection: Connection,
     pub(super) authority_id: AuthorityId,
     pub(super) run_revision: Option<Revision>,
+    pub(super) last_notice_recovered: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +60,7 @@ impl Store {
             connection,
             authority_id,
             run_revision: None,
+            last_notice_recovered: 0,
         })
     }
 
@@ -119,6 +122,10 @@ impl Store {
             integrity_ok: integrity == "ok",
             table_count,
         })
+    }
+
+    pub(crate) fn last_notice_recovered(&self) -> usize {
+        self.last_notice_recovered
     }
 }
 

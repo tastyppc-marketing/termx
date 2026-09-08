@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -103,6 +103,9 @@ pub(super) fn validate_recognized_schema(
     if identity.schema_version >= 9 {
         expected.execute_batch(MIGRATION_V9)?;
     }
+    if identity.schema_version >= 10 {
+        expected.execute_batch(MIGRATION_V10)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -171,6 +174,9 @@ fn migrate_with_final_sql(
     }
     if identity.schema_version < 9 {
         transaction.execute_batch(MIGRATION_V9)?;
+    }
+    if identity.schema_version < 10 {
+        transaction.execute_batch(MIGRATION_V10)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
@@ -683,6 +689,115 @@ ALTER TABLE publication_commitments ADD COLUMN destination_id TEXT CHECK (destin
 ALTER TABLE publication_commitments ADD COLUMN body_bytes INTEGER CHECK (body_bytes IS NULL OR body_bytes BETWEEN 1 AND 8388608);
 ALTER TABLE publication_commitments ADD COLUMN snapshot_identity TEXT CHECK (snapshot_identity IS NULL OR length(CAST(snapshot_identity AS BLOB)) BETWEEN 1 AND 4096);
 ALTER TABLE publication_commitments ADD COLUMN captured_through INTEGER CHECK (captured_through IS NULL OR captured_through >= 0);
+"#;
+
+// Coalesced native-notice coordination. Submission evidence, positive native
+// receipt and verified non-submission remain separate durable facts. Coverage
+// contains no live policy snapshot; candidates re-read current authority.
+const MIGRATION_V10: &str = r#"
+CREATE TABLE notice_coverage (
+    recipient_peer_id TEXT NOT NULL,
+    recipient_binding_revision INTEGER NOT NULL CHECK (recipient_binding_revision >= 1),
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    covered_through_sequence INTEGER NOT NULL CHECK (covered_through_sequence >= 0),
+    noticed_through_sequence INTEGER NOT NULL CHECK (noticed_through_sequence >= 0),
+    last_attempt_id TEXT,
+    updated_at_millis INTEGER NOT NULL,
+    PRIMARY KEY (recipient_peer_id, recipient_binding_revision, group_id),
+    FOREIGN KEY (recipient_peer_id, recipient_binding_revision)
+        REFERENCES peer_bindings(peer_id, binding_revision),
+    CHECK (noticed_through_sequence <= covered_through_sequence)
+) STRICT;
+
+CREATE TABLE notice_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    recipient_peer_id TEXT NOT NULL,
+    recipient_binding_revision INTEGER NOT NULL CHECK (recipient_binding_revision >= 1),
+    attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+    run_revision INTEGER NOT NULL REFERENCES broker_runs(run_revision),
+    policy_snapshot_json TEXT NOT NULL,
+    binding_snapshot_json TEXT NOT NULL,
+    started_at_millis INTEGER NOT NULL,
+    completed_at_millis INTEGER,
+    outcome TEXT CHECK (length(CAST(outcome AS BLOB)) <= 4096),
+    native_reference TEXT CHECK (length(CAST(native_reference AS BLOB)) <= 4096),
+    recovered_uncertain_at_millis INTEGER,
+    UNIQUE (recipient_peer_id, recipient_binding_revision, attempt_number),
+    FOREIGN KEY (recipient_peer_id, recipient_binding_revision)
+        REFERENCES peer_bindings(peer_id, binding_revision),
+    CHECK ((completed_at_millis IS NULL AND outcome IS NULL)
+        OR (completed_at_millis IS NOT NULL AND outcome IS NOT NULL))
+) STRICT;
+
+CREATE TABLE notice_tickets (
+    attempt_id TEXT PRIMARY KEY REFERENCES notice_attempts(attempt_id),
+    authority_id TEXT NOT NULL REFERENCES authority_metadata(authority_id),
+    run_revision INTEGER NOT NULL REFERENCES broker_runs(run_revision),
+    binding_snapshot_json TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE notice_attempt_groups (
+    attempt_id TEXT NOT NULL REFERENCES notice_attempts(attempt_id),
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    covered_through_sequence INTEGER NOT NULL CHECK (covered_through_sequence >= 1),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 1),
+    PRIMARY KEY (attempt_id, group_id)
+) STRICT;
+
+CREATE TABLE notice_not_submitted_reconciliations (
+    attempt_id TEXT PRIMARY KEY REFERENCES notice_attempts(attempt_id),
+    evidence_reference TEXT NOT NULL
+        CHECK (length(CAST(evidence_reference AS BLOB)) BETWEEN 1 AND 4096),
+    reconciled_at_millis INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE notice_receipts (
+    attempt_id TEXT PRIMARY KEY REFERENCES notice_attempts(attempt_id),
+    native_record_kind TEXT NOT NULL
+        CHECK (length(CAST(native_record_kind AS BLOB)) BETWEEN 1 AND 256),
+    provenance_reference TEXT NOT NULL
+        CHECK (length(CAST(provenance_reference AS BLOB)) BETWEEN 1 AND 4096),
+    enrolled_source_identity TEXT NOT NULL
+        CHECK (length(CAST(enrolled_source_identity AS BLOB)) BETWEEN 1 AND 4096),
+    enrolled_generation TEXT NOT NULL
+        CHECK (length(CAST(enrolled_generation AS BLOB)) BETWEEN 1 AND 4096),
+    native_item_identity TEXT NOT NULL
+        CHECK (length(CAST(native_item_identity AS BLOB)) BETWEEN 1 AND 4096),
+    received_at_millis INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX notice_attempts_unfinished
+    ON notice_attempts(recipient_peer_id, recipient_binding_revision, started_at_millis)
+    WHERE completed_at_millis IS NULL;
+CREATE INDEX notice_attempts_latest
+    ON notice_attempts(recipient_peer_id, recipient_binding_revision, attempt_number);
+CREATE INDEX notice_unfetched_eligible
+    ON current_deliveries(
+        recipient_peer_id,
+        recipient_binding_revision,
+        group_id,
+        group_sequence
+    )
+    WHERE fetched_at_millis IS NULL;
+
+INSERT INTO notice_coverage(
+    recipient_peer_id,
+    recipient_binding_revision,
+    group_id,
+    covered_through_sequence,
+    noticed_through_sequence,
+    last_attempt_id,
+    updated_at_millis
+)
+SELECT recipient_peer_id,
+       recipient_binding_revision,
+       group_id,
+       MAX(group_sequence),
+       0,
+       NULL,
+       CAST(unixepoch('subsec') * 1000 AS INTEGER)
+  FROM current_deliveries
+ GROUP BY recipient_peer_id, recipient_binding_revision, group_id;
 "#;
 
 #[cfg(test)]
@@ -1823,7 +1938,7 @@ mod v8_migration_tests {
         let mut store = Store::open(&path).unwrap();
         let inspection = store.inspect().unwrap();
         assert_eq!(inspection.schema_version, SCHEMA_VERSION);
-        assert_eq!(inspection.table_count, 29);
+        assert_eq!(inspection.table_count, 35);
         assert!(inspection.integrity_ok);
         for (message, expected_root) in [
             (ROOT, ROOT),
@@ -2270,8 +2385,8 @@ mod v9_migration_tests {
 
         let mut store = Store::open(&path).unwrap();
         let inspection = store.inspect().unwrap();
-        assert_eq!(inspection.schema_version, 9);
-        assert_eq!(inspection.table_count, 29);
+        assert_eq!(inspection.schema_version, SCHEMA_VERSION);
+        assert_eq!(inspection.table_count, 35);
         assert!(inspection.integrity_ok);
         assert_eq!(
             store
@@ -2486,10 +2601,10 @@ mod v9_migration_tests {
                 .collect::<Vec<_>>(),
             vec![SENDER.to_owned()]
         );
-        // The migrated database is recognized as exact v9 on reopen.
+        // The migrated database is recognized as the exact current schema on reopen.
         drop(store);
         let reopened = Store::open(&path).unwrap();
-        assert_eq!(reopened.inspect().unwrap().schema_version, 9);
+        assert_eq!(reopened.inspect().unwrap().schema_version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -2553,7 +2668,7 @@ mod v9_migration_tests {
         );
         drop(connection);
         let store = Store::open(path).unwrap();
-        assert_eq!(store.inspect().unwrap().schema_version, 9);
+        assert_eq!(store.inspect().unwrap().schema_version, SCHEMA_VERSION);
         assert!(store.inspect().unwrap().integrity_ok);
         assert_eq!(
             projection(&store.connection),
@@ -2577,8 +2692,8 @@ mod v9_migration_tests {
             schema_manifest(&fresh.connection).unwrap(),
             migrated_manifest
         );
-        assert_eq!(fresh.inspect().unwrap().table_count, 29);
-        // A v9 database with one extra index is not recognized and is left
+        assert_eq!(fresh.inspect().unwrap().table_count, 35);
+        // A current database with one extra index is not recognized and is left
         // byte-for-byte untouched. (A separately created store, not a file
         // copy: the open store's pages still live in its WAL.)
         let foreign_path = fresh_path.with_file_name("foreign.sqlite");
@@ -2592,10 +2707,157 @@ mod v9_migration_tests {
         assert!(matches!(
             Store::open(&foreign_path),
             Err(StoreError::UnrecognizedDatabase {
-                schema_version: 9,
+                schema_version: SCHEMA_VERSION,
                 ..
             })
         ));
         assert_eq!(std::fs::read(&foreign_path).unwrap(), before);
+    }
+
+    fn exact_v9_fixture(name: &str) -> (std::path::PathBuf, Connection) {
+        let (path, connection) = fixture(name);
+        connection.execute_batch(MIGRATION_V9).unwrap();
+        connection.pragma_update(None, "user_version", 9).unwrap();
+        (path, connection)
+    }
+
+    #[test]
+    fn exact_populated_v9_migrates_to_v10_with_coverage_only_backfilled() {
+        let (path, connection) = exact_v9_fixture("v9-to-v10");
+        let before_deliveries: Vec<(String, String, i64, String, i64, Option<i64>)> = {
+            let mut statement = connection
+                .prepare("SELECT message_id,recipient_peer_id,recipient_binding_revision,group_id,group_sequence,fetched_at_millis FROM current_deliveries ORDER BY message_id,recipient_peer_id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let expected_coverage: Vec<(String, i64, String, i64)> = {
+            let mut statement = connection
+                .prepare("SELECT recipient_peer_id,recipient_binding_revision,group_id,MAX(group_sequence) FROM current_deliveries GROUP BY recipient_peer_id,recipient_binding_revision,group_id ORDER BY recipient_peer_id,recipient_binding_revision,group_id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        drop(connection);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.inspect().unwrap().schema_version, 10);
+        let coverage: Vec<(String, i64, String, i64)> = {
+            let mut statement = store
+                .connection
+                .prepare("SELECT recipient_peer_id,recipient_binding_revision,group_id,covered_through_sequence FROM notice_coverage WHERE noticed_through_sequence=0 AND last_attempt_id IS NULL ORDER BY recipient_peer_id,recipient_binding_revision,group_id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(coverage, expected_coverage);
+        for table in [
+            "notice_attempts",
+            "notice_tickets",
+            "notice_attempt_groups",
+            "notice_receipts",
+            "notice_not_submitted_reconciliations",
+        ] {
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "migration must not invent {table} evidence"
+            );
+        }
+        let after_deliveries: Vec<(String, String, i64, String, i64, Option<i64>)> = {
+            let mut statement = store
+                .connection
+                .prepare("SELECT message_id,recipient_peer_id,recipient_binding_revision,group_id,group_sequence,fetched_at_millis FROM current_deliveries ORDER BY message_id,recipient_peer_id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(after_deliveries, before_deliveries);
+    }
+
+    #[test]
+    fn late_v10_migration_failure_keeps_exact_v9_manifest_and_data() {
+        let (_path, mut connection) = exact_v9_fixture("v9-to-v10-rollback");
+        let before_manifest = schema_manifest(&connection).unwrap();
+        let before_rows: i64 = connection
+            .query_row("SELECT count(*) FROM current_deliveries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let identity = DatabaseIdentity {
+            application_id: APPLICATION_ID,
+            schema_version: 9,
+            has_objects: true,
+        };
+
+        assert!(migrate_with_final_sql(
+            &mut connection,
+            identity,
+            Some("CREATE TABLE notice_coverage(conflict TEXT);")
+        )
+        .is_err());
+
+        assert_eq!(schema_manifest(&connection).unwrap(), before_manifest);
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            9
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM current_deliveries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            before_rows
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'notice_%'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
     }
 }
