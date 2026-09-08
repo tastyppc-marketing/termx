@@ -24,6 +24,11 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         authorize_peer(&transaction, &authority_id, principal, &request.group_id)?;
+        if request.recipients.contains(&principal.peer_id) {
+            return Err(StoreError::Unauthorized {
+                reason: "sender cannot be a message recipient",
+            });
+        }
         let frozen_recipients =
             authorize_recipients(&transaction, &request.group_id, request.recipients.iter())?;
 
@@ -85,6 +90,17 @@ impl Store {
                     recipient.peer_id.as_str(),
                     recipient.binding_revision.as_sql_i64(),
                     now,
+                    recipient.generation.as_sql_i64(),
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO recipient_ack_order(message_id,recipient_peer_id,group_id,group_sequence,binding_revision,generation,acknowledged) VALUES (?1,?2,?3,?4,?5,?6,0)",
+                params![
+                    message_id.as_str(),
+                    recipient.peer_id.as_str(),
+                    request.group_id.as_str(),
+                    group_sequence,
+                    recipient.binding_revision.as_sql_i64(),
                     recipient.generation.as_sql_i64(),
                 ],
             )?;

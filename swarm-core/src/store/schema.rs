@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -82,6 +82,9 @@ pub(super) fn validate_recognized_schema(
     if identity.schema_version >= 2 {
         expected.execute_batch(MIGRATION_V2)?;
     }
+    if identity.schema_version >= 3 {
+        expected.execute_batch(MIGRATION_V3)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -129,6 +132,9 @@ fn migrate_with_final_sql(
     }
     if identity.schema_version < 2 {
         transaction.execute_batch(MIGRATION_V2)?;
+    }
+    if identity.schema_version < 3 {
+        transaction.execute_batch(MIGRATION_V3)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
@@ -289,6 +295,43 @@ CREATE TABLE mailbox_cursors (
 CREATE INDEX mailbox_cursors_by_scope ON mailbox_cursors(group_id, peer_id, expires_at_millis);
 "#;
 
+const MIGRATION_V3: &str = r#"
+CREATE TABLE recipient_ack_order (
+    message_id TEXT NOT NULL,
+    recipient_peer_id TEXT NOT NULL,
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    group_sequence INTEGER NOT NULL CHECK (group_sequence >= 1),
+    binding_revision INTEGER NOT NULL CHECK (binding_revision >= 1),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    acknowledged INTEGER NOT NULL CHECK (acknowledged IN (0, 1)),
+    PRIMARY KEY (message_id, recipient_peer_id),
+    UNIQUE (group_id, recipient_peer_id, binding_revision, generation, group_sequence),
+    FOREIGN KEY (message_id, recipient_peer_id) REFERENCES recipient_deliveries(message_id, recipient_peer_id),
+    FOREIGN KEY (recipient_peer_id, binding_revision) REFERENCES peer_bindings(peer_id, binding_revision)
+) STRICT;
+
+CREATE INDEX recipient_ack_unresolved ON recipient_ack_order(group_id, recipient_peer_id, binding_revision, generation, group_sequence) WHERE acknowledged = 0;
+CREATE INDEX recipient_ack_sequence ON recipient_ack_order(group_id, recipient_peer_id, binding_revision, generation, group_sequence);
+
+CREATE TABLE acknowledgement_watermarks (
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    recipient_peer_id TEXT NOT NULL,
+    binding_revision INTEGER NOT NULL CHECK (binding_revision >= 1),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    contiguous_group_sequence INTEGER NOT NULL CHECK (contiguous_group_sequence >= 0),
+    updated_at_millis INTEGER NOT NULL,
+    PRIMARY KEY (group_id, recipient_peer_id, binding_revision, generation),
+    FOREIGN KEY (recipient_peer_id, binding_revision) REFERENCES peer_bindings(peer_id, binding_revision)
+) STRICT;
+
+INSERT INTO recipient_ack_order(message_id,recipient_peer_id,group_id,group_sequence,binding_revision,generation,acknowledged)
+SELECT d.message_id,d.recipient_peer_id,m.group_id,m.group_sequence,d.recipient_binding_revision,d.delivery_generation,
+       EXISTS(SELECT 1 FROM acknowledgements a WHERE a.message_id=d.message_id AND a.recipient_peer_id=d.recipient_peer_id AND a.binding_revision=d.recipient_binding_revision AND a.generation=d.delivery_generation AND a.acknowledged_at_millis IS NOT NULL)
+FROM recipient_deliveries d
+JOIN messages m ON m.message_id=d.message_id
+WHERE m.sender_peer_id <> d.recipient_peer_id;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +395,32 @@ mod tests {
             )
             .unwrap();
         connection
+            .execute_batch(
+                "BEGIN;
+                 INSERT INTO peers(peer_id,current_binding_revision,created_at_millis) VALUES ('p_00000000000000000000000000000001',1,1);
+                 INSERT INTO peer_bindings(peer_id,binding_revision,launch_id,terminal_id,harness,conversation_id,process_id,process_creation_filetime,live,bound_at_millis) VALUES ('p_00000000000000000000000000000001',1,'l_00000000000000000000000000000001','sender-terminal','codex','sender-conversation',1,1,1,1);
+                 INSERT INTO peers(peer_id,current_binding_revision,created_at_millis) VALUES ('p_00000000000000000000000000000002',1,1);
+                 INSERT INTO peer_bindings(peer_id,binding_revision,launch_id,terminal_id,harness,conversation_id,process_id,process_creation_filetime,live,bound_at_millis) VALUES ('p_00000000000000000000000000000002',1,'l_00000000000000000000000000000002','recipient-terminal','codex','recipient-conversation',2,2,1,1);
+                 INSERT INTO groups(group_id,authority_id,policy_revision,next_sequence,label,paused,created_at_millis) VALUES ('g_00000000000000000000000000000001','a_00112233445566778899aabbccddeeff',1,2,'migrated',0,1);
+                 INSERT INTO group_memberships(group_id,peer_id,added_policy_revision) VALUES ('g_00000000000000000000000000000001','p_00000000000000000000000000000001',1);
+                 INSERT INTO group_memberships(group_id,peer_id,added_policy_revision) VALUES ('g_00000000000000000000000000000001','p_00000000000000000000000000000002',1);
+                 COMMIT;",
+            )
+            .unwrap();
+        let preserved_body = "preserve \"quoted\"\n\u{0001}";
+        connection
+            .execute(
+                "INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,committed_at_millis) VALUES ('m_00000000000000000000000000000001','g_00000000000000000000000000000001',1,'p_00000000000000000000000000000001',1,'migration-key','{}',?1,1)",
+                [preserved_body],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO recipient_deliveries(message_id,recipient_peer_id,recipient_binding_revision,saved_at_millis,fetched_generation,fetched_at_millis,acknowledged_generation,acknowledged_at_millis) VALUES ('m_00000000000000000000000000000001','p_00000000000000000000000000000002',1,1,1,2,1,3);
+                 INSERT INTO acknowledgements(message_id,recipient_peer_id,binding_revision,generation,fetched_at_millis,acknowledged_at_millis) VALUES ('m_00000000000000000000000000000001','p_00000000000000000000000000000002',1,1,2,3);",
+            )
+            .unwrap();
+        connection
             .pragma_update(None, "application_id", APPLICATION_ID)
             .unwrap();
         connection.pragma_update(None, "user_version", 1).unwrap();
@@ -367,7 +436,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            2
+            SCHEMA_VERSION
         );
         assert_eq!(
             connection
@@ -396,6 +465,46 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT body FROM messages WHERE message_id='m_00000000000000000000000000000001'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            preserved_body
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT delivery_generation FROM recipient_deliveries WHERE message_id='m_00000000000000000000000000000001'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT generation,acknowledged FROM recipient_ack_order WHERE message_id='m_00000000000000000000000000000001'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+                )
+                .unwrap(),
+            (1, true)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT fetched_at_millis,acknowledged_at_millis FROM acknowledgements WHERE message_id='m_00000000000000000000000000000001'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            (2, 3)
         );
     }
 }

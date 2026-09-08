@@ -306,11 +306,18 @@ fn group_authorization_pause_removal_and_reply_access_are_transactional() {
     let carol = store
         .enroll_peer(&owner, binding("auth-carol", true))
         .unwrap();
+    let dave = store
+        .enroll_peer(&owner, binding("auth-dave", true))
+        .unwrap();
     let group_one = store
         .create_group(
             &owner,
             "one",
-            members(&[&alice.record.peer_id, &bob.record.peer_id]),
+            members(&[
+                &alice.record.peer_id,
+                &bob.record.peer_id,
+                &dave.record.peer_id,
+            ]),
         )
         .unwrap();
     let group_two = store
@@ -334,7 +341,7 @@ fn group_authorization_pause_removal_and_reply_access_are_transactional() {
             send(
                 &group_one.group_id,
                 "original",
-                &[&alice.record.peer_id, &bob.record.peer_id],
+                &[&bob.record.peer_id, &dave.record.peer_id],
                 "hello",
             ),
         )
@@ -454,12 +461,7 @@ fn snapshot_pages_are_bounded_frozen_and_reads_only_record_fetched() {
     store
         .send_message(
             &alice.principal,
-            send(
-                &group.group_id,
-                "three",
-                &[&alice.record.peer_id, &bob.record.peer_id],
-                "three",
-            ),
+            send(&group.group_id, "three", &[&bob.record.peer_id], "three"),
         )
         .unwrap();
 
@@ -812,17 +814,25 @@ fn acknowledgements_are_explicit_recipient_specific_and_out_of_order_safe() {
             send(&group.group_id, "gap", &[&carol.record.peer_id], "gap"),
         )
         .unwrap();
-    let three = store
-        .send_message(
+    assert!(matches!(
+        store.send_message(
             &alice.principal,
             send(
                 &group.group_id,
-                "three",
+                "self-recipient",
                 &[&alice.record.peer_id, &bob.record.peer_id],
-                "three",
-            ),
+                "must reject atomically",
+            )
+        ),
+        Err(StoreError::Unauthorized { .. })
+    ));
+    let three = store
+        .send_message(
+            &alice.principal,
+            send(&group.group_id, "three", &[&bob.record.peer_id], "three"),
         )
         .unwrap();
+    assert_eq!(three.group_sequence, 3);
 
     let later = store
         .acknowledge_message(&bob.principal, &group.group_id, &three.message_id)
@@ -841,6 +851,18 @@ fn acknowledgements_are_explicit_recipient_specific_and_out_of_order_safe() {
         .unwrap();
     assert_eq!(earlier.contiguous_group_sequence, 3);
     assert_eq!(earlier.generation, Revision::new(1).unwrap());
+
+    let four = store
+        .send_message(
+            &bob.principal,
+            send(&group.group_id, "four", &[&alice.record.peer_id], "four"),
+        )
+        .unwrap();
+    assert_eq!(four.group_sequence, 4);
+    let alice_ack = store
+        .acknowledge_message(&alice.principal, &group.group_id, &four.message_id)
+        .unwrap();
+    assert_eq!(alice_ack.contiguous_group_sequence, 4);
 }
 
 #[test]
