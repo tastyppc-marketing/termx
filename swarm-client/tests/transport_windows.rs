@@ -93,7 +93,10 @@ async fn wrong_server_identity_sends_zero_application_bytes() {
         termx_swarm_client::DecimalU64::new(wrong.creation_filetime.get() + 1);
     let accepting = tokio::spawn(async move { server.accept().await });
     tokio::task::yield_now().await;
-    assert!(VerifiedPipe::connect(&name, wrong).await.is_err());
+    assert!(matches!(
+        VerifiedPipe::connect(&name, wrong).await,
+        Err(WireError::ServerIdentityMismatch)
+    ));
     let accepted = accepting.await.unwrap().unwrap();
     assert!(matches!(
         tokio::time::timeout(std::time::Duration::from_secs(2), accepted.recv_bytes())
@@ -101,9 +104,32 @@ async fn wrong_server_identity_sends_zero_application_bytes() {
             .unwrap(),
         Err(WireError::Disconnected)
     ));
+
+    let name2 = pipe("wrong-pid");
+    let mut server2 = PipeServer::bind(&name2, FrameBudget::new(1024)).unwrap();
+    let actual = server2.identity();
+    let wrong_pid = if actual.pid == u32::MAX {
+        actual.pid - 1
+    } else {
+        actual.pid + 1
+    };
+    let wrong_process = ProcessIdentity::new(wrong_pid, actual.creation_filetime.get());
+    let accepting2 = tokio::spawn(async move { server2.accept().await });
+    tokio::task::yield_now().await;
+    assert!(matches!(
+        VerifiedPipe::connect(&name2, wrong_process).await,
+        Err(WireError::ServerIdentityMismatch)
+    ));
+    let accepted2 = accepting2.await.unwrap().unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), accepted2.recv_bytes())
+            .await
+            .unwrap(),
+        Err(WireError::Disconnected)
+    ));
     std::fs::write(
         evidence.join("result.json"),
-        br#"{"native_identity_rejected":true,"application_frames_received":0}"#,
+        br#"{"wrong_creation_rejected_as_server_identity_mismatch":true,"wrong_pid_rejected_as_server_identity_mismatch":true,"application_frames_received":0}"#,
     )
     .unwrap();
 }

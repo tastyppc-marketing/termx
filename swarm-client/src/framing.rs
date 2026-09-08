@@ -28,6 +28,10 @@ pub enum WireError {
     ConnectionPoisoned,
     #[error("accepted client identity is unavailable")]
     ClientIdentityUnavailable,
+    #[error("named-pipe server identity does not match the expected process generation")]
+    ServerIdentityMismatch,
+    #[error("named-pipe server identity could not be verified")]
+    ServerIdentityUnavailable,
     #[error("operation is invalid for this pipe endpoint")]
     WrongEndpoint,
     #[error("acceptor replacement is temporarily unavailable")]
@@ -107,6 +111,11 @@ pub(crate) fn decode_body<T: WireMessage>(body: &[u8]) -> Result<T, WireError> {
 }
 
 #[derive(Clone)]
+/// Aggregate admission for retained frame bytes and accepted connections.
+///
+/// Server consumers must size and own this budget for their expected load. On
+/// receive, a capacity error after the length prefix is connection-fatal; it is
+/// neither an application rollback signal nor permission to resend a request.
 pub struct FrameBudget {
     state: Arc<Mutex<BudgetState>>,
     byte_limit: usize,

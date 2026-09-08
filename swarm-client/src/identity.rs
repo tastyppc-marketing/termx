@@ -35,7 +35,7 @@ pub enum AncestryError {
     Unavailable,
 }
 pub fn resolve_enrolled_ancestor(
-    start: u32,
+    start: ProcessIdentity,
     rows: &[ProcessSnapshot],
     enrolled: &[ProcessIdentity],
     max_depth: usize,
@@ -46,12 +46,12 @@ pub fn resolve_enrolled_ancestor(
             return Err(AncestryError::Unavailable);
         }
     }
-    if !map.contains_key(&start) {
+    if map.get(&start.pid).is_none_or(|row| row.identity != start) {
         return Err(AncestryError::Unavailable);
     }
     let expected: HashSet<_> = enrolled.iter().copied().collect();
     let mut found = None;
-    let mut pid = start;
+    let mut pid = start.pid;
     let mut seen = HashSet::new();
     for _ in 0..max_depth {
         if !seen.insert(pid) {
@@ -80,7 +80,7 @@ pub fn resolve_enrolled_ancestor(
 
 #[cfg(windows)]
 pub fn resolve_verified_enrolled_ancestor(
-    start: u32,
+    start: ProcessIdentity,
     enrolled: &[ProcessIdentity],
     max_depth: usize,
 ) -> Result<VerifiedProcess, AncestryError> {
@@ -94,6 +94,14 @@ pub fn resolve_verified_enrolled_ancestor(
             TH32CS_SNAPPROCESS,
         },
     };
+
+    let start_process = VerifiedProcess::verify(start).map_err(|_| AncestryError::Unavailable)?;
+    if !start_process
+        .is_alive()
+        .map_err(|_| AncestryError::Unavailable)?
+    {
+        return Err(AncestryError::Unavailable);
+    }
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
@@ -126,42 +134,52 @@ pub fn resolve_verified_enrolled_ancestor(
     }
     unsafe { CloseHandle(snapshot) };
 
-    if !parents.contains_key(&start) {
+    if !parents.contains_key(&start.pid)
+        || !start_process
+            .is_alive()
+            .map_err(|_| AncestryError::Unavailable)?
+    {
         return Err(AncestryError::Unavailable);
     }
 
     let expected: HashSet<_> = enrolled.iter().copied().collect();
     let mut found = None;
     let mut previous_creation = None;
-    let mut handles = Vec::new();
-    let mut pid = start;
+    let mut handles = vec![start_process];
+    let mut pid = start.pid;
     let mut seen = HashSet::new();
     for _ in 0..max_depth {
         if !seen.insert(pid) {
             return Err(AncestryError::Cycle);
         }
-        let process = match VerifiedProcess::open(pid) {
-            Ok(process) => process,
-            Err(ProcessError::Gone) if pid != start => return finish_verified(found, &mut handles),
-            Err(_) => return Err(AncestryError::Unavailable),
+        let handle_index = if pid == start.pid {
+            0
+        } else {
+            let process = match VerifiedProcess::open(pid) {
+                Ok(process) => process,
+                Err(ProcessError::Gone) => return finish_verified(start, found, &mut handles),
+                Err(_) => return Err(AncestryError::Unavailable),
+            };
+            handles.push(process);
+            handles.len() - 1
         };
+        let process = &handles[handle_index];
         if !process.is_alive().map_err(|_| AncestryError::Unavailable)? {
             return Err(AncestryError::Unavailable);
         }
         if previous_creation.is_some_and(|child| process.identity().creation_filetime > child) {
-            return finish_verified(found, &mut handles);
+            return finish_verified(start, found, &mut handles);
         }
-        if expected.contains(&process.identity()) && found.replace(handles.len()).is_some() {
+        if expected.contains(&process.identity()) && found.replace(handle_index).is_some() {
             return Err(AncestryError::Ambiguous);
         }
         let parent_pid = *parents.get(&pid).ok_or(AncestryError::Unavailable)?;
         previous_creation = Some(process.identity().creation_filetime);
-        handles.push(process);
         if parent_pid == 0 {
-            return finish_verified(found, &mut handles);
+            return finish_verified(start, found, &mut handles);
         }
         if !parents.contains_key(&parent_pid) {
-            return finish_verified(found, &mut handles);
+            return finish_verified(start, found, &mut handles);
         }
         pid = parent_pid;
     }
@@ -170,9 +188,17 @@ pub fn resolve_verified_enrolled_ancestor(
 
 #[cfg(windows)]
 fn finish_verified(
+    start: ProcessIdentity,
     found: Option<usize>,
     handles: &mut Vec<VerifiedProcess>,
 ) -> Result<VerifiedProcess, AncestryError> {
+    if handles.first().map(VerifiedProcess::identity) != Some(start)
+        || !handles[0]
+            .is_alive()
+            .map_err(|_| AncestryError::Unavailable)?
+    {
+        return Err(AncestryError::Unavailable);
+    }
     let index = found.ok_or(AncestryError::NotFound)?;
     let process = handles.swap_remove(index);
     if process.is_alive().map_err(|_| AncestryError::Unavailable)? {

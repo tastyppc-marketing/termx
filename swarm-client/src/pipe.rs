@@ -489,15 +489,23 @@ impl VerifiedPipe {
                 return Err(error);
             }
             let mut pid = 0;
-            if GetNamedPipeServerProcessId(handle, &mut pid) == 0 || pid != expected.pid {
+            if GetNamedPipeServerProcessId(handle, &mut pid) == 0 {
                 CloseHandle(handle);
                 return Err(WireError::Io);
             }
+            if pid != expected.pid {
+                CloseHandle(handle);
+                return Err(WireError::ServerIdentityMismatch);
+            }
             let server = match VerifiedProcess::verify(expected) {
                 Ok(server) if server.is_alive().unwrap_or(false) => server,
+                Err(crate::ProcessError::Stale) => {
+                    CloseHandle(handle);
+                    return Err(WireError::ServerIdentityMismatch);
+                }
                 _ => {
                     CloseHandle(handle);
-                    return Err(WireError::Io);
+                    return Err(WireError::ServerIdentityUnavailable);
                 }
             };
             let client = match NamedPipeClient::from_raw_handle(handle as RawHandle) {
@@ -565,6 +573,10 @@ impl VerifiedPipe {
         self.send_bytes(&encode_message_body(response)?).await
     }
 
+    /// Receives one length-prefixed frame while retaining its byte credit.
+    ///
+    /// `Capacity` and `FrameTooLarge` occur after the prefix has been consumed,
+    /// so they poison this connection. They do not imply application rollback.
     pub async fn recv_bytes(&self) -> Result<ReceivedFrame, WireError> {
         if self.state.is_poisoned() {
             return Err(WireError::ConnectionPoisoned);
@@ -619,6 +631,12 @@ impl VerifiedPipe {
         }
     }
 
+    /// Authenticates an owner after the versioned typed boot hello.
+    ///
+    /// The credential and acceptance frames form a strict private raw-JSON
+    /// transport phase; they are not RPC `RequestEnvelope`/`ResponseEnvelope`
+    /// messages. Either side may use the timeout variant to override the
+    /// default bounded handshake deadline.
     pub async fn authenticate_owner(
         &self,
         boot_id: &str,

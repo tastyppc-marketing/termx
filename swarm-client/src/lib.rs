@@ -49,6 +49,8 @@ pub struct PeerClient {
 }
 #[cfg(windows)]
 impl OwnerClient {
+    /// Connects, verifies the server generation, completes the versioned boot
+    /// hello, and waits for the strict private owner-auth acceptance frame.
     pub async fn connect(
         discovery: &DiscoveryRecord,
         credential: &OwnerCredential,

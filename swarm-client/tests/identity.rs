@@ -10,12 +10,17 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
         parent_pid: parent,
     };
     assert!(matches!(
-        resolve_enrolled_ancestor(3, &[p(3, 2, 30), p(2, 3, 20)], &[p(2, 1, 20).identity], 32),
+        resolve_enrolled_ancestor(
+            p(3, 2, 30).identity,
+            &[p(3, 2, 30), p(2, 3, 20)],
+            &[p(2, 1, 20).identity],
+            32,
+        ),
         Err(AncestryError::Cycle)
     ));
     assert!(matches!(
         resolve_enrolled_ancestor(
-            3,
+            p(3, 2, 30).identity,
             &[p(3, 2, 30), p(2, 1, 20), p(1, 0, 10)],
             &[p(2, 1, 20).identity, p(1, 0, 10).identity],
             32
@@ -24,7 +29,7 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
     ));
     assert!(matches!(
         resolve_enrolled_ancestor(
-            3,
+            p(3, 2, 30).identity,
             &[p(3, 2, 30), p(2, 1, 20), p(1, 0, 10)],
             &[ProcessIdentity::new(2, 21)],
             32
@@ -32,12 +37,17 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
         Err(AncestryError::NotFound)
     ));
     assert!(matches!(
-        resolve_enrolled_ancestor(3, &[p(3, 2, 20), p(2, 0, 30)], &[p(2, 0, 30).identity], 32),
+        resolve_enrolled_ancestor(
+            p(3, 2, 20).identity,
+            &[p(3, 2, 20), p(2, 0, 30)],
+            &[p(2, 0, 30).identity],
+            32,
+        ),
         Err(AncestryError::NotFound)
     ));
     assert!(matches!(
         resolve_enrolled_ancestor(
-            3,
+            p(3, 2, 30).identity,
             &[p(3, 2, 30), p(2, 0, 20), p(2, 0, 21)],
             &[p(2, 0, 20).identity],
             32
@@ -46,7 +56,7 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
     ));
     assert_eq!(
         resolve_enrolled_ancestor(
-            3,
+            p(3, 2, 30).identity,
             &[p(3, 2, 30), p(2, 1, 20), p(1, 0, 10)],
             &[p(2, 1, 20).identity],
             32
@@ -61,7 +71,7 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
     // boundary preserves one already verified enrolled runtime below it.
     assert_eq!(
         resolve_enrolled_ancestor(
-            3,
+            p(3, 2, 30).identity,
             &[p(3, 2, 30), p(2, 99, 20)],
             &[p(2, 99, 20).identity],
             32,
@@ -72,7 +82,7 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
     );
     assert_eq!(
         resolve_enrolled_ancestor(
-            3,
+            p(3, 2, 30).identity,
             &[p(3, 2, 30), p(2, 1, 20), p(1, 0, 40)],
             &[p(2, 1, 20).identity],
             32,
@@ -82,17 +92,31 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
         2
     );
     assert!(matches!(
-        resolve_enrolled_ancestor(99, &[p(3, 0, 30)], &[p(3, 0, 30).identity], 32),
+        resolve_enrolled_ancestor(
+            ProcessIdentity::new(99, 30),
+            &[p(3, 0, 30)],
+            &[p(3, 0, 30).identity],
+            32,
+        ),
         Err(AncestryError::Unavailable)
     ));
     assert!(matches!(
         resolve_enrolled_ancestor(
-            3,
+            p(3, 2, 30).identity,
             &[p(3, 2, 30), p(2, 1, 20), p(1, 0, 10)],
             &[p(2, 1, 20).identity],
             1,
         ),
         Err(AncestryError::Depth)
+    ));
+    assert!(matches!(
+        resolve_enrolled_ancestor(
+            ProcessIdentity::new(3, 31),
+            &[p(3, 0, 30)],
+            &[p(3, 0, 30).identity],
+            32,
+        ),
+        Err(AncestryError::Unavailable)
     ));
 }
 
@@ -120,7 +144,7 @@ fn native_ancestry_resolves_owned_child_to_one_enrolled_parent() {
         .unwrap()
         .identity();
     let resolved =
-        resolve_verified_enrolled_ancestor(child_identity.pid, &[parent_identity], 64).unwrap();
+        resolve_verified_enrolled_ancestor(child_identity, &[parent_identity], 64).unwrap();
     assert_eq!(resolved.identity(), parent_identity);
     assert!(resolved.is_alive().unwrap());
     let status = child.wait().unwrap();
@@ -158,6 +182,61 @@ fn native_ancestry_child() {
     if std::env::var_os("TERMX_SWARM_ANCESTRY_CHILD").is_some() {
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
+    if std::env::var_os("TERMX_SWARM_ANCESTRY_EXIT_CHILD").is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn native_ancestry_rejects_wrong_or_exited_start_generation() {
+    let retained_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../retired/test-artifacts/swarm-client")
+        .join(format!(
+            "native-ancestry-start-fence-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    std::fs::create_dir_all(&retained_dir).unwrap();
+
+    let current = VerifiedProcess::open(std::process::id())
+        .unwrap()
+        .identity();
+    let wrong_generation = ProcessIdentity::new(current.pid, current.creation_filetime.get() + 1);
+    assert!(matches!(
+        resolve_verified_enrolled_ancestor(wrong_generation, &[current], 64),
+        Err(AncestryError::Unavailable)
+    ));
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "native_ancestry_child", "--nocapture"])
+        .env("TERMX_SWARM_ANCESTRY_EXIT_CHILD", "1")
+        .spawn()
+        .unwrap();
+    let retained = VerifiedProcess::open(child.id()).unwrap();
+    let child_identity = retained.identity();
+    let status = child.wait().unwrap();
+    assert!(!retained.is_alive().unwrap());
+    assert!(matches!(
+        resolve_verified_enrolled_ancestor(child_identity, &[current], 64),
+        Err(AncestryError::Unavailable)
+    ));
+    std::fs::write(
+        retained_dir.join("result.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "live_pid_wrong_creation_rejected": true,
+            "live_process": current,
+            "wrong_generation": wrong_generation,
+            "exited_child": child_identity,
+            "child_native_exit": status.code(),
+            "exited_child_rejected": true,
+            "pid_reuse_forced_or_claimed": false,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(status.success());
 }
 
 #[test]
@@ -217,11 +296,8 @@ fn native_ancestry_rejects_multiple_exact_enrolled_ancestors() {
     let parent_identity = VerifiedProcess::open(std::process::id())
         .unwrap()
         .identity();
-    match resolve_verified_enrolled_ancestor(
-        child_identity.pid,
-        &[child_identity, parent_identity],
-        64,
-    ) {
+    match resolve_verified_enrolled_ancestor(child_identity, &[child_identity, parent_identity], 64)
+    {
         Err(AncestryError::Ambiguous) => {}
         Err(other) => panic!("unexpected ancestry error: {other:?}"),
         Ok(_) => panic!("multiple enrolled ancestors were accepted"),
