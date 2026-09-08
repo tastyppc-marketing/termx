@@ -150,3 +150,62 @@ test('notify sends a notification envelope', () => {
   client.notify('progress', {percent: 50});
   assert.deepEqual(sent, [{method: 'progress', params: {percent: 50}}]);
 });
+
+test('receive ignores every envelope after disconnect', async () => {
+  let handled = 0;
+  const {client, closeCount} = fixture({
+    onRequest() { handled += 1; },
+  });
+  client.disconnect();
+
+  assert.doesNotThrow(() => client.receive({id: 1, method: 'sideEffect'}));
+  assert.doesNotThrow(() => client.receive({method: 'lateEvent'}));
+  assert.doesNotThrow(() => client.receive({id: 2, result: 'lateResult'}));
+  assert.doesNotThrow(() => client.receive({bad: true}));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(handled, 0);
+  assert.equal(closeCount(), 0);
+});
+
+test('a queued server request does not invoke its handler after disconnect', async () => {
+  let handled = 0;
+  const {client, sent} = fixture({
+    onRequest() { handled += 1; return 'done'; },
+  });
+
+  client.receive({id: 7, method: 'sideEffect'});
+  client.disconnect();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(handled, 0);
+  assert.deepEqual(sent, []);
+});
+
+test('an undefined handler result is a JSON-valid correlated null result', async () => {
+  const wire = [];
+  const client = new RpcClient({
+    send(message) { wire.push(JSON.stringify(message)); },
+    close() {},
+    onRequest() {},
+  });
+
+  client.receive({id: 'void', method: 'complete'});
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(JSON.parse(wire[0]), {id: 'void', result: null});
+});
+
+test('request rejects invalid per-call timeout values', () => {
+  const {client} = fixture();
+  for (const timeoutMs of [-1, Number.NaN, '5']) {
+    assert.throws(() => client.request('work', {}, {timeoutMs}), /timeoutMs/);
+  }
+});
+
+test('nextEvent rejects invalid per-call timeout values', () => {
+  const {client} = fixture();
+  for (const timeoutMs of [-1, Number.NaN, '5']) {
+    assert.throws(() => client.nextEvent(() => true, {timeoutMs}), /timeoutMs/);
+  }
+});

@@ -22,6 +22,12 @@ function validId(id) {
   return typeof id === 'string' || (typeof id === 'number' && Number.isFinite(id));
 }
 
+function validateTimeout(timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new RangeError('timeoutMs must be a non-negative finite number');
+  }
+}
+
 export class RpcClient {
   #send;
   #closeTransport;
@@ -39,7 +45,7 @@ export class RpcClient {
     if (typeof send !== 'function' || typeof close !== 'function') {
       throw new TypeError('send and close must be functions');
     }
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new RangeError('timeoutMs must be non-negative');
+    validateTimeout(timeoutMs);
     if (!Number.isInteger(maxEvents) || maxEvents < 0) throw new RangeError('maxEvents must be a non-negative integer');
     if (onRequest !== undefined && typeof onRequest !== 'function') throw new TypeError('onRequest must be a function');
     this.#send = send;
@@ -50,6 +56,7 @@ export class RpcClient {
   }
 
   request(method, params, {timeoutMs = this.#timeoutMs} = {}) {
+    validateTimeout(timeoutMs);
     if (this.#disconnected) return Promise.reject(this.#disconnected);
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
@@ -74,6 +81,7 @@ export class RpcClient {
   }
 
   nextEvent(predicate, {timeoutMs = this.#timeoutMs} = {}) {
+    validateTimeout(timeoutMs);
     if (typeof predicate !== 'function') return Promise.reject(new TypeError('predicate must be a function'));
     if (this.#disconnected) return Promise.reject(this.#disconnected);
 
@@ -98,6 +106,7 @@ export class RpcClient {
   }
 
   receive(message) {
+    if (this.#disconnected) return;
     try {
       if (!message || typeof message !== 'object' || Array.isArray(message)) return this.#failClosed();
       const hasId = Object.hasOwn(message, 'id');
@@ -180,9 +189,12 @@ export class RpcClient {
       return;
     }
     Promise.resolve()
-      .then(() => handler(message.method, message.params))
+      .then(() => {
+        if (this.#disconnected) return undefined;
+        return handler(message.method, message.params);
+      })
       .then(
-        result => this.#sendIfConnected({id: message.id, result}),
+        result => this.#sendIfConnected({id: message.id, result: result === undefined ? null : result}),
         reason => this.#sendIfConnected({id: message.id, error: serializedError(reason)}),
       );
   }
