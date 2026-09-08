@@ -72,7 +72,7 @@ impl Store {
             .connection
             .query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         let table_count = self.connection.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*'",
             [],
             |row| row.get::<_, u32>(0),
         )?;
@@ -101,7 +101,7 @@ fn inspect_existing_identity(path: &Path) -> Result<schema::DatabaseIdentity, St
     let application_id = pragma_i64(&connection, "application_id")?;
     let schema_version = pragma_i64(&connection, "user_version")?;
     let object_count: i64 = connection.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+        "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
         [],
         |row| row.get(0),
     )?;

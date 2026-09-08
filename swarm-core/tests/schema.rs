@@ -238,6 +238,67 @@ fn counterfeit_current_schema_is_rejected_without_mutation() {
     assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
 }
 
+fn assert_extra_schema_object_is_rejected(test_name: &str, sql: &str) {
+    let path = support::retained_db(test_name);
+    drop(Store::open(&path).expect("initialize valid current schema"));
+    let connection = Connection::open(&path).expect("open fixture directly");
+    connection
+        .execute_batch(sql)
+        .expect("add extra schema object");
+    connection
+        .pragma_update(None, "journal_mode", "DELETE")
+        .expect("checkpoint fixture and remove WAL sidecars");
+    drop(connection);
+    let before = fs::read(&path).expect("read before");
+    assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::UnrecognizedDatabase { .. })
+    ));
+    assert_eq!(fs::read(&path).expect("read after"), before);
+    assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+}
+
+#[test]
+fn current_schema_with_extra_trigger_is_rejected_without_mutation() {
+    assert_extra_schema_object_is_rejected(
+        "extra-trigger",
+        "CREATE TRIGGER discard_new_groups BEFORE INSERT ON groups BEGIN SELECT RAISE(IGNORE); END;",
+    );
+}
+
+#[test]
+fn current_schema_with_extra_view_is_rejected_without_mutation() {
+    assert_extra_schema_object_is_rejected(
+        "extra-view",
+        "CREATE VIEW exposed_messages AS SELECT body FROM messages;",
+    );
+}
+
+#[test]
+fn sqlite_lookalike_user_table_is_not_hidden_as_internal() {
+    let path = support::retained_db("sqlite-lookalike-user-table");
+    let connection = Connection::open(&path).expect("create unrelated database");
+    connection
+        .execute_batch(
+            "CREATE TABLE sqliteXuser(value TEXT); INSERT INTO sqliteXuser VALUES ('keep');",
+        )
+        .expect("seed lookalike user table");
+    drop(connection);
+    let before = fs::read(&path).expect("read before");
+
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::UnrecognizedDatabase { .. })
+    ));
+    assert_eq!(fs::read(&path).expect("read after"), before);
+    assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+}
+
 #[test]
 fn schema_enforces_binding_and_delivery_invariants_in_sqlite() {
     let path = support::retained_db("sql-invariants");

@@ -85,7 +85,7 @@ pub(super) fn validate_current_schema(
 fn schema_manifest(connection: &Connection) -> Result<Vec<(String, String, String)>, StoreError> {
     let mut statement = connection.prepare(
         "SELECT type, name, sql FROM sqlite_schema \
-         WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index') \
+         WHERE name NOT GLOB 'sqlite_*' AND sql IS NOT NULL \
          ORDER BY type, name",
     )?;
     let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
