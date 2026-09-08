@@ -24,11 +24,6 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         authorize_peer(&transaction, &authority_id, principal, &request.group_id)?;
-        if request.recipients.contains(&principal.peer_id) {
-            return Err(StoreError::Unauthorized {
-                reason: "sender cannot be a message recipient",
-            });
-        }
         let frozen_recipients =
             authorize_recipients(&transaction, &request.group_id, request.recipients.iter())?;
 
@@ -48,6 +43,11 @@ impl Store {
             return Ok(receipt);
         }
 
+        if request.recipients.contains(&principal.peer_id) {
+            return Err(StoreError::Unauthorized {
+                reason: "sender cannot be a message recipient",
+            });
+        }
         validate_reply(&transaction, principal, &request)?;
         let group_sequence = transaction.query_row(
             "SELECT next_sequence FROM groups WHERE group_id=?1",

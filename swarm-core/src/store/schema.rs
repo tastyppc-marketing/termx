@@ -334,7 +334,46 @@ WHERE m.sender_peer_id <> d.recipient_peer_id;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rusqlite::params;
+
+    use crate::model::{
+        FrozenRecipient, GroupId, MessageCommitOutcome, MessageId, PeerId, Revision,
+        SendMessageRequest, SendReceipt, VerifiedBinding,
+    };
+
     use super::*;
+
+    fn retained_path(name: &str) -> std::path::PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("retired")
+            .join("test-artifacts")
+            .join("swarm-core")
+            .join(format!("{name}-{timestamp}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join("swarm.sqlite")
+    }
+
+    fn migrated_binding(name: &str, launch_id: &str, process_id: u32) -> VerifiedBinding {
+        VerifiedBinding::trusted(
+            launch_id.to_owned(),
+            format!("{name}-terminal"),
+            "codex".to_owned(),
+            format!("{name}-conversation"),
+            None,
+            process_id,
+            u64::from(process_id),
+            true,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn failure_after_authority_and_version_updates_rolls_back_entire_migration() {
@@ -505,6 +544,183 @@ mod tests {
                 )
                 .unwrap(),
             (2, 3)
+        );
+    }
+
+    #[test]
+    fn migrated_v2_self_delivery_retry_preserves_receipt_without_reopening_ack_gap() {
+        let path = retained_path("v2-self-retry");
+        let authority_id = "a_00112233445566778899aabbccddeeff";
+        let group_id = GroupId::parse("g_00000000000000000000000000000001").unwrap();
+        let alice_id = PeerId::parse("p_00000000000000000000000000000001").unwrap();
+        let legacy_message_id = MessageId::parse("m_00000000000000000000000000000001").unwrap();
+        let legacy_request = SendMessageRequest {
+            group_id: group_id.clone(),
+            client_key: "legacy-self".to_owned(),
+            recipients: BTreeSet::from([alice_id.clone()]),
+            body: "accepted by schema v2".to_owned(),
+            topic: Some("preserved".to_owned()),
+            reply_to: None,
+        };
+        let canonical_payload =
+            String::from_utf8(legacy_request.canonical_json().unwrap()).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection.execute_batch(MIGRATION_V2).unwrap();
+        connection
+            .execute(
+                "INSERT INTO authority_metadata(singleton,authority_id,created_at_millis) VALUES (1,?1,1)",
+                [authority_id],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "BEGIN;
+                 INSERT INTO peers(peer_id,current_binding_revision,created_at_millis) VALUES ('p_00000000000000000000000000000001',1,1);
+                 INSERT INTO peer_bindings(peer_id,binding_revision,launch_id,terminal_id,harness,conversation_id,process_id,process_creation_filetime,live,bound_at_millis) VALUES ('p_00000000000000000000000000000001',1,'l_00000000000000000000000000000001','alice-terminal','codex','alice-conversation',1,1,1,1);
+                 INSERT INTO peers(peer_id,current_binding_revision,created_at_millis) VALUES ('p_00000000000000000000000000000002',1,1);
+                 INSERT INTO peer_bindings(peer_id,binding_revision,launch_id,terminal_id,harness,conversation_id,process_id,process_creation_filetime,live,bound_at_millis) VALUES ('p_00000000000000000000000000000002',1,'l_00000000000000000000000000000002','bob-terminal','codex','bob-conversation',2,2,1,1);
+                 INSERT INTO groups(group_id,authority_id,policy_revision,next_sequence,label,paused,created_at_millis) VALUES ('g_00000000000000000000000000000001','a_00112233445566778899aabbccddeeff',1,2,'migrated-v2',0,1);
+                 INSERT INTO group_memberships(group_id,peer_id,added_policy_revision) VALUES ('g_00000000000000000000000000000001','p_00000000000000000000000000000001',1);
+                 INSERT INTO group_memberships(group_id,peer_id,added_policy_revision) VALUES ('g_00000000000000000000000000000001','p_00000000000000000000000000000002',1);
+                 COMMIT;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,topic,committed_at_millis) VALUES (?1,?2,1,?3,1,?4,?5,?6,?7,11)",
+                params![
+                    legacy_message_id.as_str(),
+                    group_id.as_str(),
+                    alice_id.as_str(),
+                    legacy_request.client_key,
+                    canonical_payload,
+                    legacy_request.body,
+                    legacy_request.topic,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO recipient_deliveries(message_id,recipient_peer_id,recipient_binding_revision,saved_at_millis,delivery_generation) VALUES (?1,?2,1,11,1)",
+                params![legacy_message_id.as_str(), alice_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        drop(connection);
+
+        let mut store = crate::store::Store::open(&path).unwrap();
+        let alice = store
+            .authenticate_peer(&migrated_binding(
+                "alice",
+                "l_00000000000000000000000000000001",
+                1,
+            ))
+            .unwrap();
+        let bob = store
+            .authenticate_peer(&migrated_binding(
+                "bob",
+                "l_00000000000000000000000000000002",
+                2,
+            ))
+            .unwrap();
+        let expected_receipt = SendReceipt {
+            message_id: legacy_message_id.clone(),
+            group_id: group_id.clone(),
+            group_sequence: 1,
+            sender_peer_id: alice_id.clone(),
+            sender_binding_revision: Revision::new(1).unwrap(),
+            recipients: vec![FrozenRecipient {
+                peer_id: alice_id.clone(),
+                binding_revision: Revision::new(1).unwrap(),
+                generation: Revision::new(1).unwrap(),
+            }],
+            committed_at_millis: 11,
+            outcome: MessageCommitOutcome::Saved,
+        };
+
+        assert_eq!(
+            store.send_message(&alice, legacy_request.clone()).unwrap(),
+            expected_receipt
+        );
+        let mut changed = legacy_request.clone();
+        changed.body = "changed retry".to_owned();
+        assert!(matches!(
+            store.send_message(&alice, changed),
+            Err(StoreError::IdempotencyConflict)
+        ));
+        let rejected_new_self = SendMessageRequest {
+            client_key: "new-self".to_owned(),
+            body: "must reject".to_owned(),
+            topic: None,
+            ..legacy_request.clone()
+        };
+        assert!(matches!(
+            store.send_message(&alice, rejected_new_self),
+            Err(StoreError::Unauthorized { .. })
+        ));
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT (SELECT count(*) FROM messages),(SELECT count(*) FROM recipient_deliveries),(SELECT next_sequence FROM groups WHERE group_id=?1)",
+                    [group_id.as_str()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                )
+                .unwrap(),
+            (1, 1, 2)
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM recipient_ack_order WHERE message_id=?1",
+                    [legacy_message_id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        let legitimate = store
+            .send_message(
+                &bob,
+                SendMessageRequest {
+                    group_id: group_id.clone(),
+                    client_key: "legitimate".to_owned(),
+                    recipients: BTreeSet::from([alice_id.clone()]),
+                    body: "acknowledge me".to_owned(),
+                    topic: None,
+                    reply_to: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(legitimate.group_sequence, 2);
+        let acknowledgement = store
+            .acknowledge_message(&alice, &group_id, &legitimate.message_id)
+            .unwrap();
+        assert_eq!(acknowledgement.contiguous_group_sequence, 2);
+        assert!(matches!(
+            store.acknowledge_message(&alice, &group_id, &legacy_message_id),
+            Err(StoreError::Unauthorized { .. })
+        ));
+        assert_eq!(
+            store.send_message(&alice, legacy_request).unwrap(),
+            expected_receipt
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT recipient_binding_revision,delivery_generation,saved_at_millis FROM recipient_deliveries WHERE message_id=?1 AND recipient_peer_id=?2",
+                    params![legacy_message_id.as_str(), alice_id.as_str()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                )
+                .unwrap(),
+            (1, 1, 11)
         );
     }
 }
