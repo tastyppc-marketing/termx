@@ -624,6 +624,11 @@ fn publication_validation_rejects_claimed_credits_without_owned_evidence() {
         fn reserved_bytes(&self) -> usize {
             self.0
         }
+        /// A bare integer owns no heap; its inline size is counted once by
+        /// the constructor.
+        fn owned_heap_bytes(&self) -> usize {
+            0
+        }
     }
     let destination = PublicationDestinationId::generate();
     assert!(matches!(

@@ -19,6 +19,7 @@
 //! resolver key, delivery evidence or ACK meaning.
 
 use std::fmt;
+use std::mem::size_of;
 
 use rand::{rngs::OsRng, RngCore};
 use serde::Serialize;
@@ -37,6 +38,11 @@ pub const MAX_PUBLICATION_RESERVATION_OVERHEAD_BYTES: usize = 64 * 1024;
 /// Largest destination reservation a single publication may own.
 pub const MAX_PUBLICATION_RESERVATION_BYTES: usize =
     MAX_PUBLICATION_BYTES + MAX_PUBLICATION_RESERVATION_OVERHEAD_BYTES;
+/// Largest total guard metadata (the guard's inline size plus everything its
+/// [`OwnedDestinationCredits::owned_heap_bytes`] reports) that a
+/// [`DestinationReservation`] accepts. A guard is bookkeeping for a
+/// reservation, not a buffer: anything larger is rejected at construction.
+pub const MAX_PUBLICATION_GUARD_METADATA_BYTES: usize = 64 * 1024;
 
 opaque_local_id!(PublicationResponseId, "pr_");
 opaque_local_id!(PublicationDestinationId, "dst_");
@@ -143,14 +149,44 @@ impl SourceSnapshotObservation {
 /// Counted, owned destination credits. Implemented by the consumer's own
 /// permit type; dropping the implementor must return exactly its bytes.
 /// The core never clones, splits or re-derives a guard.
+///
+/// Implementer contract (a trusted-adapter assertion, like
+/// `VerifiedSourceDescriptor::trusted`; the core cannot authenticate a
+/// dishonest implementation against the OS or the allocator):
+///
+/// - `reserved_bytes` is the exact destination byte reservation the guard
+///   holds and returns on drop.
+/// - `owned_heap_bytes` is a stable upper bound, fixed for the guard's whole
+///   lifetime, on every heap allocation the guard keeps alive beyond its own
+///   inline size: exclusively owned buffers at their capacity, plus a
+///   conservative share of any shared allocation (for example an `Arc`
+///   counter block). The inline size itself is counted once by
+///   [`DestinationReservation::from_owned`], so it must not be repeated
+///   here. The output body is counted separately by the publication and is
+///   never guard metadata. Zero is honest for a fixed-size guard that owns no
+///   heap.
+/// - Metadata is small and bounded (at most
+///   [`MAX_PUBLICATION_GUARD_METADATA_BYTES`] in total); a guard never retains
+///   source-I/O buffers, snapshots or copies of the response.
+/// - `Drop` is nonblocking and performs no source, native or SQLite I/O: it
+///   may run inside the writer thread while the store holds its connection.
+///
+/// The worker charges the guard's total metadata in request admission and in
+/// the retained-response reservation, so an undercount here is an admission
+/// hole exactly like a mis-reported body length.
 pub trait OwnedDestinationCredits: Send + fmt::Debug + 'static {
     fn reserved_bytes(&self) -> usize;
+    fn owned_heap_bytes(&self) -> usize;
 }
 
 /// One owned reservation on one opaque destination.
 pub struct DestinationReservation {
     destination_id: PublicationDestinationId,
     reserved_bytes: usize,
+    /// Cached at construction: the boxed guard's inline size plus its
+    /// reported owned heap. Charged by the worker in both accounting domains
+    /// for as long as the guard lives.
+    guard_metadata_bytes: usize,
     /// Held only for its `Drop`: releasing it is the credit return.
     _guard: Box<dyn OwnedDestinationCredits>,
 }
@@ -160,17 +196,22 @@ impl fmt::Debug for DestinationReservation {
         f.debug_struct("DestinationReservation")
             .field("destination_id", &self.destination_id)
             .field("reserved_bytes", &self.reserved_bytes)
+            .field("guard_metadata_bytes", &self.guard_metadata_bytes)
             .finish_non_exhaustive()
     }
 }
 
 impl DestinationReservation {
     /// Wraps an actually held guard. A zero-byte guard is not a reservation,
-    /// and a guard beyond the documented publication maximum is rejected; in
-    /// both cases the guard is dropped here and its bytes return to the owner.
-    pub fn from_owned(
+    /// a guard beyond the documented publication maximum is rejected, and a
+    /// guard whose total metadata (`size_of::<G>()` for the value placed in
+    /// the box plus `owned_heap_bytes()`) overflows or exceeds
+    /// [`MAX_PUBLICATION_GUARD_METADATA_BYTES`] is rejected. In every
+    /// rejection the guard is dropped here exactly once and its bytes return
+    /// to the owner. Zero extra heap is valid for a fixed-size guard.
+    pub fn from_owned<G: OwnedDestinationCredits>(
         destination_id: PublicationDestinationId,
-        guard: impl OwnedDestinationCredits,
+        guard: G,
     ) -> Result<Self, ValidationError> {
         let reserved_bytes = guard.reserved_bytes();
         if reserved_bytes == 0 {
@@ -184,9 +225,19 @@ impl DestinationReservation {
                 max: MAX_PUBLICATION_RESERVATION_BYTES,
             });
         }
+        // The inline value is charged once here (it moves into the box); the
+        // guard reports only what it retains beyond that.
+        let guard_metadata_bytes = size_of::<G>()
+            .checked_add(guard.owned_heap_bytes())
+            .filter(|total| *total <= MAX_PUBLICATION_GUARD_METADATA_BYTES)
+            .ok_or(ValidationError::TooLarge {
+                field: "guard_metadata_bytes",
+                max: MAX_PUBLICATION_GUARD_METADATA_BYTES,
+            })?;
         Ok(Self {
             destination_id,
             reserved_bytes,
+            guard_metadata_bytes,
             _guard: Box::new(guard),
         })
     }
@@ -197,6 +248,12 @@ impl DestinationReservation {
 
     pub fn reserved_bytes(&self) -> usize {
         self.reserved_bytes
+    }
+
+    /// Total guard metadata cached at construction and charged by the worker
+    /// while the guard lives: inline size plus reported owned heap.
+    pub fn guard_metadata_bytes(&self) -> usize {
+        self.guard_metadata_bytes
     }
 }
 
@@ -291,14 +348,18 @@ impl PreparedPublication {
     pub fn reserved_bytes(&self) -> usize {
         self.reservation.reserved_bytes
     }
+    pub fn guard_metadata_bytes(&self) -> usize {
+        self.reservation.guard_metadata_bytes
+    }
 
     /// Heap bytes carried through the worker: lease strings, observation
-    /// strings and the real body.
+    /// strings, the real body and the destination guard's cached metadata.
     pub(crate) fn estimated_bytes(&self) -> usize {
         self.lease
             .estimated_bytes()
             .saturating_add(self.observation.estimated_bytes())
             .saturating_add(self.body.len())
+            .saturating_add(self.reservation.guard_metadata_bytes)
     }
 
     pub(crate) fn into_parts(
@@ -463,6 +524,9 @@ impl CommittedPublication {
     pub fn reserved_bytes(&self) -> usize {
         self.reservation.reserved_bytes
     }
+    pub fn guard_metadata_bytes(&self) -> usize {
+        self.reservation.guard_metadata_bytes
+    }
 
     /// Attaches the committed buffer to the exact destination it was reserved
     /// for. A different destination (for example a reconnected output slot)
@@ -482,10 +546,14 @@ impl CommittedPublication {
         })
     }
 
+    /// Retained-response bytes: the body, the record's strings and the
+    /// destination guard's cached metadata, which stays charged until the
+    /// committed value or its send wrapper is dropped or finished.
     pub(crate) fn estimated_bytes(&self) -> usize {
         self.body
             .len()
             .saturating_add(self.record.estimated_bytes())
+            .saturating_add(self.reservation.guard_metadata_bytes)
     }
 }
 
@@ -528,6 +596,9 @@ impl PublicationSend {
     }
     pub fn reserved_bytes(&self) -> usize {
         self.reservation.reserved_bytes
+    }
+    pub fn guard_metadata_bytes(&self) -> usize {
+        self.reservation.guard_metadata_bytes
     }
 
     /// Ends the send: the buffer and the credit guard are dropped here, and

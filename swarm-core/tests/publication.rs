@@ -6,6 +6,9 @@ mod credits;
 mod support;
 
 use std::collections::BTreeSet;
+use std::mem::size_of;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use credits::TestBudget;
 use rusqlite::Connection;
@@ -308,6 +311,9 @@ fn prepare_enforces_body_bounds_and_actually_owned_reservation_coverage() {
     struct Hollow;
     impl OwnedDestinationCredits for Hollow {
         fn reserved_bytes(&self) -> usize {
+            0
+        }
+        fn owned_heap_bytes(&self) -> usize {
             0
         }
     }
@@ -874,4 +880,317 @@ async fn maximum_response_pressure_keeps_control_headroom_and_separates_the_two_
     assert_eq!(f.budget.usage(), 0);
     f.worker.shutdown().await.unwrap();
     assert_eq!(f.client.metrics().outcome_unknown, 0);
+}
+
+/// A fixed-size guard that retains no extra heap. Its whole footprint is its
+/// inline size, which the reservation constructor counts once.
+#[derive(Debug)]
+struct Fixed(usize);
+
+impl OwnedDestinationCredits for Fixed {
+    fn reserved_bytes(&self) -> usize {
+        self.0
+    }
+    fn owned_heap_bytes(&self) -> usize {
+        0
+    }
+}
+
+#[tokio::test]
+async fn guard_metadata_is_charged_in_request_admission_before_acceptance() {
+    // The request byte limit sits between the body-only estimate (about
+    // 4 KiB + lease/observation strings + 128 KiB) and the complete estimate
+    // that includes the guard's 60 KiB of retained heap: large requests admit
+    // against `max_request_bytes - 64 KiB` = 160 KiB.
+    const BODY: usize = 128 * 1024;
+    const METADATA: usize = 60 * 1024;
+    let f = WorkerFixture::new(
+        "publication-guard-admission",
+        WorkerConfig {
+            max_request_bytes: 224 * 1024,
+            ..Default::default()
+        },
+        1 << 20,
+    )
+    .await;
+    let destination = PublicationDestinationId::generate();
+
+    // Same body, a guard with no extra heap: admitted and committed.
+    let lease = f.lease().await;
+    let fixed = DestinationReservation::from_owned(destination.clone(), Fixed(BODY)).unwrap();
+    assert_eq!(fixed.guard_metadata_bytes(), size_of::<Fixed>());
+    let prepared = PreparedPublication::prepare(
+        lease.clone(),
+        Fixture::observe(&lease, 7),
+        vec![5; BODY],
+        fixed,
+    )
+    .unwrap();
+    assert_eq!(prepared.guard_metadata_bytes(), size_of::<Fixed>());
+    let pending = f
+        .client
+        .submit(Command::ValidateContextGrant(
+            f.alice.principal.clone(),
+            prepared,
+        ))
+        .unwrap_or_else(|error| panic!("body-only estimate must admit: {error}"));
+    let Response::CommittedPublication(committed) = pending.await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(committed.body().len(), BODY);
+    drop(committed);
+    let mut waited = 0;
+    while f.client.metrics().response_reserved_bytes != 0 {
+        tokio::task::yield_now().await;
+        waited += 1;
+        assert!(waited < 1_000);
+    }
+    assert_eq!(f.commitments(), 1);
+
+    // Same body, a guard that actually owns 60 KiB of metadata: the complete
+    // estimate crosses the limit, so admission rejects before any commit and
+    // both accounting domains are released.
+    let lease = f.lease().await;
+    let permit = f.budget.reserve_with_metadata(BODY, METADATA).unwrap();
+    let retained = permit.retained_heap_bytes();
+    assert!(retained >= METADATA);
+    let reservation = DestinationReservation::from_owned(destination.clone(), permit).unwrap();
+    assert_eq!(
+        reservation.guard_metadata_bytes(),
+        size_of::<credits::TestPermit>() + retained
+    );
+    let prepared = PreparedPublication::prepare(
+        lease.clone(),
+        Fixture::observe(&lease, 7),
+        vec![5; BODY],
+        reservation,
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.guard_metadata_bytes(),
+        size_of::<credits::TestPermit>() + retained
+    );
+    assert_eq!(f.budget.usage(), BODY);
+    let before = f.client.metrics();
+    let outcome = f.client.submit(Command::ValidateContextGrant(
+        f.alice.principal.clone(),
+        prepared,
+    ));
+    assert!(
+        matches!(outcome, Err(AdmissionError::RequestBytes)),
+        "guard metadata must be charged before acceptance"
+    );
+    let after = f.client.metrics();
+    assert_eq!(after.rejected, before.rejected + 1);
+    assert_eq!(after.accepted, before.accepted);
+    assert_eq!(after.request_bytes, before.request_bytes);
+    assert_eq!(
+        after.response_reserved_bytes,
+        before.response_reserved_bytes
+    );
+    assert_eq!(
+        f.budget.usage(),
+        0,
+        "rejected command dropped its destination credits"
+    );
+    assert_eq!(f.commitments(), 1, "no audit row for the rejected request");
+    f.worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn guard_metadata_remains_charged_through_committed_response_send_and_drop() {
+    const BODY: usize = 64 * 1024;
+    const METADATA: usize = 32 * 1024;
+    let f = WorkerFixture::new(
+        "publication-guard-retained",
+        WorkerConfig::default(),
+        1 << 20,
+    )
+    .await;
+    let destination = PublicationDestinationId::generate();
+    let lease = f.lease().await;
+    let permit = f.budget.reserve_with_metadata(BODY, METADATA).unwrap();
+    let retained = permit.retained_heap_bytes();
+    assert!(retained >= METADATA);
+    let reservation = DestinationReservation::from_owned(destination.clone(), permit).unwrap();
+    let prepared = PreparedPublication::prepare(
+        lease.clone(),
+        Fixture::observe(&lease, 7),
+        vec![6; BODY],
+        reservation,
+    )
+    .unwrap();
+    let Response::CommittedPublication(committed) = f
+        .client
+        .submit(Command::ValidateContextGrant(
+            f.alice.principal.clone(),
+            prepared,
+        ))
+        .unwrap()
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let metrics = f.client.metrics();
+    assert!(
+        metrics.max_response_estimated_bytes >= BODY + METADATA,
+        "retained response must charge the guard's heap: {}",
+        metrics.max_response_estimated_bytes
+    );
+    assert!(metrics.max_response_estimated_bytes <= metrics.max_response_reservation);
+    assert_eq!(committed.body().len(), BODY);
+    assert_eq!(committed.reserved_bytes(), BODY);
+    let expected_metadata = size_of::<credits::TestPermit>() + retained;
+    assert_eq!(committed.guard_metadata_bytes(), expected_metadata);
+    assert!(metrics.max_response_estimated_bytes >= BODY + expected_metadata);
+    assert_eq!(
+        f.budget.usage(),
+        BODY,
+        "the committed response owns the guard"
+    );
+    let send = committed.into_send(&destination).unwrap();
+    assert_eq!(send.body().len(), BODY);
+    assert_eq!(send.guard_metadata_bytes(), expected_metadata);
+    assert_eq!(
+        f.budget.usage(),
+        BODY,
+        "the send wrapper still owns the guard"
+    );
+    let record = send.finish();
+    assert_eq!(record.body_bytes(), BODY as u64);
+    assert_eq!(
+        f.budget.usage(),
+        0,
+        "finish released the guard exactly once"
+    );
+    let lease = f.lease().await;
+    let permit = f.budget.reserve_with_metadata(BODY, METADATA).unwrap();
+    let reservation = DestinationReservation::from_owned(destination.clone(), permit).unwrap();
+    let prepared = PreparedPublication::prepare(
+        lease.clone(),
+        Fixture::observe(&lease, 7),
+        vec![6; BODY],
+        reservation,
+    )
+    .unwrap();
+    let Response::CommittedPublication(committed) = f
+        .client
+        .submit(Command::ValidateContextGrant(
+            f.alice.principal.clone(),
+            prepared,
+        ))
+        .unwrap()
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    drop(committed);
+    assert_eq!(f.budget.usage(), 0, "drop released the guard exactly once");
+    assert_eq!(f.commitments(), 2);
+    f.worker.shutdown().await.unwrap();
+}
+
+/// Drop-counting guard that reports whatever heap total the test claims.
+/// Used only to prove constructor rejection and exactly-once release; a real
+/// adapter must report its actual retained heap.
+#[derive(Debug)]
+struct Claiming {
+    drops: Arc<AtomicUsize>,
+    claimed_heap: usize,
+}
+
+impl Drop for Claiming {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl OwnedDestinationCredits for Claiming {
+    fn reserved_bytes(&self) -> usize {
+        4096
+    }
+    fn owned_heap_bytes(&self) -> usize {
+        self.claimed_heap
+    }
+}
+
+#[test]
+fn guard_metadata_bound_rejects_oversized_guards_and_accepts_fixed_size_ones() {
+    let budget = TestBudget::new(1 << 20);
+    let destination = PublicationDestinationId::generate();
+    let fixed_overhead =
+        size_of::<credits::TestPermit>() + credits::TestPermit::SHARED_COUNTER_BYTES;
+
+    // Over the documented guard-metadata maximum by one byte of measured
+    // capacity: rejected at construction, the guard released exactly once.
+    let over = budget
+        .reserve_with_metadata(
+            4096,
+            MAX_PUBLICATION_GUARD_METADATA_BYTES - fixed_overhead + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        size_of::<credits::TestPermit>() + over.retained_heap_bytes(),
+        MAX_PUBLICATION_GUARD_METADATA_BYTES + 1
+    );
+    assert!(matches!(
+        DestinationReservation::from_owned(destination.clone(), over),
+        Err(ValidationError::TooLarge {
+            field: "guard_metadata_bytes",
+            max: MAX_PUBLICATION_GUARD_METADATA_BYTES
+        })
+    ));
+    assert_eq!(budget.usage(), 0, "rejected guard released exactly once");
+
+    // Exactly at the maximum: accepted, the cached total is the maximum, and
+    // the guard stays held until the reservation drops.
+    let exact = budget
+        .reserve_with_metadata(4096, MAX_PUBLICATION_GUARD_METADATA_BYTES - fixed_overhead)
+        .unwrap();
+    let reservation = DestinationReservation::from_owned(destination.clone(), exact).unwrap();
+    assert_eq!(
+        reservation.guard_metadata_bytes(),
+        MAX_PUBLICATION_GUARD_METADATA_BYTES
+    );
+    assert_eq!(reservation.reserved_bytes(), 4096);
+    assert!(format!("{reservation:?}").contains("guard_metadata_bytes"));
+    assert_eq!(budget.usage(), 4096);
+    drop(reservation);
+    assert_eq!(budget.usage(), 0);
+
+    // Arithmetic overflow of inline size plus reported heap is rejected, not
+    // wrapped, and the guard drops exactly once.
+    let drops = Arc::new(AtomicUsize::new(0));
+    let overflow = Claiming {
+        drops: Arc::clone(&drops),
+        claimed_heap: usize::MAX,
+    };
+    assert!(matches!(
+        DestinationReservation::from_owned(destination.clone(), overflow),
+        Err(ValidationError::TooLarge {
+            field: "guard_metadata_bytes",
+            max: MAX_PUBLICATION_GUARD_METADATA_BYTES
+        })
+    ));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    let just_over = Claiming {
+        drops: Arc::clone(&drops),
+        claimed_heap: MAX_PUBLICATION_GUARD_METADATA_BYTES - size_of::<Claiming>() + 1,
+    };
+    assert!(matches!(
+        DestinationReservation::from_owned(destination.clone(), just_over),
+        Err(ValidationError::TooLarge {
+            field: "guard_metadata_bytes",
+            ..
+        })
+    ));
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+
+    // A fixed-size guard with zero extra heap is a valid reservation whose
+    // whole metadata charge is its inline size.
+    let fixed = DestinationReservation::from_owned(destination, Fixed(4096)).unwrap();
+    assert_eq!(fixed.reserved_bytes(), 4096);
+    assert_eq!(fixed.guard_metadata_bytes(), size_of::<Fixed>());
 }

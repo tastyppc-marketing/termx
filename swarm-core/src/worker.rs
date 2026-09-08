@@ -751,8 +751,9 @@ impl Command {
                 SourceTransition::Reestablish { descriptor, .. }
                 | SourceTransition::Replace { descriptor, .. },
             ) => descriptor.estimated_bytes(),
-            // The real body travels with the command and is retained by the
-            // committed response; charge it in both accounting domains.
+            // The real body and the destination guard's cached metadata travel
+            // with the command and are retained by the committed response;
+            // charge them in both accounting domains.
             Self::ValidateContextGrant(_, prepared) => prepared.estimated_bytes(),
             Self::CreateGroup(_, label, members) => label
                 .capacity()
