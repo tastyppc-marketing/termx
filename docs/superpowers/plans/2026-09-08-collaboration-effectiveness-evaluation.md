@@ -1,6 +1,6 @@
 # Evaluating whether collaboration helps
 
-Date: 2026-09-08. Status: protocol and task preparation; no comparative results claimed yet. This accompanies the [durable-core work](2026-09-08-swarm-durable-core.md) and the user's request for sustained reliability and productivity testing.
+Date: 2026-09-08. Status: four synthetic task packets prepared and independently reviewed; no comparative model results claimed yet. See the [preparation evidence](../reports/2026-09-08-swarm-evaluation-preparation.md). This accompanies the [durable-core work](2026-09-08-swarm-durable-core.md) and the user's request for sustained reliability and productivity testing.
 
 ## What the evidence changes
 
