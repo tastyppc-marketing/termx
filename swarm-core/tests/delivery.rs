@@ -972,3 +972,264 @@ fn successive_continuations_keep_logical_generations_separate_from_binding_revis
         2
     );
 }
+
+#[test]
+fn delayed_native_completion_preserves_reconciled_candidates_and_continuation() {
+    for outcome in [
+        AttemptOutcome::Held,
+        AttemptOutcome::NativeQueued,
+        AttemptOutcome::TransportWritten,
+    ] {
+        let mut f = Fixture::new("reconciliation-late-completion");
+        let saved = f.send("one");
+        let candidate = f.candidates().remove(0);
+        let ticket = f.store.begin_delivery(&f.owner, &candidate).unwrap();
+        drop(f.store);
+        f.store = Store::open(&f.path).unwrap();
+        assert_eq!(f.store.recover_trusted_new_run(&f.owner).unwrap(), 1);
+        let proof = VerifiedNotSubmitted::trusted(
+            ticket.attempt_id().clone(),
+            "verified-cancellation-after-native-observation".into(),
+        )
+        .unwrap();
+        f.store
+            .reconcile_not_submitted(&f.owner, proof.clone())
+            .unwrap();
+        let reconciled = f
+            .store
+            .delivery_attempt(&f.owner, ticket.attempt_id())
+            .unwrap();
+        assert!(reconciled.recovered_uncertain_at_millis.is_some());
+        assert!(reconciled.reconciled_not_submitted_at_millis.is_some());
+        assert_eq!(f.candidates().len(), 1);
+        let completed = f
+            .store
+            .complete_delivery(&f.owner, ticket.attempt_id(), outcome)
+            .unwrap();
+        assert_eq!(
+            f.candidates().len(),
+            1,
+            "delayed {outcome:?} must not override later verified cancellation"
+        );
+        f.store
+            .reconcile_not_submitted(&f.owner, proof.clone())
+            .unwrap();
+        assert_eq!(
+            f.candidates().len(),
+            1,
+            "same-proof replay after {outcome:?} must remain eligible"
+        );
+        assert_eq!(completed.outcome, Some(outcome));
+        assert_eq!(
+            completed.recovered_uncertain_at_millis,
+            reconciled.recovered_uncertain_at_millis
+        );
+        assert_eq!(
+            completed.reconciled_not_submitted_at_millis,
+            reconciled.reconciled_not_submitted_at_millis
+        );
+        assert_eq!(
+            f.store
+                .delivery_attempt(&f.owner, ticket.attempt_id())
+                .unwrap(),
+            completed
+        );
+        let successor = f
+            .store
+            .continue_peer(
+                &f.owner,
+                f.continuation(&f.bob, "bob2"),
+                "continue-reconciled",
+                f.policies(),
+            )
+            .unwrap();
+        let candidates = f
+            .store
+            .delivery_candidates(
+                &f.owner,
+                &f.group.group_id,
+                &successor.record.peer_id,
+                successor.record.revision,
+                1,
+            )
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].generation().get(), 2);
+        assert_eq!(
+            f.store
+                .send_message(&f.alice.principal, f.request("one"))
+                .unwrap(),
+            saved
+        );
+        assert_eq!(
+            f.store
+                .complete_delivery(&f.owner, ticket.attempt_id(), outcome)
+                .unwrap(),
+            completed
+        );
+        f.store.reconcile_not_submitted(&f.owner, proof).unwrap();
+        let successor_ticket = f.store.begin_delivery(&f.owner, &candidates[0]).unwrap();
+        assert_ne!(successor_ticket.attempt_id(), ticket.attempt_id());
+        let db = rusqlite::Connection::open(&f.path).unwrap();
+        assert_eq!(db.query_row("SELECT count(*) FROM attempt_not_submitted_reconciliations WHERE evidence_reference='verified-cancellation-after-native-observation'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM acknowledgements", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+    }
+}
+
+#[test]
+fn delayed_reconciled_completion_cannot_change_a_new_attempt_or_successor_generation() {
+    for outcome in [
+        AttemptOutcome::Held,
+        AttemptOutcome::NativeQueued,
+        AttemptOutcome::TransportWritten,
+    ] {
+        for transfer in [false, true] {
+            let mut f = Fixture::new("reconciliation-completion-fences");
+            let saved = f.send("one");
+            let candidate = f.candidates().remove(0);
+            let old_ticket = f.store.begin_delivery(&f.owner, &candidate).unwrap();
+            drop(f.store);
+            f.store = Store::open(&f.path).unwrap();
+            f.store.recover_trusted_new_run(&f.owner).unwrap();
+            let proof = VerifiedNotSubmitted::trusted(
+                old_ticket.attempt_id().clone(),
+                "verified-not-delivered".into(),
+            )
+            .unwrap();
+            f.store
+                .reconcile_not_submitted(&f.owner, proof.clone())
+                .unwrap();
+            let current = if transfer {
+                f.store
+                    .continue_peer(
+                        &f.owner,
+                        f.continuation(&f.bob, "bob2"),
+                        "transfer-before-late-observation",
+                        f.policies(),
+                    )
+                    .unwrap()
+            } else {
+                f.bob.clone()
+            };
+            let candidate = f
+                .store
+                .delivery_candidates(
+                    &f.owner,
+                    &f.group.group_id,
+                    &current.record.peer_id,
+                    current.record.revision,
+                    1,
+                )
+                .unwrap()
+                .remove(0);
+            let new_ticket = f.store.begin_delivery(&f.owner, &candidate).unwrap();
+            f.store
+                .complete_delivery(&f.owner, old_ticket.attempt_id(), outcome)
+                .unwrap();
+            f.store.reconcile_not_submitted(&f.owner, proof).unwrap();
+            assert!(
+                f.store
+                    .delivery_candidates(
+                        &f.owner,
+                        &f.group.group_id,
+                        &current.record.peer_id,
+                        current.record.revision,
+                        1
+                    )
+                    .unwrap()
+                    .is_empty(),
+                "historical {outcome:?} must not ready a newer attempt; transfer={transfer}"
+            );
+            assert_eq!(
+                f.store
+                    .delivery_attempt(&f.owner, new_ticket.attempt_id())
+                    .unwrap()
+                    .outcome,
+                None
+            );
+            assert_eq!(
+                f.store
+                    .delivery_attempt(&f.owner, old_ticket.attempt_id())
+                    .unwrap()
+                    .outcome,
+                Some(outcome)
+            );
+            assert_eq!(
+                f.store
+                    .send_message(&f.alice.principal, f.request("one"))
+                    .unwrap(),
+                saved
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_generation_ack_gap_spans_current_binding_and_old_ack_replay_never_regresses() {
+    let mut f = Fixture::new("mixed-generation-watermark");
+    let old = f.send("old");
+    let bob2 = f
+        .store
+        .continue_peer(
+            &f.owner,
+            f.continuation(&f.bob, "bob2"),
+            "first",
+            f.policies(),
+        )
+        .unwrap();
+    let fresh = f.send("fresh");
+    let bob3 = f
+        .store
+        .continue_peer(
+            &f.owner,
+            f.continuation(&bob2, "bob3"),
+            "second",
+            f.policies(),
+        )
+        .unwrap();
+    let second = f
+        .store
+        .acknowledge_message(&bob3.principal, &f.group.group_id, &fresh.message_id)
+        .unwrap();
+    assert_eq!(second.generation.get(), 2);
+    assert_eq!(
+        second.contiguous_group_sequence, 0,
+        "sequence 1/generation 3 still blocks sequence 2/generation 2 for the same current binding"
+    );
+    let first = f
+        .store
+        .acknowledge_message(&bob3.principal, &f.group.group_id, &old.message_id)
+        .unwrap();
+    assert_eq!(first.generation.get(), 3);
+    assert_eq!(first.contiguous_group_sequence, 2);
+    let future = f.send("future");
+    let third = f
+        .store
+        .acknowledge_message(&bob3.principal, &f.group.group_id, &future.message_id)
+        .unwrap();
+    assert_eq!(third.generation.get(), 1);
+    assert_eq!(third.contiguous_group_sequence, 3);
+    let replay = f
+        .store
+        .acknowledge_message(&bob3.principal, &f.group.group_id, &old.message_id)
+        .unwrap();
+    assert_eq!(replay.generation.get(), 3);
+    assert_eq!(replay.acknowledged_at_millis, first.acknowledged_at_millis);
+    assert_eq!(
+        replay.contiguous_group_sequence, 3,
+        "replaying an older generation must use the binding-wide lower bound"
+    );
+}

@@ -136,7 +136,7 @@ impl Store {
             tx.execute("UPDATE recipient_ack_order SET binding_revision=?1,generation=(SELECT delivery_generation FROM current_deliveries d WHERE d.message_id=recipient_ack_order.message_id AND d.recipient_peer_id=recipient_ack_order.recipient_peer_id) WHERE recipient_peer_id=?2 AND binding_revision=?3 AND group_id=?4 AND EXISTS(SELECT 1 FROM current_deliveries d WHERE d.message_id=recipient_ack_order.message_id AND d.recipient_peer_id=recipient_ack_order.recipient_peer_id AND d.recipient_binding_revision=?1)",params![next.as_sql_i64(),old.peer_id.as_str(),current,group.as_str()])?;
             // Successor scopes are new: no inherited proven prefix. Historical
             // predecessor watermarks remain available for reconciliation/audit.
-            tx.execute("INSERT INTO acknowledgement_watermarks(group_id,recipient_peer_id,binding_revision,generation,contiguous_group_sequence,updated_at_millis) SELECT DISTINCT group_id,recipient_peer_id,binding_revision,generation,0,?1 FROM recipient_ack_order WHERE group_id=?2 AND recipient_peer_id=?3 AND binding_revision=?4",params![now,group.as_str(),old.peer_id.as_str(),next.as_sql_i64()])?;
+            tx.execute("INSERT INTO binding_acknowledgement_watermarks(group_id,recipient_peer_id,binding_revision,contiguous_group_sequence,updated_at_millis) SELECT DISTINCT group_id,recipient_peer_id,binding_revision,0,?1 FROM recipient_ack_order WHERE group_id=?2 AND recipient_peer_id=?3 AND binding_revision=?4",params![now,group.as_str(),old.peer_id.as_str(),next.as_sql_i64()])?;
         }
         tx.commit()?;
         Ok(EnrolledPeer {

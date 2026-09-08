@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -88,6 +88,9 @@ pub(super) fn validate_recognized_schema(
     if identity.schema_version >= 4 {
         expected.execute_batch(MIGRATION_V4)?;
     }
+    if identity.schema_version >= 5 {
+        expected.execute_batch(MIGRATION_V5)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -141,6 +144,9 @@ fn migrate_with_final_sql(
     }
     if identity.schema_version < 4 {
         transaction.execute_batch(MIGRATION_V4)?;
+    }
+    if identity.schema_version < 5 {
+        transaction.execute_batch(MIGRATION_V5)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
@@ -458,6 +464,23 @@ CREATE TABLE continuation_intents (
  FOREIGN KEY(peer_id,successor_binding_revision) REFERENCES peer_bindings(peer_id,binding_revision),
  CHECK(successor_binding_revision > predecessor_binding_revision)
 ) STRICT;
+"#;
+
+const MIGRATION_V5: &str = r#"
+CREATE TABLE binding_acknowledgement_watermarks (
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    recipient_peer_id TEXT NOT NULL,
+    binding_revision INTEGER NOT NULL CHECK(binding_revision >= 1),
+    contiguous_group_sequence INTEGER NOT NULL CHECK(contiguous_group_sequence >= 0),
+    updated_at_millis INTEGER NOT NULL,
+    PRIMARY KEY(group_id,recipient_peer_id,binding_revision),
+    FOREIGN KEY(recipient_peer_id,binding_revision) REFERENCES peer_bindings(peer_id,binding_revision)
+) STRICT;
+CREATE INDEX recipient_ack_binding_unresolved ON recipient_ack_order(group_id,recipient_peer_id,binding_revision,group_sequence) WHERE acknowledged=0;
+CREATE INDEX recipient_ack_binding_sequence ON recipient_ack_order(group_id,recipient_peer_id,binding_revision,group_sequence);
+-- Retain historical per-generation watermarks verbatim. They cannot safely seed
+-- a binding-wide lower bound: another generation may contain an earlier gap.
+-- The first current ACK starts at zero and resolves its bound with indexed seeks.
 "#;
 
 #[cfg(test)]
@@ -859,7 +882,7 @@ mod v3_migration_tests {
     use crate::{model::*, store::Store};
     use rusqlite::params;
 
-    fn fixture(name: &str) -> (std::path::PathBuf, Connection) {
+    pub(super) fn fixture(name: &str) -> (std::path::PathBuf, Connection) {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../retired/test-artifacts/swarm-core")
             .join(format!("{name}-{}", LaunchId::generate().as_str()));
@@ -1019,5 +1042,140 @@ mod v3_migration_tests {
         let owner = store.trusted_owner();
         assert_eq!(store.recover_trusted_new_run(&owner).unwrap(), 1);
         assert!(store.inspect().unwrap().integrity_ok);
+    }
+}
+
+#[cfg(test)]
+mod v4_migration_tests {
+    use super::*;
+    use crate::{model::*, store::Store};
+    use rusqlite::params;
+
+    #[test]
+    fn exact_v4_mixed_generation_migration_preserves_history_and_rolls_back_late_failure() {
+        let (path, mut connection) =
+            super::v3_migration_tests::fixture("v4-mixed-generation-migration");
+        connection.execute_batch(MIGRATION_V4).unwrap();
+        connection.pragma_update(None, "user_version", 4).unwrap();
+        let tx = connection.transaction().unwrap();
+        let peer = "p_00000000000000000000000000000002";
+        let group = "g_00000000000000000000000000000001";
+        for revision in [2, 3] {
+            tx.execute("INSERT INTO peer_bindings VALUES(?1,?2,?3,'peer-2','codex','peer-2',NULL,100,1000,1,1)", params![peer, revision, format!("l_{:032x}", revision+10)]).unwrap();
+        }
+        tx.execute(
+            "UPDATE peers SET current_binding_revision=3 WHERE peer_id=?1",
+            [peer],
+        )
+        .unwrap();
+        for (sequence, generation) in [(3, 3), (4, 2)] {
+            let message = format!("m_{sequence:032x}");
+            tx.execute("INSERT INTO messages VALUES(?1,?2,?3,'p_00000000000000000000000000000001',1,?4,'{}','preserved v4 mixed generation',NULL,NULL,1)", params![message, group, sequence, format!("mixed-{sequence}")]).unwrap();
+            tx.execute("INSERT INTO recipient_deliveries(message_id,recipient_peer_id,recipient_binding_revision,saved_at_millis,delivery_generation) VALUES(?1,?2,1,1,1)", params![message, peer]).unwrap();
+            tx.execute(
+                "INSERT INTO delivery_generations VALUES(?1,?2,3,?3)",
+                params![message, peer, generation],
+            )
+            .unwrap();
+            tx.execute("UPDATE current_deliveries SET recipient_binding_revision=3,delivery_generation=?1 WHERE message_id=?2", params![generation, message]).unwrap();
+            tx.execute(
+                "INSERT INTO recipient_ack_order VALUES(?1,?2,?3,?4,3,?5,?6)",
+                params![message, peer, group, sequence, generation, sequence == 4],
+            )
+            .unwrap();
+        }
+        tx.execute("INSERT INTO acknowledgements VALUES('m_00000000000000000000000000000004',?1,3,2,NULL,41)", [peer]).unwrap();
+        tx.execute("UPDATE current_deliveries SET acknowledged_generation=2,acknowledged_at_millis=41 WHERE message_id='m_00000000000000000000000000000004'", []).unwrap();
+        tx.execute(
+            "INSERT INTO acknowledgement_watermarks VALUES(?1,?2,3,2,4,42)",
+            params![group, peer],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE groups SET next_sequence=5 WHERE group_id=?1",
+            [group],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let before = schema_manifest(&connection).unwrap();
+        let identity = DatabaseIdentity {
+            application_id: APPLICATION_ID,
+            schema_version: 4,
+            has_objects: true,
+        };
+        assert!(migrate_with_final_sql(
+            &mut connection,
+            identity,
+            Some("INSERT INTO deliberately_missing_v5_target VALUES(1)")
+        )
+        .is_err());
+        assert_eq!(schema_manifest(&connection).unwrap(), before);
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(connection.query_row("SELECT contiguous_group_sequence FROM acknowledgement_watermarks WHERE binding_revision=3", [], |r| r.get::<_,i64>(0)).unwrap(), 4);
+        drop(connection);
+        let mut store = Store::open(&path).unwrap();
+        let principal = PeerPrincipal::new(
+            store.authority_id.clone(),
+            PeerId::parse(peer).unwrap(),
+            Revision::new(3).unwrap(),
+        );
+        let group_id = GroupId::parse(group).unwrap();
+        let second_id = MessageId::parse("m_00000000000000000000000000000004").unwrap();
+        let first_id = MessageId::parse("m_00000000000000000000000000000003").unwrap();
+        let second = store
+            .acknowledge_message(&principal, &group_id, &second_id)
+            .unwrap();
+        assert_eq!(second.generation.get(), 2);
+        assert_eq!(second.acknowledged_at_millis, 41);
+        assert_eq!(
+            second.contiguous_group_sequence, 0,
+            "v4 generation-specific frontier 4 is not a valid binding-wide lower bound"
+        );
+        assert_eq!(
+            store
+                .acknowledge_message(&principal, &group_id, &first_id)
+                .unwrap()
+                .contiguous_group_sequence,
+            4
+        );
+        assert_eq!(
+            store
+                .acknowledge_message(&principal, &group_id, &first_id)
+                .unwrap()
+                .contiguous_group_sequence,
+            4
+        );
+        assert_eq!(store.connection.query_row("SELECT contiguous_group_sequence,updated_at_millis FROM acknowledgement_watermarks WHERE binding_revision=3", [], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).unwrap(), (4,42));
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM acknowledgements_v3_archive",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        drop(store);
+        assert_eq!(
+            Store::open(path).unwrap().inspect().unwrap().schema_version,
+            5
+        );
     }
 }

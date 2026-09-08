@@ -209,7 +209,12 @@ impl Store {
             "UPDATE delivery_attempts SET outcome=?1,completed_at_millis=?2 WHERE attempt_id=?3",
             params![outcome.as_str(), now, id.as_str()],
         )?;
-        let state = if outcome == AttemptOutcome::KnownNotSubmitted {
+        // A delayed native observation can predate a later verified cancellation.
+        // Retain that outcome above, but let the independent reconciliation proof
+        // continue to govern eligibility for this exact current attempt.
+        let state = if outcome == AttemptOutcome::KnownNotSubmitted
+            || previous.reconciled_not_submitted_at_millis.is_some()
+        {
             "ready"
         } else {
             outcome.as_str()

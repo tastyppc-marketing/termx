@@ -184,8 +184,7 @@ impl Store {
             params![message_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64(), generation],
             |row| row.get::<_, i64>(0),
         )?;
-        let contiguous =
-            acknowledgement_watermark(&transaction, group_id, principal, generation, now)?;
+        let contiguous = acknowledgement_watermark(&transaction, group_id, principal, now)?;
         let result = AcknowledgementResult {
             message_id: message_id.clone(),
             generation: revision_from_sql(generation)?,
@@ -300,45 +299,35 @@ fn acknowledgement_watermark(
     transaction: &Transaction<'_>,
     group_id: &GroupId,
     principal: &PeerPrincipal,
-    generation: i64,
     now: i64,
 ) -> Result<u64, StoreError> {
-    let current = transaction
-        .query_row(
-            "SELECT contiguous_group_sequence FROM acknowledgement_watermarks WHERE group_id=?1 AND recipient_peer_id=?2 AND binding_revision=?3 AND generation=?4",
-            params![group_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64(), generation],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    let first_unacknowledged = transaction
-        .query_row(
-            "SELECT group_sequence FROM recipient_ack_order WHERE group_id=?1 AND recipient_peer_id=?2 AND binding_revision=?3 AND generation=?4 AND acknowledged=0 AND group_sequence>?5 ORDER BY group_sequence LIMIT 1",
-            params![group_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64(), generation, current],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
+    // Receipt generations remain distinct, but a group sequence gap belongs to
+    // the whole current binding. Never reuse a historical per-generation bound.
+    let current = transaction.query_row(
+        "SELECT contiguous_group_sequence FROM binding_acknowledgement_watermarks WHERE group_id=?1 AND recipient_peer_id=?2 AND binding_revision=?3",
+        params![group_id.as_str(),principal.peer_id.as_str(),principal.binding_revision.as_sql_i64()],
+        |row|row.get::<_,i64>(0),
+    ).optional()?.unwrap_or(0);
+    let first_unacknowledged = transaction.query_row(
+        "SELECT group_sequence FROM recipient_ack_order WHERE group_id=?1 AND recipient_peer_id=?2 AND binding_revision=?3 AND acknowledged=0 AND group_sequence>?4 ORDER BY group_sequence LIMIT 1",
+        params![group_id.as_str(),principal.peer_id.as_str(),principal.binding_revision.as_sql_i64(),current],
+        |row|row.get::<_,i64>(0),
+    ).optional()?;
     let watermark = match first_unacknowledged {
-        Some(sequence) => transaction
-            .query_row(
-                "SELECT group_sequence FROM recipient_ack_order WHERE group_id=?1 AND recipient_peer_id=?2 AND binding_revision=?3 AND generation=?4 AND group_sequence>?5 AND group_sequence<?6 ORDER BY group_sequence DESC LIMIT 1",
-                params![group_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64(), generation, current, sequence],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(current),
-        None => transaction
-            .query_row(
-                "SELECT group_sequence FROM recipient_ack_order WHERE group_id=?1 AND recipient_peer_id=?2 AND binding_revision=?3 AND generation=?4 AND group_sequence>?5 ORDER BY group_sequence DESC LIMIT 1",
-                params![group_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64(), generation, current],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(current),
+        Some(sequence) => transaction.query_row(
+            "SELECT group_sequence FROM recipient_ack_order WHERE group_id=?1 AND recipient_peer_id=?2 AND binding_revision=?3 AND group_sequence>?4 AND group_sequence<?5 ORDER BY group_sequence DESC LIMIT 1",
+            params![group_id.as_str(),principal.peer_id.as_str(),principal.binding_revision.as_sql_i64(),current,sequence],
+            |row|row.get::<_,i64>(0),
+        ).optional()?.unwrap_or(current),
+        None => transaction.query_row(
+            "SELECT group_sequence FROM recipient_ack_order WHERE group_id=?1 AND recipient_peer_id=?2 AND binding_revision=?3 AND group_sequence>?4 ORDER BY group_sequence DESC LIMIT 1",
+            params![group_id.as_str(),principal.peer_id.as_str(),principal.binding_revision.as_sql_i64(),current],
+            |row|row.get::<_,i64>(0),
+        ).optional()?.unwrap_or(current),
     };
     transaction.execute(
-        "INSERT INTO acknowledgement_watermarks(group_id,recipient_peer_id,binding_revision,generation,contiguous_group_sequence,updated_at_millis) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(group_id,recipient_peer_id,binding_revision,generation) DO UPDATE SET contiguous_group_sequence=MAX(acknowledgement_watermarks.contiguous_group_sequence,excluded.contiguous_group_sequence),updated_at_millis=excluded.updated_at_millis",
-        params![group_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64(), generation, watermark, now],
+        "INSERT INTO binding_acknowledgement_watermarks(group_id,recipient_peer_id,binding_revision,contiguous_group_sequence,updated_at_millis) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(group_id,recipient_peer_id,binding_revision) DO UPDATE SET contiguous_group_sequence=MAX(binding_acknowledgement_watermarks.contiguous_group_sequence,excluded.contiguous_group_sequence),updated_at_millis=excluded.updated_at_millis",
+        params![group_id.as_str(),principal.peer_id.as_str(),principal.binding_revision.as_sql_i64(),watermark,now],
     )?;
     u64::try_from(watermark).map_err(|_| StoreError::InvalidCursor)
 }
