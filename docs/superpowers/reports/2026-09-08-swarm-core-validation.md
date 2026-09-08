@@ -5,7 +5,7 @@ The core fixes at `9d92f707492f18ce777997d43af5b19b91951191` passed
 review. The corrected 30-minute workload completed successfully in a separate frozen checkout.
 The earlier build completed its own 30-minute workload; those results remain
 earlier-build evidence. Final independent evidence review passed; the reviewed
-Task 5 checkpoint is being published to the feature branches.
+Task 5 checkpoint `6221a54` is published on both feature branches.
 Native integration, UI behavior and comparative collaboration effectiveness remain
 separate work in the [companion plan](../plans/2026-09-08-swarm-companion-integration.md).
 
