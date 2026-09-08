@@ -15,12 +15,26 @@ const CWD = path.join(ROOT, '.superpowers', 'swarm-proof', 'remote-agent');
 const TIMEOUT = Number(process.env.TERMX_CODEX_REMOTE_TIMEOUT_MS || 120_000);
 
 function input(text) { return [{type: 'text', text}]; }
-function metadata(thread) {
+function threadMetadata(thread) {
   return {
     id: thread.id, sessionId: thread.sessionId, cwd: thread.cwd, ephemeral: thread.ephemeral,
     modelProvider: thread.modelProvider, model: thread.model, reasoningEffort: thread.reasoningEffort,
     canAcceptDirectInput: thread.canAcceptDirectInput,
   };
+}
+function effectiveMetadata(response) {
+  return {
+    model: response.model, modelProvider: response.modelProvider, serviceTier: response.serviceTier,
+    cwd: response.cwd, runtimeWorkspaceRoots: response.runtimeWorkspaceRoots,
+    instructionSources: response.instructionSources, approvalPolicy: response.approvalPolicy,
+    approvalsReviewer: response.approvalsReviewer, sandbox: response.sandbox,
+    activePermissionProfile: response.activePermissionProfile, reasoningEffort: response.reasoningEffort,
+  };
+}
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return {promise, resolve};
 }
 function isAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
@@ -37,10 +51,12 @@ async function waitReady(port, hasExited) {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     if (hasExited()) throw new Error('app-server exited before readiness');
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/readyz`);
-      if (response.ok) return;
-    } catch {}
+    const ready = await new Promise(resolve => {
+      const socket = net.connect(port, '127.0.0.1');
+      socket.once('connect', () => { socket.destroy(); resolve(true); });
+      socket.once('error', () => { socket.destroy(); resolve(false); });
+    });
+    if (ready) return;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error('app-server readiness timed out');
@@ -84,25 +100,44 @@ test('live shared app-server routes dynamic tools by authoritative thread and ke
     windowsHide: true,
   });
   let exited = false;
-  const childExited = new Promise(resolve => child.once('exit', () => { exited = true; resolve(); }));
+  let spawnFailed = false;
+  let settleChild;
+  const childExited = new Promise(resolve => { settleChild = resolve; });
+  child.once('error', () => { spawnFailed = true; settleChild(); });
+  child.once('exit', () => { exited = true; settleChild(); });
   const clients = [];
+  const barriers = new Map();
+  const activeTurns = new Map();
   let durableId;
   let durableArchived = false;
   child.stderr.resume();
   t.after(async () => {
-    if (durableId && !durableArchived && clients[0]) {
-      try { await clients[0].request('thread/archive', {threadId: durableId}, {timeoutMs: 10_000}); } catch {}
+    const failures = [];
+    try {
+      for (const barrier of barriers.values()) barrier.release.resolve();
+      for (const [threadId, turnId] of activeTurns) {
+        try { await clients[0]?.request('turn/interrupt', {threadId, turnId}, {timeoutMs: 10_000}); }
+        catch { failures.push('tracked turn interrupt failed'); }
+      }
+      if (durableId && !durableArchived && clients[0]) {
+        try { await clients[0].request('thread/archive', {threadId: durableId}, {timeoutMs: 10_000}); }
+        catch { failures.push('owned durable thread archive failed'); }
+      }
+    } finally {
+      for (const client of clients) client.close();
+      child.stderr.destroy();
+      if (!exited && Number.isInteger(child.pid)) child.kill();
+      let exitTimer;
+      await Promise.race([childExited, new Promise(resolve => { exitTimer = setTimeout(resolve, 5000); })]);
+      clearTimeout(exitTimer);
     }
-    for (const client of clients) client.close();
-    if (!exited) child.kill();
-    await Promise.race([
-      childExited,
-      new Promise(resolve => setTimeout(resolve, 5000)),
-    ]);
-    assert.equal(exited, true, 'owned app-server did not emit an exit event after handle-scoped termination');
-    assert.equal(isAlive(child.pid), false, 'owned app-server PID remained live after exit');
+    if (!spawnFailed) {
+      if (!exited) failures.push('owned app-server exit event not observed');
+      if (Number.isInteger(child.pid) && isAlive(child.pid)) failures.push('owned app-server PID remained live');
+    }
+    assert.deepEqual(failures, [], `sanitized cleanup failures: ${failures.join(', ')}`);
   });
-  await waitReady(port, () => exited);
+  await waitReady(port, () => exited || spawnFailed);
 
   const calls = [];
   const authorized = new Set();
@@ -115,6 +150,11 @@ test('live shared app-server routes dynamic tools by authoritative thread and ke
     const senderMatches = params.arguments?.senderThreadId === params.threadId;
     const success = authorized.has(params.threadId) && senderMatches;
     calls.push({threadId: params.threadId, turnId: params.turnId, callId: params.callId, senderMatches, success});
+    const barrier = barriers.get(params.threadId);
+    if (barrier) {
+      barrier.reached.resolve(params);
+      await barrier.release.promise;
+    }
     return {contentItems: [{type: 'inputText', text: success ? 'accepted' : 'rejected'}], success};
   };
   const clientA = await connect(url, handler);
@@ -184,14 +224,32 @@ test('live shared app-server routes dynamic tools by authoritative thread and ke
   const sibling = await invoke(clientA, two);
   assert.equal(sibling.success, true);
 
-  await assert.rejects(clientA.request('turn/steer', {threadId: two.id, expectedTurnId: crypto.randomUUID(), input: input('invalid')}), /active|turn|mismatch|running/i);
-
-  const durable = (await clientA.request('thread/start', {cwd: CWD, ephemeral: false, environments: []})).thread;
+  const durableStart = await clientA.request('thread/start', {
+    cwd: CWD, ephemeral: false, environments: [], dynamicTools: [tool],
+  });
+  const durable = durableStart.thread;
   durableId = durable.id;
+  authorized.add(durable.id);
+
+  const hold = {reached: deferred(), release: deferred()};
+  barriers.set(durable.id, hold);
+  const heldStarted = clientA.nextEvent(event => event.method === 'turn/started' && event.params?.threadId === durable.id);
+  const held = await clientA.request('turn/start', {threadId: durable.id, input: input(
+    `Call peer_signal exactly once with senderThreadId ${durable.id} and payload hold. After its result, reply with one word.`)});
+  assert.equal((await heldStarted).params.turn.id, held.turn.id);
+  activeTurns.set(durable.id, held.turn.id);
+  const heldCall = await hold.reached.promise;
+  assert.equal(heldCall.threadId, durable.id);
+  assert.equal(heldCall.turnId, held.turn.id);
+  await assert.rejects(
+    clientA.request('turn/steer', {
+      threadId: durable.id, expectedTurnId: crypto.randomUUID(), input: input('must-not-be-accepted'),
+    }),
+    error => error.code === -32600 && /expected active turn id .* but found/i.test(error.message),
+  );
 
   const durableQueueId = crypto.randomUUID();
   const changed = clientA.nextEvent(event => event.method === 'thread/queue/changed' && event.params?.threadId === durable.id);
-  const idleStarted = clientA.nextEvent(event => event.method === 'turn/started' && event.params?.threadId === durable.id);
   const added = await clientA.request('thread/queue/add', {
     threadId: durable.id, input: input('Reply with exactly: durable-queued-ok'), clientUserMessageId: durableQueueId,
   });
@@ -201,23 +259,40 @@ test('live shared app-server routes dynamic tools by authoritative thread and ke
     threadId: durable.id, input: input('Reply with exactly: durable-queued-ok'), clientUserMessageId: durableQueueId,
   });
   assert.notEqual(duplicate.queuedSubmission.id, added.queuedSubmission.id,
-    'duplicate client correlation keys replace the queued submission with a new server ID');
+    'duplicate client correlation keys create distinct server submissions');
   assert.deepEqual((await clientA.request('thread/queue/list', {threadId: durable.id})).data.map(row => row.id),
-    [duplicate.queuedSubmission.id]);
-  const automaticallyStartedTurn = (await idleStarted).params.turn;
-  const queuedStarted = clientA.nextEvent(event => event.method === 'turn/started' &&
-    event.params?.threadId === durable.id && event.params?.turn?.id !== automaticallyStartedTurn.id);
-  await completed(clientA, durable.id, automaticallyStartedTurn.id);
+    [added.queuedSubmission.id, duplicate.queuedSubmission.id]);
+  await clientA.request('thread/queue/delete', {
+    threadId: durable.id, queuedSubmissionId: duplicate.queuedSubmission.id,
+  });
+  assert.deepEqual((await clientA.request('thread/queue/list', {threadId: durable.id})).data.map(row => row.id),
+    [added.queuedSubmission.id]);
+  const queuedStarted = clientA.nextEvent(event => event.method === 'turn/started' && event.params?.threadId === durable.id);
+  hold.release.resolve();
+  barriers.delete(durable.id);
+  await completed(clientA, durable.id, held.turn.id);
+  activeTurns.delete(durable.id);
   const durableTurn = (await queuedStarted).params.turn;
   await completed(clientA, durable.id, durableTurn.id);
+  assert.deepEqual((await clientA.request('thread/queue/list', {threadId: durable.id})).data, []);
+
+  const idleQueueId = crypto.randomUUID();
+  const idleStarted = clientA.nextEvent(event => event.method === 'turn/started' && event.params?.threadId === durable.id);
+  const idleAdded = await clientA.request('thread/queue/add', {
+    threadId: durable.id, input: input('Reply with exactly: idle-queued-ok'), clientUserMessageId: idleQueueId,
+  });
+  const idleTurn = (await idleStarted).params.turn;
+  await completed(clientA, durable.id, idleTurn.id);
   await assert.rejects(clientA.request('thread/queue/start', {
-    threadId: durable.id, queuedSubmissionId: duplicate.queuedSubmission.id,
+    threadId: durable.id, queuedSubmissionId: idleAdded.queuedSubmission.id,
   }), /queued submission not found/i);
-  const rejoined = (await clientB.request('thread/resume', {threadId: durable.id, excludeTurns: true})).thread;
-  assert.deepEqual(metadata(rejoined), metadata(durable));
+
+  const durableResume = await clientB.request('thread/resume', {threadId: durable.id, excludeTurns: true});
+  assert.deepEqual(threadMetadata(durableResume.thread), threadMetadata(durable));
+  assert.deepEqual(effectiveMetadata(durableResume), effectiveMetadata(durableStart));
   const readBack = (await clientB.request('thread/read', {threadId: durable.id, includeTurns: true})).thread;
   assert.ok(readBack.turns.some(turn => turn.id === durableTurn.id && turn.status === 'completed'));
-  assert.deepEqual(metadata(readBack), metadata(durable));
+  assert.deepEqual(threadMetadata(readBack), threadMetadata(durable));
   await clientB.request('thread/archive', {threadId: durable.id});
   durableArchived = true;
 
