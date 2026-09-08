@@ -36,14 +36,58 @@ async fn gate(client: &Client, panic: bool) -> (Pending, std::sync::mpsc::Sender
         return (pending, release);
     }
 }
-async fn submit(client: &Client, mut command: impl FnMut() -> Command) -> Pending {
+async fn submit(client: &Client, command: impl FnMut() -> Command) -> Pending {
+    admit(client, command)
+        .await
+        .unwrap_or_else(|e| panic!("admission: {e}"))
+}
+async fn admit(
+    client: &Client,
+    mut command: impl FnMut() -> Command,
+) -> Result<Pending, AdmissionError> {
     loop {
         match client.submit(command()) {
-            Ok(p) => return p,
             Err(AdmissionError::Contended) => tokio::task::yield_now().await,
-            Err(e) => panic!("admission: {e}"),
+            result => return result,
         }
     }
+}
+#[tokio::test]
+async fn admission_retry_ignores_only_contention_and_preserves_capacity_rejection() {
+    let worker = Worker::open(
+        support::retained_db("admission-retry"),
+        WorkerConfig {
+            max_responses: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = worker.client();
+    let held = submit(&client, || Command::TrustedOwner).await;
+    let mut attempts = 0;
+    let mut retry = Box::pin(admit(&client, || {
+        attempts += 1;
+        Command::TrustedOwner
+    }));
+    {
+        // A real held admission mutex deterministically supplies Contended.
+        // Poll once without awaiting while holding the lock.
+        let _guard = lock(&client.shared);
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(retry.as_mut().poll(&mut context).is_pending());
+    }
+    // The held reply deterministically exhausts response credits. A deadline is
+    // only a watchdog against incorrectly retrying permanent capacity errors.
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), retry)
+            .await
+            .unwrap(),
+        Err(AdmissionError::Responses)
+    ));
+    assert!(attempts >= 2);
+    held.await.unwrap();
+    worker.shutdown().await.unwrap();
 }
 #[tokio::test]
 async fn full_queue_close_drains_and_unread_response_reserves_capacity() {
@@ -172,21 +216,26 @@ async fn large_moved_binding_capacity_reserves_response_bytes_before_enqueue() {
     else {
         panic!()
     };
-    let mut terminal = String::with_capacity(256 * 1024);
-    terminal.push('t');
-    let binding = VerifiedBinding::trusted(
-        LaunchId::generate().as_str().into(),
-        terminal,
-        "synthetic".into(),
-        "conversation".into(),
-        None,
-        1,
-        1,
-        true,
-    )
-    .unwrap();
     assert!(matches!(
-        client.submit(Command::Enroll(owner, binding)),
+        admit(&client, || {
+            // Rebuild on contention: cloning would discard the spare capacity
+            // that this test is specifically intended to measure.
+            let mut terminal = String::with_capacity(256 * 1024);
+            terminal.push('t');
+            let binding = VerifiedBinding::trusted(
+                LaunchId::generate().as_str().into(),
+                terminal,
+                "synthetic".into(),
+                "conversation".into(),
+                None,
+                1,
+                1,
+                true,
+            )
+            .unwrap();
+            Command::Enroll(owner.clone(), binding)
+        })
+        .await,
         Err(AdmissionError::ResponseBytes)
     ));
     worker.shutdown().await.unwrap();
@@ -438,32 +487,34 @@ async fn large_reply_admission_leaves_a_small_response_slot() {
         fixture("reserved-small-response").await;
     // Default response budget is 64 MiB. One 32 MiB reservation must leave
     // enough room for small unrelated operations even if another read arrives.
-    let first = client
-        .submit(Command::Mailbox(
+    let first = submit(&client, || {
+        Command::Mailbox(
             recipient.principal.clone(),
             MailboxPageRequest {
                 group_id: group.group_id.clone(),
                 cursor: None,
                 max_items: 1,
             },
-        ))
-        .unwrap();
+        )
+    })
+    .await;
     submit(&client, || Command::TrustedOwner)
         .await
         .await
         .unwrap();
     assert!(matches!(
-        client.submit(Command::Mailbox(
-            recipient.principal,
+        admit(&client, || Command::Mailbox(
+            recipient.principal.clone(),
             MailboxPageRequest {
-                group_id: group.group_id,
+                group_id: group.group_id.clone(),
                 cursor: None,
                 max_items: 1
             }
-        )),
+        ))
+        .await,
         Err(AdmissionError::ResponseBytes)
     ));
-    let small = client.submit(Command::TrustedOwner).unwrap();
+    let small = submit(&client, || Command::TrustedOwner).await;
     small.await.unwrap();
     drop(first);
     worker.shutdown().await.unwrap();
@@ -473,9 +524,10 @@ async fn near_limit_escaped_unicode_pages_stay_within_response_reservations() {
     let (worker, client, _owner, sender, recipient, group) = fixture("bounded-frames").await;
     let bodies = [
         "\u{0000}".repeat(MAX_MESSAGE_BODY_BYTES),
-        "??".repeat(MAX_MESSAGE_BODY_BYTES / 4),
+        "\u{1f980}".repeat(MAX_MESSAGE_BODY_BYTES / 4),
     ];
     for (i, body) in bodies.iter().enumerate() {
+        assert_eq!(body.len(), MAX_MESSAGE_BODY_BYTES);
         let request = SendMessageRequest {
             group_id: group.group_id.clone(),
             client_key: format!("near-limit-{i}"),
@@ -613,13 +665,16 @@ impl TestHook for Locate {
 #[tokio::test]
 async fn worker_reopen_is_passive_and_explicit_recovery_runs_on_owned_thread() {
     let (worker, client, owner, sender, recipient, group) = fixture("worker-recovery").await;
-    let (reply, location) = oneshot::channel();
-    client
-        .submit(Command::TestHook(Box::new(Locate { reply })))
-        .unwrap()
-        .await
-        .unwrap();
-    let (path, thread) = location.await.unwrap();
+    let mut location = None;
+    submit(&client, || {
+        let (reply, receiver) = oneshot::channel();
+        location = Some(receiver);
+        Command::TestHook(Box::new(Locate { reply }))
+    })
+    .await
+    .await
+    .unwrap();
+    let (path, thread) = location.unwrap().await.unwrap();
     assert_ne!(thread, std::thread::current().id());
     let request = SendMessageRequest {
         group_id: group.group_id.clone(),

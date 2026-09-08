@@ -273,31 +273,53 @@ impl Model {
         }
     }
     async fn pause(&mut self, g: usize) {
-        self.log(&format!("pause group={g}"));
+        let mut expected = self.groups[g].clone();
+        let previous_policy_revision = expected.policy_revision;
+        let requested_paused = !expected.paused;
+        expected.paused = requested_paused;
+        expected.policy_revision = Revision::new(previous_policy_revision.get() + 1).unwrap();
+        self.log(&format!(
+            "pause group={g} requested={requested_paused} previous_policy={}",
+            previous_policy_revision.get()
+        ));
         let Response::Group(group) = call(&self.client, || {
             Command::Pause(
                 self.owner.clone(),
-                self.groups[g].group_id.clone(),
-                !self.groups[g].paused,
-                self.groups[g].policy_revision,
+                expected.group_id.clone(),
+                requested_paused,
+                previous_policy_revision,
             )
         })
         .await
         .unwrap() else {
             panic!()
         };
-        self.groups[g] = group;
+        // Check the transition and stable group identity before advancing the
+        // oracle using only the expected state captured before the operation.
+        assert_eq!(
+            group, expected,
+            "pause transition or stable identity differs"
+        );
+        self.groups[g] = expected;
     }
     async fn live(&mut self, p: usize) {
-        self.log(&format!("live peer={p}"));
+        let mut expected = self.peers[p].record.clone();
+        let expected_binding_revision = expected.revision;
+        let requested_live = !expected.is_live;
+        expected.is_live = requested_live;
+        expected.model_metadata = None;
+        self.log(&format!(
+            "live peer={p} requested={requested_live} binding={}",
+            expected_binding_revision.get()
+        ));
         let Response::Binding(record) = call(&self.client, || {
             Command::UpdatePeer(
                 self.owner.clone(),
-                self.peers[p].record.peer_id.clone(),
-                self.peers[p].record.revision,
+                expected.peer_id.clone(),
+                expected_binding_revision,
                 PeerMetadataUpdate {
                     model_metadata: None,
-                    is_live: !self.peers[p].record.is_live,
+                    is_live: requested_live,
                 },
             )
         })
@@ -305,7 +327,13 @@ impl Model {
         .unwrap() else {
             panic!()
         };
-        self.peers[p].record = record;
+        // Equality includes the unchanged binding revision and every stable
+        // peer/process identity field, as well as the requested mutable fields.
+        assert_eq!(
+            record, expected,
+            "live transition or stable identity differs"
+        );
+        self.peers[p].record = expected;
     }
     async fn continuation(&mut self, p: usize) {
         self.log(&format!("continue peer={p}"));
