@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import {effectiveMetadata, receiveWebSocketFrame, threadMetadata} from './codex-remote-helpers.mjs';
 import {RpcClient} from './rpc.mjs';
 
 const LIVE = process.env.TERMX_CODEX_REMOTE_LIVE === '1';
@@ -15,22 +16,6 @@ const CWD = path.join(ROOT, '.superpowers', 'swarm-proof', 'remote-agent');
 const TIMEOUT = Number(process.env.TERMX_CODEX_REMOTE_TIMEOUT_MS || 120_000);
 
 function input(text) { return [{type: 'text', text}]; }
-function threadMetadata(thread) {
-  return {
-    id: thread.id, sessionId: thread.sessionId, cwd: thread.cwd, ephemeral: thread.ephemeral,
-    modelProvider: thread.modelProvider, model: thread.model, reasoningEffort: thread.reasoningEffort,
-    canAcceptDirectInput: thread.canAcceptDirectInput,
-  };
-}
-function effectiveMetadata(response) {
-  return {
-    model: response.model, modelProvider: response.modelProvider, serviceTier: response.serviceTier,
-    cwd: response.cwd, runtimeWorkspaceRoots: response.runtimeWorkspaceRoots,
-    instructionSources: response.instructionSources, approvalPolicy: response.approvalPolicy,
-    approvalsReviewer: response.approvalsReviewer, sandbox: response.sandbox,
-    activePermissionProfile: response.activePermissionProfile, reasoningEffort: response.reasoningEffort,
-  };
-}
 function deferred() {
   let resolve;
   const promise = new Promise(done => { resolve = done; });
@@ -75,7 +60,7 @@ async function connect(url, onRequest) {
     close() { ws.close(); },
     onRequest,
   });
-  ws.addEventListener('message', event => client.receive(JSON.parse(event.data)));
+  ws.addEventListener('message', event => receiveWebSocketFrame(client, event.data));
   ws.addEventListener('close', () => client.disconnect(new Error('WebSocket closed')));
   await client.request('initialize', {
     clientInfo: {name: 'termx_swarm_probe', title: 'TermX isolated proof', version: '0.1.0'},
