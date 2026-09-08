@@ -37,7 +37,15 @@ Retained fixture generations include `pilot-python-1788868407570009400`,
 generator/support hashes, parent revisions, packet commits and exact commands.
 Earlier generations, review findings and the focused mutant remain retained.
 
-The pilot will deliver only task contents into fresh independent repositories.
+Twelve fresh run repositories are now prepared: Astra/Codex solo, Fable/Claude
+solo, and one shared pair repository for each of the four cases. Readback checked
+all 48 copied files against the reviewed packet hashes, all twelve repositories
+clean, and identical baseline Git trees across the three arms of each case.
+Only packet files were copied; graders, references and source repository metadata
+remain outside the run directories. Independent preparation review found no
+outstanding issue. The retained inventory records exact source/manifest/recipe
+hashes and baseline commits. No model has been launched in these repositories.
+
 Withheld graders remain outside those repositories, but ordinary unrestricted
 same-account tools can still reach other files. This is procedural separation,
 not a claimed sandbox. Observed reference access invalidates an arm; undetected
