@@ -72,3 +72,16 @@ they can overlap and must not all be added together. No dollar estimate is made.
 The input record limit is 16 MiB. Retained memory grows with distinct response
 IDs; decoding also uses memory for one record and its Python objects. This
 offline diagnostic is not a broker memory bound or a private-context reader.
+
+## Completion observation
+
+The [offline observer](observer/README.md) accepts typed adapter evidence, waits
+for two coherent completed observations, and retains one immutable scoring tree.
+It keeps unavailable work pending, censors at the evaluation deadline, and retains
+later writes separately. Run its owned tests through the retaining runner in that
+directory; each invocation needs a new evidence path.
+
+This verifies the observation and file-publication rules only. The native harness
+adapters and comparative pilot remain pending. The
+[validation report](../../docs/superpowers/reports/2026-09-08-swarm-observer-validation.md)
+records the independent review and preservation checks.

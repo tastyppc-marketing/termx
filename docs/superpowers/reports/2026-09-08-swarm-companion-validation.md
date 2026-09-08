@@ -13,6 +13,17 @@ Its final narrow review approved `8ea7445` without required code changes on
 2026-09-08 at 17:07:31 UTC. The documentation handoff below closes the remaining
 consumer-documentation requirement.
 
+A subsequent development worker exposed a Windows command-wrapper issue: passing
+a multiline task prompt through the local `claude.cmd` launcher delivered only
+its first line. The earlier review produced real findings and approval, but its
+complete intended instructions were not delivered. The development launcher now
+uses a short instruction pointing to the complete retained task file. A fresh
+read-only Fable review verified full task-file delivery, inspected the complete
+client contracts/source and retained evidence, and returned Spec PASS / Quality
+APPROVED with no required changes on 2026-09-08 at 17:23:46 UTC. It reran no tests
+or builds and made no mutations. This reconciles the review-context limitation;
+the client source and validation results below are unchanged.
+
 ## Behavior verified
 
 - Ancestry requires an exact starting PID and creation FILETIME, retains process
@@ -50,7 +61,9 @@ Retained local evidence is under
 `retired/test-artifacts/swarm-client/task-1-fix-2-final-20260908T1656413278036Z/`.
 Its manifest records exact arguments, working directory, target override, times,
 native exits and log hashes. All 15 source hashes are unchanged before/after and
-match the committed Git blobs. Root independently verified eight logs, three new
+match the committed Git content after Git's path-specific line-ending
+normalization; raw working-file hashes are recorded separately. Root independently
+verified eight logs, three new
 release artifacts and three preserved prior artifacts. Final rlib SHA256:
 `e924e74f483325bc1bb8cf393996bf61f92915f6a0fadb09f7715741e574ac38`.
 Raw synthetic credentials and native model traces are excluded from Git.
@@ -81,6 +94,11 @@ inspection have distinct errors. There is not yet a dedicated native transport
 regression for the unavailable-identity error branch; this is a recorded coverage
 gap, not a claimed test. Final review's cosmetic suggestions are deferred.
 
+Short-lived discovery readers can temporarily block `ReplaceFileW` because their
+handles use read-only sharing. Broker integration must handle that publication
+failure with bounded retry or an explicit unavailable result while preserving the
+predecessor; Task 3 has a deterministic held-reader acceptance case for this.
+
 The client is Windows-only and is not a sandbox against other unrestricted code
 running as the same user or administrators. Unvalidated ancestor directories are
 outside its object-validation guarantee. Generation tests do not claim forced
@@ -99,3 +117,31 @@ belong to later integration. No live TermX executable was replaced or restarted.
 The separately reviewed [durable-core validation](2026-09-08-swarm-core-validation.md)
 remains valid. Neither these client tests nor the core stress run establish that
 collaboration outperforms solo work; the reviewed comparative pilot is still pending.
+
+
+## Reserved-send extension
+
+The independently reviewed extension at `996cf46` adds
+`VerifiedPipe::reserve_send` and `send_reserved`. A private, single-use
+`ReservedFrameSend` owns one actual body-plus-four-byte-prefix permit and binds
+it to the exact endpoint. An opaque cloneable `FrameCreditHandle` shares the
+same permit lifetime; it cannot send or reconstruct a token. Wrong endpoint,
+undersized capacity and poisoned state reject before writing. The writer uses
+existing cancellation/poison behavior and never reserves a second permit.
+
+Frozen evidence is retained under
+`retired/test-artifacts/swarm-client/reserved-send-20260908T1959549967224Z/final`.
+All five native exits were zero: 56 top-level tests, seven doctests, package fmt,
+strict all-target Clippy and release build (2026-09-08 20:08:54-20:09:56 UTC).
+Root matched all 14 inputs against raw files and committed blobs, ten logs,
+counts and three release artifacts. Manifest SHA-256:
+`b108532cc3349ee9811f97ee2cacf74601de9034603dec4af73a6e6e1b59c318`.
+Release rlib SHA-256:
+`2ca659258a0e0e925d01dc725e2968cd9e4cbbe03b7d12a2418151a8f150cb04`.
+
+Grok implemented this scope; independent review returned Spec PASS / Quality
+APPROVED. The future core adapter still needs a client-owned bound/getter for
+opaque retained metadata. Reserved on-wire bytes are not a heap-size estimate.
+The host must also bind one send token to one request, destination and committed
+immutable response. This generic transport primitive alone does not provide
+protected context publication or complete the host runtime.

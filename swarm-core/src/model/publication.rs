@@ -184,8 +184,9 @@ pub struct DestinationReservation {
     destination_id: PublicationDestinationId,
     reserved_bytes: usize,
     /// Cached at construction: the boxed guard's inline size plus its
-    /// reported owned heap. Charged by the worker in both accounting domains
-    /// for as long as the guard lives.
+    /// reported owned heap. Included in worker admission and pending-reply
+    /// accounting; the destination guard outlives that accounting when a
+    /// consumer takes the reply.
     guard_metadata_bytes: usize,
     /// Held only for its `Drop`: releasing it is the credit return.
     _guard: Box<dyn OwnedDestinationCredits>,
@@ -250,8 +251,8 @@ impl DestinationReservation {
         self.reserved_bytes
     }
 
-    /// Total guard metadata cached at construction and charged by the worker
-    /// while the guard lives: inline size plus reported owned heap.
+    /// Total guard metadata cached at construction for worker request and
+    /// pending-reply accounting: inline size plus reported owned heap.
     pub fn guard_metadata_bytes(&self) -> usize {
         self.guard_metadata_bytes
     }
@@ -546,9 +547,10 @@ impl CommittedPublication {
         })
     }
 
-    /// Retained-response bytes: the body, the record's strings and the
-    /// destination guard's cached metadata, which stays charged until the
-    /// committed value or its send wrapper is dropped or finished.
+    /// Retained-response estimate: body, record strings and guard metadata.
+    /// The worker's response reservation ends when `Pending` yields this
+    /// value. The consumer then owns the body and destination guard, which
+    /// remains held until this value or its send wrapper is dropped/finished.
     pub(crate) fn estimated_bytes(&self) -> usize {
         self.body
             .len()
