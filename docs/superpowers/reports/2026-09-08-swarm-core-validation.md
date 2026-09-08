@@ -2,9 +2,10 @@
 
 The core fixes at `9d92f707492f18ce777997d43af5b19b91951191` passed
 81 active tests, strict all-target Clippy, release builds and independent scoped
-review. The corrected 30-minute workload is running in a separate frozen checkout.
+review. The corrected 30-minute workload completed successfully in a separate frozen checkout.
 The earlier build completed its own 30-minute workload; those results remain
-earlier-build evidence. Task 5 awaits the corrected run and final evidence review.
+earlier-build evidence. Final independent evidence review passed; the reviewed
+Task 5 checkpoint is being published to the feature branches.
 Native integration, UI behavior and comparative collaboration effectiveness remain
 separate work in the [companion plan](../plans/2026-09-08-swarm-companion-integration.md).
 
@@ -102,8 +103,8 @@ Initial full traversal of 12,500 messages in 98 pages measured 7.149/4.656/4.400
 The corrected column and 5.744-second traversal come directly from
 `retired/test-artifacts/swarm-core/b1-fixed-short-20260908T142131255402Z/stdout.jsonl`.
 Its `result.json` and `root-analysis-20260908.json` provide corrected short-run
-accounting and memory figures. None of these values is attributed to the pending
-corrected 30-minute run.
+accounting and memory figures. None of these values is attributed to the
+corrected 30-minute run, whose separate results follow below.
 
 ## Completed earlier-build 30-minute run
 
@@ -144,7 +145,7 @@ as an isolated-machine benchmark. The final navigation-to-integrity-completion
 interval was 28.774 seconds: full `Inspect` is maintenance, and the companion plan
 explicitly excludes it from ordinary UI status and peer requests.
 
-## Corrected build verification and current run
+## Corrected build verification and completed run
 
 The initial `b1-fixed-short-20260908T141451863205Z` invocation accidentally copied
 the pre-existing schema-6 observer target. It is preserved and **invalid as
@@ -176,12 +177,63 @@ source bytes and executable. Preparation records Git's EOL-related stat flags
 alongside a zero normalized content diff and exact per-file hashes; no rebuild
 is claimed. Its retained directory is
 `corrected-30m-20260908T143330815795Z`, PID 105532 / FILETIME
-`134333516115183858`. Result and final evidence review are pending. Shared-client
-development may coexist in the separate development checkout and is recorded as
-load; it cannot mutate this frozen run.
+`134333516115183858`. It exited 0 at 2026-09-08 15:07:01 UTC with unchanged source
+hashes and empty stderr. Shared-client builds/tests coexisted in the separate
+development checkout. A fresh Grok development-review process began at 15:05 UTC,
+near the last load phase's end. These are shared-machine observations; none of
+that work could mutate this frozen source/build.
 
 The exact preparation record is
 `C:/Dev/TermX/.worktrees/swarm-core-validation-9d92f707/retired/test-artifacts/swarm-core/frozen-preparation.json`.
+
+| Offered rate | Offered | Admitted/completed | Driver busy | Admission contention | Response-byte admission | Expected conflicts | Actual duration |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10/s | 6,000 | 5,883 | 23 | 0 | 94 | 597 | 600.005 s |
+| 50/s | 30,000 | 27,323 | 1,214 | 0 | 1,463 | 2,873 | 600.005 s |
+| 100/s | 60,000 | 48,202 | 7,035 | 9 | 4,754 | 5,272 | 600.606 s |
+
+Achieved rates were 9.805/45.538/80.256 completed operations/s; each phase's coarse
+driver p95 bound was less than 257 ms. All 108,361 accepted worker operations
+completed, final request/response reservations and unknown worker outcomes were
+zero, and four intentional abandoned replies were reconciled. The 8,762 store
+errors equal 8,742 expected timed conflicts plus 20 lifecycle rejections.
+All four lifecycle barriers checked the exact uncertain message through the
+public mailbox API before reporting no ACK.
+
+The retained 60,121 messages equal 59,974 independently expected workload plus
+147 boundary messages. Final diagnostics show 120,095 current deliveries, 12,397
+cursors, 60,110 receipt rows and four attempts. Final public traversals checked
+29,998 and 29,976 messages in 235 pages each, taking 4.489 and 12.203 seconds.
+Integrity passed. The final navigation-to-inspection interval was 21.763 seconds,
+again supporting the separation of integrity maintenance from routine status.
+
+Across 384 samples, private memory peaked at 6,836,224 bytes and ended at
+6,807,552 bytes; the lifetime private-commit peak counter was 31,227,904 bytes.
+Phase-three first/last twelve-sample private medians were 6,668,288/6,834,176 bytes
+while history grew. Timed handle samples ranged 78-80; whole-lifetime threads
+were 3-6. Final main database size was 480,608,256 bytes, with sampled peak WAL
+20,126,232 bytes. Memory remained within this small observed range; this duration
+and workload cannot establish multi-week leak or disk-retention behavior.
+
+The run's `root-analysis-final-20260908.json` contains log-derived phase/operation
+accounting and memory windows. `root-postrun-verification.json` independently
+rechecks all 30 exact retained/frozen source hashes and Git-filtered commit blobs,
+the executable, actual schema-7 complete-mailbox index, final counts, phase sums,
+four uncertainty assertions and zero final worker reservations. It performs no
+new integrity scan or model call. A fresh Fable 5.1 evidence review independently
+recomputed the source/build hashes, database counts, run accounting and reported
+memory figures, returning Spec PASS / Quality APPROVED on 2026-09-08. Its retained
+native run is `fable-review-20260908T151345575855Z` (exit 0, empty stderr); the
+review's final text is saved separately from native output. The 20 lifecycle
+rejections are an accounting reconciliation, not a reconstructed per-event trace.
+This review used session-local safe mode and read-only tools; it is development
+review evidence, not ordinary production activation or a comparative pilot arm.
+Production-path integration and effectiveness remain separate gates.
+
+The 81-test result belongs to the frozen core workspace at `9d92f707`, before
+the companion client became a workspace member. Later integration changes require
+their own applicable checks. The sustained driver used eight fixed client slots
+and varied offered load and retained history; it did not sweep client counts.
 
 ## Host regression and retained evidence
 

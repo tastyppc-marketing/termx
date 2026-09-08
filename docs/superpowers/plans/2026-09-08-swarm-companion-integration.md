@@ -10,7 +10,7 @@
 
 **Spec:** [Approved design](../specs/2026-09-08-cross-harness-collaboration-design.md). [Native capability evidence](../reports/2026-09-08-swarm-windows-proof.md) overrides assumptions about untested runtime activation. The [core plan](2026-09-08-swarm-durable-core.md) must finish sustained validation and review before Tasks 2 onward. Independent Task 1 may begin once the core fixes pass scoped review and short verification, while a separate frozen validation checkout completes the core soak; the client crate has no core/SQLite dependency or native activation.
 
-**Status:** Task 1 is ready for dispatch after the independently approved core B1/M1 fixes at `9d92f707`. The corrected core soak is running in a separate frozen checkout. Tasks 2 onward await its completion and evidence review. The shared-client task has one implementation owner and separately recorded coexistence load. This document is not a feature-completion claim.
+**Status:** Task 1 is in progress after the independently approved core B1/M1 fixes at `9d92f707`. The corrected 30-minute core soak completed with unchanged sources in a separate frozen checkout; final independent evidence review passed. Publication of that reviewed core checkpoint is the remaining core gate. Tasks 2 onward still require Task 1's implementation and independent review. The shared-client task has one implementation owner and separately recorded coexistence load. This document is not a feature-completion claim.
 
 ## Global constraints
 
