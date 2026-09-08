@@ -1,0 +1,148 @@
+{
+  "schema": "termx.context-fixture.catalog/v1",
+  "status": "structural_oracles_only_not_a_parser_test",
+  "final_rust_api": "pending_task_5",
+  "fixture_limits": {
+    "max_record_utf8_bytes_candidate": 1048576,
+    "max_json_nesting_candidate": 64,
+    "authority": "fixture_only_pending_reviewed_task_5_api"
+  },
+  "forbidden_peer_output_sentinels": [
+    "SECRET_CLAUDE_THINKING_ALPHA",
+    "SECRET_CLAUDE_THINKING_SIGNATURE",
+    "SECRET_CLAUDE_REDACTED_THINKING",
+    "SECRET_CLAUDE_UNKNOWN_SENSITIVE",
+    "SECRET_CODEX_DEVELOPER_INSTRUCTION",
+    "SECRET_CODEX_SYSTEM_INSTRUCTION",
+    "SECRET_CODEX_REASONING_SUMMARY",
+    "SECRET_CODEX_ENCRYPTED_REASONING",
+    "SECRET_NESTED_OTHER_GROUP_BODY",
+    "SECRET_NESTED_OTHER_GROUP_MESSAGE",
+    "SECRET_CLI_WRAPPED_NESTED_BODY",
+    "SECRET_INVALID_UTF8"
+  ],
+  "fixtures": [
+    {
+      "id": "claude-adversarial",
+      "path": "fixtures/claude-adversarial.jsonl",
+      "kind": "utf8_jsonl",
+      "provider": "claude",
+      "bytes": 4140,
+      "records": 10,
+      "sha256": "8222a396b4be5515517aabdfd49e5d57b2c54b73897746596f83c7dd0e12460e"
+    },
+    {
+      "id": "codex-adversarial",
+      "path": "fixtures/codex-adversarial.jsonl",
+      "kind": "utf8_jsonl",
+      "provider": "codex",
+      "bytes": 2123,
+      "records": 9,
+      "sha256": "bd7338e77809ebfda4de0a711b4321dff040c7b91c670efb2e15383b5a6c6867"
+    },
+    {
+      "id": "provenance-adversarial",
+      "path": "fixtures/provenance-adversarial.jsonl",
+      "kind": "utf8_jsonl",
+      "provider": "claude",
+      "bytes": 3314,
+      "records": 7,
+      "sha256": "f39618171ce36814c985d39a1f572cadbe23c25b31367a6f7105da014e57074c"
+    },
+    {
+      "id": "virtual-bounds",
+      "path": "fixtures/virtual-bounds.json",
+      "kind": "virtual_marker_json",
+      "provider": "synthetic_control",
+      "bytes": 633,
+      "records": 2,
+      "sha256": "c2b01ca8490a25f477e7a7f9f8fb247b1d8fd8039d3184679077a58961609377"
+    },
+    {
+      "id": "invalid-utf8-record",
+      "path": "fixtures/invalid-utf8.jsonl.bin",
+      "kind": "preserved_bytes",
+      "provider": "claude",
+      "bytes": 570,
+      "records": 3,
+      "sha256": "6ec1c83f82b3b8ee8618d57eb9a6b36027b1e49644858d3fe9044e40324830a9"
+    },
+    {
+      "id": "malformed-json-record",
+      "path": "fixtures/malformed-json.jsonl.bin",
+      "kind": "preserved_bytes",
+      "provider": "codex",
+      "bytes": 512,
+      "records": 3,
+      "sha256": "a8a34d94ac8960c96ee70d026282ae99a6dd4b6488b324bad42fbee3a431e7ad"
+    },
+    {
+      "id": "incomplete-final-append",
+      "path": "fixtures/incomplete-final-append.jsonl.bin",
+      "kind": "preserved_bytes",
+      "provider": "codex",
+      "bytes": 293,
+      "records": 2,
+      "sha256": "bcfd3203e7c3c18c42a93a41bf36fd1b575f1833851c23229e8f6b6498d954c2"
+    }
+  ],
+  "support_documents": [
+    {
+      "path": "broker-provenance.json",
+      "bytes": 774,
+      "sha256": "6b5052f38f2cc146f40c5af3c8ab24a86ff8e1c435a4289586e10ee4d9d48fe4"
+    },
+    {
+      "path": "expected/byte-edge-cases.expected.json",
+      "bytes": 4486,
+      "sha256": "cf3f844470db6730e864e1ff9db63754fb477343bdb8034b510e3a0626086728"
+    },
+    {
+      "path": "expected/claude.expected.json",
+      "bytes": 3751,
+      "sha256": "acace6cc9fa4aa7d3ce5be96d91d4a56485c8489e6f871e63dad4841ab0e2b2b"
+    },
+    {
+      "path": "expected/codex.expected.json",
+      "bytes": 2951,
+      "sha256": "eed3042a4912918f21317413cd29ed3e3429962ab6b0b94909b3bd59ad5d24bd"
+    },
+    {
+      "path": "expected/provenance.expected.json",
+      "bytes": 2298,
+      "sha256": "49b242343e9e8e9df8774abc17721a4282907895522722996883c4e4f0039b4f"
+    },
+    {
+      "path": "expected/virtual-bounds.expected.json",
+      "bytes": 782,
+      "sha256": "922d8add6707a169fdfad41f30880001ca0c7f466f6f823b198db1fc1ce39e6f"
+    }
+  ],
+  "cases": [
+    {"id": "claude-shared-response-text-blocks", "fixture": "claude-adversarial", "expected": "expected/claude.expected.json"},
+    {"id": "claude-thinking-excluded", "fixture": "claude-adversarial", "expected": "expected/claude.expected.json"},
+    {"id": "claude-redacted-thinking-excluded", "fixture": "claude-adversarial", "expected": "expected/claude.expected.json"},
+    {"id": "claude-unknown-sensitive-excluded", "fixture": "claude-adversarial", "expected": "expected/claude.expected.json"},
+    {"id": "claude-user-text", "fixture": "claude-adversarial", "expected": "expected/claude.expected.json"},
+    {"id": "claude-native-tool-linkage", "fixture": "claude-adversarial", "expected": "expected/claude.expected.json"},
+    {"id": "claude-compaction-boundary-and-recap", "fixture": "claude-adversarial", "expected": "expected/claude.expected.json"},
+    {"id": "codex-native-header", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "codex-user-text", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "codex-assistant-commentary", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "codex-assistant-final", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "codex-native-tool-linkage", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "codex-developer-excluded", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "codex-system-excluded", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "codex-reasoning-excluded", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "codex-compaction-shape-unverified", "fixture": "codex-adversarial", "expected": "expected/codex.expected.json"},
+    {"id": "nested-other-group-context", "fixture": "provenance-adversarial", "expected": "expected/provenance.expected.json"},
+    {"id": "copied-envelope-prose", "fixture": "provenance-adversarial", "expected": "expected/provenance.expected.json"},
+    {"id": "spoofed-shell-marker", "fixture": "provenance-adversarial", "expected": "expected/provenance.expected.json"},
+    {"id": "ambiguous-cli-wrapped-context", "fixture": "provenance-adversarial", "expected": "expected/provenance.expected.json"},
+    {"id": "invalid-utf8-record", "fixture": "invalid-utf8-record", "expected": "expected/byte-edge-cases.expected.json"},
+    {"id": "malformed-json-record", "fixture": "malformed-json-record", "expected": "expected/byte-edge-cases.expected.json"},
+    {"id": "incomplete-final-append", "fixture": "incomplete-final-append", "expected": "expected/byte-edge-cases.expected.json"},
+    {"id": "virtual-nesting-limit", "fixture": "virtual-bounds", "expected": "expected/virtual-bounds.expected.json"},
+    {"id": "virtual-oversize-record", "fixture": "virtual-bounds", "expected": "expected/virtual-bounds.expected.json"}
+  ]
+}

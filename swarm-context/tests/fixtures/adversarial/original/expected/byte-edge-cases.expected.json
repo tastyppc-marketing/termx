@@ -1,0 +1,147 @@
+{
+  "schema": "termx.context-fixture.byte-edges.expected/v1",
+  "byte_cases": [
+    {
+      "case_id": "invalid-utf8-record",
+      "fixture_path": "fixtures/invalid-utf8.jsonl.bin",
+      "file_bytes": 570,
+      "file_sha256": "6ec1c83f82b3b8ee8618d57eb9a6b36027b1e49644858d3fe9044e40324830a9",
+      "preserved_ranges": [
+        {
+          "start": 0,
+          "end": 168,
+          "sha256": "f8f006707fa9bb9ee6b5fc7e6eae0c9ab004bb51157855d1e2e9dd955deeeac9",
+          "classification": "complete_projected"
+        },
+        {
+          "start": 168,
+          "end": 341,
+          "sha256": "0793b2c1b1a3c8082f673ef5bdb2142b9ac8d85517b1d17694edc3492a871014",
+          "classification": "invalid_utf8_unavailable"
+        },
+        {
+          "start": 341,
+          "end": 570,
+          "sha256": "932edcc615f68335183de3ae4aa24dd90170289d207843402b5f5f6aa10ad3a9",
+          "classification": "complete_projected"
+        }
+      ],
+      "projected_records": [
+        {
+          "case_id": "invalid-utf8-record",
+          "record_id": "edge:utf8:before",
+          "kind": "user_text",
+          "order": 1,
+          "text": "EDGE_UTF8_BEFORE",
+          "source_attribution": "provider_native_user"
+        },
+        {
+          "case_id": "invalid-utf8-record",
+          "record_id": "edge:utf8:after",
+          "kind": "assistant_text",
+          "order": 2,
+          "text": "EDGE_UTF8_AFTER",
+          "source_attribution": "provider_native_assistant"
+        }
+      ],
+      "unavailable": [
+        {
+          "start": 168,
+          "end": 341,
+          "reason": "invalid_utf8_record"
+        }
+      ],
+      "lag": null
+    },
+    {
+      "case_id": "malformed-json-record",
+      "fixture_path": "fixtures/malformed-json.jsonl.bin",
+      "file_bytes": 512,
+      "file_sha256": "a8a34d94ac8960c96ee70d026282ae99a6dd4b6488b324bad42fbee3a431e7ad",
+      "preserved_ranges": [
+        {
+          "start": 0,
+          "end": 195,
+          "sha256": "7fba7c3b2c99ce503e3a4551e0c8a7cdab178e81302c6107b7fd018556e5e3ae",
+          "classification": "complete_projected"
+        },
+        {
+          "start": 195,
+          "end": 290,
+          "sha256": "f4ee46ebb22854a823288690c62d44e0e9e0fd8598c3d811136e2929e83c7883",
+          "classification": "malformed_json_unavailable"
+        },
+        {
+          "start": 290,
+          "end": 512,
+          "sha256": "62ae1fc0b726d7ed43c8f206bb644a6a6de92ed9345378508cf2b7809b84b850",
+          "classification": "complete_projected"
+        }
+      ],
+      "projected_records": [
+        {
+          "case_id": "malformed-json-record",
+          "record_id": "edge:json:before",
+          "kind": "user_text",
+          "order": 1,
+          "text": "EDGE_JSON_BEFORE",
+          "source_attribution": "provider_native_user"
+        },
+        {
+          "case_id": "malformed-json-record",
+          "record_id": "edge:json:after",
+          "kind": "assistant_text",
+          "order": 2,
+          "phase": "final_answer",
+          "text": "EDGE_JSON_AFTER",
+          "source_attribution": "provider_native_assistant"
+        }
+      ],
+      "unavailable": [
+        {
+          "start": 195,
+          "end": 290,
+          "reason": "malformed_json_record"
+        }
+      ],
+      "lag": null
+    },
+    {
+      "case_id": "incomplete-final-append",
+      "fixture_path": "fixtures/incomplete-final-append.jsonl.bin",
+      "file_bytes": 293,
+      "file_sha256": "bcfd3203e7c3c18c42a93a41bf36fd1b575f1833851c23229e8f6b6498d954c2",
+      "preserved_ranges": [
+        {
+          "start": 0,
+          "end": 203,
+          "sha256": "7aa3c103007ca260a0c6fdd5a1ed274cd98717c41a2aa2c6627a12bbb25f2f7f",
+          "classification": "complete_projected"
+        },
+        {
+          "start": 203,
+          "end": 293,
+          "sha256": "abe8dbb07b809c0c7300536258fb4376d09f70b92ec5cb36a3bbbbaf965a40c2",
+          "classification": "incomplete_final_append"
+        }
+      ],
+      "projected_records": [
+        {
+          "case_id": "incomplete-final-append",
+          "record_id": "edge:append:complete",
+          "kind": "user_text",
+          "order": 1,
+          "text": "EDGE_APPEND_COMPLETE",
+          "source_attribution": "provider_native_user"
+        }
+      ],
+      "unavailable": [],
+      "lag": {
+        "reason": "incomplete_final_json_append",
+        "captured_through": 203,
+        "observed_length": 293,
+        "pending_bytes": 90
+      }
+    }
+  ]
+}

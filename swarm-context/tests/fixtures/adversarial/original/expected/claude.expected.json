@@ -1,0 +1,104 @@
+{
+  "schema": "termx.context-fixture.expected/v1",
+  "fixture_id": "claude-adversarial",
+  "conversation_header": {
+    "provider": "claude",
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "evidence": "consistent_sessionId_on_every_native_record",
+    "separate_native_header_record": false
+  },
+  "records": [
+    {
+      "case_id": "claude-user-text",
+      "record_id": "claude:10000000-0000-4000-8000-000000000001:text:0",
+      "kind": "user_text",
+      "order": 1,
+      "native_record_id": "10000000-0000-4000-8000-000000000001",
+      "block_index": 0,
+      "text": "CLAUDE_PUBLIC_USER_ALPHA",
+      "source_attribution": "provider_native_user"
+    },
+    {
+      "case_id": "claude-shared-response-text-blocks",
+      "record_id": "claude:10000000-0000-4000-8000-000000000002:text:0",
+      "kind": "assistant_text",
+      "order": 2,
+      "native_record_id": "10000000-0000-4000-8000-000000000002",
+      "native_response_id": "msg_fixture_claude_shared_001",
+      "block_index": 0,
+      "text": "CLAUDE_PUBLIC_TEXT_ALPHA",
+      "source_attribution": "provider_native_assistant"
+    },
+    {
+      "case_id": "claude-shared-response-text-blocks",
+      "record_id": "claude:10000000-0000-4000-8000-000000000003:text:0",
+      "kind": "assistant_text",
+      "order": 3,
+      "native_record_id": "10000000-0000-4000-8000-000000000003",
+      "native_response_id": "msg_fixture_claude_shared_001",
+      "block_index": 0,
+      "text": "CLAUDE_PUBLIC_TEXT_BETA",
+      "source_attribution": "provider_native_assistant"
+    },
+    {
+      "case_id": "claude-native-tool-linkage",
+      "record_id": "claude:toolu_fixture_claude_001:call",
+      "kind": "tool_call",
+      "order": 4,
+      "native_record_id": "10000000-0000-4000-8000-000000000007",
+      "native_response_id": "msg_fixture_claude_tool_001",
+      "native_call_id": "toolu_fixture_claude_001",
+      "tool_name": "SyntheticLookup",
+      "summary": "SYNTHETIC_SAFE_QUERY",
+      "source_attribution": "provider_native_tool"
+    },
+    {
+      "case_id": "claude-native-tool-linkage",
+      "record_id": "claude:toolu_fixture_claude_001:result",
+      "kind": "tool_result",
+      "order": 5,
+      "native_record_id": "10000000-0000-4000-8000-000000000008",
+      "native_call_id": "toolu_fixture_claude_001",
+      "text": "CLAUDE_PUBLIC_TOOL_RESULT",
+      "is_error": false,
+      "source_attribution": "provider_native_tool"
+    },
+    {
+      "case_id": "claude-compaction-boundary-and-recap",
+      "record_id": "claude:10000000-0000-4000-8000-000000000009:boundary",
+      "kind": "compaction_boundary",
+      "order": 6,
+      "native_record_id": "10000000-0000-4000-8000-000000000009",
+      "text": "Conversation compacted",
+      "source_attribution": "provider_native_system"
+    },
+    {
+      "case_id": "claude-compaction-boundary-and-recap",
+      "record_id": "claude:10000000-0000-4000-8000-000000000010:recap",
+      "kind": "compaction_summary",
+      "order": 7,
+      "native_record_id": "10000000-0000-4000-8000-000000000010",
+      "text": "CLAUDE_PUBLIC_COMPACTION_RECAP",
+      "source_attribution": "provider_native_compaction"
+    }
+  ],
+  "excluded": [
+    {
+      "case_id": "claude-thinking-excluded",
+      "native_record_id": "10000000-0000-4000-8000-000000000004",
+      "reason": "private_model_reasoning"
+    },
+    {
+      "case_id": "claude-redacted-thinking-excluded",
+      "native_record_id": "10000000-0000-4000-8000-000000000005",
+      "reason": "redacted_private_model_reasoning"
+    },
+    {
+      "case_id": "claude-unknown-sensitive-excluded",
+      "native_record_id": "10000000-0000-4000-8000-000000000006",
+      "reason": "unknown_sensitive_variant"
+    }
+  ],
+  "format_gaps": [],
+  "lag": null
+}

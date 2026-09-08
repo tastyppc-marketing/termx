@@ -1,0 +1,30 @@
+{
+  "schema": "termx.context-fixture.expected/v1",
+  "fixture_id": "virtual-bounds",
+  "conversation_header": null,
+  "records": [
+    {
+      "case_id": "virtual-nesting-limit",
+      "record_id": "virtual:nesting:65",
+      "kind": "record_unavailable",
+      "order": 1,
+      "availability": "unavailable",
+      "reason": "nesting_limit_exceeded",
+      "observed_nesting": 65,
+      "fixture_limit": 64
+    },
+    {
+      "case_id": "virtual-oversize-record",
+      "record_id": "virtual:bytes:1048577",
+      "kind": "record_unavailable",
+      "order": 2,
+      "availability": "unavailable",
+      "reason": "record_size_limit_exceeded",
+      "observed_utf8_bytes": 1048577,
+      "fixture_limit": 1048576
+    }
+  ],
+  "excluded": [],
+  "format_gaps": [],
+  "lag": null
+}

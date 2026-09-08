@@ -1,0 +1,39 @@
+{
+  "prepared_utc": "20260908T144115686689Z",
+  "status": "synthetic_shapes_only_not_parser_validation",
+  "recipe_sha256": "655a1d5f6eedd609d91833ab79b2bc4a4c88be9279599dfb38c8c238a4ddf7cc",
+  "sources": {
+    "codex": {
+      "source_sha256": "d1188b13aac20bd986ea0ba9419c11177a45d16d51876cadb86aa0060ccf12d0",
+      "records": 71,
+      "selected_types": {
+        "response_item": 70,
+        "session_meta": 1
+      },
+      "fixture_sha256": "a4fe91f370836d990dfcd2d4ddfe81344021f5ba978a832b7eeb4b805acf04f3",
+      "fixture_bytes": 28334
+    },
+    "claude": {
+      "source_sha256": "359c5082a27846ae3ac0f8d26c3d8c97d85f3e824aefea164beb47216abfed1d",
+      "records": 88,
+      "selected_types": {
+        "assistant": 37,
+        "last-prompt": 10,
+        "queue-operation": 10,
+        "system": 12,
+        "user": 19
+      },
+      "fixture_sha256": "fadef212361b586a5f8f6301f9628e8f60de04215dc2b9a5c77bc826288753ec",
+      "fixture_bytes": 91891
+    }
+  },
+  "limits": [
+    "Only selected exact-owned source record types included.",
+    "Unknown field names and all free-form strings replaced.",
+    "Original numeric values replaced with 1; booleans/null retain type/value.",
+    "String equality/linkage retained via synthetic IDs; original ID syntax is not retained.",
+    "No source text or private reasoning exported; no reverse mapping retained.",
+    "No compaction occurred in these selected proof sources; hand-authored cases still required.",
+    "Not a verified provenance boundary or a production peer projector."
+  ]
+}

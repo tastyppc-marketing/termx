@@ -1,0 +1,91 @@
+{
+  "schema": "termx.context-fixture.expected/v1",
+  "fixture_id": "codex-adversarial",
+  "conversation_header": {
+    "case_id": "codex-native-header",
+    "provider": "codex",
+    "conversation_id": "22222222-2222-4222-8222-222222222222",
+    "evidence": "session_meta_payload_id",
+    "separate_native_header_record": true
+  },
+  "records": [
+    {
+      "case_id": "codex-user-text",
+      "record_id": "codex:msg_fixture_codex_user_001:text:0",
+      "kind": "user_text",
+      "order": 1,
+      "native_record_id": "msg_fixture_codex_user_001",
+      "block_index": 0,
+      "text": "CODEX_PUBLIC_USER_ALPHA",
+      "source_attribution": "provider_native_user"
+    },
+    {
+      "case_id": "codex-assistant-commentary",
+      "record_id": "codex:msg_fixture_codex_commentary_001:text:0",
+      "kind": "assistant_text",
+      "order": 2,
+      "native_record_id": "msg_fixture_codex_commentary_001",
+      "block_index": 0,
+      "phase": "commentary",
+      "text": "CODEX_PUBLIC_COMMENTARY_ALPHA",
+      "source_attribution": "provider_native_assistant"
+    },
+    {
+      "case_id": "codex-native-tool-linkage",
+      "record_id": "codex:call_fixture_codex_001:call",
+      "kind": "tool_call",
+      "order": 3,
+      "native_record_id": "item_fixture_codex_call_001",
+      "native_call_id": "call_fixture_codex_001",
+      "tool_name": "SyntheticInspect",
+      "source_attribution": "provider_native_tool"
+    },
+    {
+      "case_id": "codex-native-tool-linkage",
+      "record_id": "codex:call_fixture_codex_001:result",
+      "kind": "tool_result",
+      "order": 4,
+      "native_record_id": "item_fixture_codex_output_001",
+      "native_call_id": "call_fixture_codex_001",
+      "text": "CODEX_PUBLIC_TOOL_RESULT",
+      "source_attribution": "provider_native_tool"
+    },
+    {
+      "case_id": "codex-assistant-final",
+      "record_id": "codex:msg_fixture_codex_final_001:text:0",
+      "kind": "assistant_text",
+      "order": 5,
+      "native_record_id": "msg_fixture_codex_final_001",
+      "block_index": 0,
+      "phase": "final_answer",
+      "text": "CODEX_PUBLIC_FINAL_ALPHA",
+      "source_attribution": "provider_native_assistant"
+    }
+  ],
+  "excluded": [
+    {
+      "case_id": "codex-developer-excluded",
+      "native_record_id": "msg_fixture_codex_developer_001",
+      "reason": "developer_instruction"
+    },
+    {
+      "case_id": "codex-system-excluded",
+      "native_record_id": "msg_fixture_codex_system_001",
+      "reason": "system_instruction"
+    },
+    {
+      "case_id": "codex-reasoning-excluded",
+      "native_record_id": "rs_fixture_codex_001",
+      "reason": "private_model_reasoning"
+    }
+  ],
+  "format_gaps": [
+    {
+      "case_id": "codex-compaction-shape-unverified",
+      "provider": "codex",
+      "status": "unavailable",
+      "reason": "no_compaction_record_in_sanctioned_structural_slice_or_current_ui_parser"
+    }
+  ],
+  "lag": null
+}
