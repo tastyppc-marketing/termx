@@ -1,0 +1,9 @@
+# Owner conversation structure parser
+
+The new owner namespace extracts the Claude chat and Claude/Codex transcript structural forms into shared owner-only records: queued/user/assistant text, thinking, tool calls/grouped results, system notices and compaction. Native IDs, timestamps, roles and block positions remain optional source metadata. Parsing owner history establishes no peer identity and exposes no peer content grant.
+
+Record-level tool results now share one immutable allocation across blocks. This fixes a potentially multiplicative memory increase. Message/text and tool-input selectors preserve nullish precedence; root additionally repaired Codex event-message fallback after a behavioral regression reproduced the mismatch. Per-block result content remains distinct from the transcript's selected tool input. Textless system records preserve a structural marker for later display formatting.
+
+Root independently reviewed source and reconciled44 final input/copy identities,5 native command manifests/10 logs and2 release artifacts at2026-09-08T23:26:49UTC.74 tests,3 doctests, format check, strict Clippy and release build passed. Final manifest SHA256:e05eac4d7311ecdef27a477985adef0afdde79a365e9add5ad1f99f20c392d08. Evidence is retained at retired/test-artifacts/swarm-context/root-event-selector-20260908T232400907938Z/final-20260908T232541101418Z; original Grok implementation/fix evidence and all failures remain intact.
+
+The owner parser keeps existing peer limits/identity checks unchanged. Owner reads still depend on the caller's bounded window; this layer has no native file access or source proof. Chat/transcript DTO adapters and parity tests, native context indexing, product integration and collaboration evaluation remain pending. Strict-family mode is not a substitute for each UI consumer's legacy structural filtering. No installed application or real user history was changed.

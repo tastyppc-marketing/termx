@@ -13,7 +13,43 @@
 //! let _peer_bytes = serde_json::to_vec(&owner)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! The `owner` module is the full owner-adapter entry point. Top-level
+//! `OwnerRecord`/`OwnerProjection` remain compatibility APIs and are not that
+//! adapter surface. Namespaced owner projections also cannot be serialized:
+//!
+//! ```compile_fail
+//! use termx_swarm_context::owner::OwnerParser;
+//! use termx_swarm_context::Provider;
+//!
+//! let parser = OwnerParser::new(Provider::Claude);
+//! let owner = parser.project_line(
+//!     r#"{"type":"user","uuid":"record","message":{"content":"text"}}"#,
+//! );
+//! let _peer_bytes = serde_json::to_vec(&owner)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Neighboring field inspection compiles and observes owner-only structure:
+//!
+//! ```
+//! use termx_swarm_context::owner::{OwnerParser, OwnerRecord};
+//! use termx_swarm_context::Provider;
+//!
+//! let parser = OwnerParser::new(Provider::Claude);
+//! let owner = parser.project_line(
+//!     r#"{"type":"user","uuid":"record","message":{"content":"text"}}"#,
+//! );
+//! assert_eq!(owner.source.native_record_id.as_deref(), Some("record"));
+//! assert_eq!(owner.source.native_kind.as_deref(), Some("user"));
+//! assert_eq!(owner.source.nested_message_role.as_deref(), None);
+//! assert!(matches!(
+//!     &owner.records[0].record,
+//!     OwnerRecord::UserText { text } if text == "text"
+//! ));
+//! ```
 
+pub mod owner;
 mod provider;
 mod records;
 mod scanner;
