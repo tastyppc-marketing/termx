@@ -108,6 +108,52 @@ fn future_schema_is_rejected_without_mutation() {
 }
 
 #[test]
+fn negative_schema_version_is_rejected_without_mutation() {
+    let path = support::retained_db("negative-version");
+    let connection = Connection::open(&path).expect("create malformed database");
+    connection
+        .pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", -1_i64)
+        .unwrap();
+    drop(connection);
+    let before = fs::read(&path).expect("read before");
+
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::UnrecognizedDatabase { .. })
+    ));
+    assert_eq!(fs::read(&path).expect("read after"), before);
+    assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+}
+
+#[test]
+fn version_zero_with_user_data_is_rejected_without_mutation() {
+    let path = support::retained_db("version-zero-user-data");
+    let connection = Connection::open(&path).expect("create unrecognized database");
+    connection
+        .pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE user_content(value TEXT); INSERT INTO user_content VALUES ('keep');",
+        )
+        .unwrap();
+    drop(connection);
+    let before = fs::read(&path).expect("read before");
+
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::UnrecognizedDatabase { .. })
+    ));
+    assert_eq!(fs::read(&path).expect("read after"), before);
+    assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+}
+
+#[test]
 fn store_verifies_explicit_durability_pragmas() {
     let path = support::retained_db("durability");
     let inspection = Store::open(&path)
@@ -119,45 +165,6 @@ fn store_verifies_explicit_durability_pragmas() {
     assert_eq!(inspection.journal_mode, "wal");
     assert_eq!(inspection.synchronous, "FULL");
     assert!(inspection.busy_timeout_millis > 0);
-}
-
-#[test]
-fn failed_migration_rolls_back_schema_changes_and_preserves_existing_state() {
-    let path = support::retained_db("migration-failure");
-    let connection = Connection::open(&path).expect("create recognized database");
-    connection
-        .pragma_update(None, "application_id", APPLICATION_ID)
-        .expect("set identity");
-    connection
-        .execute_batch(
-            "CREATE TABLE authority_metadata(marker TEXT NOT NULL);\n             INSERT INTO authority_metadata VALUES ('preserve-me');",
-        )
-        .expect("create incompatible prior state");
-    drop(connection);
-
-    assert!(Store::open(&path).is_err());
-    let connection = Connection::open(&path).expect("reopen fixture");
-    assert_eq!(
-        connection
-            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        connection
-            .query_row("SELECT marker FROM authority_metadata", [], |row| row
-                .get::<_, String>(0))
-            .unwrap(),
-        "preserve-me"
-    );
-    let created: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='peers'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(created, 0);
 }
 
 #[test]

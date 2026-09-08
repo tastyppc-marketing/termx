@@ -38,6 +38,13 @@ pub(super) fn validate_identity(
             schema_version: identity.schema_version,
         });
     }
+    if identity.schema_version < 0 || (identity.schema_version == 0 && identity.has_objects) {
+        return Err(StoreError::UnrecognizedDatabase {
+            path: path.to_path_buf(),
+            application_id: identity.application_id,
+            schema_version: identity.schema_version,
+        });
+    }
     if identity.schema_version > SCHEMA_VERSION {
         return Err(StoreError::FutureSchema {
             found: identity.schema_version,
@@ -96,6 +103,14 @@ pub(super) fn migrate(
     connection: &mut Connection,
     identity: DatabaseIdentity,
 ) -> Result<(), StoreError> {
+    migrate_with_final_sql(connection, identity, None)
+}
+
+fn migrate_with_final_sql(
+    connection: &mut Connection,
+    identity: DatabaseIdentity,
+    final_sql: Option<&str>,
+) -> Result<(), StoreError> {
     if identity.schema_version == SCHEMA_VERSION {
         return Ok(());
     }
@@ -108,6 +123,9 @@ pub(super) fn migrate(
     )?;
     transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    if let Some(sql) = final_sql {
+        transaction.execute_batch(sql)?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -242,3 +260,56 @@ CREATE INDEX messages_by_group_sequence ON messages(group_id, group_sequence);
 CREATE INDEX deliveries_by_recipient ON recipient_deliveries(recipient_peer_id, message_id);
 CREATE INDEX attempts_unfinished ON delivery_attempts(recipient_peer_id, started_at_millis) WHERE completed_at_millis IS NULL;
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_after_authority_and_version_updates_rolls_back_entire_migration() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE late_conflict(marker TEXT NOT NULL);\
+                 INSERT INTO late_conflict VALUES ('preserve-me');",
+            )
+            .unwrap();
+        let identity = DatabaseIdentity::new();
+
+        assert!(migrate_with_final_sql(
+            &mut connection,
+            identity,
+            Some("CREATE TABLE late_conflict(value TEXT);")
+        )
+        .is_err());
+
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "application_id", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT marker FROM late_conflict", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "preserve-me"
+        );
+        let migrated_tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name = 'authority_metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated_tables, 0);
+    }
+}
