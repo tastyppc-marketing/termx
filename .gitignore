@@ -10,6 +10,7 @@ dist-portable/
 .superpowers/
 .worktrees/
 retired/test-artifacts/swarm-core/
+/retired/test-artifacts/swarm-client/
 
 # Python bytecode from tools/claude-hooks
 __pycache__/

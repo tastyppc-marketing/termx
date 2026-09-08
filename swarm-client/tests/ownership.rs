@@ -9,7 +9,7 @@ use std::{
 };
 use termx_swarm_client::{AuthorityClaim, AuthorityError, DiscoveryRecord, VerifiedProcess};
 
-fn retained(name: &str) -> PathBuf {
+fn retained_container(name: &str) -> PathBuf {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../retired/test-artifacts/swarm-client")
         .join(format!(
@@ -23,14 +23,20 @@ fn retained(name: &str) -> PathBuf {
     p
 }
 
+fn retained(name: &str) -> PathBuf {
+    retained_container(name).join("authority")
+}
+
 #[test]
 fn aliases_contend_and_reopen_preserves_lock_and_credential() {
     let dir = retained("authority-alias");
+    drop(AuthorityClaim::claim(&dir).unwrap());
     fs::write(dir.join("authority.lock"), b"retained-lock-bytes").unwrap();
     let claim = AuthorityClaim::claim(&dir).unwrap();
     let secret = claim.load_or_create_owner_credential().unwrap();
+    let case_alias = dir.with_file_name("AUTHORITY");
     assert!(matches!(
-        AuthorityClaim::claim(dir.join(".").as_path()),
+        AuthorityClaim::claim(&case_alias),
         Err(AuthorityError::Busy)
     ));
     drop(claim);
@@ -41,12 +47,14 @@ fn aliases_contend_and_reopen_preserves_lock_and_credential() {
         fs::read(dir.join("authority.lock")).unwrap(),
         b"retained-lock-bytes"
     );
+    termx_swarm_client::ClientBootstrap::open(&case_alias).unwrap();
 }
 
 #[test]
 fn permissive_existing_credential_is_rejected_and_preserved() {
     let dir = retained("credential-reject");
-    fs::write(dir.join("owner.credential"), b"not-a-valid-secret").unwrap();
+    drop(AuthorityClaim::claim(&dir).unwrap());
+    fs::write(dir.join("owner.credential"), [b'x'; 32]).unwrap();
     let claim = AuthorityClaim::claim(&dir).unwrap();
     let before = fs::read(dir.join("owner.credential")).unwrap();
     assert!(matches!(
@@ -57,10 +65,35 @@ fn permissive_existing_credential_is_rejected_and_preserved() {
 }
 
 #[test]
+fn insecure_existing_authority_directory_is_rejected_and_preserved() {
+    let container = retained_container("authority-directory-reject");
+    let dir = container.join("insecure-authority");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("sentinel.txt"), b"preserve-insecure-directory").unwrap();
+
+    assert!(matches!(
+        AuthorityClaim::claim(&dir),
+        Err(AuthorityError::InsecureAuthority)
+    ));
+    assert!(matches!(
+        termx_swarm_client::ClientBootstrap::open(&dir),
+        Err(AuthorityError::InsecureAuthority)
+    ));
+    assert_eq!(
+        fs::read(dir.join("sentinel.txt")).unwrap(),
+        b"preserve-insecure-directory"
+    );
+    fs::write(
+        container.join("result.json"),
+        br#"{"claim_rejected":true,"client_bootstrap_rejected":true,"insecure_directory_preserved":true}"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn discovery_rejects_malformed_predecessor_and_atomically_retires_valid_one() {
     let dir = retained("discovery");
     let claim = AuthorityClaim::claim(&dir).unwrap();
-    fs::write(dir.join("discovery.json"), b"{malformed").unwrap();
     let identity = VerifiedProcess::open(std::process::id())
         .unwrap()
         .identity();
@@ -70,6 +103,8 @@ fn discovery_rejects_malformed_predecessor_and_atomically_retires_valid_one() {
         identity,
         r"\\.\pipe\termx-test-discovery",
     );
+    claim.publish_discovery(&first).unwrap();
+    fs::write(dir.join("discovery.json"), b"{malformed").unwrap();
     assert!(matches!(
         claim.publish_discovery(&first),
         Err(AuthorityError::InvalidDiscovery)
@@ -78,6 +113,7 @@ fn discovery_rejects_malformed_predecessor_and_atomically_retires_valid_one() {
 
     let dir2 = retained("discovery-future");
     let claim2 = AuthorityClaim::claim(&dir2).unwrap();
+    claim2.publish_discovery(&first).unwrap();
     let mut future = first.clone();
     future.version += 1;
     let future_bytes = serde_json::to_vec(&future).unwrap();
@@ -112,8 +148,41 @@ fn discovery_rejects_malformed_predecessor_and_atomically_retires_valid_one() {
 }
 
 #[test]
+fn insecure_existing_discovery_is_rejected_and_preserved() {
+    let container = retained_container("discovery-acl-reject");
+    let dir = container.join("authority");
+    let claim = AuthorityClaim::claim(&dir).unwrap();
+    let identity = VerifiedProcess::open(std::process::id())
+        .unwrap()
+        .identity();
+    let discovery = DiscoveryRecord::new(
+        "authority-1",
+        "boot-1",
+        identity,
+        r"\\.\pipe\termx-test-insecure-discovery",
+    );
+    let bytes = serde_json::to_vec(&discovery).unwrap();
+    fs::write(dir.join("discovery.json"), &bytes).unwrap();
+    assert!(matches!(
+        claim.read_discovery(),
+        Err(AuthorityError::InsecureDiscovery)
+    ));
+    assert!(matches!(
+        claim.publish_discovery(&discovery),
+        Err(AuthorityError::InsecureDiscovery)
+    ));
+    assert_eq!(fs::read(dir.join("discovery.json")).unwrap(), bytes);
+    fs::write(
+        container.join("result.json"),
+        br#"{"read_rejected":true,"publish_rejected":true,"insecure_discovery_preserved":true}"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn wrong_type_credential_is_rejected_and_preserved() {
     let dir = retained("credential-type");
+    drop(AuthorityClaim::claim(&dir).unwrap());
     fs::create_dir(dir.join("owner.credential")).unwrap();
     let claim = AuthorityClaim::claim(&dir).unwrap();
     match claim.load_or_create_owner_credential() {
@@ -127,7 +196,8 @@ fn wrong_type_credential_is_rejected_and_preserved() {
 #[test]
 fn reparse_credential_is_rejected_and_preserved() {
     let dir = retained("credential-reparse");
-    let target = fs::canonicalize(retained("credential-reparse-target")).unwrap();
+    drop(AuthorityClaim::claim(&dir).unwrap());
+    let target = fs::canonicalize(retained_container("credential-reparse-target")).unwrap();
     let link = fs::canonicalize(&dir).unwrap().join("owner.credential");
     let output = Command::new("cmd")
         .args(["/d", "/c", "mklink", "/J"])
@@ -163,8 +233,8 @@ fn reparse_credential_is_rejected_and_preserved() {
 fn retained_directory_handle_blocks_rename_until_released() {
     let dir = retained("authority-rename");
     let moved = dir.with_extension("released");
-    fs::write(dir.join("sentinel.txt"), b"preserve-me").unwrap();
     let claim = AuthorityClaim::claim(&dir).unwrap();
+    fs::write(dir.join("sentinel.txt"), b"preserve-me").unwrap();
     assert!(fs::rename(&dir, &moved).is_err());
     drop(claim);
     fs::rename(&dir, &moved).unwrap();

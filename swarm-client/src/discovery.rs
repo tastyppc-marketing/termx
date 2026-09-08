@@ -1,8 +1,11 @@
-use crate::{AuthorityClaim, AuthorityError, ClientBootstrap, DiscoveryRecord, WIRE_VERSION};
+use crate::{
+    security::{create_private_discovery, open_private_discovery},
+    AuthorityClaim, AuthorityError, ClientBootstrap, DiscoveryRecord, WIRE_VERSION,
+};
 use rand::RngCore;
 use std::{
     ffi::OsStr,
-    fs::{self, File, OpenOptions},
+    fs,
     io::{Read, Write},
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
@@ -29,7 +32,7 @@ fn classify(record: DiscoveryRecord) -> Result<DiscoveryRecord, AuthorityError> 
 }
 
 fn read(path: &Path) -> Result<DiscoveryRecord, AuthorityError> {
-    let file = File::open(path)?;
+    let file = open_private_discovery(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > MAX_DISCOVERY_BYTES {
         return Err(AuthorityError::InvalidDiscovery);
@@ -82,10 +85,7 @@ fn publish(root: &Path, record: &DiscoveryRecord) -> Result<(), AuthorityError> 
     };
 
     let pending = unique_sibling(root, "discovery.pending");
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&pending)?;
+    let mut output = create_private_discovery(&pending)?;
     output.write_all(&bytes)?;
     output.sync_all()?;
     drop(output);

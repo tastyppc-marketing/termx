@@ -46,6 +46,9 @@ pub fn resolve_enrolled_ancestor(
             return Err(AncestryError::Unavailable);
         }
     }
+    if !map.contains_key(&start) {
+        return Err(AncestryError::Unavailable);
+    }
     let expected: HashSet<_> = enrolled.iter().copied().collect();
     let mut found = None;
     let mut pid = start;
@@ -54,7 +57,7 @@ pub fn resolve_enrolled_ancestor(
         if !seen.insert(pid) {
             return Err(AncestryError::Cycle);
         }
-        let row = map.get(&pid).ok_or(AncestryError::NotFound)?;
+        let row = map.get(&pid).ok_or(AncestryError::Unavailable)?;
         if expected.contains(&row.identity) && found.replace(row.identity).is_some() {
             return Err(AncestryError::Ambiguous);
         }
@@ -64,9 +67,11 @@ pub fn resolve_enrolled_ancestor(
         if seen.contains(&row.parent_pid) {
             return Err(AncestryError::Cycle);
         }
-        let parent = map.get(&row.parent_pid).ok_or(AncestryError::NotFound)?;
+        let Some(parent) = map.get(&row.parent_pid) else {
+            return found.ok_or(AncestryError::NotFound);
+        };
         if parent.identity.creation_filetime > row.identity.creation_filetime {
-            return Err(AncestryError::Unavailable);
+            return found.ok_or(AncestryError::NotFound);
         }
         pid = row.parent_pid;
     }
@@ -80,7 +85,10 @@ pub fn resolve_verified_enrolled_ancestor(
     max_depth: usize,
 ) -> Result<VerifiedProcess, AncestryError> {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        Foundation::{
+            CloseHandle, GetLastError, SetLastError, ERROR_NO_MORE_FILES, ERROR_SUCCESS,
+            INVALID_HANDLE_VALUE,
+        },
         System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
             TH32CS_SNAPPROCESS,
@@ -96,8 +104,16 @@ pub fn resolve_verified_enrolled_ancestor(
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
+    unsafe { SetLastError(ERROR_SUCCESS) };
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
-    while ok != 0 {
+    loop {
+        if ok == 0 {
+            if unsafe { GetLastError() } != ERROR_NO_MORE_FILES {
+                unsafe { CloseHandle(snapshot) };
+                return Err(AncestryError::Unavailable);
+            }
+            break;
+        }
         if parents
             .insert(entry.th32ProcessID, entry.th32ParentProcessID)
             .is_some()
@@ -105,9 +121,14 @@ pub fn resolve_verified_enrolled_ancestor(
             unsafe { CloseHandle(snapshot) };
             return Err(AncestryError::Unavailable);
         }
+        unsafe { SetLastError(ERROR_SUCCESS) };
         ok = unsafe { Process32NextW(snapshot, &mut entry) };
     }
     unsafe { CloseHandle(snapshot) };
+
+    if !parents.contains_key(&start) {
+        return Err(AncestryError::Unavailable);
+    }
 
     let expected: HashSet<_> = enrolled.iter().copied().collect();
     let mut found = None;
@@ -119,12 +140,16 @@ pub fn resolve_verified_enrolled_ancestor(
         if !seen.insert(pid) {
             return Err(AncestryError::Cycle);
         }
-        let process = VerifiedProcess::open(pid).map_err(|_| AncestryError::Unavailable)?;
+        let process = match VerifiedProcess::open(pid) {
+            Ok(process) => process,
+            Err(ProcessError::Gone) if pid != start => return finish_verified(found, &mut handles),
+            Err(_) => return Err(AncestryError::Unavailable),
+        };
         if !process.is_alive().map_err(|_| AncestryError::Unavailable)? {
             return Err(AncestryError::Unavailable);
         }
         if previous_creation.is_some_and(|child| process.identity().creation_filetime > child) {
-            return Err(AncestryError::Unavailable);
+            return finish_verified(found, &mut handles);
         }
         if expected.contains(&process.identity()) && found.replace(handles.len()).is_some() {
             return Err(AncestryError::Ambiguous);
@@ -133,12 +158,28 @@ pub fn resolve_verified_enrolled_ancestor(
         previous_creation = Some(process.identity().creation_filetime);
         handles.push(process);
         if parent_pid == 0 {
-            let index = found.ok_or(AncestryError::NotFound)?;
-            return Ok(handles.swap_remove(index));
+            return finish_verified(found, &mut handles);
+        }
+        if !parents.contains_key(&parent_pid) {
+            return finish_verified(found, &mut handles);
         }
         pid = parent_pid;
     }
     Err(AncestryError::Depth)
+}
+
+#[cfg(windows)]
+fn finish_verified(
+    found: Option<usize>,
+    handles: &mut Vec<VerifiedProcess>,
+) -> Result<VerifiedProcess, AncestryError> {
+    let index = found.ok_or(AncestryError::NotFound)?;
+    let process = handles.swap_remove(index);
+    if process.is_alive().map_err(|_| AncestryError::Unavailable)? {
+        Ok(process)
+    } else {
+        Err(AncestryError::Unavailable)
+    }
 }
 
 pub struct VerifiedProcess {
@@ -154,6 +195,10 @@ unsafe impl Sync for VerifiedProcess {}
 pub enum ProcessError {
     #[error("process unavailable")]
     Unavailable,
+    #[error("process no longer exists")]
+    Gone,
+    #[error("process access denied")]
+    AccessDenied,
     #[error("process generation mismatch")]
     Stale,
 }
@@ -164,13 +209,18 @@ impl VerifiedProcess {
     #[cfg(windows)]
     pub fn open(pid: u32) -> Result<Self, ProcessError> {
         use windows_sys::Win32::{
-            Foundation::FILETIME,
+            Foundation::{GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME},
+            Storage::FileSystem::SYNCHRONIZE,
             System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
         };
         unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | 0x0010_0000, 0, pid);
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
             if handle.is_null() {
-                return Err(ProcessError::Unavailable);
+                return match GetLastError() {
+                    ERROR_INVALID_PARAMETER => Err(ProcessError::Gone),
+                    ERROR_ACCESS_DENIED => Err(ProcessError::AccessDenied),
+                    _ => Err(ProcessError::Unavailable),
+                };
             }
             let mut creation = FILETIME::default();
             let mut exit = FILETIME::default();

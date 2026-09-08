@@ -18,6 +18,22 @@ pub enum WireError {
     Capacity,
     #[error("pipe disconnected")]
     Disconnected,
+    #[error("named pipe remained busy until the connection deadline")]
+    ConnectTimeout,
+    #[error("transport handshake deadline expired")]
+    HandshakeTimeout,
+    #[error("transport authentication rejected")]
+    AuthenticationRejected,
+    #[error("transport connection is no longer reusable")]
+    ConnectionPoisoned,
+    #[error("accepted client identity is unavailable")]
+    ClientIdentityUnavailable,
+    #[error("operation is invalid for this pipe endpoint")]
+    WrongEndpoint,
+    #[error("acceptor replacement is temporarily unavailable")]
+    Transient,
+    #[error("named pipe is currently busy")]
+    PipeBusy,
     #[error("pipe I/O failed")]
     Io,
     #[error("native operation failed ({0})")]

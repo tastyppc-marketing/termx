@@ -33,7 +33,7 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
     ));
     assert!(matches!(
         resolve_enrolled_ancestor(3, &[p(3, 2, 20), p(2, 0, 30)], &[p(2, 0, 30).identity], 32),
-        Err(AncestryError::Unavailable)
+        Err(AncestryError::NotFound)
     ));
     assert!(matches!(
         resolve_enrolled_ancestor(
@@ -55,6 +55,88 @@ fn ancestry_rejects_cycles_ambiguity_and_stale_generations() {
         .pid,
         2
     );
+
+    // A complete snapshot can conclusively show that the next parent is gone or
+    // that its PID has been reused by a generation newer than its child. Either
+    // boundary preserves one already verified enrolled runtime below it.
+    assert_eq!(
+        resolve_enrolled_ancestor(
+            3,
+            &[p(3, 2, 30), p(2, 99, 20)],
+            &[p(2, 99, 20).identity],
+            32,
+        )
+        .unwrap()
+        .pid,
+        2
+    );
+    assert_eq!(
+        resolve_enrolled_ancestor(
+            3,
+            &[p(3, 2, 30), p(2, 1, 20), p(1, 0, 40)],
+            &[p(2, 1, 20).identity],
+            32,
+        )
+        .unwrap()
+        .pid,
+        2
+    );
+    assert!(matches!(
+        resolve_enrolled_ancestor(99, &[p(3, 0, 30)], &[p(3, 0, 30).identity], 32),
+        Err(AncestryError::Unavailable)
+    ));
+    assert!(matches!(
+        resolve_enrolled_ancestor(
+            3,
+            &[p(3, 2, 30), p(2, 1, 20), p(1, 0, 10)],
+            &[p(2, 1, 20).identity],
+            1,
+        ),
+        Err(AncestryError::Depth)
+    ));
+}
+
+#[test]
+fn native_ancestry_resolves_owned_child_to_one_enrolled_parent() {
+    use std::{fs, path::PathBuf, process::Command, time::SystemTime};
+
+    let retained = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../retired/test-artifacts/swarm-client")
+        .join(format!(
+            "native-ancestry-positive-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    fs::create_dir_all(&retained).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "native_ancestry_child", "--nocapture"])
+        .env("TERMX_SWARM_ANCESTRY_CHILD", "1")
+        .spawn()
+        .unwrap();
+    let child_identity = VerifiedProcess::open(child.id()).unwrap().identity();
+    let parent_identity = VerifiedProcess::open(std::process::id())
+        .unwrap()
+        .identity();
+    let resolved =
+        resolve_verified_enrolled_ancestor(child_identity.pid, &[parent_identity], 64).unwrap();
+    assert_eq!(resolved.identity(), parent_identity);
+    assert!(resolved.is_alive().unwrap());
+    let status = child.wait().unwrap();
+    fs::write(
+        retained.join("result.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "child": child_identity,
+            "parent": parent_identity,
+            "resolved": resolved.identity(),
+            "resolved_live": true,
+            "native_exit": status.code(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(status.success());
 }
 
 #[test]

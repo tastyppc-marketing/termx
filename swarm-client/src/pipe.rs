@@ -2,26 +2,37 @@ use crate::{
     framing::{decode_body, encode_message_body, ConnectionPermit},
     wire::valid_id,
     DiscoveryRecord, FrameBudget, OwnerCredential, ProcessIdentity, ReceivedFrame, RequestEnvelope,
-    ResponseEnvelope, VerifiedProcess, WireError, MAX_FRAME_BYTES, WIRE_VERSION,
+    ResponseEnvelope, VerifiedProcess, WireError, MAX_FRAME_BYTES,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
+    collections::VecDeque,
     ffi::OsStr,
+    future::Future,
     os::windows::{
         ffi::OsStrExt,
         io::{AsRawHandle, RawHandle},
     },
+    pin::Pin,
     ptr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
+    time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf},
     net::windows::named_pipe::{NamedPipeClient, NamedPipeServer, ServerOptions},
+    sync::{watch, Mutex},
+    time::{sleep, timeout, Instant},
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetHandleInformation, GetLastError, LocalFree, HANDLE, HANDLE_FLAG_INHERIT,
-        INVALID_HANDLE_VALUE,
+        CloseHandle, GetHandleInformation, GetLastError, LocalFree, ERROR_PIPE_BUSY, HANDLE,
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{
@@ -34,61 +45,183 @@ use windows_sys::Win32::{
         CreateFileW, FILE_FLAG_OVERLAPPED, FILE_READ_DATA, FILE_WRITE_DATA, OPEN_EXISTING,
     },
     System::{
-        Pipes::GetNamedPipeServerProcessId,
+        Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
         Threading::{GetCurrentProcess, OpenProcessToken},
     },
 };
+
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+pub const DEFAULT_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 // CreateFile named-pipe SQOS flags: require the SQOS bits and cap impersonation
 // at identification when transferring the verified handle into Tokio.
 const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
 const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 
-enum Pipe {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportOptions {
+    pub connect_timeout: Duration,
+    pub connect_retry_interval: Duration,
+    pub handshake_timeout: Duration,
+}
+
+impl Default for TransportOptions {
+    fn default() -> Self {
+        Self {
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            connect_retry_interval: DEFAULT_CONNECT_RETRY_INTERVAL,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+        }
+    }
+}
+
+enum PipeStream {
     Client(NamedPipeClient),
     Server(NamedPipeServer),
 }
+
+impl AsyncRead for PipeStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            Self::Client(pipe) => Pin::new(pipe).poll_read(cx, buffer),
+            Self::Server(pipe) => Pin::new(pipe).poll_read(cx, buffer),
+        }
+    }
+}
+
+impl AsyncWrite for PipeStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match &mut *self {
+            Self::Client(pipe) => Pin::new(pipe).poll_write(cx, buffer),
+            Self::Server(pipe) => Pin::new(pipe).poll_write(cx, buffer),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            Self::Client(pipe) => Pin::new(pipe).poll_flush(cx),
+            Self::Server(pipe) => Pin::new(pipe).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            Self::Client(pipe) => Pin::new(pipe).poll_shutdown(cx),
+            Self::Server(pipe) => Pin::new(pipe).poll_shutdown(cx),
+        }
+    }
+}
+
+struct ConnectionState {
+    poisoned: AtomicBool,
+    poison_signal: watch::Sender<bool>,
+}
+
+impl ConnectionState {
+    fn new() -> Arc<Self> {
+        let (poison_signal, _) = watch::channel(false);
+        Arc::new(Self {
+            poisoned: AtomicBool::new(false),
+            poison_signal,
+        })
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn poison(&self) {
+        if !self.poisoned.swap(true, Ordering::AcqRel) {
+            self.poison_signal.send_replace(true);
+        }
+    }
+
+    async fn wait_until_poisoned(&self) {
+        let mut receiver = self.poison_signal.subscribe();
+        if *receiver.borrow() {
+            return;
+        }
+        let _ = receiver.changed().await;
+    }
+}
+
+struct ProgressGuard {
+    state: Arc<ConnectionState>,
+    started: bool,
+    complete: bool,
+}
+
+impl ProgressGuard {
+    fn new(state: Arc<ConnectionState>) -> Self {
+        Self {
+            state,
+            started: false,
+            complete: false,
+        }
+    }
+
+    fn start(&mut self) {
+        self.started = true;
+    }
+
+    fn complete(&mut self) {
+        self.complete = true;
+    }
+}
+
+impl Drop for ProgressGuard {
+    fn drop(&mut self) {
+        if self.started && !self.complete {
+            self.state.poison();
+        }
+    }
+}
+
 pub struct VerifiedPipe {
-    pipe: tokio::sync::Mutex<Pipe>,
+    reader: Mutex<ReadHalf<PipeStream>>,
+    writer: Mutex<WriteHalf<PipeStream>>,
     budget: FrameBudget,
     server: VerifiedProcess,
+    client: Option<VerifiedProcess>,
+    state: Arc<ConnectionState>,
     _connection: ConnectionPermit,
 }
+
+struct ReadyConnection {
+    pipe: NamedPipeServer,
+    client: Option<VerifiedProcess>,
+    connection: ConnectionPermit,
+}
+
 pub struct PipeServer {
     name: String,
     pending: Option<NamedPipeServer>,
+    ready: VecDeque<ReadyConnection>,
     budget: FrameBudget,
     identity: ProcessIdentity,
+    #[cfg(test)]
+    replacement_failures: usize,
 }
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ClientHello {
-    version: u16,
-    boot_id: String,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ServerHello {
-    version: u16,
-    boot_id: String,
-    accepted: bool,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct OwnerAuth {
     credential: String,
 }
 
-impl ClientHello {
-    fn valid(&self) -> bool {
-        self.version == WIRE_VERSION && valid_id(&self.boot_id)
-    }
-}
-
-impl ServerHello {
-    fn valid(&self) -> bool {
-        self.version == WIRE_VERSION && valid_id(&self.boot_id)
-    }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AuthResult {
+    authenticated: bool,
 }
 
 impl OwnerAuth {
@@ -116,6 +249,7 @@ fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WireError> {
 fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(Some(0)).collect()
 }
+
 fn verify_noninheritable(handle: HANDLE) -> Result<(), WireError> {
     let mut flags = 0;
     if unsafe { GetHandleInformation(handle, &mut flags) } == 0 || flags & HANDLE_FLAG_INHERIT != 0
@@ -124,6 +258,7 @@ fn verify_noninheritable(handle: HANDLE) -> Result<(), WireError> {
     }
     Ok(())
 }
+
 unsafe fn current_sid() -> Result<String, WireError> {
     let mut token = ptr::null_mut();
     if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
@@ -131,11 +266,11 @@ unsafe fn current_sid() -> Result<String, WireError> {
     }
     let mut needed = 0;
     GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
-    let mut buf = vec![0; needed as usize];
+    let mut buffer = vec![0; needed as usize];
     if GetTokenInformation(
         token,
         TokenUser,
-        buf.as_mut_ptr().cast(),
+        buffer.as_mut_ptr().cast(),
         needed,
         &mut needed,
     ) == 0
@@ -143,39 +278,40 @@ unsafe fn current_sid() -> Result<String, WireError> {
         CloseHandle(token);
         return Err(WireError::Io);
     }
-    let sid = (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid;
+    let sid = (*(buffer.as_ptr() as *const TOKEN_USER)).User.Sid;
     let mut text = ptr::null_mut();
     if ConvertSidToStringSidW(sid, &mut text) == 0 {
         CloseHandle(token);
         return Err(WireError::Io);
     }
-    let mut n = 0;
-    while *text.add(n) != 0 {
-        n += 1
+    let mut length = 0;
+    while *text.add(length) != 0 {
+        length += 1;
     }
-    let out = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+    let out = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
     let _ = LocalFree(text.cast());
     CloseHandle(token);
     Ok(out)
 }
+
 fn create_server(name: &str, first: bool) -> Result<NamedPipeServer, WireError> {
     unsafe {
         let sddl: Vec<u16> = format!("D:P(A;;GA;;;{})\0", current_sid()?)
             .encode_utf16()
             .collect();
-        let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
         if ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
             1,
-            &mut sd,
+            &mut descriptor,
             ptr::null_mut(),
         ) == 0
         {
             return Err(WireError::Io);
         }
-        let mut sa = SECURITY_ATTRIBUTES {
+        let mut attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: sd,
+            lpSecurityDescriptor: descriptor,
             bInheritHandle: 0,
         };
         let mut options = ServerOptions::new();
@@ -183,16 +319,32 @@ fn create_server(name: &str, first: bool) -> Result<NamedPipeServer, WireError> 
             .first_pipe_instance(first)
             .reject_remote_clients(true);
         let result = options
-            .create_with_security_attributes_raw(name, ptr::addr_of_mut!(sa).cast())
+            .create_with_security_attributes_raw(name, ptr::addr_of_mut!(attributes).cast())
             .map_err(|_| WireError::Io)
             .and_then(|server| {
                 verify_noninheritable(server.as_raw_handle() as HANDLE)?;
                 Ok(server)
             });
-        let _ = LocalFree(sd);
+        let _ = LocalFree(descriptor);
         result
     }
 }
+
+fn capture_client(pipe: &NamedPipeServer) -> Option<VerifiedProcess> {
+    let mut pid = 0;
+    if unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle() as HANDLE, &mut pid) } == 0
+        || pid == 0
+    {
+        return None;
+    }
+    let client = VerifiedProcess::open(pid).ok()?;
+    if client.is_alive().ok()? {
+        Some(client)
+    } else {
+        None
+    }
+}
+
 impl PipeServer {
     pub fn bind(name: &str, budget: FrameBudget) -> Result<Self, WireError> {
         let pending = create_server(name, true)?;
@@ -202,79 +354,120 @@ impl PipeServer {
         Ok(Self {
             name: name.into(),
             pending: Some(pending),
+            ready: VecDeque::new(),
             budget,
             identity,
+            #[cfg(test)]
+            replacement_failures: 0,
         })
     }
+
     pub fn identity(&self) -> ProcessIdentity {
         self.identity
     }
+
+    fn create_replacement(&mut self) -> Result<NamedPipeServer, WireError> {
+        #[cfg(test)]
+        if self.replacement_failures > 0 {
+            self.replacement_failures -= 1;
+            return Err(WireError::Transient);
+        }
+        create_server(&self.name, false).map_err(|_| WireError::Transient)
+    }
+
+    #[cfg(test)]
+    fn fail_next_replacement(&mut self) {
+        self.replacement_failures += 1;
+    }
+
+    fn take_ready(&mut self) -> Result<VerifiedPipe, WireError> {
+        let ready = self.ready.pop_front().ok_or(WireError::Transient)?;
+        let client = ready.client.ok_or(WireError::ClientIdentityUnavailable)?;
+        let server = VerifiedProcess::verify(self.identity).map_err(|_| WireError::Io)?;
+        Ok(VerifiedPipe::from_stream(
+            PipeStream::Server(ready.pipe),
+            self.budget.clone(),
+            server,
+            Some(client),
+            ready.connection,
+        ))
+    }
+
     pub async fn accept(&mut self) -> Result<VerifiedPipe, WireError> {
-        let server = self.pending.take().ok_or(WireError::Io)?;
-        server.connect().await.map_err(|_| WireError::Io)?;
-        self.pending = Some(create_server(&self.name, false)?);
+        if !self.ready.is_empty() {
+            if self.pending.is_none() {
+                self.pending = Some(self.create_replacement()?);
+            }
+            return self.take_ready();
+        }
+
         let connection = self.budget.reserve_connection()?;
-        let retained = VerifiedProcess::verify(self.identity).map_err(|_| WireError::Io)?;
-        Ok(VerifiedPipe {
-            pipe: tokio::sync::Mutex::new(Pipe::Server(server)),
-            budget: self.budget.clone(),
-            server: retained,
-            _connection: connection,
-        })
-    }
-    pub async fn accept_owner(
-        &mut self,
-        boot_id: &str,
-        credential: &OwnerCredential,
-    ) -> Result<VerifiedPipe, WireError> {
-        let mut pipe = self.accept().await?;
-        let hello_bytes = pipe.recv_bytes().await?;
-        let hello: ClientHello = decode_json(hello_bytes.as_ref())?;
-        let accepted = hello.valid() && valid_id(boot_id) && hello.boot_id == boot_id;
-        pipe.send_bytes(
-            &serde_json::to_vec(&ServerHello {
-                version: WIRE_VERSION,
-                boot_id: boot_id.into(),
-                accepted,
-            })
-            .map_err(|_| WireError::InvalidFrame)?,
-        )
-        .await?;
-        if !accepted {
-            return Err(WireError::InvalidFrame);
+        let pending = self.pending.as_ref().ok_or(WireError::Transient)?;
+        if pending.connect().await.is_err() {
+            let _ = pending.disconnect();
+            return Err(WireError::Transient);
         }
-        let auth_bytes = pipe.recv_bytes().await?;
-        let auth: OwnerAuth = decode_json(auth_bytes.as_ref())?;
-        if !credential.matches_bytes(&auth.decode()?) {
-            return Err(WireError::InvalidFrame);
-        }
-        Ok(pipe)
-    }
-    pub async fn accept_peer(&mut self, boot_id: &str) -> Result<VerifiedPipe, WireError> {
-        let mut pipe = self.accept().await?;
-        let hello_bytes = pipe.recv_bytes().await?;
-        let hello: ClientHello = decode_json(hello_bytes.as_ref())?;
-        let accepted = hello.valid() && valid_id(boot_id) && hello.boot_id == boot_id;
-        pipe.send_bytes(
-            &serde_json::to_vec(&ServerHello {
-                version: WIRE_VERSION,
-                boot_id: boot_id.into(),
-                accepted,
-            })
-            .map_err(|_| WireError::InvalidFrame)?,
-        )
-        .await?;
-        if accepted {
-            Ok(pipe)
-        } else {
-            Err(WireError::InvalidFrame)
-        }
+        let connected = self.pending.take().ok_or(WireError::Transient)?;
+        self.ready.push_back(ReadyConnection {
+            client: capture_client(&connected),
+            pipe: connected,
+            connection,
+        });
+        self.pending = Some(self.create_replacement()?);
+        self.take_ready()
     }
 }
+
 impl VerifiedPipe {
+    fn from_stream(
+        stream: PipeStream,
+        budget: FrameBudget,
+        server: VerifiedProcess,
+        client: Option<VerifiedProcess>,
+        connection: ConnectionPermit,
+    ) -> Self {
+        let (reader, writer) = split(stream);
+        Self {
+            reader: Mutex::new(reader),
+            writer: Mutex::new(writer),
+            budget,
+            server,
+            client,
+            state: ConnectionState::new(),
+            _connection: connection,
+        }
+    }
+
     pub async fn connect(name: &str, expected: ProcessIdentity) -> Result<Self, WireError> {
+        Self::connect_with_options(name, expected, TransportOptions::default()).await
+    }
+
+    pub async fn connect_with_options(
+        name: &str,
+        expected: ProcessIdentity,
+        options: TransportOptions,
+    ) -> Result<Self, WireError> {
+        if options.connect_timeout.is_zero() || options.connect_retry_interval.is_zero() {
+            return Err(WireError::InvalidFrame);
+        }
+        let deadline = Instant::now() + options.connect_timeout;
+        loop {
+            match Self::try_connect(name, expected) {
+                Err(WireError::PipeBusy) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(WireError::ConnectTimeout);
+                    }
+                    sleep(options.connect_retry_interval.min(deadline - now)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn try_connect(name: &str, expected: ProcessIdentity) -> Result<Self, WireError> {
         unsafe {
-            let h = CreateFileW(
+            let handle = CreateFileW(
                 wide(OsStr::new(name)).as_ptr(),
                 FILE_READ_DATA | FILE_WRITE_DATA,
                 0,
@@ -283,106 +476,285 @@ impl VerifiedPipe {
                 FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 ptr::null_mut(),
             );
-            if h == INVALID_HANDLE_VALUE {
-                return Err(WireError::Native(GetLastError()));
+            if handle == INVALID_HANDLE_VALUE {
+                let error = GetLastError();
+                return if error == ERROR_PIPE_BUSY {
+                    Err(WireError::PipeBusy)
+                } else {
+                    Err(WireError::Native(error))
+                };
             }
-            if let Err(error) = verify_noninheritable(h) {
-                CloseHandle(h);
+            if let Err(error) = verify_noninheritable(handle) {
+                CloseHandle(handle);
                 return Err(error);
             }
             let mut pid = 0;
-            if GetNamedPipeServerProcessId(h, &mut pid) == 0 || pid != expected.pid {
-                CloseHandle(h);
+            if GetNamedPipeServerProcessId(handle, &mut pid) == 0 || pid != expected.pid {
+                CloseHandle(handle);
                 return Err(WireError::Io);
             }
-            let retained = match VerifiedProcess::verify(expected) {
-                Ok(v) => v,
-                Err(_) => {
-                    CloseHandle(h);
+            let server = match VerifiedProcess::verify(expected) {
+                Ok(server) if server.is_alive().unwrap_or(false) => server,
+                _ => {
+                    CloseHandle(handle);
                     return Err(WireError::Io);
                 }
             };
-            let client = match NamedPipeClient::from_raw_handle(h as RawHandle) {
-                Ok(v) => v,
+            let client = match NamedPipeClient::from_raw_handle(handle as RawHandle) {
+                Ok(client) => client,
                 Err(_) => {
-                    CloseHandle(h);
+                    CloseHandle(handle);
                     return Err(WireError::Io);
                 }
             };
             let budget = FrameBudget::new(MAX_FRAME_BYTES * 2);
             let connection = budget.reserve_connection()?;
-            Ok(Self {
-                pipe: tokio::sync::Mutex::new(Pipe::Client(client)),
+            Ok(Self::from_stream(
+                PipeStream::Client(client),
                 budget,
-                server: retained,
-                _connection: connection,
-            })
+                server,
+                None,
+                connection,
+            ))
         }
     }
+
     pub fn server_identity(&self) -> ProcessIdentity {
         self.server.identity()
     }
+
+    pub fn connecting_client_identity(&self) -> Result<ProcessIdentity, WireError> {
+        self.client
+            .as_ref()
+            .map(VerifiedProcess::identity)
+            .ok_or(WireError::WrongEndpoint)
+    }
+
+    pub fn connecting_client_is_alive(&self) -> Result<bool, WireError> {
+        self.client
+            .as_ref()
+            .ok_or(WireError::WrongEndpoint)?
+            .is_alive()
+            .map_err(|_| WireError::ClientIdentityUnavailable)
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.state.is_poisoned()
+    }
+
     pub async fn send_bytes(&self, bytes: &[u8]) -> Result<(), WireError> {
+        if self.state.is_poisoned() {
+            return Err(WireError::ConnectionPoisoned);
+        }
         if bytes.len() > MAX_FRAME_BYTES {
             return Err(WireError::FrameTooLarge);
         }
         let _permit = self.budget.reserve(bytes.len() + 4)?;
-        let mut guard = self.pipe.lock().await;
-        let prefix = (bytes.len() as u32).to_le_bytes();
-        match &mut *guard {
-            Pipe::Client(p) => {
-                p.write_all(&prefix).await.map_err(map_io)?;
-                p.write_all(bytes).await.map_err(map_io)?;
-                p.flush().await.map_err(map_io)
-            }
-            Pipe::Server(p) => {
-                p.write_all(&prefix).await.map_err(map_io)?;
-                p.write_all(bytes).await.map_err(map_io)?;
-                p.flush().await.map_err(map_io)
-            }
+        let mut writer = self.writer.lock().await;
+        if self.state.is_poisoned() {
+            return Err(WireError::ConnectionPoisoned);
         }
+        write_frame(&mut *writer, bytes, self.state.clone()).await
     }
+
     pub async fn send_request(&self, request: &RequestEnvelope) -> Result<(), WireError> {
         self.send_bytes(&encode_message_body(request)?).await
     }
+
     pub async fn send_response(&self, response: &ResponseEnvelope) -> Result<(), WireError> {
         self.send_bytes(&encode_message_body(response)?).await
     }
-    pub async fn recv_bytes(&mut self) -> Result<ReceivedFrame, WireError> {
-        let mut prefix = [0; 4];
-        let mut guard = self.pipe.lock().await;
-        let read = match &mut *guard {
-            Pipe::Client(p) => p.read_exact(&mut prefix).await,
-            Pipe::Server(p) => p.read_exact(&mut prefix).await,
-        };
-        read.map_err(map_io)?;
-        let len = u32::from_le_bytes(prefix) as usize;
-        if len > MAX_FRAME_BYTES {
-            return Err(WireError::FrameTooLarge);
+
+    pub async fn recv_bytes(&self) -> Result<ReceivedFrame, WireError> {
+        if self.state.is_poisoned() {
+            return Err(WireError::ConnectionPoisoned);
         }
-        let _permit = self.budget.reserve(len + 4)?;
-        let mut out = vec![0; len];
-        match &mut *guard {
-            Pipe::Client(p) => p.read_exact(&mut out).await.map_err(map_io)?,
-            Pipe::Server(p) => p.read_exact(&mut out).await.map_err(map_io)?,
-        };
-        Ok(ReceivedFrame {
-            bytes: out,
-            _permit,
-        })
+        let mut reader = self.reader.lock().await;
+        if self.state.is_poisoned() {
+            return Err(WireError::ConnectionPoisoned);
+        }
+        read_frame(&mut *reader, &self.budget, self.state.clone()).await
     }
-    pub async fn recv_request(&mut self) -> Result<RequestEnvelope, WireError> {
+
+    pub async fn recv_request(&self) -> Result<RequestEnvelope, WireError> {
         let frame = self.recv_bytes().await?;
         decode_body(frame.as_ref())
     }
-    pub async fn recv_response(&mut self) -> Result<ResponseEnvelope, WireError> {
+
+    pub async fn recv_response(&self) -> Result<ResponseEnvelope, WireError> {
         let frame = self.recv_bytes().await?;
         decode_body(frame.as_ref())
+    }
+
+    pub async fn authenticate_peer(&self, boot_id: &str) -> Result<(), WireError> {
+        self.authenticate_peer_with_timeout(boot_id, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+    }
+
+    pub async fn authenticate_peer_with_timeout(
+        &self,
+        boot_id: &str,
+        deadline: Duration,
+    ) -> Result<(), WireError> {
+        if self.client.is_none() {
+            return Err(WireError::WrongEndpoint);
+        }
+        run_handshake_deadline(self, deadline, self.authenticate_peer_inner(boot_id)).await
+    }
+
+    async fn authenticate_peer_inner(&self, boot_id: &str) -> Result<(), WireError> {
+        if !valid_id(boot_id) {
+            return Err(WireError::InvalidFrame);
+        }
+        let request = self.recv_request().await?;
+        let accepted =
+            request.correlation_id() == boot_id && request.hello_payload().boot_id() == boot_id;
+        self.send_response(&ResponseEnvelope::new(request.correlation_id(), accepted))
+            .await?;
+        if accepted {
+            Ok(())
+        } else {
+            self.state.poison();
+            Err(WireError::AuthenticationRejected)
+        }
+    }
+
+    pub async fn authenticate_owner(
+        &self,
+        boot_id: &str,
+        credential: &OwnerCredential,
+    ) -> Result<(), WireError> {
+        self.authenticate_owner_with_timeout(boot_id, credential, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+    }
+
+    pub async fn authenticate_owner_with_timeout(
+        &self,
+        boot_id: &str,
+        credential: &OwnerCredential,
+        deadline: Duration,
+    ) -> Result<(), WireError> {
+        if self.client.is_none() {
+            return Err(WireError::WrongEndpoint);
+        }
+        run_handshake_deadline(
+            self,
+            deadline,
+            self.authenticate_owner_inner(boot_id, credential),
+        )
+        .await
+    }
+
+    async fn authenticate_owner_inner(
+        &self,
+        boot_id: &str,
+        credential: &OwnerCredential,
+    ) -> Result<(), WireError> {
+        self.authenticate_peer_inner(boot_id).await?;
+        let auth_bytes = self.recv_bytes().await?;
+        let auth: OwnerAuth = decode_json(auth_bytes.as_ref())?;
+        let authenticated = credential.matches_bytes(&auth.decode()?);
+        self.send_bytes(
+            &serde_json::to_vec(&AuthResult { authenticated })
+                .map_err(|_| WireError::InvalidFrame)?,
+        )
+        .await?;
+        if authenticated {
+            Ok(())
+        } else {
+            self.state.poison();
+            Err(WireError::AuthenticationRejected)
+        }
     }
 }
-fn map_io(e: std::io::Error) -> WireError {
+
+async fn run_handshake_deadline<T>(
+    pipe: &VerifiedPipe,
+    deadline: Duration,
+    operation: impl Future<Output = Result<T, WireError>>,
+) -> Result<T, WireError> {
+    if deadline.is_zero() {
+        return Err(WireError::InvalidFrame);
+    }
+    match timeout(deadline, operation).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            pipe.state.poison();
+            Err(error)
+        }
+        Err(_) => {
+            pipe.state.poison();
+            Err(WireError::HandshakeTimeout)
+        }
+    }
+}
+
+async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    state: Arc<ConnectionState>,
+) -> Result<(), WireError> {
+    if state.is_poisoned() {
+        return Err(WireError::ConnectionPoisoned);
+    }
+    let prefix = (bytes.len() as u32).to_le_bytes();
+    let mut progress = ProgressGuard::new(state.clone());
+    progress.start();
+    let io = async {
+        writer.write_all(&prefix).await.map_err(map_io)?;
+        writer.write_all(bytes).await.map_err(map_io)?;
+        writer.flush().await.map_err(map_io)
+    };
+    let result = tokio::select! {
+        biased;
+        _ = state.wait_until_poisoned() => Err(WireError::ConnectionPoisoned),
+        result = io => result,
+    };
+    if result.is_ok() {
+        progress.complete();
+    }
+    result
+}
+
+async fn read_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    budget: &FrameBudget,
+    state: Arc<ConnectionState>,
+) -> Result<ReceivedFrame, WireError> {
+    if state.is_poisoned() {
+        return Err(WireError::ConnectionPoisoned);
+    }
+    let mut progress = ProgressGuard::new(state.clone());
+    progress.start();
+    let io = async {
+        let mut prefix = [0; 4];
+        reader.read_exact(&mut prefix).await.map_err(map_io)?;
+        let length = u32::from_le_bytes(prefix) as usize;
+        if length > MAX_FRAME_BYTES {
+            return Err(WireError::FrameTooLarge);
+        }
+        let permit = budget.reserve(length + 4)?;
+        let mut bytes = vec![0; length];
+        reader.read_exact(&mut bytes).await.map_err(map_io)?;
+        Ok(ReceivedFrame {
+            bytes,
+            _permit: permit,
+        })
+    };
+    let result = tokio::select! {
+        biased;
+        _ = state.wait_until_poisoned() => Err(WireError::ConnectionPoisoned),
+        result = io => result,
+    };
+    if result.is_ok() {
+        progress.complete();
+    }
+    result
+}
+
+fn map_io(error: std::io::Error) -> WireError {
     if matches!(
-        e.kind(),
+        error.kind(),
         std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
     ) {
         WireError::Disconnected
@@ -390,40 +762,410 @@ fn map_io(e: std::io::Error) -> WireError {
         WireError::Io
     }
 }
-async fn hello(discovery: &DiscoveryRecord) -> Result<VerifiedPipe, WireError> {
+
+async fn hello(pipe: &VerifiedPipe, discovery: &DiscoveryRecord) -> Result<(), WireError> {
     if !discovery.validate() {
         return Err(WireError::InvalidFrame);
     }
-    let mut pipe = VerifiedPipe::connect(&discovery.pipe_name, discovery.server).await?;
-    pipe.send_bytes(
-        &serde_json::to_vec(&ClientHello {
-            version: WIRE_VERSION,
-            boot_id: discovery.boot_id.clone(),
-        })
-        .map_err(|_| WireError::InvalidFrame)?,
-    )
+    pipe.send_request(&RequestEnvelope::hello(
+        discovery.boot_id.clone(),
+        crate::Hello::new(discovery.boot_id.clone()),
+    ))
     .await?;
-    let response_bytes = pipe.recv_bytes().await?;
-    let response: ServerHello = decode_json(response_bytes.as_ref())?;
-    if !response.valid() || response.boot_id != discovery.boot_id || !response.accepted {
-        return Err(WireError::InvalidFrame);
+    let response = pipe.recv_response().await?;
+    if response.correlation_id() != discovery.boot_id || !response.accepted() {
+        pipe.state.poison();
+        return Err(WireError::AuthenticationRejected);
     }
-    Ok(pipe)
+    Ok(())
 }
+
 pub(crate) async fn connect_owner(
     discovery: &DiscoveryRecord,
     credential: &OwnerCredential,
+    options: TransportOptions,
 ) -> Result<VerifiedPipe, WireError> {
-    let pipe = hello(discovery).await?;
-    pipe.send_bytes(
-        &serde_json::to_vec(&OwnerAuth {
-            credential: STANDARD.encode(credential.bytes()),
-        })
-        .map_err(|_| WireError::InvalidFrame)?,
-    )
-    .await?;
+    let pipe =
+        VerifiedPipe::connect_with_options(&discovery.pipe_name, discovery.server, options).await?;
+    let handshake = async {
+        hello(&pipe, discovery).await?;
+        pipe.send_bytes(
+            &serde_json::to_vec(&OwnerAuth {
+                credential: STANDARD.encode(credential.bytes()),
+            })
+            .map_err(|_| WireError::InvalidFrame)?,
+        )
+        .await?;
+        let result_bytes = pipe.recv_bytes().await?;
+        let result: AuthResult = decode_json(result_bytes.as_ref())?;
+        if result.authenticated {
+            Ok(())
+        } else {
+            pipe.state.poison();
+            Err(WireError::AuthenticationRejected)
+        }
+    };
+    run_handshake_deadline(&pipe, options.handshake_timeout, handshake).await?;
     Ok(pipe)
 }
-pub(crate) async fn connect_peer(discovery: &DiscoveryRecord) -> Result<VerifiedPipe, WireError> {
-    hello(discovery).await
+
+pub(crate) async fn connect_peer(
+    discovery: &DiscoveryRecord,
+    options: TransportOptions,
+) -> Result<VerifiedPipe, WireError> {
+    let pipe =
+        VerifiedPipe::connect_with_options(&discovery.pipe_name, discovery.server, options).await?;
+    run_handshake_deadline(&pipe, options.handshake_timeout, hello(&pipe, discovery)).await?;
+    Ok(pipe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs, io,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        task::Waker,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use tokio::sync::oneshot;
+
+    fn pipe_name(label: &str) -> String {
+        format!(
+            r"\\.\pipe\termx-swarm-unit-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    fn retained(label: &str) -> std::path::PathBuf {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../retired/test-artifacts/swarm-client")
+            .join(format!(
+                "{label}-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn cancelled_accept_and_failed_replacement_preserve_first_instance() {
+        let evidence = retained("accept-cancellation-recovery");
+        let name = pipe_name("accept-recovery");
+        let budget = FrameBudget::new(1024);
+        let mut server = PipeServer::bind(&name, budget).unwrap();
+        assert!(timeout(Duration::from_millis(20), server.accept())
+            .await
+            .is_err());
+        assert!(PipeServer::bind(&name, FrameBudget::new(1024)).is_err());
+
+        let client = VerifiedPipe::connect(&name, server.identity())
+            .await
+            .unwrap();
+        server.fail_next_replacement();
+        assert!(matches!(server.accept().await, Err(WireError::Transient)));
+        assert!(PipeServer::bind(&name, FrameBudget::new(1024)).is_err());
+        let accepted = server.accept().await.unwrap();
+        assert_eq!(
+            accepted.connecting_client_identity().unwrap().pid,
+            std::process::id()
+        );
+        drop(accepted);
+        drop(client);
+        fs::write(
+            evidence.join("result.json"),
+            br#"{"cancelled_accept_retained_first_instance":true,"replacement_failure_retained_connected_instance":true,"later_accept_progressed":true}"#,
+        )
+        .unwrap();
+    }
+
+    struct PartialReader {
+        stage: usize,
+        partial: Option<oneshot::Sender<()>>,
+    }
+
+    impl AsyncRead for PartialReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            match self.stage {
+                0 => {
+                    buffer.put_slice(&4u32.to_le_bytes());
+                    self.stage = 1;
+                    Poll::Ready(Ok(()))
+                }
+                1 => {
+                    buffer.put_slice(b"ab");
+                    self.stage = 2;
+                    if let Some(signal) = self.partial.take() {
+                        let _ = signal.send(());
+                    }
+                    Poll::Ready(Ok(()))
+                }
+                _ => Poll::Pending,
+            }
+        }
+    }
+
+    struct PartialWriter {
+        stage: usize,
+        bytes: Arc<AtomicUsize>,
+        partial: Option<oneshot::Sender<()>>,
+        waker: Option<Waker>,
+    }
+
+    struct PrefixPartialReader {
+        partial: Option<oneshot::Sender<()>>,
+        wrote_prefix_bytes: bool,
+    }
+
+    impl AsyncRead for PrefixPartialReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if !self.wrote_prefix_bytes {
+                buffer.put_slice(&4u32.to_le_bytes()[..2]);
+                self.wrote_prefix_bytes = true;
+                if let Some(signal) = self.partial.take() {
+                    let _ = signal.send(());
+                }
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    struct PrefixPartialWriter {
+        partial: Option<oneshot::Sender<()>>,
+        wrote_prefix_bytes: bool,
+    }
+
+    impl AsyncWrite for PrefixPartialWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if !self.wrote_prefix_bytes {
+                self.wrote_prefix_bytes = true;
+                if let Some(signal) = self.partial.take() {
+                    let _ = signal.send(());
+                }
+                Poll::Ready(Ok(2))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for PartialWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            match self.stage {
+                0 => {
+                    self.stage = 1;
+                    self.bytes.fetch_add(buffer.len(), AtomicOrdering::Relaxed);
+                    Poll::Ready(Ok(buffer.len()))
+                }
+                1 => {
+                    self.stage = 2;
+                    self.bytes.fetch_add(2, AtomicOrdering::Relaxed);
+                    if let Some(signal) = self.partial.take() {
+                        let _ = signal.send(());
+                    }
+                    Poll::Ready(Ok(2))
+                }
+                _ => {
+                    self.waker = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_read_and_write_cancellation_poison_both_directions() {
+        let evidence = retained("partial-io-cancellation");
+
+        let prefix_read_state = ConnectionState::new();
+        let prefix_read_budget = FrameBudget::new(1024);
+        let (prefix_read_signal, prefix_read_partial) = oneshot::channel();
+        let mut prefix_reader = PrefixPartialReader {
+            partial: Some(prefix_read_signal),
+            wrote_prefix_bytes: false,
+        };
+        let mut prefix_read = Box::pin(read_frame(
+            &mut prefix_reader,
+            &prefix_read_budget,
+            prefix_read_state.clone(),
+        ));
+        tokio::select! {
+            _ = prefix_read_partial => {}
+            _ = &mut prefix_read => panic!("partial-prefix reader unexpectedly completed"),
+        }
+        drop(prefix_read);
+        assert!(prefix_read_state.is_poisoned());
+        assert_eq!(prefix_read_budget.usage(), (0, 0));
+
+        let prefix_write_state = ConnectionState::new();
+        let (prefix_write_signal, prefix_write_partial) = oneshot::channel();
+        let mut prefix_writer = PrefixPartialWriter {
+            partial: Some(prefix_write_signal),
+            wrote_prefix_bytes: false,
+        };
+        let mut prefix_write = Box::pin(write_frame(
+            &mut prefix_writer,
+            b"four",
+            prefix_write_state.clone(),
+        ));
+        tokio::select! {
+            _ = prefix_write_partial => {}
+            result = &mut prefix_write => panic!("partial-prefix writer unexpectedly completed: {result:?}"),
+        }
+        drop(prefix_write);
+        assert!(prefix_write_state.is_poisoned());
+
+        let read_state = ConnectionState::new();
+        let read_budget = FrameBudget::new(1024);
+        let (read_signal, read_partial) = oneshot::channel();
+        let mut reader = PartialReader {
+            stage: 0,
+            partial: Some(read_signal),
+        };
+        let mut read = Box::pin(read_frame(&mut reader, &read_budget, read_state.clone()));
+        tokio::select! {
+            _ = read_partial => {}
+            _ = &mut read => panic!("partial reader unexpectedly completed"),
+        }
+        drop(read);
+        assert!(read_state.is_poisoned());
+        assert_eq!(read_budget.usage(), (0, 0));
+        assert!(matches!(
+            read_frame(&mut tokio::io::empty(), &read_budget, read_state.clone()).await,
+            Err(WireError::ConnectionPoisoned)
+        ));
+
+        let write_state = ConnectionState::new();
+        let written = Arc::new(AtomicUsize::new(0));
+        let (write_signal, write_partial) = oneshot::channel();
+        let mut writer = PartialWriter {
+            stage: 0,
+            bytes: written.clone(),
+            partial: Some(write_signal),
+            waker: None,
+        };
+        let mut write = Box::pin(write_frame(&mut writer, b"four", write_state.clone()));
+        tokio::select! {
+            _ = write_partial => {}
+            result = &mut write => panic!("partial writer unexpectedly completed: {result:?}"),
+        }
+        drop(write);
+        assert_eq!(written.load(AtomicOrdering::Relaxed), 6);
+        assert!(write_state.is_poisoned());
+        assert!(matches!(
+            write_frame(&mut tokio::io::sink(), b"next", write_state.clone()).await,
+            Err(WireError::ConnectionPoisoned)
+        ));
+        fs::write(
+            evidence.join("result.json"),
+            br#"{"partial_prefix_read_cancelled":true,"partial_prefix_write_cancelled":true,"partial_body_read_cancelled":true,"partial_body_write_cancelled":true,"all_connections_poisoned":true,"frame_credit_released":true}"#,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_prefix_capacity_and_oversize_are_connection_fatal() {
+        let evidence = retained("post-prefix-fatal");
+        for (length, limit, expected) in [
+            (100u32, 32usize, WireError::Capacity),
+            (
+                MAX_FRAME_BYTES as u32 + 1,
+                MAX_FRAME_BYTES + 4,
+                WireError::FrameTooLarge,
+            ),
+        ] {
+            let state = ConnectionState::new();
+            let budget = FrameBudget::new(limit);
+            let mut input = &length.to_le_bytes()[..];
+            match read_frame(&mut input, &budget, state.clone()).await {
+                Err(error) => assert_eq!(error, expected),
+                Ok(_) => panic!("post-prefix failure unexpectedly produced a frame"),
+            }
+            assert!(state.is_poisoned());
+            assert!(matches!(
+                read_frame(&mut tokio::io::empty(), &budget, state).await,
+                Err(WireError::ConnectionPoisoned)
+            ));
+            assert_eq!(budget.usage(), (0, 0));
+        }
+        fs::write(
+            evidence.join("result.json"),
+            br#"{"post_prefix_capacity_fatal":true,"post_prefix_oversize_fatal":true,"residual_bytes_not_reinterpreted":true}"#,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unpolled_frame_future_does_not_poison() {
+        let state = ConnectionState::new();
+        let mut writer = tokio::io::sink();
+        let future = write_frame(&mut writer, b"never-polled", state.clone());
+        drop(future);
+        assert!(!state.is_poisoned());
+        write_frame(&mut writer, b"later", state.clone())
+            .await
+            .unwrap();
+        assert!(!state.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_waiting_for_direction_lock_does_not_poison() {
+        let name = pipe_name("lock-wait-cancel");
+        let mut server = PipeServer::bind(&name, FrameBudget::new(1024)).unwrap();
+        let client = VerifiedPipe::connect(&name, server.identity())
+            .await
+            .unwrap();
+        let accepted = server.accept().await.unwrap();
+
+        let lock = accepted.writer.lock().await;
+        let blocked = accepted.send_bytes(b"not-started");
+        assert!(timeout(Duration::from_millis(20), blocked).await.is_err());
+        assert!(!accepted.is_poisoned());
+        drop(lock);
+
+        accepted.send_bytes(b"progress").await.unwrap();
+        assert_eq!(client.recv_bytes().await.unwrap().as_ref(), b"progress");
+        assert!(!accepted.is_poisoned());
+    }
 }

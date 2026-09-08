@@ -41,6 +41,10 @@ fn strict_typed_frames_reject_duplicates_unknowns_trailing_and_oversize() {
     ));
     for json in [
         r#"{"version":1,"version":1,"correlationId":"c","kind":"hello","payload":{"bootId":"b"}}"#,
+        r#"{"version":1,"correlationId":"c","kind":"hello","payload":{"bootId":"b"},"extra":1}"#,
+        r#"{"version":1,"correlationId":"c","kind":"hello","kind":"hello","payload":{"bootId":"b"}}"#,
+        r#"{"version":1,"correlationId":"c","kind":"hello","payload":{"bootId":"b"},"payload":{"bootId":"b"}}"#,
+        r#"{"version":1,"correlationId":"c","kind":"hello","payload":{"bootId":"b","extra":1}}"#,
         r#"{"version":1,"correlationId":"c","kind":"other","payload":{"bootId":"b"}}"#,
         r#"{"version":1,"correlationId":"c","kind":"hello","payload":{"bootId":"b"}}x"#,
     ] {

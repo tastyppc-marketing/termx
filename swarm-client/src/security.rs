@@ -11,10 +11,14 @@ pub enum AuthorityError {
     Busy,
     #[error("insecure credential object")]
     InsecureCredential,
+    #[error("insecure authority directory")]
+    InsecureAuthority,
     #[error("unsupported object type")]
     ObjectType,
     #[error("discovery document is invalid")]
     InvalidDiscovery,
+    #[error("insecure discovery object")]
+    InsecureDiscovery,
     #[error("discovery document uses an unsupported future version")]
     FutureDiscovery,
     #[error("native authority unavailable")]
@@ -73,8 +77,9 @@ mod windows {
     };
     use windows_sys::Win32::{
         Foundation::{
-            CloseHandle, GetHandleInformation, LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE,
-            HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+            CloseHandle, GetHandleInformation, GetLastError, LocalFree, ERROR_ALREADY_EXISTS,
+            ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE,
+            HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
         },
         Security::{
             Authorization::{
@@ -86,12 +91,12 @@ mod windows {
             PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
         },
         Storage::FileSystem::{
-            CreateFileW, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
-            BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY,
-            FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-            FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, OPEN_EXISTING,
-            READ_CONTROL, VOLUME_NAME_DOS,
+            CreateDirectoryW, CreateFileW, GetFileInformationByHandle, GetFileType,
+            GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ALL_ACCESS,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+            FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FILE_TYPE_DISK, OPEN_EXISTING, READ_CONTROL, VOLUME_NAME_DOS,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
@@ -135,6 +140,92 @@ mod windows {
         }
     }
 
+    fn validate_directory_acl(directory: &File) -> Result<(), AuthorityError> {
+        let current_sid = current_sid_string()?;
+        unsafe {
+            let mut owner = ptr::null_mut();
+            let mut dacl: *mut ACL = ptr::null_mut();
+            let mut sd = ptr::null_mut();
+            let rc = GetSecurityInfo(
+                directory.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut sd,
+            );
+            if rc != 0 || owner.is_null() || dacl.is_null() {
+                if !sd.is_null() {
+                    let _ = LocalFree(sd);
+                }
+                return Err(AuthorityError::InsecureAuthority);
+            }
+            let mut control = 0;
+            let mut revision = 0;
+            let mut ace = ptr::null_mut();
+            let mut ok = sid_string(owner).ok().as_ref() == Some(&current_sid)
+                && GetSecurityDescriptorControl(sd, &mut control, &mut revision) != 0
+                && control & SE_DACL_PROTECTED != 0
+                && (*dacl).AceCount == 1
+                && GetAce(dacl, 0, &mut ace) != 0;
+            if ok {
+                let allowed = ace as *mut ACCESS_ALLOWED_ACE;
+                let sid = ptr::addr_of_mut!((*allowed).SidStart).cast();
+                let mask = (*allowed).Mask;
+                ok = (*allowed).Header.AceType == 0
+                    && (mask == GENERIC_ALL || mask == FILE_ALL_ACCESS)
+                    && EqualSid(owner, sid) != 0;
+            }
+            let _ = LocalFree(sd);
+            if ok {
+                Ok(())
+            } else {
+                Err(AuthorityError::InsecureAuthority)
+            }
+        }
+    }
+
+    fn create_or_open_authority_directory(path: &Path) -> Result<File, AuthorityError> {
+        let parent = path.parent().ok_or(AuthorityError::Native)?;
+        std::fs::create_dir_all(parent)?;
+        let sid = current_sid_string()?;
+        let sddl: Vec<u16> = format!("O:{sid}D:P(A;;GA;;;{sid})\0")
+            .encode_utf16()
+            .collect();
+        unsafe {
+            let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut sd,
+                ptr::null_mut(),
+            ) == 0
+            {
+                return Err(AuthorityError::Native);
+            }
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: sd,
+                bInheritHandle: 0,
+            };
+            let created = CreateDirectoryW(wide(path.as_os_str()).as_ptr(), &sa);
+            let error = if created == 0 {
+                Some(GetLastError())
+            } else {
+                None
+            };
+            let _ = LocalFree(sd);
+            if error.is_some_and(|value| value != ERROR_ALREADY_EXISTS) {
+                return Err(AuthorityError::Native);
+            }
+        }
+        let directory = open_directory(path)?;
+        validate_directory_acl(&directory)?;
+        Ok(directory)
+    }
+
     fn final_path(directory: &File) -> Result<PathBuf, AuthorityError> {
         let handle = directory.as_raw_handle() as HANDLE;
         let mut buffer = vec![0u16; 512];
@@ -158,8 +249,7 @@ mod windows {
     }
 
     pub(super) fn claim(path: &Path) -> Result<AuthorityClaim, AuthorityError> {
-        std::fs::create_dir_all(path)?;
-        let directory = open_directory(path)?;
+        let directory = create_or_open_authority_directory(path)?;
         let root = final_path(&directory)?;
         let mut o = std::fs::OpenOptions::new();
         o.read(true)
@@ -183,6 +273,7 @@ mod windows {
     }
     pub(super) fn client(path: &Path) -> Result<ClientBootstrap, AuthorityError> {
         let directory = open_directory(path)?;
+        validate_directory_acl(&directory)?;
         let root = final_path(&directory)?;
         Ok(ClientBootstrap {
             _directory: directory,
@@ -253,7 +344,14 @@ mod windows {
                 ptr::null_mut(),
             );
             if inspection == INVALID_HANDLE_VALUE {
-                return Err(AuthorityError::Native);
+                let error = GetLastError();
+                return if error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND {
+                    Err(AuthorityError::Io(std::io::Error::from_raw_os_error(
+                        error as i32,
+                    )))
+                } else {
+                    Err(AuthorityError::Native)
+                };
             }
             let inspection = File::from_raw_handle(inspection as _);
             verify_noninheritable(&inspection)?;
@@ -283,7 +381,7 @@ mod windows {
         }
     }
 
-    fn secure_open(path: &Path) -> Result<(File, bool), AuthorityError> {
+    fn create_private_file(path: &Path) -> Result<File, AuthorityError> {
         unsafe {
             let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
             let sid = current_sid_string()?;
@@ -315,15 +413,23 @@ mod windows {
             );
             let _ = LocalFree(sd);
             if h == INVALID_HANDLE_VALUE {
-                return open_existing_credential(path).map(|file| (file, true));
+                return Err(AuthorityError::Native);
             }
             let file = File::from_raw_handle(h as _);
             verify_noninheritable(&file)?;
             credential_object_info(&file)?;
-            Ok((file, false))
+            Ok(file)
         }
     }
-    fn validate_acl(file: &File) -> Result<(), AuthorityError> {
+
+    fn secure_open(path: &Path) -> Result<(File, bool), AuthorityError> {
+        match create_private_file(path) {
+            Ok(file) => Ok((file, false)),
+            Err(_) => open_existing_credential(path).map(|file| (file, true)),
+        }
+    }
+
+    fn private_acl_matches(file: &File) -> Result<bool, AuthorityError> {
         let current_sid = current_sid_string()?;
         unsafe {
             let mut owner = ptr::null_mut();
@@ -343,7 +449,7 @@ mod windows {
                 if !sd.is_null() {
                     let _ = LocalFree(sd);
                 }
-                return Err(AuthorityError::InsecureCredential);
+                return Ok(false);
             }
             let mut control = 0;
             let mut revision = 0;
@@ -363,11 +469,15 @@ mod windows {
                     && EqualSid(owner, sid) != 0;
             }
             let _ = LocalFree(sd);
-            if ok {
-                Ok(())
-            } else {
-                Err(AuthorityError::InsecureCredential)
-            }
+            Ok(ok)
+        }
+    }
+
+    fn validate_acl(file: &File) -> Result<(), AuthorityError> {
+        if private_acl_matches(file)? {
+            Ok(())
+        } else {
+            Err(AuthorityError::InsecureCredential)
         }
     }
 
@@ -400,6 +510,24 @@ mod windows {
         read_credential(open_existing_credential(path)?)
     }
 
+    pub(super) fn open_discovery(path: &Path) -> Result<File, AuthorityError> {
+        let file = open_existing_credential(path)?;
+        if private_acl_matches(&file)? {
+            Ok(file)
+        } else {
+            Err(AuthorityError::InsecureDiscovery)
+        }
+    }
+
+    pub(super) fn create_discovery(path: &Path) -> Result<File, AuthorityError> {
+        let file = create_private_file(path)?;
+        if private_acl_matches(&file)? {
+            Ok(file)
+        } else {
+            Err(AuthorityError::InsecureDiscovery)
+        }
+    }
+
     pub(super) fn credential(path: &Path) -> Result<OwnerCredential, AuthorityError> {
         let (mut file, existed) = secure_open(path)?;
         validate_acl(&file)?;
@@ -413,6 +541,14 @@ mod windows {
             Ok(OwnerCredential(b))
         }
     }
+}
+
+pub(crate) fn open_private_discovery(path: &Path) -> Result<File, AuthorityError> {
+    windows::open_discovery(path)
+}
+
+pub(crate) fn create_private_discovery(path: &Path) -> Result<File, AuthorityError> {
+    windows::create_discovery(path)
 }
 
 impl ClientBootstrap {
