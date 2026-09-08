@@ -175,35 +175,70 @@ pub async fn run(client: &Client, fixture: &mut Fixture) {
     else {
         panic!("candidates")
     };
-    if let Some(candidate) = candidates.first() {
-        let Response::Ticket(ticket) = call(client, || {
-            Command::Begin(fixture.owner.clone(), candidate.clone())
-        })
-        .await
+    assert_eq!(candidates.len(), 1, "seeded uncertain candidate missing");
+    let candidate = candidates.into_iter().next().unwrap();
+    assert_eq!(candidate.group_id(), &fixture.groups[1].group_id);
+    assert_eq!(
+        candidate.recipient_peer_id(),
+        fixture.recipient(1).peer_id()
+    );
+    let candidate_message_id = candidate.message_id().clone();
+    let Response::Ticket(ticket) = call(client, || {
+        Command::Begin(fixture.owner.clone(), candidate.clone())
+    })
+    .await
+    else {
+        panic!("ticket")
+    };
+    assert_eq!(ticket.message_id(), &candidate_message_id);
+    assert_eq!(
+        ticket.candidate().recipient_peer_id(),
+        fixture.recipient(1).peer_id()
+    );
+    call(client, || {
+        Command::Complete(
+            fixture.owner.clone(),
+            ticket.attempt_id().clone(),
+            AttemptOutcome::Uncertain,
+        )
+    })
+    .await;
+    let Response::Attempt(status) = call(client, || {
+        Command::Attempt(fixture.owner.clone(), ticket.attempt_id().clone())
+    })
+    .await
+    else {
+        panic!("attempt")
+    };
+    assert_eq!(status.attempt_id, *ticket.attempt_id());
+    assert_eq!(status.outcome, Some(AttemptOutcome::Uncertain));
+
+    let mut cursor = None;
+    let mut uncertain_receipt_verified = false;
+    loop {
+        let Response::Mailbox(page) =
+            call(client, || fixture.mailbox(1, cursor.clone(), 128)).await
         else {
-            panic!("ticket")
-        };
-        call(client, || {
-            Command::Complete(
-                fixture.owner.clone(),
-                ticket.attempt_id().clone(),
-                AttemptOutcome::Uncertain,
-            )
-        })
-        .await;
-        let Response::Attempt(status) = call(client, || {
-            Command::Attempt(fixture.owner.clone(), ticket.attempt_id().clone())
-        })
-        .await
-        else {
-            panic!("attempt")
-        };
-        assert_eq!(status.outcome, Some(AttemptOutcome::Uncertain));
-        let Response::Mailbox(page) = call(client, || fixture.mailbox(1, None, 1)).await else {
             panic!("page")
         };
-        assert!(page.messages[0].receipt.acknowledged_at_millis.is_none());
+        if let Some(entry) = page
+            .messages
+            .iter()
+            .find(|entry| entry.message.message_id == candidate_message_id)
+        {
+            assert!(entry.receipt.acknowledged_at_millis.is_none());
+            uncertain_receipt_verified = true;
+            break;
+        }
+        let Some(next) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
     }
+    assert!(
+        uncertain_receipt_verified,
+        "uncertain candidate absent from public mailbox snapshot"
+    );
     // Continue the second group's sender, which has no recipient backlog.
     // The short independent reference model separately covers backlog transfer.
     let old = fixture.peers[4].clone();
@@ -267,6 +302,6 @@ pub async fn run(client: &Client, fixture: &mut Fixture) {
     }
     assert_eq!(admitted as u64 + rejected.iter().sum::<u64>(), 128);
     emit(
-        serde_json::json!({"event":"lifecycle_barrier","pause_resume":true,"stale_cursor":true,"offline_reconnect":true,"remove_readd":true,"uncertain_no_ack":true,"sender_continuation":true,"lost_reply_stable_retry":true,"snapshot_excludes_append":true,"burst_offered":128,"burst_admitted":admitted,"burst_rejected":rejected}),
+        serde_json::json!({"event":"lifecycle_barrier","pause_resume":true,"stale_cursor":true,"offline_reconnect":true,"remove_readd":true,"uncertain_no_ack":uncertain_receipt_verified,"sender_continuation":true,"lost_reply_stable_retry":true,"snapshot_excludes_append":true,"burst_offered":128,"burst_admitted":admitted,"burst_rejected":rejected}),
     );
 }

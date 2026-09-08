@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -94,6 +94,9 @@ pub(super) fn validate_recognized_schema(
     if identity.schema_version >= 6 {
         expected.execute_batch(MIGRATION_V6)?;
     }
+    if identity.schema_version >= 7 {
+        expected.execute_batch(MIGRATION_V7)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -153,6 +156,9 @@ fn migrate_with_final_sql(
     }
     if identity.schema_version < 6 {
         transaction.execute_batch(MIGRATION_V6)?;
+    }
+    if identity.schema_version < 7 {
+        transaction.execute_batch(MIGRATION_V7)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
@@ -517,6 +523,13 @@ WHERE route_state IN ('held','native_queued','transport_written','uncertain')
   );
 "#;
 
+// Mailbox history is broader than ACK eligibility: supported v2 databases may
+// retain sender/self deliveries which migration v3 intentionally excluded from
+// recipient_ack_order. Index the complete current-delivery projection instead.
+const MIGRATION_V7: &str = r#"
+CREATE INDEX current_delivery_mailbox ON current_deliveries(group_id,recipient_peer_id,recipient_binding_revision,group_sequence);
+"#;
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -525,8 +538,8 @@ mod tests {
     use rusqlite::params;
 
     use crate::model::{
-        FrozenRecipient, GroupId, MessageCommitOutcome, MessageId, PeerId, Revision,
-        SendMessageRequest, SendReceipt, VerifiedBinding,
+        FrozenRecipient, GroupId, MailboxPageRequest, MessageCommitOutcome, MessageId, PeerId,
+        Revision, SendMessageRequest, SendReceipt, VerifiedBinding,
     };
 
     use super::*;
@@ -888,6 +901,74 @@ mod tests {
             .acknowledge_message(&alice, &group_id, &legitimate.message_id)
             .unwrap();
         assert_eq!(acknowledgement.contiguous_group_sequence, 2);
+        let first_page = store
+            .read_mailbox(
+                &alice,
+                MailboxPageRequest {
+                    group_id: group_id.clone(),
+                    cursor: None,
+                    max_items: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            first_page
+                .messages
+                .iter()
+                .map(|entry| (
+                    entry.message.group_sequence,
+                    entry.message.client_key.as_str(),
+                    entry.message.body.as_str(),
+                    entry.receipt.generation.get(),
+                    entry.receipt.acknowledged_at_millis.is_some(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![(1, "legacy-self", "accepted by schema v2", 1, false)]
+        );
+        assert_eq!(first_page.snapshot_high_sequence, 2);
+        let cursor = first_page
+            .next_cursor
+            .expect("sequence 2 remains in snapshot");
+        let appended = store
+            .send_message(
+                &bob,
+                SendMessageRequest {
+                    group_id: group_id.clone(),
+                    client_key: "after-snapshot".to_owned(),
+                    recipients: BTreeSet::from([alice_id.clone()]),
+                    body: "must remain outside the frozen snapshot".to_owned(),
+                    topic: None,
+                    reply_to: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(appended.group_sequence, 3);
+        let second_page = store
+            .read_mailbox(
+                &alice,
+                MailboxPageRequest {
+                    group_id: group_id.clone(),
+                    cursor: Some(cursor),
+                    max_items: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            second_page
+                .messages
+                .iter()
+                .map(|entry| (
+                    entry.message.group_sequence,
+                    entry.message.client_key.as_str(),
+                    entry.message.body.as_str(),
+                    entry.receipt.generation.get(),
+                    entry.receipt.acknowledged_at_millis.is_some(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![(2, "legitimate", "acknowledge me", 1, true)]
+        );
+        assert_eq!(second_page.snapshot_high_sequence, 2);
+        assert!(second_page.next_cursor.is_none());
         assert!(matches!(
             store.acknowledge_message(&alice, &group_id, &legacy_message_id),
             Err(StoreError::Unauthorized { .. })

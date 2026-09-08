@@ -44,11 +44,11 @@ impl Store {
         };
 
         let now = now_millis(&transaction)?;
-        // The recipient-order index skips other recipients' retained history.
-        // Historical order rows convey no eligibility: join the exact current
-        // binding/generation, and include both acknowledged and unresolved rows.
+        // Mailbox history includes every exact current delivery, including
+        // acknowledged rows and retained v2 sender/self rows which are
+        // intentionally absent from ACK ordering.
         let mut statement = transaction.prepare(
-            "SELECT m.message_id,m.group_sequence,m.sender_peer_id,m.sender_binding_revision,m.client_key,m.body,m.topic,m.reply_to_message_id,d.delivery_generation,a.fetched_at_millis,a.acknowledged_at_millis FROM recipient_ack_order o JOIN current_deliveries d ON d.message_id=o.message_id AND d.recipient_peer_id=o.recipient_peer_id AND d.recipient_binding_revision=o.binding_revision AND d.delivery_generation=o.generation JOIN messages m ON m.message_id=o.message_id LEFT JOIN acknowledgements a ON a.message_id=d.message_id AND a.recipient_peer_id=d.recipient_peer_id AND a.binding_revision=d.recipient_binding_revision AND a.generation=d.delivery_generation WHERE o.group_id=?1 AND o.recipient_peer_id=?2 AND o.binding_revision=?3 AND o.group_sequence>?4 AND o.group_sequence<=?5 AND m.group_id=o.group_id AND m.group_sequence=o.group_sequence ORDER BY o.group_sequence LIMIT ?6",
+            "SELECT m.message_id,m.group_sequence,m.sender_peer_id,m.sender_binding_revision,m.client_key,m.body,m.topic,m.reply_to_message_id,d.delivery_generation,a.fetched_at_millis,a.acknowledged_at_millis FROM current_deliveries d INDEXED BY current_delivery_mailbox JOIN messages m ON m.message_id=d.message_id LEFT JOIN acknowledgements a ON a.message_id=d.message_id AND a.recipient_peer_id=d.recipient_peer_id AND a.binding_revision=d.recipient_binding_revision AND a.generation=d.delivery_generation WHERE d.group_id=?1 AND d.recipient_peer_id=?2 AND d.recipient_binding_revision=?3 AND d.group_sequence>?4 AND d.group_sequence<=?5 AND m.group_id=d.group_id AND m.group_sequence=d.group_sequence ORDER BY d.group_sequence LIMIT ?6",
         )?;
         let mut rows = statement.query_map(
             params![
@@ -399,6 +399,38 @@ mod tests {
             alice.record.peer_id.as_str(),
             bob.record.peer_id.as_str(),
             5_000,
+        );
+        let plan = {
+            let mut statement = store
+                .connection
+                .prepare(
+                    "EXPLAIN QUERY PLAN SELECT m.message_id FROM current_deliveries d INDEXED BY current_delivery_mailbox JOIN messages m ON m.message_id=d.message_id WHERE d.group_id=?1 AND d.recipient_peer_id=?2 AND d.recipient_binding_revision=?3 AND d.group_sequence>?4 AND d.group_sequence<=?5 AND m.group_id=d.group_id AND m.group_sequence=d.group_sequence ORDER BY d.group_sequence LIMIT ?6",
+                )
+                .unwrap();
+            statement
+                .query_map(
+                    params![
+                        group.group_id.as_str(),
+                        bob.record.peer_id.as_str(),
+                        bob.record.revision.as_sql_i64(),
+                        0,
+                        5_001,
+                        129,
+                    ],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("current_delivery_mailbox")),
+            "mailbox plan did not use complete recipient range index: {plan:?}"
+        );
+        assert!(
+            plan.iter().all(|detail| !detail.contains("TEMP B-TREE")),
+            "mailbox plan introduced temporary ordering: {plan:?}"
         );
         let callbacks = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&callbacks);
