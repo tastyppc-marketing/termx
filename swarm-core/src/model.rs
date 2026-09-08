@@ -10,6 +10,7 @@ pub const MAX_METADATA_BYTES: usize = 4 * 1024;
 pub const MAX_CLIENT_KEY_BYTES: usize = 256;
 pub const MAX_TOPIC_BYTES: usize = 512;
 pub const MAX_MESSAGE_BODY_BYTES: usize = 1024 * 1024;
+pub const MAX_CANONICAL_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn sqlite_i64(field: &'static str, value: u64) -> Result<i64, ValidationError> {
     i64::try_from(value).map_err(|_| ValidationError::IntegerRange { field })
@@ -73,12 +74,15 @@ opaque_id!(MessageId, "m_");
 opaque_id!(DeliveryAttemptId, "d_");
 opaque_id!(SourceReferenceId, "s_");
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Revision(u64);
 
 impl Revision {
     pub fn new(value: u64) -> Result<Self, ValidationError> {
+        if value == 0 {
+            return Err(ValidationError::Empty { field: "revision" });
+        }
         sqlite_i64("revision", value)?;
         Ok(Self(value))
     }
@@ -89,6 +93,16 @@ impl Revision {
 
     pub fn as_sql_i64(self) -> i64 {
         i64::try_from(self.0).expect("validated revision fits in i64")
+    }
+}
+
+impl<'de> Deserialize<'de> for Revision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -142,7 +156,20 @@ impl SendMessageRequest {
         if let Some(topic) = &self.topic {
             validate_nonempty("topic", topic, MAX_TOPIC_BYTES)?;
         }
+        self.canonical_json()?;
         Ok(())
+    }
+
+    pub fn canonical_json(&self) -> Result<Vec<u8>, ValidationError> {
+        let encoded = serde_json::to_vec(self)
+            .map_err(|error| ValidationError::CanonicalSerialization(error.to_string()))?;
+        if encoded.len() > MAX_CANONICAL_PAYLOAD_BYTES {
+            return Err(ValidationError::TooLong {
+                field: "canonical_payload",
+                max: MAX_CANONICAL_PAYLOAD_BYTES,
+            });
+        }
+        Ok(encoded)
     }
 }
 

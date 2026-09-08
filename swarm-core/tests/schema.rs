@@ -5,7 +5,8 @@ use std::fs;
 use rusqlite::Connection;
 use termx_swarm_core::error::StoreError;
 use termx_swarm_core::model::{
-    sqlite_i64, AuthorityId, GroupId, PeerId, SendMessageRequest, MAX_MESSAGE_BODY_BYTES,
+    sqlite_i64, AuthorityId, GroupId, PeerId, Revision, SendMessageRequest,
+    MAX_CANONICAL_PAYLOAD_BYTES, MAX_MESSAGE_BODY_BYTES,
 };
 use termx_swarm_core::store::{Store, APPLICATION_ID, SCHEMA_VERSION};
 
@@ -48,6 +49,31 @@ fn unrelated_database_is_rejected_without_mutation() {
             "CREATE TABLE user_content(value TEXT); INSERT INTO user_content VALUES ('keep');",
         )
         .expect("seed unrelated database");
+    drop(connection);
+    let before = fs::read(&path).expect("read before");
+
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::UnrecognizedDatabase { .. })
+    ));
+    assert_eq!(fs::read(&path).expect("read after"), before);
+    assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+}
+
+#[test]
+fn unrelated_application_with_current_version_is_rejected_by_identity_first() {
+    let path = support::retained_db("unrelated-current-version");
+    let connection = Connection::open(&path).expect("create unrelated database");
+    connection
+        .pragma_update(None, "application_id", 12345)
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .unwrap();
+    connection
+        .execute_batch("CREATE TABLE user_content(value TEXT);")
+        .unwrap();
     drop(connection);
     let before = fs::read(&path).expect("read before");
 
@@ -180,6 +206,39 @@ fn recognized_current_schema_without_authority_is_rejected_on_open() {
 }
 
 #[test]
+fn counterfeit_current_schema_is_rejected_without_mutation() {
+    let path = support::retained_db("counterfeit-current");
+    let connection = Connection::open(&path).expect("create counterfeit database");
+    connection
+        .pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE authority_metadata(\
+                 singleton INTEGER PRIMARY KEY,\
+                 authority_id TEXT NOT NULL,\
+                 created_at_millis INTEGER NOT NULL\
+             );\
+             INSERT INTO authority_metadata VALUES \
+                 (1, 'a_00112233445566778899aabbccddeeff', 1);",
+        )
+        .unwrap();
+    drop(connection);
+    let before = fs::read(&path).expect("read before");
+
+    assert!(matches!(
+        Store::open(&path),
+        Err(StoreError::UnrecognizedDatabase { .. })
+    ));
+    assert_eq!(fs::read(&path).expect("read after"), before);
+    assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+}
+
+#[test]
 fn schema_enforces_binding_and_delivery_invariants_in_sqlite() {
     let path = support::retained_db("sql-invariants");
     drop(Store::open(&path).expect("initialize"));
@@ -240,4 +299,56 @@ fn serialized_send_request_rejects_sender_claims_and_validates_limits() {
 fn unsigned_values_cannot_overflow_sqlite_integer_fields() {
     assert_eq!(sqlite_i64("sequence", i64::MAX as u64).unwrap(), i64::MAX);
     assert!(sqlite_i64("sequence", i64::MAX as u64 + 1).is_err());
+}
+
+#[test]
+fn revision_rejects_zero_and_sqlite_overflow_from_code_and_json() {
+    assert!(Revision::new(0).is_err());
+    assert!(Revision::new(i64::MAX as u64 + 1).is_err());
+    assert!(serde_json::from_str::<Revision>("0").is_err());
+    assert!(serde_json::from_str::<Revision>(&((i64::MAX as u64) + 1).to_string()).is_err());
+    assert_eq!(serde_json::from_str::<Revision>("1").unwrap().get(), 1);
+}
+
+#[test]
+fn escape_heavy_max_body_fits_explicit_canonical_payload_bound() {
+    let path = support::retained_db("escape-heavy-canonical");
+    drop(Store::open(&path).expect("initialize"));
+    let mut connection = Connection::open(&path).expect("open fixture directly");
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    let authority_id: String = connection
+        .query_row("SELECT authority_id FROM authority_metadata", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let group_id = GroupId::generate();
+    let peer_id = PeerId::generate();
+    let request = SendMessageRequest {
+        group_id: group_id.clone(),
+        client_key: "escape-boundary".to_owned(),
+        recipients: [peer_id.clone()].into_iter().collect(),
+        body: "\u{0000}".repeat(MAX_MESSAGE_BODY_BYTES),
+        topic: Some("\\\"\u{0001}".repeat(100)),
+        reply_to: None,
+    };
+
+    request.validate().expect("valid bounded request");
+    let canonical = request.canonical_json().expect("canonical JSON");
+    assert!(canonical.len() > MAX_MESSAGE_BODY_BYTES * 5);
+    assert!(canonical.len() <= MAX_CANONICAL_PAYLOAD_BYTES);
+
+    let canonical = String::from_utf8(canonical).unwrap();
+    let transaction = connection.transaction().unwrap();
+    transaction
+        .execute(
+            "INSERT INTO peers(peer_id,current_binding_revision,created_at_millis) VALUES (?1,1,1)",
+            [peer_id.as_str()],
+        )
+        .unwrap();
+    transaction.execute("INSERT INTO peer_bindings(peer_id,binding_revision,launch_id,terminal_id,harness,conversation_id,process_id,process_creation_filetime,live,bound_at_millis) VALUES (?1,1,'l_00112233445566778899aabbccddeeff','terminal','codex','conversation',1,1,1,1)", [peer_id.as_str()]).unwrap();
+    transaction.execute("INSERT INTO groups(group_id,authority_id,policy_revision,label,paused,created_at_millis) VALUES (?1,?2,1,'group',0,1)", [group_id.as_str(), &authority_id]).unwrap();
+    transaction.execute("INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,topic,committed_at_millis) VALUES ('m_00112233445566778899aabbccddeeff',?1,1,?2,1,'escape-boundary',?3,?4,?5,1)", rusqlite::params![group_id.as_str(), peer_id.as_str(), canonical, request.body, request.topic]).expect("schema accepts canonical JSON for an accepted escape-heavy body");
+    transaction.commit().unwrap();
 }

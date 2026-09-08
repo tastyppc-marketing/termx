@@ -10,6 +10,8 @@ pub enum ValidationError {
     InvalidId { kind: &'static str },
     #[error("{field} is outside SQLite's signed integer range")]
     IntegerRange { field: &'static str },
+    #[error("canonical payload could not be serialized: {0}")]
+    CanonicalSerialization(String),
 }
 
 #[derive(Debug, thiserror::Error)]

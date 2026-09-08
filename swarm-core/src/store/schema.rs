@@ -47,6 +47,51 @@ pub(super) fn validate_identity(
     Ok(())
 }
 
+pub(super) fn validate_current_schema(
+    connection: &Connection,
+    path: &Path,
+    identity: &DatabaseIdentity,
+) -> Result<(), StoreError> {
+    if identity.schema_version != SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    let authority = connection
+        .query_row(
+            "SELECT authority_id FROM authority_metadata WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows | rusqlite::Error::SqliteFailure(_, _) => {
+                StoreError::MissingAuthority
+            }
+            other => StoreError::Sqlite(other),
+        })?;
+    AuthorityId::parse(&authority)?;
+
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(SCHEMA_V1)?;
+    if schema_manifest(connection)? != schema_manifest(&expected)? {
+        return Err(StoreError::UnrecognizedDatabase {
+            path: path.to_path_buf(),
+            application_id: identity.application_id,
+            schema_version: identity.schema_version,
+        });
+    }
+    Ok(())
+}
+
+fn schema_manifest(connection: &Connection) -> Result<Vec<(String, String, String)>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT type, name, sql FROM sqlite_schema \
+         WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index') \
+         ORDER BY type, name",
+    )?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub(super) fn migrate(
     connection: &mut Connection,
     identity: DatabaseIdentity,
@@ -123,7 +168,7 @@ CREATE TABLE messages (
     sender_peer_id TEXT NOT NULL REFERENCES peers(peer_id),
     sender_binding_revision INTEGER NOT NULL,
     client_key TEXT NOT NULL CHECK (length(CAST(client_key AS BLOB)) BETWEEN 1 AND 256),
-    semantic_payload_json TEXT NOT NULL CHECK (length(CAST(semantic_payload_json AS BLOB)) BETWEEN 1 AND 1052672),
+    semantic_payload_json TEXT NOT NULL CHECK (length(CAST(semantic_payload_json AS BLOB)) BETWEEN 1 AND 8388608),
     body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) BETWEEN 1 AND 1048576),
     topic TEXT CHECK (length(CAST(topic AS BLOB)) BETWEEN 1 AND 512),
     reply_to_message_id TEXT REFERENCES messages(message_id),

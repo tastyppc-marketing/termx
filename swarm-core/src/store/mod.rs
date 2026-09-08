@@ -35,7 +35,6 @@ impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
         let identity = inspect_existing_identity(&path)?;
-        schema::validate_identity(&path, &identity)?;
 
         let mut connection = Connection::open(&path)?;
         configure_connection(&connection)?;
@@ -106,11 +105,14 @@ fn inspect_existing_identity(path: &Path) -> Result<schema::DatabaseIdentity, St
         [],
         |row| row.get(0),
     )?;
-    Ok(schema::DatabaseIdentity {
+    let identity = schema::DatabaseIdentity {
         application_id,
         schema_version,
         has_objects: object_count != 0,
-    })
+    };
+    schema::validate_identity(path, &identity)?;
+    schema::validate_current_schema(&connection, path, &identity)?;
+    Ok(identity)
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StoreError> {
