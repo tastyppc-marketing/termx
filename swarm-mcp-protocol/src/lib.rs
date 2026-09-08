@@ -1,12 +1,14 @@
-//! Pure MCP request-ID, handshake admission, and bounded active-ID leases.
+//! Pure MCP bounded JSON/envelope parsing, request-ID normalization, handshake
+//! admission, and bounded active-ID leases.
 //!
 //! This crate grants protocol admission only. A [`Disposition::OrdinaryReady`]
 //! result is not application authority and does not reserve output or domain
-//! capacity. Transport, envelope parsing, tool catalogs, and native enrollment
-//! are out of scope.
+//! capacity. A validated JSON document or parsed envelope proves syntax only;
+//! neither grants application authority. Transport, tool catalogs, and native
+//! enrollment are out of scope.
 //!
 //! Request-ID token spans must be exact. Leading or trailing whitespace is
-//! rejected because the future envelope parser supplies the span.
+//! rejected because the envelope parser supplies the span.
 //!
 //! Completed request IDs are not retained. An invalid later reuse may be
 //! treated as a new request; a late cancel cannot be distinguished from
@@ -53,10 +55,20 @@
 
 #![forbid(unsafe_code)]
 
+mod envelope;
 mod id;
+mod json;
 mod session;
 
+pub use envelope::{
+    EnvelopeError, EnvelopeErrorKind, McpEnvelope, MAX_MCP_INPUT_BYTES, MAX_MCP_METHOD_BYTES,
+};
 pub use id::{IdView, RequestId};
+pub use json::{
+    validate_json, JsonError, JsonErrorKind, JsonValidationStats, ValidatedJson,
+    JSON_VALIDATOR_SCRATCH_BYTES, MAX_JSON_DEPTH, MAX_JSON_INPUT_BYTES, MAX_JSON_KEYS_PER_OBJECT,
+    MAX_JSON_KEY_BYTES, MAX_JSON_LIVE_KEYS, MAX_JSON_NODES,
+};
 pub use session::{
     AccountingSnapshot, ActiveRequest, AdmitError, CancelDisposition, Disposition,
     InitializedDisposition, Limits, Phase, ProtocolSession, RequestClass, ResponseOutcome,
