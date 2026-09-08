@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -91,6 +91,9 @@ pub(super) fn validate_recognized_schema(
     if identity.schema_version >= 5 {
         expected.execute_batch(MIGRATION_V5)?;
     }
+    if identity.schema_version >= 6 {
+        expected.execute_batch(MIGRATION_V6)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -147,6 +150,9 @@ fn migrate_with_final_sql(
     }
     if identity.schema_version < 5 {
         transaction.execute_batch(MIGRATION_V5)?;
+    }
+    if identity.schema_version < 6 {
+        transaction.execute_batch(MIGRATION_V6)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
@@ -481,6 +487,34 @@ CREATE INDEX recipient_ack_binding_sequence ON recipient_ack_order(group_id,reci
 -- Retain historical per-generation watermarks verbatim. They cannot safely seed
 -- a binding-wide lower bound: another generation may contain an earlier gap.
 -- The first current ACK starts at zero and resolves its bound with indexed seeks.
+"#;
+
+// Versions 4 and 5 may have materialized the pre-fix I1 ordering: a delayed
+// native observation replaced ready routing after trusted cancellation. Repair
+// only its exact still-current projection; keep both historical facts intact.
+const MIGRATION_V6: &str = r#"
+UPDATE current_deliveries SET route_state='ready'
+WHERE route_state IN ('held','native_queued','transport_written','uncertain')
+  AND fetched_at_millis IS NULL
+  AND acknowledged_at_millis IS NULL
+  AND replied_by_message_id IS NULL
+  AND EXISTS (
+      SELECT 1 FROM delivery_attempts a
+      JOIN attempt_not_submitted_reconciliations r ON r.attempt_id=a.attempt_id
+      WHERE a.attempt_id=current_deliveries.last_attempt_id
+        AND a.message_id=current_deliveries.message_id
+        AND a.recipient_peer_id=current_deliveries.recipient_peer_id
+        AND a.binding_revision=current_deliveries.recipient_binding_revision
+        AND a.generation=current_deliveries.delivery_generation
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM acknowledgements a
+      WHERE a.message_id=current_deliveries.message_id
+        AND a.recipient_peer_id=current_deliveries.recipient_peer_id
+        AND a.binding_revision=current_deliveries.recipient_binding_revision
+        AND a.generation=current_deliveries.delivery_generation
+        AND (a.fetched_at_millis IS NOT NULL OR a.acknowledged_at_millis IS NOT NULL)
+  );
 "#;
 
 #[cfg(test)]
@@ -1175,7 +1209,314 @@ mod v4_migration_tests {
         drop(store);
         assert_eq!(
             Store::open(path).unwrap().inspect().unwrap().schema_version,
-            5
+            SCHEMA_VERSION
         );
+    }
+}
+
+#[cfg(test)]
+mod reconciled_projection_migration_tests {
+    use super::*;
+    use crate::{model::*, store::Store};
+    use rusqlite::params;
+
+    const PEER: &str = "p_00000000000000000000000000000002";
+    const MESSAGE: &str = "m_00000000000000000000000000000002";
+    const GROUP: &str = "g_00000000000000000000000000000001";
+    const ATTEMPT: &str = "d_00000000000000000000000000000001";
+    const PROOF: &str = "verified-cancelled-after-native-observation";
+
+    fn fixture(
+        version: i64,
+        outcome: AttemptOutcome,
+        guard: &str,
+    ) -> (std::path::PathBuf, Connection) {
+        let (path, mut connection) =
+            super::v3_migration_tests::fixture("stranded-reconciliation-migration");
+        connection.execute_batch(MIGRATION_V4).unwrap();
+        if version == 5 {
+            connection.execute_batch(MIGRATION_V5).unwrap();
+        }
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        // Materialize exactly the old I1 result: recovery, trusted cancellation,
+        // then an older native observation overwrites the current routing state.
+        let tx = connection.transaction().unwrap();
+        tx.execute("UPDATE delivery_attempts SET outcome=?1,completed_at_millis=30,recovered_uncertain_at_millis=10 WHERE attempt_id=?2", params![outcome.as_str(), ATTEMPT]).unwrap();
+        tx.execute(
+            "INSERT INTO attempt_not_submitted_reconciliations VALUES(?1,?2,20)",
+            params![ATTEMPT, PROOF],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE current_deliveries SET last_attempt_id=?1,route_state=?2 WHERE message_id=?3",
+            params![ATTEMPT, outcome.as_str(), MESSAGE],
+        )
+        .unwrap();
+        match guard {
+            "newer_attempt" => {
+                tx.execute("INSERT INTO delivery_attempts(attempt_id,message_id,recipient_peer_id,binding_revision,generation,attempt_number,started_at_millis,completed_at_millis,outcome) VALUES('d_00000000000000000000000000000002',?1,?2,1,1,2,35,40,'native_queued')", params![MESSAGE, PEER]).unwrap();
+                tx.execute("UPDATE current_deliveries SET last_attempt_id='d_00000000000000000000000000000002',route_state='native_queued' WHERE message_id=?1", [MESSAGE]).unwrap();
+            }
+            "successor" | "binding_only" | "generation_only" => {
+                let binding = if guard == "generation_only" { 1 } else { 2 };
+                let generation = if guard == "binding_only" { 1 } else { 2 };
+                if binding == 2 {
+                    tx.execute("INSERT INTO peer_bindings VALUES(?1,2,'l_00000000000000000000000000000012','peer-2','codex','peer-2',NULL,100,1000,1,1)", [PEER]).unwrap();
+                    tx.execute(
+                        "UPDATE peers SET current_binding_revision=2 WHERE peer_id=?1",
+                        [PEER],
+                    )
+                    .unwrap();
+                }
+                tx.execute(
+                    "INSERT INTO delivery_generations VALUES(?1,?2,?3,?4)",
+                    params![MESSAGE, PEER, binding, generation],
+                )
+                .unwrap();
+                tx.execute("UPDATE current_deliveries SET recipient_binding_revision=?1,delivery_generation=?2 WHERE message_id=?3", params![binding, generation, MESSAGE]).unwrap();
+                tx.execute("UPDATE recipient_ack_order SET binding_revision=?1,generation=?2 WHERE message_id=?3", params![binding, generation, MESSAGE]).unwrap();
+            }
+            "fetched" => {
+                tx.execute("UPDATE current_deliveries SET fetched_generation=1,fetched_at_millis=21 WHERE message_id=?1", [MESSAGE]).unwrap();
+                tx.execute(
+                    "INSERT INTO acknowledgements VALUES(?1,?2,1,1,21,NULL)",
+                    params![MESSAGE, PEER],
+                )
+                .unwrap();
+            }
+            "acknowledged" => {
+                tx.execute("UPDATE current_deliveries SET acknowledged_generation=1,acknowledged_at_millis=21 WHERE message_id=?1", [MESSAGE]).unwrap();
+                tx.execute(
+                    "INSERT INTO acknowledgements VALUES(?1,?2,1,1,NULL,21)",
+                    params![MESSAGE, PEER],
+                )
+                .unwrap();
+                tx.execute(
+                    "UPDATE recipient_ack_order SET acknowledged=1 WHERE message_id=?1",
+                    [MESSAGE],
+                )
+                .unwrap();
+            }
+            "replied" => {
+                tx.execute("UPDATE current_deliveries SET replied_by_message_id='m_00000000000000000000000000000001' WHERE message_id=?1", [MESSAGE]).unwrap();
+            }
+            "paused" => {
+                tx.execute("UPDATE groups SET paused=1 WHERE group_id=?1", [GROUP])
+                    .unwrap();
+            }
+            "offline" => {
+                tx.execute(
+                    "UPDATE peer_bindings SET live=0 WHERE peer_id=?1 AND binding_revision=1",
+                    [PEER],
+                )
+                .unwrap();
+            }
+            "removed" => {
+                tx.execute(
+                    "UPDATE group_memberships SET removed_policy_revision=1 WHERE peer_id=?1",
+                    [PEER],
+                )
+                .unwrap();
+            }
+            "none" => {}
+            _ => panic!("unknown fixture guard"),
+        }
+        tx.commit().unwrap();
+        (path, connection)
+    }
+
+    fn history(connection: &Connection) -> (String, i64, i64, String, i64) {
+        connection.query_row("SELECT a.outcome,a.completed_at_millis,a.recovered_uncertain_at_millis,r.evidence_reference,r.reconciled_at_millis FROM delivery_attempts a JOIN attempt_not_submitted_reconciliations r ON r.attempt_id=a.attempt_id WHERE a.attempt_id=?1", [ATTEMPT], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap()
+    }
+
+    fn candidates(store: &mut Store, binding: u64) -> Vec<DeliveryCandidate> {
+        store
+            .delivery_candidates(
+                &store.trusted_owner(),
+                &GroupId::parse(GROUP).unwrap(),
+                &PeerId::parse(PEER).unwrap(),
+                Revision::new(binding).unwrap(),
+                128,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn stranded_exact_v4_and_v5_reconciliation_is_repaired_with_history_replays_and_rollback() {
+        for version in [4, 5] {
+            for outcome in [
+                AttemptOutcome::Held,
+                AttemptOutcome::NativeQueued,
+                AttemptOutcome::TransportWritten,
+            ] {
+                let (path, mut connection) = fixture(version, outcome, "none");
+                let before_schema = schema_manifest(&connection).unwrap();
+                let before_history = history(&connection);
+                let identity = DatabaseIdentity {
+                    application_id: APPLICATION_ID,
+                    schema_version: version,
+                    has_objects: true,
+                };
+                assert!(migrate_with_final_sql(
+                    &mut connection,
+                    identity,
+                    Some("INSERT INTO deliberately_missing_projection_migration_target VALUES(1)")
+                )
+                .is_err());
+                assert_eq!(schema_manifest(&connection).unwrap(), before_schema);
+                assert_eq!(
+                    connection
+                        .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    version
+                );
+                assert_eq!(
+                    connection
+                        .query_row(
+                            "SELECT route_state FROM current_deliveries WHERE message_id=?1",
+                            [MESSAGE],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    outcome.as_str()
+                );
+                assert_eq!(history(&connection), before_history);
+                drop(connection);
+                let mut store = Store::open(&path).unwrap();
+                let owner = store.trusted_owner();
+                store.recover_trusted_new_run(&owner).unwrap();
+                assert_eq!(
+                    candidates(&mut store, 1).len(),
+                    1,
+                    "v{version} stranded {outcome:?} must be repaired by migration"
+                );
+                let attempt = DeliveryAttemptId::parse(ATTEMPT).unwrap();
+                store.complete_delivery(&owner, &attempt, outcome).unwrap();
+                assert_eq!(candidates(&mut store, 1).len(), 1);
+                store
+                    .reconcile_not_submitted(
+                        &owner,
+                        VerifiedNotSubmitted::trusted(attempt, PROOF.into()).unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(candidates(&mut store, 1).len(), 1);
+                assert_eq!(history(&store.connection), before_history);
+                assert_eq!(store.connection.query_row("SELECT recipient_binding_revision,delivery_generation FROM recipient_deliveries WHERE message_id=?1", [MESSAGE], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).unwrap(), (1,1));
+                drop(store);
+                let mut reopened = Store::open(path).unwrap();
+                reopened
+                    .recover_trusted_new_run(&reopened.trusted_owner())
+                    .unwrap();
+                assert_eq!(candidates(&mut reopened, 1).len(), 1);
+                assert_eq!(history(&reopened.connection), before_history);
+                let tx = reopened.connection.transaction().unwrap();
+                let predecessor =
+                    super::super::policy::read_binding(&tx, &PeerId::parse(PEER).unwrap(), 1)
+                        .unwrap();
+                tx.commit().unwrap();
+                let next = VerifiedBinding::trusted(
+                    LaunchId::generate().as_str().into(),
+                    "continued-peer-2".into(),
+                    "codex".into(),
+                    "peer-2".into(),
+                    None,
+                    101,
+                    1001,
+                    true,
+                )
+                .unwrap();
+                let evidence = VerifiedContinuation::trusted(
+                    &predecessor,
+                    next,
+                    "verified-same-branch".into(),
+                )
+                .unwrap();
+                let successor = reopened
+                    .continue_peer(
+                        &reopened.trusted_owner(),
+                        evidence,
+                        "continue-migrated-reconciled-backlog",
+                        [(GroupId::parse(GROUP).unwrap(), Revision::new(1).unwrap())].into(),
+                    )
+                    .unwrap();
+                let transferred = candidates(&mut reopened, successor.record.revision.get());
+                assert_eq!(transferred.len(), 1);
+                assert_eq!(transferred[0].generation().get(), 2);
+                assert_eq!(history(&reopened.connection), before_history);
+            }
+        }
+    }
+
+    #[test]
+    fn reconciliation_projection_migration_respects_attempt_binding_receipt_and_policy_guards() {
+        for version in [4, 5] {
+            for guard in [
+                "newer_attempt",
+                "successor",
+                "binding_only",
+                "generation_only",
+                "fetched",
+                "acknowledged",
+                "replied",
+                "paused",
+                "offline",
+                "removed",
+            ] {
+                let (path, connection) = fixture(version, AttemptOutcome::Held, guard);
+                let before_history = history(&connection);
+                let before_route: String = connection
+                    .query_row(
+                        "SELECT route_state FROM current_deliveries WHERE message_id=?1",
+                        [MESSAGE],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                drop(connection);
+                let mut store = Store::open(path).unwrap();
+                let authorized_later = matches!(guard, "paused" | "offline" | "removed");
+                let expected_route = if authorized_later {
+                    "ready"
+                } else {
+                    before_route.as_str()
+                };
+                assert_eq!(
+                    store
+                        .connection
+                        .query_row(
+                            "SELECT route_state FROM current_deliveries WHERE message_id=?1",
+                            [MESSAGE],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    expected_route,
+                    "v{version} guard {guard}"
+                );
+                store
+                    .recover_trusted_new_run(&store.trusted_owner())
+                    .unwrap();
+                let binding = if matches!(guard, "successor" | "binding_only") {
+                    2
+                } else {
+                    1
+                };
+                assert!(
+                    candidates(&mut store, binding).is_empty(),
+                    "v{version} repair must not bypass {guard}"
+                );
+                assert_eq!(history(&store.connection), before_history);
+                assert_eq!(
+                    store
+                        .connection
+                        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                            .get::<_, i64>(
+                            0
+                        ))
+                        .unwrap(),
+                    0
+                );
+            }
+        }
     }
 }
