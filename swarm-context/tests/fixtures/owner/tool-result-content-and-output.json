@@ -1,0 +1,1 @@
+{"type":"user","uuid":"both-views","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"chat-body","output":"transcript-body"}]}}
