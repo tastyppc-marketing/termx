@@ -34,6 +34,10 @@ pub enum WireError {
     ServerIdentityUnavailable,
     #[error("operation is invalid for this pipe endpoint")]
     WrongEndpoint,
+    #[error("reserved send token does not belong to this connection")]
+    WrongConnection,
+    #[error("frame body exceeds reserved send capacity")]
+    ReservationTooSmall,
     #[error("acceptor replacement is temporarily unavailable")]
     Transient,
     #[error("named pipe is currently busy")]

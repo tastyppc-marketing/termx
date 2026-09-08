@@ -1,5 +1,5 @@
 use crate::{
-    framing::{decode_body, encode_message_body, ConnectionPermit},
+    framing::{decode_body, encode_message_body, ConnectionPermit, FramePermit},
     wire::valid_id,
     DiscoveryRecord, FrameBudget, OwnerCredential, ProcessIdentity, ReceivedFrame, RequestEnvelope,
     ResponseEnvelope, VerifiedProcess, WireError, MAX_FRAME_BYTES,
@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     ffi::OsStr,
+    fmt,
     future::Future,
     os::windows::{
         ffi::OsStrExt,
@@ -184,6 +185,167 @@ impl Drop for ProgressGuard {
             self.state.poison();
         }
     }
+}
+
+struct FrameReservation {
+    _permit: FramePermit,
+    connection: Arc<ConnectionState>,
+    reserved_bytes: usize,
+    body_capacity: usize,
+}
+
+/// One exclusive right to send a single reserved frame on one `VerifiedPipe`.
+///
+/// Not `Clone` and not `Deserialize`. `send_reserved` consumes the token once.
+/// Share reservation lifetime with [`FrameCreditHandle`]; cloning a handle does
+/// not duplicate this send right or reserve more bytes.
+///
+/// ```
+/// use termx_swarm_client::ReservedFrameSend;
+/// fn capacities(token: &ReservedFrameSend) -> (usize, usize) {
+///     (token.body_capacity(), token.reserved_bytes())
+/// }
+/// ```
+///
+/// ```
+/// fn clone_handle(
+///     handle: termx_swarm_client::FrameCreditHandle,
+/// ) -> (termx_swarm_client::FrameCreditHandle, termx_swarm_client::FrameCreditHandle) {
+///     (handle.clone(), handle)
+/// }
+/// ```
+///
+/// ```
+/// termx_swarm_client::assert_deserialize_owned::<termx_swarm_client::DiscoveryRecord>();
+/// ```
+///
+/// ```compile_fail
+/// use termx_swarm_client::ReservedFrameSend;
+/// fn duplicate(token: ReservedFrameSend) -> (ReservedFrameSend, ReservedFrameSend) {
+///     (token.clone(), token)
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn send_twice(pipe: &termx_swarm_client::VerifiedPipe, token: termx_swarm_client::ReservedFrameSend, body: &[u8]) {
+///     let _ = pipe.send_reserved(token, body);
+///     let _ = pipe.send_reserved(token, body);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// termx_swarm_client::assert_deserialize_owned::<termx_swarm_client::ReservedFrameSend>();
+/// ```
+///
+/// ```compile_fail
+/// fn send_with_handle(pipe: &termx_swarm_client::VerifiedPipe, handle: termx_swarm_client::FrameCreditHandle, body: &[u8]) {
+///     let _ = pipe.send_reserved(handle, body);
+/// }
+/// ```
+pub struct ReservedFrameSend {
+    reservation: Arc<FrameReservation>,
+}
+
+/// Shared ownership of one actual frame reservation. Cannot authorize a send.
+///
+/// Cloning does not reserve more bytes or release the original credit. Debug
+/// reports only the reserved byte count.
+#[derive(Clone)]
+pub struct FrameCreditHandle {
+    reservation: Arc<FrameReservation>,
+}
+
+impl fmt::Debug for ReservedFrameSend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReservedFrameSend")
+            .field("reserved_bytes", &self.reservation.reserved_bytes)
+            .field("body_capacity", &self.reservation.body_capacity)
+            .finish()
+    }
+}
+
+impl fmt::Debug for FrameCreditHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameCreditHandle")
+            .field("reserved_bytes", &self.reservation.reserved_bytes)
+            .finish()
+    }
+}
+
+impl ReservedFrameSend {
+    pub fn credit_handle(&self) -> FrameCreditHandle {
+        FrameCreditHandle {
+            reservation: self.reservation.clone(),
+        }
+    }
+
+    pub fn body_capacity(&self) -> usize {
+        self.reservation.body_capacity
+    }
+
+    pub fn reserved_bytes(&self) -> usize {
+        self.reservation.reserved_bytes
+    }
+
+    fn belongs_to(&self, state: &Arc<ConnectionState>) -> bool {
+        Arc::ptr_eq(&self.reservation.connection, state)
+    }
+}
+
+impl FrameCreditHandle {
+    pub fn reserved_bytes(&self) -> usize {
+        self.reservation.reserved_bytes
+    }
+}
+
+fn reserve_send_on(
+    state: &Arc<ConnectionState>,
+    budget: &FrameBudget,
+    body_capacity: usize,
+) -> Result<ReservedFrameSend, WireError> {
+    if state.is_poisoned() {
+        return Err(WireError::ConnectionPoisoned);
+    }
+    if body_capacity > MAX_FRAME_BYTES {
+        return Err(WireError::FrameTooLarge);
+    }
+    let reserved_bytes = body_capacity
+        .checked_add(4)
+        .ok_or(WireError::FrameTooLarge)?;
+    let permit = budget.reserve(reserved_bytes)?;
+    Ok(ReservedFrameSend {
+        reservation: Arc::new(FrameReservation {
+            _permit: permit,
+            connection: state.clone(),
+            reserved_bytes,
+            body_capacity,
+        }),
+    })
+}
+
+async fn send_reserved_to<W: AsyncWrite + Unpin>(
+    writer: &Mutex<W>,
+    state: Arc<ConnectionState>,
+    token: ReservedFrameSend,
+    body: &[u8],
+) -> Result<(), WireError> {
+    if !token.belongs_to(&state) {
+        return Err(WireError::WrongConnection);
+    }
+    if body.len() > token.body_capacity() {
+        return Err(WireError::ReservationTooSmall);
+    }
+    if body.len() > MAX_FRAME_BYTES {
+        return Err(WireError::FrameTooLarge);
+    }
+    if state.is_poisoned() {
+        return Err(WireError::ConnectionPoisoned);
+    }
+    let mut writer = writer.lock().await;
+    if state.is_poisoned() {
+        return Err(WireError::ConnectionPoisoned);
+    }
+    write_frame(&mut *writer, body, state).await
 }
 
 pub struct VerifiedPipe {
@@ -550,19 +712,21 @@ impl VerifiedPipe {
         self.state.is_poisoned()
     }
 
+    pub fn reserve_send(&self, body_capacity: usize) -> Result<ReservedFrameSend, WireError> {
+        reserve_send_on(&self.state, &self.budget, body_capacity)
+    }
+
+    pub async fn send_reserved(
+        &self,
+        token: ReservedFrameSend,
+        body: &[u8],
+    ) -> Result<(), WireError> {
+        send_reserved_to(&self.writer, self.state.clone(), token, body).await
+    }
+
     pub async fn send_bytes(&self, bytes: &[u8]) -> Result<(), WireError> {
-        if self.state.is_poisoned() {
-            return Err(WireError::ConnectionPoisoned);
-        }
-        if bytes.len() > MAX_FRAME_BYTES {
-            return Err(WireError::FrameTooLarge);
-        }
-        let _permit = self.budget.reserve(bytes.len() + 4)?;
-        let mut writer = self.writer.lock().await;
-        if self.state.is_poisoned() {
-            return Err(WireError::ConnectionPoisoned);
-        }
-        write_frame(&mut *writer, bytes, self.state.clone()).await
+        let token = self.reserve_send(bytes.len())?;
+        self.send_reserved(token, bytes).await
     }
 
     pub async fn send_request(&self, request: &RequestEnvelope) -> Result<(), WireError> {
@@ -1185,5 +1349,99 @@ mod tests {
         accepted.send_bytes(b"progress").await.unwrap();
         assert_eq!(client.recv_bytes().await.unwrap().as_ref(), b"progress");
         assert!(!accepted.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn reserved_send_cancel_while_waiting_for_writer_does_not_poison() {
+        let evidence = retained("reserved-send-lock-wait-cancel");
+        let name = pipe_name("reserved-lock-wait");
+        let budget = FrameBudget::new(1024);
+        let mut server = PipeServer::bind(&name, budget.clone()).unwrap();
+        let client = VerifiedPipe::connect(&name, server.identity())
+            .await
+            .unwrap();
+        let accepted = server.accept().await.unwrap();
+        let lock = accepted.writer.lock().await;
+        let token = accepted.reserve_send(4).unwrap();
+        let handle = token.credit_handle();
+        assert_eq!(budget.usage(), (8, 1));
+        let blocked = accepted.send_reserved(token, b"abcd");
+        assert!(timeout(Duration::from_millis(20), blocked).await.is_err());
+        assert!(!accepted.is_poisoned());
+        assert_eq!(budget.usage(), (8, 1));
+        drop(handle);
+        assert_eq!(budget.usage(), (0, 0));
+        drop(lock);
+        accepted.send_bytes(b"progress").await.unwrap();
+        assert_eq!(client.recv_bytes().await.unwrap().as_ref(), b"progress");
+        assert!(!accepted.is_poisoned());
+        fs::write(
+            evidence.join("result.json"),
+            br#"{"writer_wait_cancel_did_not_poison":true,"later_send_progressed":true}"#,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reserved_send_partial_write_cancellation_poisons() {
+        let evidence = retained("reserved-send-partial-write");
+        let state = ConnectionState::new();
+        let budget = FrameBudget::new(1024);
+        let token = reserve_send_on(&state, &budget, 4).unwrap();
+        let extra = reserve_send_on(&state, &budget, 1).unwrap();
+        let handle = token.credit_handle();
+        assert_eq!(budget.usage(), (13, 2));
+        let written = Arc::new(AtomicUsize::new(0));
+        let (write_signal, write_partial) = oneshot::channel();
+        let writer = Mutex::new(PartialWriter {
+            stage: 0,
+            bytes: written.clone(),
+            partial: Some(write_signal),
+            waker: None,
+        });
+        let mut write = Box::pin(send_reserved_to(&writer, state.clone(), token, b"four"));
+        tokio::select! {
+            _ = write_partial => {}
+            result = &mut write => panic!("partial reserved writer unexpectedly completed: {result:?}"),
+        }
+        drop(write);
+        assert_eq!(written.load(AtomicOrdering::Relaxed), 6);
+        assert!(state.is_poisoned());
+        assert_eq!(budget.usage(), (13, 2));
+        let extra_writer = Mutex::new(tokio::io::sink());
+        assert!(matches!(
+            send_reserved_to(&extra_writer, state.clone(), extra, b"x").await,
+            Err(WireError::ConnectionPoisoned)
+        ));
+        drop(handle);
+        assert_eq!(budget.usage(), (0, 0));
+        assert!(matches!(
+            reserve_send_on(&state, &budget, 1),
+            Err(WireError::ConnectionPoisoned)
+        ));
+        fs::write(
+            evidence.join("result.json"),
+            br#"{"partial_reserved_write_cancelled":true,"connection_poisoned":true,"credit_held_until_handle_drop":true}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reserved_send_credit_handle_is_clone_positive_control() {
+        fn clone_handle(handle: FrameCreditHandle) -> (FrameCreditHandle, FrameCreditHandle) {
+            (handle.clone(), handle)
+        }
+        let state = ConnectionState::new();
+        let budget = FrameBudget::new(1024);
+        let token = reserve_send_on(&state, &budget, 2).unwrap();
+        let (first, second) = clone_handle(token.credit_handle());
+        assert_eq!(first.reserved_bytes(), 6);
+        assert_eq!(second.reserved_bytes(), 6);
+        assert_eq!(budget.usage(), (6, 1));
+        drop(token);
+        drop(first);
+        assert_eq!(budget.usage(), (6, 1));
+        drop(second);
+        assert_eq!(budget.usage(), (0, 0));
     }
 }

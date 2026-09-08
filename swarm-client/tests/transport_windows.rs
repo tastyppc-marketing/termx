@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use termx_swarm_client::{
     AuthorityClaim, ClientBootstrap, DiscoveryRecord, FrameBudget, Hello, OwnerClient, PeerClient,
     PipeServer, ProcessIdentity, RequestEnvelope, ResponseEnvelope, TransportOptions, VerifiedPipe,
-    WireError,
+    WireError, MAX_FRAME_BYTES,
 };
 
 fn pipe(label: &str) -> String {
@@ -642,4 +642,220 @@ async fn pipe_handles_are_not_inherited_by_subprocess() {
     )
     .unwrap();
     assert!(status.success());
+}
+
+#[tokio::test]
+async fn reserved_send_admission_includes_length_prefix() {
+    let evidence = retained("reserved-send-prefix-admission");
+    let budget = FrameBudget::new(8);
+    let name = pipe("reserved-prefix");
+    let mut server = PipeServer::bind(&name, budget.clone()).unwrap();
+    let client = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted = server.accept().await.unwrap();
+
+    assert!(matches!(accepted.reserve_send(5), Err(WireError::Capacity)));
+    assert_eq!(budget.usage(), (0, 0));
+    assert!(matches!(
+        accepted.reserve_send(MAX_FRAME_BYTES + 1),
+        Err(WireError::FrameTooLarge)
+    ));
+    assert!(matches!(
+        accepted.reserve_send(usize::MAX),
+        Err(WireError::FrameTooLarge)
+    ));
+    assert_eq!(budget.usage(), (0, 0));
+
+    let token = accepted.reserve_send(4).unwrap();
+    assert_eq!(token.body_capacity(), 4);
+    assert_eq!(token.reserved_bytes(), 8);
+    let handle = token.credit_handle();
+    assert_eq!(handle.reserved_bytes(), 8);
+    assert_eq!(budget.usage(), (8, 1));
+    assert!(matches!(accepted.reserve_send(0), Err(WireError::Capacity)));
+    let debug = format!("{handle:?}");
+    assert!(debug.contains("FrameCreditHandle"));
+    assert!(debug.contains("8"));
+    assert!(!debug.contains("abcd"));
+    drop(token);
+    drop(handle);
+    assert_eq!(budget.usage(), (0, 0));
+    drop(client);
+    std::fs::write(
+        evidence.join("result.json"),
+        br#"{"prefix_counted_in_admission":true,"over_limit_rejected_before_reserve":true,"exact_fit_reserved_eight_bytes":true}"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn full_admitted_budget_sends_without_second_reserve() {
+    let evidence = retained("reserved-send-full-budget");
+    let budget = FrameBudget::new(8);
+    let name = pipe("reserved-full");
+    let mut server = PipeServer::bind(&name, budget.clone()).unwrap();
+    let client = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted = server.accept().await.unwrap();
+    let token = accepted.reserve_send(4).unwrap();
+    assert_eq!(budget.usage(), (8, 1));
+    accepted.send_reserved(token, b"abcd").await.unwrap();
+    assert_eq!(client.recv_bytes().await.unwrap().as_ref(), b"abcd");
+    assert_eq!(budget.usage(), (0, 0));
+    std::fs::write(
+        evidence.join("result.json"),
+        br#"{"send_used_existing_reservation":true,"second_reserve_not_required":true}"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reserved_send_rejects_other_connection_before_native_bytes() {
+    let evidence = retained("reserved-send-wrong-connection");
+    let budget = FrameBudget::with_limits(1024, 2);
+    let name = pipe("reserved-wrong-conn");
+    let mut server = PipeServer::bind(&name, budget.clone()).unwrap();
+    let _client_a = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted_a = server.accept().await.unwrap();
+    let client_b = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted_b = server.accept().await.unwrap();
+    let token = accepted_a.reserve_send(4).unwrap();
+    assert_eq!(budget.usage(), (8, 1));
+    assert!(matches!(
+        accepted_b.send_reserved(token, b"abcd").await,
+        Err(WireError::WrongConnection)
+    ));
+    accepted_b.send_bytes(b"okok").await.unwrap();
+    assert_eq!(client_b.recv_bytes().await.unwrap().as_ref(), b"okok");
+    assert!(!accepted_b.is_poisoned());
+    std::fs::write(
+        evidence.join("result.json"),
+        br#"{"wrong_connection_rejected":true,"native_bytes_from_rejected_body":0,"later_marker_received":true}"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reserved_send_rejects_undersized_token_without_io() {
+    let evidence = retained("reserved-send-undersized");
+    let budget = FrameBudget::new(1024);
+    let name = pipe("reserved-undersized");
+    let mut server = PipeServer::bind(&name, budget.clone()).unwrap();
+    let client = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted = server.accept().await.unwrap();
+    let token = accepted.reserve_send(3).unwrap();
+    assert_eq!(token.body_capacity(), 3);
+    assert_eq!(token.reserved_bytes(), 7);
+    assert!(matches!(
+        accepted.send_reserved(token, b"abcd").await,
+        Err(WireError::ReservationTooSmall)
+    ));
+    assert!(!accepted.is_poisoned());
+    accepted.send_bytes(b"ok").await.unwrap();
+    assert_eq!(client.recv_bytes().await.unwrap().as_ref(), b"ok");
+    std::fs::write(
+        evidence.join("result.json"),
+        br#"{"undersized_token_rejected":true,"connection_not_poisoned":true,"later_send_progressed":true}"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn shared_reservation_releases_only_after_all_owners_drop() {
+    let evidence = retained("reserved-send-shared-credit");
+    let budget = FrameBudget::new(8);
+    let name = pipe("reserved-shared");
+    let mut server = PipeServer::bind(&name, budget.clone()).unwrap();
+    let client = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted = server.accept().await.unwrap();
+    let token = accepted.reserve_send(4).unwrap();
+    let handle_a = token.credit_handle();
+    let handle_b = handle_a.clone();
+    assert_eq!(budget.usage(), (8, 1));
+    drop(token);
+    assert_eq!(budget.usage(), (8, 1));
+    drop(handle_a);
+    assert_eq!(budget.usage(), (8, 1));
+    drop(handle_b);
+    assert_eq!(budget.usage(), (0, 0));
+    accepted.send_bytes(b"zz").await.unwrap();
+    assert_eq!(client.recv_bytes().await.unwrap().as_ref(), b"zz");
+    std::fs::write(
+        evidence.join("result.json"),
+        br#"{"clone_did_not_reserve_again":true,"released_only_after_all_owners_dropped":true}"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn unpolled_reserved_send_releases_without_poison() {
+    let evidence = retained("reserved-send-unpolled");
+    let budget = FrameBudget::new(1024);
+    let name = pipe("reserved-unpolled");
+    let mut server = PipeServer::bind(&name, budget.clone()).unwrap();
+    let client = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted = server.accept().await.unwrap();
+    let token = accepted.reserve_send(4).unwrap();
+    let handle = token.credit_handle();
+    let future = accepted.send_reserved(token, b"abcd");
+    drop(future);
+    assert!(!accepted.is_poisoned());
+    assert_eq!(budget.usage(), (8, 1));
+    drop(handle);
+    assert_eq!(budget.usage(), (0, 0));
+    accepted.send_bytes(b"later").await.unwrap();
+    assert_eq!(client.recv_bytes().await.unwrap().as_ref(), b"later");
+    std::fs::write(
+        evidence.join("result.json"),
+        br#"{"unpolled_drop_did_not_poison":true,"credits_held_by_remaining_handle":true,"later_send_progressed":true}"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reserved_send_disconnected_then_later_client_progresses() {
+    let evidence = retained("reserved-send-disconnected");
+    let budget = FrameBudget::with_limits(1024, 2);
+    let name = pipe("reserved-disconnected");
+    let mut server = PipeServer::bind(&name, budget.clone()).unwrap();
+    let client = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted = server.accept().await.unwrap();
+    drop(client);
+    let token = accepted.reserve_send(4).unwrap();
+    assert!(matches!(
+        accepted.send_reserved(token, b"abcd").await,
+        Err(WireError::Disconnected)
+    ));
+    assert!(accepted.is_poisoned());
+    assert!(matches!(
+        accepted.reserve_send(1),
+        Err(WireError::ConnectionPoisoned)
+    ));
+    drop(accepted);
+    let client2 = VerifiedPipe::connect(&name, server.identity())
+        .await
+        .unwrap();
+    let accepted2 = server.accept().await.unwrap();
+    client2.send_bytes(b"next").await.unwrap();
+    assert_eq!(accepted2.recv_bytes().await.unwrap().as_ref(), b"next");
+    assert!(!accepted2.is_poisoned());
+    std::fs::write(
+        evidence.join("result.json"),
+        br#"{"disconnected_reserved_send":true,"poisoned_reserve_rejected":true,"later_client_progressed":true}"#,
+    )
+    .unwrap();
 }

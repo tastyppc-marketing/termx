@@ -28,9 +28,14 @@ pub use identity::{
 };
 #[cfg(windows)]
 pub use pipe::{
-    PipeServer, TransportOptions, VerifiedPipe, DEFAULT_CONNECT_RETRY_INTERVAL,
-    DEFAULT_CONNECT_TIMEOUT, DEFAULT_HANDSHAKE_TIMEOUT,
+    FrameCreditHandle, PipeServer, ReservedFrameSend, TransportOptions, VerifiedPipe,
+    DEFAULT_CONNECT_RETRY_INTERVAL, DEFAULT_CONNECT_TIMEOUT, DEFAULT_HANDSHAKE_TIMEOUT,
 };
+
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn assert_deserialize_owned<T: serde::de::DeserializeOwned>() {}
+
 #[cfg(windows)]
 pub use security::{AuthorityClaim, AuthorityError, ClientBootstrap, OwnerCredential};
 #[cfg(windows)]
