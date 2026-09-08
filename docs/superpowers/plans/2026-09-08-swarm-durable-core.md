@@ -8,7 +8,7 @@
 
 **Starting checkpoint:** `eb5ffb5`, published on both feature branches. GitHub backup `backup/pre-swarm-2026-09-08` remains at `41a72fc`. Existing TermX host and user sessions stay running.
 
-**Progress:** Tasks 1–3 completed and independently reviewed through `6171a5d`: 59 tests passed, with package formatting and clippy clean. The bundled SQLite is 3.53.2; schema v6 preserves recognized historical layouts and delivery evidence. The core supports exact message retries, bounded snapshot pages, binding-wide acknowledgement progress, persisted delivery attempts, explicit recovery and owner-authorized continuation. Review caught and fixed late-completion ordering, mixed-generation acknowledgement gaps, and repair of already-materialized older delivery state. The serialized worker, actual subprocess crashes, sustained testing, and native/UI integration remain ahead. This is an internal library, not yet a usable collaboration control in TermX.
+**Progress:** Tasks 1–4 completed and independently reviewed through `0836057`. The complete Task 4 suite passed 76 tests; its reviewed test-only follow-up passed 12 worker tests and the three-seed model, with formatting and clippy clean. The bundled SQLite is 3.53.2; schema v6 preserves recognized historical layouts and delivery evidence. Exact retries, bounded snapshot pages, binding-wide acknowledgement progress, persisted native attempts, explicit recovery and owner-authorized continuation now run behind a bounded serialized worker. Actual owned subprocess exits cover committed/uncommitted state, lost replies and uncertain tickets; storage and slow-client faults are exercised. Sustained performance measurements and native/UI integration remain ahead. The [next integration plan](2026-09-08-swarm-companion-integration.md) is prepared but not dispatched. This is an internal library, not yet a usable collaboration control in TermX.
 
 ## Global constraints
 
@@ -86,13 +86,13 @@ The real Codex probe accepted two pending rows with one client correlation key. 
 
 **Files:** `swarm-core/src/worker.rs`, focused worker tests, an explicitly test-only subprocess harness if needed, and `tools/swarm-proof` runner/report support.
 
-- [ ] Own the SQLite connection in one worker thread with a bounded request channel. Define explicit backpressure/unavailable errors, cancellation semantics, clean flush/shutdown, and worker-panic propagation. Do not block an async executor thread with database work.
-- [ ] A client timeout after enqueue means outcome unknown; it does not cancel a possibly committed transaction or justify a different idempotency key. A request rejected before enqueue is distinguishable. Bound queued work and response payloads independently of database history size.
-- [ ] Prove slow/abandoned clients cannot stop other operations or leak unbounded pending work. Hold no database transaction while waiting for the next client message or native delivery response.
-- [ ] Use owned test subprocesses and retained databases to verify committed data survives abrupt process exit, uncommitted transactions disappear on recovery, and a retry after a lost reply returns the original message. Do not claim a simulated process crash proves physical power-loss behavior.
-- [ ] Exercise disk-full through a fixture-specific SQLite page limit, corrupt/unknown files, read-only/unavailable storage, and queued work at shutdown. Failures cannot return a false saved/acknowledged state or erase evidence.
-- [ ] Run bounded workload tests with deterministic seeds and a simple independent reference model for memberships, recipient order, retry deduplication, acknowledgements, and continuation. Report the seed and smallest observed failing trace without message bodies/secrets.
-- [ ] Review/lint/commit before sustained runs.
+- [x] Own the SQLite connection in one worker thread with a bounded request channel. Define explicit backpressure/unavailable errors, cancellation semantics, clean flush/shutdown, and worker-panic propagation. Do not block an async executor thread with database work.
+- [x] A client timeout after enqueue means outcome unknown; it does not cancel a possibly committed transaction or justify a different idempotency key. A request rejected before enqueue is distinguishable. Bound queued work and response payloads independently of database history size.
+- [x] Prove slow/abandoned clients cannot stop other operations or leak unbounded pending work. Hold no database transaction while waiting for the next client message or native delivery response.
+- [x] Use owned test subprocesses and retained databases to verify committed data survives abrupt process exit, uncommitted transactions disappear on recovery, and a retry after a lost reply returns the original message. Do not claim a simulated process crash proves physical power-loss behavior.
+- [x] Exercise disk-full through a fixture-specific SQLite page limit, corrupt/unknown files, read-only/unavailable storage, and queued work at shutdown. Failures cannot return a false saved/acknowledged state or erase evidence.
+- [x] Run bounded workload tests with deterministic seeds and a simple independent reference model for memberships, recipient order, retry deduplication, acknowledgements, and continuation. Report the seed and smallest observed failing trace without message bodies/secrets.
+- [x] Review/lint/commit before sustained runs.
 
 ## Task 5: Sustained validation, optimization, and next-stage contract
 
