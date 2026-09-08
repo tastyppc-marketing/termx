@@ -8,7 +8,7 @@
 
 **Starting checkpoint:** `eb5ffb5`, published on both feature branches. GitHub backup `backup/pre-swarm-2026-09-08` remains at `41a72fc`. Existing TermX host and user sessions stay running.
 
-**Progress:** Task 1 completed and independently reviewed through `94ceaa3`: 1 schema unit test and 20 integration tests passed, with package formatting and clippy clean. The bundled SQLite is 3.53.2. Task 2 is in progress; delivery/continuation, worker recovery, sustained testing, and native/UI integration remain ahead. This is an internal library, not yet a usable collaboration control in TermX.
+**Progress:** Tasks 1 and 2 completed and independently reviewed through `30596fb`: 36 tests passed, with package formatting and clippy clean. The bundled SQLite is 3.53.2. The mailbox preserves exact retries across migration, uses bounded snapshot pages, and advances acknowledgements without rescanning resolved history. Delivery/continuation, worker recovery, sustained testing, and native/UI integration remain ahead. This is an internal library, not yet a usable collaboration control in TermX.
 
 ## Global constraints
 
@@ -64,19 +64,19 @@ The real Codex probe accepted two pending rows with one client correlation key. 
 
 **Files:** extend `swarm-core/src/store/` with focused policy/message/query modules and tests; adjust model types only where required by this task's contract.
 
-- [ ] Add owner peer enrollment/metadata updates and group create/membership/pause operations with expected policy revision. Enrollment requires an internal verified-binding value supplied by a future trusted binder; do not manufacture process-verification claims here.
-- [ ] Add peer send/read/ack operations with authorization checks inside each protected transaction. Bind all SQL parameters. Normalize recipient sets and persist canonical retry payloads; freeze bindings/recipients on commit.
-- [ ] Prove identical retry returns the original committed receipt, changed payload conflicts, unauthorized recipient rolls back every row/sequence change, and two concurrent same-key attempts cannot create two messages.
-- [ ] Prove cross-group isolation (including overlapping groups), sender-spoof fields rejected by request decoding, paused/removed/stale bindings denied, message bodies preserved, replies limited to an accessible same-group message, and owner/user authorship cannot be obtained through a peer operation.
-- [ ] Implement bounded snapshot mailbox paging and explicit acknowledgements. Test appended messages excluded from an existing snapshot, forged/other-peer/old-policy cursors rejected, recipient-specific sequence gaps, out-of-order acknowledgements, and no acknowledgement caused by a read.
-- [ ] Reopen the store and verify mailbox order, recipient freezing, receipts, and idempotency survive. Run focused tests/lint, review, and commit.
+- [x] Add owner peer enrollment/metadata updates and group create/membership/pause operations with expected policy revision. Enrollment requires an internal verified-binding value supplied by a future trusted binder; do not manufacture process-verification claims here.
+- [x] Add peer send/read/ack operations with authorization checks inside each protected transaction. Bind all SQL parameters. Normalize recipient sets and persist canonical retry payloads; freeze bindings/recipients on commit.
+- [x] Prove identical retry returns the original committed receipt, changed payload conflicts, unauthorized recipient rolls back every row/sequence change, and two concurrent same-key attempts cannot create two messages.
+- [x] Prove cross-group isolation (including overlapping groups), sender-spoof fields rejected by request decoding, paused/removed/stale bindings denied, message bodies preserved, replies limited to an accessible same-group message, and owner/user authorship cannot be obtained through a peer operation.
+- [x] Implement bounded snapshot mailbox paging and explicit acknowledgements. Test appended messages excluded from an existing snapshot, forged/other-peer/old-policy cursors rejected, recipient-specific sequence gaps, out-of-order acknowledgements, and no acknowledgement caused by a read.
+- [x] Reopen the store and verify mailbox order, recipient freezing, receipts, and idempotency survive. Run focused tests/lint, review, and commit.
 
 ## Task 3: Delivery attempts, uncertainty, and explicit continuation
 
 **Files:** focused delivery/continuation modules and tests under `swarm-core/src/store/`.
 
 - [ ] Commit a unique delivery-attempt ticket before invoking any future adapter. A ticket binds group policy, recipient binding, and message/notification revision. Native I/O is outside the database connection/transaction.
-- [ ] Record outcomes only for the matching attempt. Stale completions cannot overwrite a successor binding or acknowledge content. Transport-written/native-queued remain evidence, not agent receipt. On reopening, unfinished attempts become uncertain and are not blindly dispatched again.
+- [ ] Record outcomes only for the matching attempt. Stale completions cannot overwrite a successor binding or acknowledge content. Transport-written/native-queued remain evidence, not agent receipt. During explicit trusted new-run recovery after reopening, unfinished attempts become uncertain and are not blindly dispatched again. Merely opening an additional library connection must not invalidate a live attempt; the future exclusive companion must establish prior-run exit and invoke recovery before dispatch.
 - [ ] Candidate queries return bounded work for exact live authorized bindings. One held/unavailable recipient does not stall another. Pause/removal blocks future candidates while retaining messages and prior native evidence.
 - [ ] Implement owner-only compare-and-swap continuation using expected old binding, verified same-conversation/branch evidence, explicit continuation intent, and expected policy revisions. Two successors cannot win. Record predecessor/successor and original versus new delivery bindings.
 - [ ] Carry pending known-not-delivered backlog only through this transaction. Preserve acknowledged rows; preserve uncertain native outcomes for reconciliation rather than auto-resending them. An unrelated conversation/new pane occupant cannot inherit backlog or grants.
