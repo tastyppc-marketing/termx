@@ -78,6 +78,14 @@ fn cleanup_runtime_if_owned(path: &std::path::Path, ours: &RuntimeInfo) -> Resul
         }
     };
     if should_remove {
+        #[cfg(test)]
+        crate::test_support::preserve_before_remove_if_needed(path, "runtime-discovery-cleanup")
+            .with_context(|| {
+                format!(
+                    "preserving or validating synthetic runtime discovery state before cleanup {}",
+                    path.display()
+                )
+            })?;
         std::fs::remove_file(path)
             .with_context(|| format!("removing runtime discovery state {}", path.display()))?;
     }
@@ -670,9 +678,22 @@ async fn handle_conn(
                         )
                         .await;
                     }
-                    ClientMsg::ChangeDirectory { session_id, expected_pid, prompt_id, cwd } => {
-                        let accepted = registry.change_directory(session_id, expected_pid, &prompt_id, &cwd);
-                        send_ctl(&out_tx, &HostMsg::DirectoryChanged { session_id, accepted }).await;
+                    ClientMsg::ChangeDirectory {
+                        session_id,
+                        expected_pid,
+                        prompt_id,
+                        cwd,
+                    } => {
+                        let accepted =
+                            registry.change_directory(session_id, expected_pid, &prompt_id, &cwd);
+                        send_ctl(
+                            &out_tx,
+                            &HostMsg::DirectoryChanged {
+                                session_id,
+                                accepted,
+                            },
+                        )
+                        .await;
                     }
                     ClientMsg::ListSessions => {
                         send_ctl(
@@ -777,30 +798,63 @@ mod tests {
     #[tokio::test]
     async fn guarded_directory_request_refuses_input_that_races_after_the_probe() {
         let _serial = crate::HEAVY_PTY_TEST.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
         let id = create_session(&mut ws, Some("powershell"), true).await;
         send_json(&mut ws, &ClientMsg::ListSessions).await;
         let pid = match next_json(&mut ws).await {
-            HostMsg::Sessions { sessions } => sessions.iter().find(|info| info.id == id).unwrap().pid.unwrap(),
+            HostMsg::Sessions { sessions } => sessions
+                .iter()
+                .find(|info| info.id == id)
+                .unwrap()
+                .pid
+                .unwrap(),
             other => panic!("expected sessions, got {other:?}"),
         };
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
         let prompt_id = loop {
             send_json(&mut ws, &ClientMsg::ProbeSession { session_id: id }).await;
-            if let HostMsg::SessionProbe { at_prompt: Some(true), prompt_id: Some(prompt_id), .. } = next_json(&mut ws).await { break prompt_id; }
-            assert!(tokio::time::Instant::now() < deadline, "no trusted PSReadLine prompt");
+            if let HostMsg::SessionProbe {
+                at_prompt: Some(true),
+                prompt_id: Some(prompt_id),
+                ..
+            } = next_json(&mut ws).await
+            {
+                break prompt_id;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no trusted PSReadLine prompt"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         };
-        ws.send(input_frame(id, b"Write-Output pending_user_input")).await.unwrap();
-        send_json(&mut ws, &ClientMsg::ChangeDirectory { session_id: id, expected_pid: pid,
-            prompt_id, cwd: tmp.path().to_string_lossy().into_owned() }).await;
-        assert!(matches!(next_json(&mut ws).await, HostMsg::DirectoryChanged { accepted: false, .. }));
+        ws.send(input_frame(id, b"Write-Output pending_user_input"))
+            .await
+            .unwrap();
+        send_json(
+            &mut ws,
+            &ClientMsg::ChangeDirectory {
+                session_id: id,
+                expected_pid: pid,
+                prompt_id,
+                cwd: tmp.path().to_string_lossy().into_owned(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            next_json(&mut ws).await,
+            HostMsg::DirectoryChanged {
+                accepted: false,
+                ..
+            }
+        ));
         send_json(&mut ws, &ClientMsg::ListSessions).await;
         match next_json(&mut ws).await {
-            HostMsg::Sessions { sessions } => assert!(sessions.iter().find(|info| info.id == id).unwrap().alive),
+            HostMsg::Sessions { sessions } => {
+                assert!(sessions.iter().find(|info| info.id == id).unwrap().alive)
+            }
             other => panic!("expected sessions, got {other:?}"),
         }
         ws.send(input_frame(id, b"\rexit\r")).await.unwrap();
@@ -936,7 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn bad_token_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         send_json(
@@ -954,7 +1008,7 @@ mod tests {
 
     #[tokio::test]
     async fn garbage_json_pre_auth_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         ws.send(Message::Text("{not json".into())).await.unwrap();
@@ -966,7 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn binary_frame_pre_auth_does_not_burn_the_attempt() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         ws.send(Message::Binary(vec![9, 9, 9])).await.unwrap();
@@ -979,7 +1033,7 @@ mod tests {
     /// sees OSC 9;9 cwd reports on its own socket.
     #[tokio::test]
     async fn shell_integration_flag_reaches_the_spawned_shell() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1006,7 +1060,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_create_echo_binary_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1042,7 +1096,7 @@ mod tests {
 
     #[tokio::test]
     async fn self_exited_session_notifies_attached_client_with_code() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1085,7 +1139,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_by_one_client_notifies_other_attached_client() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws_a = connect(&rt).await;
         auth(&mut ws_a, &rt).await;
@@ -1132,7 +1186,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_clients_both_receive_output_and_detach_isolates() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws_a = connect(&rt).await;
         auth(&mut ws_a, &rt).await;
@@ -1186,7 +1240,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_layout_get_state_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1212,7 +1266,7 @@ mod tests {
 
     #[tokio::test]
     async fn resize_updates_dims_and_unknown_session_errors() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1260,7 +1314,7 @@ mod tests {
 
     #[tokio::test]
     async fn input_to_unknown_session_reports_error() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1279,7 +1333,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_unknown_session_reports_error_not_closed() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1298,7 +1352,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_survives_client_death_and_replays() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
 
         // Client A: create a session, write a marker, then DIE without cleanup.
@@ -1377,7 +1431,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_to_exited_session_gets_replay_and_exit_code() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1438,7 +1492,7 @@ mod tests {
     #[tokio::test]
     async fn attach_mid_stream_delivers_gapless_coverage() {
         let _serial = crate::HEAVY_PTY_TEST.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1516,7 +1570,7 @@ mod tests {
     #[tokio::test]
     async fn reattach_never_delivers_stale_covered_frames() {
         let _serial = crate::HEAVY_PTY_TEST.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1602,7 +1656,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_profile_is_used_when_profile_omitted() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1634,7 +1688,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_sent_output_frame_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1678,7 +1732,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         // Same order as the Attach arm: subscribe, then snapshot.
         let chunk_rx = session.subscribe();
@@ -1739,7 +1793,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_without_replay_suppresses_the_initial_replay() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1778,7 +1832,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_connection_is_closed_at_the_deadline() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         // Send NOTHING. The 5s auth deadline must close the socket; we must
@@ -1804,7 +1858,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_layout_persist_failure_reaches_the_client() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         // A DIRECTORY named state.json makes the persist rename fail
         // deterministically — the client must get the error, not silence.
         std::fs::create_dir(tmp.path().join("state.json")).unwrap();
@@ -1832,7 +1886,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_client_attached_to_two_sessions_gets_both_streams() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -1892,7 +1946,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_json_is_written_and_valid() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let text = std::fs::read_to_string(tmp.path().join("runtime.json")).unwrap();
         let parsed: RuntimeInfo = serde_json::from_str(&text).unwrap();
@@ -1990,7 +2044,7 @@ mod tests {
     /// cursor from a previous replay yields a Replay that starts exactly there.
     #[tokio::test]
     async fn attach_with_since_offset_replays_only_the_unseen_tail() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         let mut ws = connect(&rt).await;
         auth(&mut ws, &rt).await;
@@ -2087,7 +2141,7 @@ mod tests {
     /// began, and reaching the oldest stored byte sets `at_start`.
     #[tokio::test]
     async fn read_history_pages_backward_and_reports_the_start() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         {
             let mut writer = crate::history::HistoryWriter::open(tmp.path(), 5, 1024).unwrap();
@@ -2162,7 +2216,7 @@ mod tests {
     /// connection down over scrollback the user can live without.
     #[tokio::test]
     async fn read_history_degrades_on_a_corrupt_spill_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let (rt, _sd) = boot(tmp.path()).await;
         std::fs::create_dir_all(crate::history::history_dir(tmp.path())).unwrap();
         std::fs::write(crate::history::session_file(tmp.path(), 3), b"xx").unwrap();
@@ -2190,7 +2244,7 @@ mod tests {
 
     #[test]
     fn runtime_cleanup_removes_corrupt_discovery_record() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let path = tmp.path().join("runtime.json");
         let ours = RuntimeInfo {
             port: 1001,
@@ -2210,7 +2264,7 @@ mod tests {
 
     #[test]
     fn runtime_cleanup_reports_delete_failure() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let path = tmp.path().join("runtime.json");
         let ours = RuntimeInfo {
             port: 1001,
@@ -2236,8 +2290,35 @@ mod tests {
     }
 
     #[test]
+    fn test_runtime_cleanup_refuses_to_delete_when_preservation_rejects_a_reparse_subject() {
+        let tmp = crate::test_support::retained_dir().unwrap();
+        let target = tmp.path().join("outside-runtime.json");
+        let path = tmp.path().join("runtime.json");
+        let ours = RuntimeInfo {
+            port: 1001,
+            token: "ours".into(),
+            pid: 11,
+            version: "1".into(),
+        };
+        std::fs::write(&target, serde_json::to_string(&ours).unwrap()).unwrap();
+        std::os::windows::fs::symlink_file(&target, &path).unwrap();
+
+        let error = cleanup_runtime_if_owned(&path, &ours)
+            .expect_err("test runtime cleanup must fail closed when preservation fails");
+
+        assert!(error
+            .to_string()
+            .contains("preserving or validating synthetic runtime"));
+        assert!(path.exists(), "the unpreserved runtime link was removed");
+        assert_eq!(
+            std::fs::read_to_string(target).unwrap(),
+            serde_json::to_string(&ours).unwrap()
+        );
+    }
+
+    #[test]
     fn runtime_cleanup_never_removes_another_hosts_record() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let path = tmp.path().join("runtime.json");
         let ours = RuntimeInfo {
             port: 1001,

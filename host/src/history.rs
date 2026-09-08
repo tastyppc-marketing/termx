@@ -181,6 +181,9 @@ pub fn read_history(
 /// already gone, or briefly locked, must never fail the close.
 pub fn delete(data_dir: &Path, session_id: SessionId) {
     let path = session_file(data_dir, session_id);
+    #[cfg(test)]
+    crate::test_support::preserve_before_remove_if_needed(&path, "history-delete")
+        .expect("preserve or validate synthetic history before delete");
     if let Err(error) = std::fs::remove_file(&path) {
         if error.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!("removing {} failed: {error}", path.display());
@@ -196,6 +199,9 @@ pub fn sweep_all(data_dir: &Path) {
         return;
     };
     for entry in entries.flatten() {
+        #[cfg(test)]
+        crate::test_support::preserve_before_remove_if_needed(&entry.path(), "history-sweep")
+            .expect("preserve or validate synthetic history before sweep");
         if entry.path().is_file() {
             if let Err(error) = std::fs::remove_file(entry.path()) {
                 tracing::warn!("sweeping {} failed: {error}", entry.path().display());
@@ -216,7 +222,7 @@ mod tests {
 
     #[test]
     fn append_then_read_round_trips_absolute_offsets() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let mut writer = HistoryWriter::open(tmp.path(), 1, 1024).unwrap();
         assert_eq!((writer.start_offset(), writer.end_offset()), (0, 0));
         writer.append(b"0123456789").unwrap();
@@ -239,7 +245,7 @@ mod tests {
 
     #[test]
     fn empty_append_is_a_no_op() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let mut writer = HistoryWriter::open(tmp.path(), 1, 1024).unwrap();
         writer.append(b"").unwrap();
         assert_eq!(writer.end_offset(), 0);
@@ -248,7 +254,7 @@ mod tests {
 
     #[test]
     fn cap_truncation_keeps_the_newer_half_and_advances_the_start() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let mut writer = HistoryWriter::open(tmp.path(), 1, 8).unwrap();
         writer.append(b"0123456789").unwrap(); // 10 bytes into a cap of 8
 
@@ -269,7 +275,7 @@ mod tests {
 
     #[test]
     fn repeated_truncation_stays_bounded() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let cap = 512;
         let mut writer = HistoryWriter::open(tmp.path(), 1, cap).unwrap();
         for _ in 0..200 {
@@ -287,7 +293,7 @@ mod tests {
 
     #[test]
     fn a_cursor_past_the_stored_window_is_clamped_not_an_error() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let mut writer = HistoryWriter::open(tmp.path(), 1, 1024).unwrap();
         writer.append(b"abcdef").unwrap();
 
@@ -304,7 +310,7 @@ mod tests {
 
     #[test]
     fn request_size_is_capped() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let mut writer = HistoryWriter::open(tmp.path(), 1, 4 * 1024 * 1024).unwrap();
         writer
             .append(&vec![b'y'; (MAX_HISTORY_REQUEST_BYTES as usize) + 4_096])
@@ -316,13 +322,13 @@ mod tests {
 
     #[test]
     fn missing_file_reads_as_absent_not_as_an_error() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         assert!(read_history(tmp.path(), 42, 100, 64).unwrap().is_none());
     }
 
     #[test]
     fn corrupt_file_is_an_error_the_caller_can_degrade_on() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::create_dir_all(history_dir(tmp.path())).unwrap();
         std::fs::write(session_file(tmp.path(), 7), b"xx").unwrap();
         assert!(read_history(tmp.path(), 7, 100, 64).is_err());
@@ -330,7 +336,7 @@ mod tests {
 
     #[test]
     fn delete_removes_one_session_and_tolerates_a_missing_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         HistoryWriter::open(tmp.path(), 1, 1024).unwrap();
         HistoryWriter::open(tmp.path(), 2, 1024).unwrap();
 
@@ -343,7 +349,7 @@ mod tests {
 
     #[test]
     fn sweep_all_clears_stale_history_at_boot() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         HistoryWriter::open(tmp.path(), 1, 1024).unwrap();
         HistoryWriter::open(tmp.path(), 2, 1024).unwrap();
 
@@ -358,5 +364,43 @@ mod tests {
             "no session survives a daemon restart, so no history file may"
         );
         sweep_all(tmp.path()); // no dir / empty dir is fine
+    }
+
+    #[test]
+    fn test_cleanup_refuses_to_delete_when_preservation_rejects_a_reparse_subject() {
+        let tmp = crate::test_support::retained_dir().unwrap();
+        let target = tmp.path().join("outside-history.bin");
+        std::fs::write(&target, b"must survive failed preservation").unwrap();
+        std::fs::create_dir_all(history_dir(tmp.path())).unwrap();
+        let link = session_file(tmp.path(), 9);
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+        let outcome = std::panic::catch_unwind(|| delete(tmp.path(), 9));
+
+        assert!(outcome.is_err(), "test cleanup must fail closed");
+        assert!(link.exists(), "the unpreserved working link was removed");
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            b"must survive failed preservation"
+        );
+    }
+
+    #[test]
+    fn test_sweep_refuses_to_delete_when_preservation_rejects_a_reparse_subject() {
+        let tmp = crate::test_support::retained_dir().unwrap();
+        let target = tmp.path().join("outside-swept-history.bin");
+        std::fs::write(&target, b"sweep must preserve before deleting").unwrap();
+        std::fs::create_dir_all(history_dir(tmp.path())).unwrap();
+        let link = session_file(tmp.path(), 10);
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+        let outcome = std::panic::catch_unwind(|| sweep_all(tmp.path()));
+
+        assert!(outcome.is_err(), "test sweep must fail closed");
+        assert!(link.exists(), "the unpreserved swept link was removed");
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            b"sweep must preserve before deleting"
+        );
     }
 }

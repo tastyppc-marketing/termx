@@ -251,7 +251,10 @@ fn is_termx_host_stem(stem: &str) -> bool {
     .any(|expected| stem.eq_ignore_ascii_case(expected))
 }
 
-fn resolve_provider_in_paths(provider: Provider, path_var: &std::ffi::OsStr) -> Result<ResolvedProvider> {
+fn resolve_provider_in_paths(
+    provider: Provider,
+    path_var: &std::ffi::OsStr,
+) -> Result<ResolvedProvider> {
     let directories = std::env::split_paths(path_var).collect::<Vec<_>>();
     let executable = format!("{}.exe", provider.executable_stem());
     for directory in &directories {
@@ -332,7 +335,9 @@ fn capture_from_parts(
         return None;
     }
     let cwd = match payload.cwd {
-        Some(value) if !value.is_empty() && !value.contains('\0') && value.len() <= MAX_ARG_BYTES => {
+        Some(value)
+            if !value.is_empty() && !value.contains('\0') && value.len() <= MAX_ARG_BYTES =>
+        {
             Some(value)
         }
         Some(_) => return None,
@@ -345,10 +350,20 @@ fn capture_from_parts(
         id: payload.session_id,
         cwd,
         at_ms,
-        model: payload.model.as_ref().and_then(serde_json::Value::as_str)
-            .filter(|model| !model.trim().is_empty() && model.chars().count() <= 128
-                && !model.chars().any(char::is_control)).map(str::to_string),
-        transcript_path: payload.transcript_path.as_ref().and_then(serde_json::Value::as_str)
+        model: payload
+            .model
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .filter(|model| {
+                !model.trim().is_empty()
+                    && model.chars().count() <= 128
+                    && !model.chars().any(char::is_control)
+            })
+            .map(str::to_string),
+        transcript_path: payload
+            .transcript_path
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
             .filter(|path| !path.is_empty() && path.len() <= MAX_ARG_BYTES && !path.contains('\0'))
             .map(str::to_string),
         launcher_pid: stamp.launcher_pid,
@@ -380,37 +395,69 @@ fn append_capture_with_liveness(
     let mut launches: HashMap<(u64, u32, String), serde_json::Value> = HashMap::new();
     let mut incoming = serde_json::to_value(record).context("encoding conversation capture")?;
     for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
-        let Some(pane) = value.get("termxSessionId").and_then(serde_json::Value::as_u64)
-            .filter(|pane| *pane <= u64::from(u32::MAX)) else { continue; };
-        if value.get("v").and_then(serde_json::Value::as_u64).is_some_and(|v| v != 1)
-            || !matches!(value.get("provider").and_then(serde_json::Value::as_str), Some("claude" | "codex"))
-            || !value.get("id").and_then(serde_json::Value::as_str).is_some_and(valid_conversation_id) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(pane) = value
+            .get("termxSessionId")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|pane| *pane <= u64::from(u32::MAX))
+        else {
+            continue;
+        };
+        if value
+            .get("v")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|v| v != 1)
+            || !matches!(
+                value.get("provider").and_then(serde_json::Value::as_str),
+                Some("claude" | "codex")
+            )
+            || !value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(valid_conversation_id)
+        {
             continue;
         }
         // A later same-launch hook cannot erase already-recorded ambiguity,
         // even if a different pane's capture has since won the current index.
-        if same_captured_launch(&value, &incoming) && value.get("modelAmbiguous").and_then(serde_json::Value::as_bool) == Some(true) {
+        if same_captured_launch(&value, &incoming)
+            && value
+                .get("modelAmbiguous")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
             incoming["modelAmbiguous"] = true.into();
         }
-        if value.get("provider") != incoming.get("provider") || value.get("id") != incoming.get("id") {
+        if value.get("provider") != incoming.get("provider")
+            || value.get("id") != incoming.get("id")
+        {
             continue;
         }
-        let Some((pid, created)) = captured_identity(&value) else { continue; };
+        let Some((pid, created)) = captured_identity(&value) else {
+            continue;
+        };
         let identity = (pane, pid, created.to_owned());
         // A nested/newer conversation can replace the pane's visible capture
         // while an older launcher is still alive. Check each exact invocation.
         match launches.get(&identity) {
             Some(previous) if !capture_replaces(previous, &value) => {}
-            _ => { launches.insert(identity, value); }
+            _ => {
+                launches.insert(identity, value);
+            }
         }
     }
     let mut updates = Vec::new();
     for previous in launches.values() {
-        if previous.get("termxSessionId") == incoming.get("termxSessionId") && same_captured_launch(previous, &incoming) {
+        if previous.get("termxSessionId") == incoming.get("termxSessionId")
+            && same_captured_launch(previous, &incoming)
+        {
             continue;
         }
-        let Some((pid, created)) = captured_identity(previous) else { continue; };
+        let Some((pid, created)) = captured_identity(previous) else {
+            continue;
+        };
         if is_live(pid, created) {
             let mut peer = previous.clone();
             peer["modelAmbiguous"] = true.into();
@@ -423,7 +470,9 @@ fn append_capture_with_liveness(
     // native record only. Peer annotations preserve every rich/raw field and
     // only add modelAmbiguous in the pane capture log.
     let mut batch = Vec::new();
-    for peer in updates { batch.extend(capture_json_line(&peer)?); }
+    for peer in updates {
+        batch.extend(capture_json_line(&peer)?);
+    }
     batch.extend_from_slice(&line);
     append_line(&data_dir.join(LAUNCHES_FILE), &line, true)?;
     append_line(&capture_path, &batch, true)?;
@@ -431,29 +480,48 @@ fn append_capture_with_liveness(
 }
 
 fn captured_identity(value: &serde_json::Value) -> Option<(u32, &str)> {
-    let pid = value.get("launcherPid")?.as_u64().filter(|pid| *pid > 0 && *pid <= u64::from(u32::MAX))? as u32;
+    let pid = value
+        .get("launcherPid")?
+        .as_u64()
+        .filter(|pid| *pid > 0 && *pid <= u64::from(u32::MAX))? as u32;
     let created = value.get("launcherCreatedAt")?.as_str()?;
-    if created.is_empty() || created.len() > 20 || !created.bytes().all(|byte| byte.is_ascii_digit())
-        || created.parse::<u64>().ok()? == 0 { return None; }
+    if created.is_empty()
+        || created.len() > 20
+        || !created.bytes().all(|byte| byte.is_ascii_digit())
+        || created.parse::<u64>().ok()? == 0
+    {
+        return None;
+    }
     Some((pid, created))
 }
 
 fn same_captured_launch(left: &serde_json::Value, right: &serde_json::Value) -> bool {
-    left.get("provider") == right.get("provider") && left.get("id") == right.get("id")
-        && captured_identity(left).is_some() && captured_identity(left) == captured_identity(right)
+    left.get("provider") == right.get("provider")
+        && left.get("id") == right.get("id")
+        && captured_identity(left).is_some()
+        && captured_identity(left) == captured_identity(right)
 }
 
 fn capture_replaces(previous: &serde_json::Value, next: &serde_json::Value) -> bool {
-    if same_captured_launch(previous, next) && previous.get("launch").is_some() != next.get("launch").is_some() {
+    if same_captured_launch(previous, next)
+        && previous.get("launch").is_some() != next.get("launch").is_some()
+    {
         return next.get("launch").is_some();
     }
-    next.get("atMs").and_then(serde_json::Value::as_u64).unwrap_or(0)
-        >= previous.get("atMs").and_then(serde_json::Value::as_u64).unwrap_or(0)
+    next.get("atMs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        >= previous
+            .get("atMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
 }
 
 fn capture_json_line(value: &serde_json::Value) -> Result<Vec<u8>> {
     let mut line = serde_json::to_vec(value).context("encoding capture annotation")?;
-    if line.len() > MAX_CAPTURE_INPUT_BYTES { bail!("conversation capture is too large"); }
+    if line.len() > MAX_CAPTURE_INPUT_BYTES {
+        bail!("conversation capture is too large");
+    }
     line.push(b'\n');
     Ok(line)
 }
@@ -465,8 +533,12 @@ fn read_capture_log(path: &Path) -> Result<String> {
         Err(error) => return Err(error).context("opening capture log"),
     };
     let mut bytes = Vec::new();
-    file.take(MAX_CAPTURE_LOG_BYTES + 1).read_to_end(&mut bytes).context("reading capture log")?;
-    if bytes.len() as u64 > MAX_CAPTURE_LOG_BYTES { bail!("capture log exceeds the bounded overlap scan"); }
+    file.take(MAX_CAPTURE_LOG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("reading capture log")?;
+    if bytes.len() as u64 > MAX_CAPTURE_LOG_BYTES {
+        bail!("capture log exceeds the bounded overlap scan");
+    }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -613,7 +685,10 @@ fn decode_stamp(token: &str) -> Result<LaunchStamp> {
 fn valid_conversation_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value.bytes().next().is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
@@ -640,7 +715,11 @@ fn resolve_verified_npm(
     path_directories: &[PathBuf],
 ) -> Option<ResolvedProvider> {
     let (package_name, package_relative, entry_relative) = match provider {
-        Provider::Codex => ("@openai/codex", r"node_modules\@openai\codex", r"bin\codex.js"),
+        Provider::Codex => (
+            "@openai/codex",
+            r"node_modules\@openai\codex",
+            r"bin\codex.js",
+        ),
         Provider::Claude => (
             "@anthropic-ai/claude-code",
             r"node_modules\@anthropic-ai\claude-code",
@@ -657,16 +736,20 @@ fn resolve_verified_npm(
         return None;
     }
     if manifest
-            .get("bin")?
-            .get(provider.executable_stem())?
-            .as_str()?
-            .replace('/', "\\")
-            != entry_relative
+        .get("bin")?
+        .get(provider.executable_stem())?
+        .as_str()?
+        .replace('/', "\\")
+        != entry_relative
     {
         // Current native Claude packages declare bin/claude.exe rather than
         // the older cli.js. Verify and launch that fixed entry directly.
         if provider != Provider::Claude
-            || manifest.get("bin")?.get("claude")?.as_str()?.replace('/', "\\")
+            || manifest
+                .get("bin")?
+                .get("claude")?
+                .as_str()?
+                .replace('/', "\\")
                 != r"bin\claude.exe"
         {
             return None;
@@ -679,7 +762,11 @@ fn resolve_verified_npm(
     }
     let entry = verified_package_entry(&package, Path::new(entry_relative))?;
     let node = std::iter::once(shim_directory.join("node.exe"))
-        .chain(path_directories.iter().map(|directory| directory.join("node.exe")))
+        .chain(
+            path_directories
+                .iter()
+                .map(|directory| directory.join("node.exe")),
+        )
         .find(|candidate| candidate.is_file())?;
     Some(ResolvedProvider {
         program: node,
@@ -768,11 +855,19 @@ fn capture_silently(provider: Provider) {
 fn launcher_creation_time(pid: u32) -> Option<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, WaitForSingleObject,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE,
     };
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
-    if handle.is_null() { return None; }
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return None;
+    }
     let mut created: FILETIME = unsafe { std::mem::zeroed() };
     let mut exited = created;
     let mut kernel = created;
@@ -781,7 +876,9 @@ fn launcher_creation_time(pid: u32) -> Option<String> {
         GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0
             && WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
     };
-    unsafe { CloseHandle(handle); }
+    unsafe {
+        CloseHandle(handle);
+    }
     let timestamp = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
     (valid && timestamp > 0).then(|| timestamp.to_string())
 }
@@ -841,19 +938,51 @@ mod tests {
     #[test]
     fn ancestry_requires_one_matching_provider_below_the_live_launcher() {
         let valid = vec![
-            ProcessRow { pid: 40, parent_pid: 30, exe_name: "termx-host.exe".into() },
-            ProcessRow { pid: 30, parent_pid: 20, exe_name: "python.exe".into() },
-            ProcessRow { pid: 20, parent_pid: 10, exe_name: "claude.exe".into() },
-            ProcessRow { pid: 10, parent_pid: 1, exe_name: "termx-host.exe".into() },
+            ProcessRow {
+                pid: 40,
+                parent_pid: 30,
+                exe_name: "termx-host.exe".into(),
+            },
+            ProcessRow {
+                pid: 30,
+                parent_pid: 20,
+                exe_name: "python.exe".into(),
+            },
+            ProcessRow {
+                pid: 20,
+                parent_pid: 10,
+                exe_name: "claude.exe".into(),
+            },
+            ProcessRow {
+                pid: 10,
+                parent_pid: 1,
+                exe_name: "termx-host.exe".into(),
+            },
         ];
         assert!(ancestry_matches(Provider::Claude, 10, 40, &valid));
         assert!(!ancestry_matches(Provider::Codex, 10, 40, &valid));
 
         let nested = vec![
-            ProcessRow { pid: 50, parent_pid: 25, exe_name: "termx-host.exe".into() },
-            ProcessRow { pid: 25, parent_pid: 20, exe_name: "claude.exe".into() },
-            ProcessRow { pid: 20, parent_pid: 10, exe_name: "claude.exe".into() },
-            ProcessRow { pid: 10, parent_pid: 1, exe_name: "termx-host.exe".into() },
+            ProcessRow {
+                pid: 50,
+                parent_pid: 25,
+                exe_name: "termx-host.exe".into(),
+            },
+            ProcessRow {
+                pid: 25,
+                parent_pid: 20,
+                exe_name: "claude.exe".into(),
+            },
+            ProcessRow {
+                pid: 20,
+                parent_pid: 10,
+                exe_name: "claude.exe".into(),
+            },
+            ProcessRow {
+                pid: 10,
+                parent_pid: 1,
+                exe_name: "termx-host.exe".into(),
+            },
         ];
         assert!(
             !ancestry_matches(Provider::Claude, 10, 50, &nested),
@@ -861,36 +990,92 @@ mod tests {
         );
 
         let shared_daemon = vec![
-            ProcessRow { pid: 60, parent_pid: 55, exe_name: "termx-host.exe".into() },
-            ProcessRow { pid: 55, parent_pid: 1, exe_name: "codex.exe".into() },
-            ProcessRow { pid: 10, parent_pid: 1, exe_name: "termx-host.exe".into() },
+            ProcessRow {
+                pid: 60,
+                parent_pid: 55,
+                exe_name: "termx-host.exe".into(),
+            },
+            ProcessRow {
+                pid: 55,
+                parent_pid: 1,
+                exe_name: "codex.exe".into(),
+            },
+            ProcessRow {
+                pid: 10,
+                parent_pid: 1,
+                exe_name: "termx-host.exe".into(),
+            },
         ];
         assert!(!ancestry_matches(Provider::Codex, 10, 60, &shared_daemon));
 
         let legacy_node = vec![
-            ProcessRow { pid: 40, parent_pid: 20, exe_name: "termx-host.exe".into() },
-            ProcessRow { pid: 20, parent_pid: 10, exe_name: "node.exe".into() },
-            ProcessRow { pid: 10, parent_pid: 1, exe_name: "termx-host.exe".into() },
+            ProcessRow {
+                pid: 40,
+                parent_pid: 20,
+                exe_name: "termx-host.exe".into(),
+            },
+            ProcessRow {
+                pid: 20,
+                parent_pid: 10,
+                exe_name: "node.exe".into(),
+            },
+            ProcessRow {
+                pid: 10,
+                parent_pid: 1,
+                exe_name: "termx-host.exe".into(),
+            },
         ];
         assert!(
             ancestry_matches(Provider::Claude, 10, 40, &legacy_node),
             "the verified legacy Claude npm launcher is one node child"
         );
         let nested_node = vec![
-            ProcessRow { pid: 40, parent_pid: 25, exe_name: "termx-host.exe".into() },
-            ProcessRow { pid: 25, parent_pid: 20, exe_name: "node.exe".into() },
-            ProcessRow { pid: 20, parent_pid: 10, exe_name: "node.exe".into() },
-            ProcessRow { pid: 10, parent_pid: 1, exe_name: "termx-host.exe".into() },
+            ProcessRow {
+                pid: 40,
+                parent_pid: 25,
+                exe_name: "termx-host.exe".into(),
+            },
+            ProcessRow {
+                pid: 25,
+                parent_pid: 20,
+                exe_name: "node.exe".into(),
+            },
+            ProcessRow {
+                pid: 20,
+                parent_pid: 10,
+                exe_name: "node.exe".into(),
+            },
+            ProcessRow {
+                pid: 10,
+                parent_pid: 1,
+                exe_name: "termx-host.exe".into(),
+            },
         ];
         assert!(
             !ancestry_matches(Provider::Claude, 10, 40, &nested_node),
             "a nested legacy Node provider must not reuse its parent's launch"
         );
         let native_nested_below_legacy_node = vec![
-            ProcessRow { pid: 40, parent_pid: 25, exe_name: "termx-host.exe".into() },
-            ProcessRow { pid: 25, parent_pid: 20, exe_name: "claude.exe".into() },
-            ProcessRow { pid: 20, parent_pid: 10, exe_name: "node.exe".into() },
-            ProcessRow { pid: 10, parent_pid: 1, exe_name: "termx-host.exe".into() },
+            ProcessRow {
+                pid: 40,
+                parent_pid: 25,
+                exe_name: "termx-host.exe".into(),
+            },
+            ProcessRow {
+                pid: 25,
+                parent_pid: 20,
+                exe_name: "claude.exe".into(),
+            },
+            ProcessRow {
+                pid: 20,
+                parent_pid: 10,
+                exe_name: "node.exe".into(),
+            },
+            ProcessRow {
+                pid: 10,
+                parent_pid: 1,
+                exe_name: "termx-host.exe".into(),
+            },
         ];
         assert!(
             !ancestry_matches(Provider::Claude, 10, 40, &native_nested_below_legacy_node),
@@ -898,8 +1083,16 @@ mod tests {
         );
 
         let packaged_launcher = vec![
-            ProcessRow { pid: 40, parent_pid: 20, exe_name: "termx-host.exe".into() },
-            ProcessRow { pid: 20, parent_pid: 10, exe_name: "claude.exe".into() },
+            ProcessRow {
+                pid: 40,
+                parent_pid: 20,
+                exe_name: "termx-host.exe".into(),
+            },
+            ProcessRow {
+                pid: 20,
+                parent_pid: 10,
+                exe_name: "claude.exe".into(),
+            },
             ProcessRow {
                 pid: 10,
                 parent_pid: 1,
@@ -914,7 +1107,7 @@ mod tests {
 
     #[test]
     fn provider_resolution_prefers_an_exe_and_accepts_only_a_verified_npm_layout() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let first = tmp.path().join("first");
         let second = tmp.path().join("second");
         std::fs::create_dir_all(&first).unwrap();
@@ -924,10 +1117,14 @@ mod tests {
         let path = std::env::join_paths([&first, &second]).unwrap();
         assert_eq!(
             resolve_provider_in_paths(Provider::Codex, &path).unwrap(),
-            ResolvedProvider { program: second.join("codex.exe"), leading_args: vec![] }
+            ResolvedProvider {
+                program: second.join("codex.exe"),
+                leading_args: vec![]
+            }
         );
 
-        std::fs::remove_file(second.join("codex.exe")).unwrap();
+        crate::test_support::retire_file(&second.join("codex.exe"), "provider-resolution-fallback")
+            .unwrap();
         assert!(
             resolve_provider_in_paths(Provider::Codex, OsStr::new(first.as_os_str())).is_err(),
             "an arbitrary cmd file must never be executed"
@@ -948,7 +1145,6 @@ mod tests {
                 leading_args: vec![package.join("bin").join("codex.js").into_os_string()],
             }
         );
-
 
         std::fs::write(second.join("codex.exe"), "later fake exe").unwrap();
         let path = std::env::join_paths([&first, &second]).unwrap();
@@ -1025,7 +1221,7 @@ fn main() {
 
     #[test]
     fn native_launcher_preserves_real_windows_argv_and_stamps_the_actual_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         build_argv_dumper(tmp.path(), "codex.exe");
         let want = vec!["plain", "", "a b", "^&|<>%", "雪だるま"]
             .into_iter()
@@ -1038,7 +1234,10 @@ fn main() {
             cwd: Some(tmp.path().display().to_string()),
         };
 
-        assert_eq!(launch_with_paths(invocation, tmp.path().as_os_str()).unwrap(), 23);
+        assert_eq!(
+            launch_with_paths(invocation, tmp.path().as_os_str()).unwrap(),
+            23
+        );
         assert_eq!(read_dump(&tmp.path().join("argv.dump")), want);
         let stamp_token = std::fs::read_to_string(tmp.path().join("stamp.dump")).unwrap();
         let stamp_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1053,19 +1252,27 @@ fn main() {
 
     fn valid_rows(provider: Provider, launcher_pid: u32, current_pid: u32) -> Vec<ProcessRow> {
         vec![
-            ProcessRow { pid: current_pid, parent_pid: 30, exe_name: "termx-host.exe".into() },
+            ProcessRow {
+                pid: current_pid,
+                parent_pid: 30,
+                exe_name: "termx-host.exe".into(),
+            },
             ProcessRow {
                 pid: 30,
                 parent_pid: launcher_pid,
                 exe_name: format!("{}.exe", provider.executable_stem()),
             },
-            ProcessRow { pid: launcher_pid, parent_pid: 1, exe_name: "termx-host.exe".into() },
+            ProcessRow {
+                pid: launcher_pid,
+                parent_pid: 1,
+                exe_name: "termx-host.exe".into(),
+            },
         ]
     }
 
     #[test]
     fn capture_validates_identity_and_appends_the_same_launch_record_to_both_logs() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let stamp = LaunchStamp {
             v: 1,
             provider: Provider::Claude,
@@ -1091,7 +1298,16 @@ fn main() {
         assert_eq!(captures.lines().count(), 1);
 
         assert!(capture_from_parts(Provider::Codex, payload, "7", &token, 40, &rows, 55).is_none());
-        assert!(capture_from_parts(Provider::Claude, payload, "not-a-pane", &token, 40, &rows, 55).is_none());
+        assert!(capture_from_parts(
+            Provider::Claude,
+            payload,
+            "not-a-pane",
+            &token,
+            40,
+            &rows,
+            55
+        )
+        .is_none());
         assert!(capture_from_parts(
             Provider::Claude,
             br#"{"session_id":"bad/id","cwd":"C:\\hook","source":"startup"}"#,
@@ -1106,49 +1322,85 @@ fn main() {
 
     #[test]
     fn capture_preserves_bounded_opaque_runtime_metadata_without_guessing_models() {
-        let stamp = LaunchStamp { v: 1, provider: Provider::Claude, args: vec!["--model".into(), "opus".into()], cwd: r"C:\launch".into(), launcher_pid: 10, launcher_created_at: None };
+        let stamp = LaunchStamp {
+            v: 1,
+            provider: Provider::Claude,
+            args: vec!["--model".into(), "opus".into()],
+            cwd: r"C:\launch".into(),
+            launcher_pid: 10,
+            launcher_created_at: None,
+        };
         let token = encode_token(&stamp).unwrap();
         let rows = valid_rows(Provider::Claude, 10, 40);
         let payload = br#"{"session_id":"abc-123","source":"startup","model":"gpt-6-astra","transcript_path":"C:\\sessions\\one.jsonl"}"#;
-        let record = capture_from_parts(Provider::Claude, payload, "7", &token, 40, &rows, 55).unwrap();
+        let record =
+            capture_from_parts(Provider::Claude, payload, "7", &token, 40, &rows, 55).unwrap();
         let json = serde_json::to_value(record).unwrap();
         assert_eq!(json["model"], "gpt-6-astra");
         assert_eq!(json["transcriptPath"], r"C:\sessions\one.jsonl");
         assert_eq!(json["launcherPid"], 10);
-        for model in [serde_json::json!("x".repeat(129)), serde_json::json!("bad\nmodel"), serde_json::json!(42), serde_json::Value::Null] {
-            let payload = serde_json::to_vec(&serde_json::json!({"session_id":"abc-123", "source":"startup", "model": model})).unwrap();
-            let record = capture_from_parts(Provider::Claude, &payload, "7", &token, 40, &rows, 55).unwrap();
-            assert!(serde_json::to_value(record).unwrap().get("model").is_none_or(serde_json::Value::is_null));
+        for model in [
+            serde_json::json!("x".repeat(129)),
+            serde_json::json!("bad\nmodel"),
+            serde_json::json!(42),
+            serde_json::Value::Null,
+        ] {
+            let payload = serde_json::to_vec(
+                &serde_json::json!({"session_id":"abc-123", "source":"startup", "model": model}),
+            )
+            .unwrap();
+            let record =
+                capture_from_parts(Provider::Claude, &payload, "7", &token, 40, &rows, 55).unwrap();
+            assert!(serde_json::to_value(record)
+                .unwrap()
+                .get("model")
+                .is_none_or(serde_json::Value::is_null));
         }
     }
 
     #[test]
     fn capture_reads_the_current_process_creation_identity_without_rounding() {
         let first = launcher_creation_time(std::process::id()).unwrap();
-        assert_eq!(launcher_creation_time(std::process::id()).as_deref(), Some(first.as_str()));
+        assert_eq!(
+            launcher_creation_time(std::process::id()).as_deref(),
+            Some(first.as_str())
+        );
         assert!(first.parse::<u64>().unwrap() > 9_007_199_254_740_991);
         assert_eq!(launcher_creation_time(0), None);
     }
 
     fn overlap_record(pane: u32, pid: u32, at_ms: u64) -> CaptureRecord {
         CaptureRecord {
-            v: 1, termx_session_id: pane, provider: Provider::Claude, id: "shared-123".into(),
-            cwd: Some(r"C:\same-folder".into()), at_ms,
-            launch: LaunchConfiguration { v: 1, provider: Provider::Claude, args: vec!["--model".into(), format!("model-{pane}")], cwd: Some(r"C:\same-folder".into()) },
-            model: Some(format!("model-{pane}")), transcript_path: Some(r"C:\sessions\shared-123.jsonl".into()),
-            launcher_pid: pid, launcher_created_at: Some(format!("13400000000000{pid:04}")),
+            v: 1,
+            termx_session_id: pane,
+            provider: Provider::Claude,
+            id: "shared-123".into(),
+            cwd: Some(r"C:\same-folder".into()),
+            at_ms,
+            launch: LaunchConfiguration {
+                v: 1,
+                provider: Provider::Claude,
+                args: vec!["--model".into(), format!("model-{pane}")],
+                cwd: Some(r"C:\same-folder".into()),
+            },
+            model: Some(format!("model-{pane}")),
+            transcript_path: Some(r"C:\sessions\shared-123.jsonl".into()),
+            launcher_pid: pid,
+            launcher_created_at: Some(format!("13400000000000{pid:04}")),
         }
     }
 
     #[test]
     fn source_overlap_remains_marked_when_the_second_launcher_exits_before_any_ui_read() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         use std::os::windows::process::CommandExt;
         // This isolated helper exits naturally. No UI reader runs until after
         // its exit, reproducing the short-lived overlapping invocation.
         let mut child = std::process::Command::new(std::env::var_os("ComSpec").unwrap())
             .args(["/D", "/C", "ping -n 2 127.0.0.1 >nul"])
-            .creation_flags(0x0800_0000).spawn().unwrap();
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .unwrap();
         let pid = std::process::id();
         let mut a = overlap_record(1, pid, 1000);
         a.launcher_created_at = launcher_creation_time(pid);
@@ -1161,9 +1413,16 @@ fn main() {
         // Reading only after both source writes models a UI which never saw
         // the overlap live. Persisted flags must be sufficient by themselves.
         let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
-        let rows: Vec<serde_json::Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         for pane in [1, 2] {
-            let row = rows.iter().rev().find(|row| row["termxSessionId"] == pane).unwrap();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row["termxSessionId"] == pane)
+                .unwrap();
             assert_eq!(row["modelAmbiguous"], true);
             assert_eq!(row["launch"]["args"][0], "--model");
         }
@@ -1171,7 +1430,7 @@ fn main() {
 
     #[test]
     fn source_overlap_serializes_simultaneous_hooks_and_preserves_duplicate_flags() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let mut workers = Vec::new();
         for pane in [1, 2] {
@@ -1183,7 +1442,9 @@ fn main() {
                 append_capture_with_liveness(&path, &capture, |_, _| true).unwrap();
             }));
         }
-        for worker in workers { worker.join().unwrap(); }
+        for worker in workers {
+            worker.join().unwrap();
+        }
         // Subsequent duplicate native hooks arrive after the peer has exited.
         // They must inherit the persistent flag rather than relying on liveness.
         for pane in [1, 2] {
@@ -1191,16 +1452,23 @@ fn main() {
             append_capture_with_liveness(tmp.path(), &duplicate, |_, _| false).unwrap();
         }
         let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
-        let rows: Vec<serde_json::Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         for pane in [1, 2] {
-            let row = rows.iter().rev().find(|row| row["termxSessionId"] == pane).unwrap();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row["termxSessionId"] == pane)
+                .unwrap();
             assert_eq!(row["modelAmbiguous"], true);
         }
     }
 
     #[test]
     fn source_overlap_does_not_flag_nonoverlapping_resumes_or_same_launch_duplicates() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let a = overlap_record(1, 101, 1000);
         append_capture_with_liveness(tmp.path(), &a, |_, _| true).unwrap();
         append_capture_with_liveness(tmp.path(), &a, |_, _| true).unwrap();
@@ -1212,18 +1480,28 @@ fn main() {
 
     #[test]
     fn source_overlap_retains_rich_native_peer_fields_over_a_later_legacy_duplicate() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let a = overlap_record(1, 101, 1000);
         append_capture_with_liveness(tmp.path(), &a, |_, _| true).unwrap();
         let mut legacy = serde_json::to_value(&a).unwrap();
         legacy.as_object_mut().unwrap().remove("launch");
         legacy["atMs"] = 9000.into();
         legacy["cwd"] = r"C:\wrong-duplicate".into();
-        append_line(&tmp.path().join(CAPTURES_FILE), &capture_json_line(&legacy).unwrap(), false).unwrap();
-        append_capture_with_liveness(tmp.path(), &overlap_record(2, 202, 2000), |_, _| true).unwrap();
+        append_line(
+            &tmp.path().join(CAPTURES_FILE),
+            &capture_json_line(&legacy).unwrap(),
+            false,
+        )
+        .unwrap();
+        append_capture_with_liveness(tmp.path(), &overlap_record(2, 202, 2000), |_, _| true)
+            .unwrap();
         let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
-        let peer: serde_json::Value = text.lines().rev().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .find(|row| row["termxSessionId"] == 1).unwrap();
+        let peer: serde_json::Value = text
+            .lines()
+            .rev()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["termxSessionId"] == 1)
+            .unwrap();
         assert_eq!(peer["modelAmbiguous"], true);
         assert_eq!(peer["cwd"], r"C:\same-folder");
         assert_eq!(peer["model"], "model-1");
@@ -1233,36 +1511,57 @@ fn main() {
 
     #[test]
     fn source_overlap_checks_live_older_launches_after_a_pane_records_another_conversation() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let a = overlap_record(1, 101, 1000);
         append_capture_with_liveness(tmp.path(), &a, |_, _| false).unwrap();
         let mut nested = overlap_record(1, 303, 2000);
         nested.id = "another-conversation".into();
         append_capture_with_liveness(tmp.path(), &nested, |_, _| false).unwrap();
-        append_capture_with_liveness(tmp.path(), &overlap_record(2, 202, 3000), |pid, _| pid == 101).unwrap();
+        append_capture_with_liveness(tmp.path(), &overlap_record(2, 202, 3000), |pid, _| {
+            pid == 101
+        })
+        .unwrap();
         let text = std::fs::read_to_string(tmp.path().join(CAPTURES_FILE)).unwrap();
-        let rows: Vec<serde_json::Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         for pane in [1, 2] {
-            let row = rows.iter().rev().find(|row| row["termxSessionId"] == pane && row["id"] == "shared-123").unwrap();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row["termxSessionId"] == pane && row["id"] == "shared-123")
+                .unwrap();
             assert_eq!(row["modelAmbiguous"], true);
         }
-        assert!(!rows.iter().any(|row| row["id"] == "another-conversation" && row["modelAmbiguous"] == true));
+        assert!(!rows
+            .iter()
+            .any(|row| row["id"] == "another-conversation" && row["modelAmbiguous"] == true));
     }
 
     #[test]
     fn source_overlap_lock_wait_and_log_read_are_bounded_without_overwriting_logs() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let lock = capture_lock(tmp.path()).unwrap();
         let start = std::time::Instant::now();
-        assert!(append_capture_with_liveness(tmp.path(), &overlap_record(1, 101, 1000), |_, _| true).is_err());
+        assert!(
+            append_capture_with_liveness(tmp.path(), &overlap_record(1, 101, 1000), |_, _| true)
+                .is_err()
+        );
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
         drop(lock);
         let path = tmp.path().join(CAPTURES_FILE);
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(MAX_CAPTURE_LOG_BYTES + 1).unwrap();
         drop(file);
-        assert!(append_capture_with_liveness(tmp.path(), &overlap_record(1, 101, 1000), |_, _| true).is_err());
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_CAPTURE_LOG_BYTES + 1);
+        assert!(
+            append_capture_with_liveness(tmp.path(), &overlap_record(1, 101, 1000), |_, _| true)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            MAX_CAPTURE_LOG_BYTES + 1
+        );
     }
 
     #[test]
@@ -1315,7 +1614,10 @@ fn main() {
 
     #[test]
     fn early_dispatch_ignores_daemon_args_and_capture_failures_are_silent_success() {
-        assert_eq!(dispatch_early([OsString::from("--data-dir")].into_iter()), None);
+        assert_eq!(
+            dispatch_early([OsString::from("--data-dir")].into_iter()),
+            None
+        );
         assert_eq!(
             dispatch_early(
                 [OsString::from("--capture-agent"), OsString::from("unknown")].into_iter()

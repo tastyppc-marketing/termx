@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn override_dir_wins_and_is_created() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let want = tmp.path().join("custom");
         let got = resolve_data_dir(Some(&want)).unwrap();
         assert_eq!(got, want);
@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn portable_flag_beside_exe_wins_over_appdata() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(tmp.path().join("portable.flag"), "").unwrap();
         let got = choose_data_dir(None, Some(tmp.path()), Some(r"X:\FakeAppData")).unwrap();
         assert_eq!(got, tmp.path().join("data"));
@@ -83,14 +83,14 @@ mod tests {
 
     #[test]
     fn no_flag_falls_through_to_appdata() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let got = choose_data_dir(None, Some(tmp.path()), Some(r"X:\FakeAppData")).unwrap();
         assert_eq!(got, Path::new(r"X:\FakeAppData").join("TermX"));
     }
 
     #[test]
     fn override_beats_portable_flag() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(tmp.path().join("portable.flag"), "").unwrap();
         let want = tmp.path().join("explicit");
         let got = choose_data_dir(Some(&want), Some(tmp.path()), None).unwrap();
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn helper_paths_derive_from_data_dir() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let d = resolve_data_dir(Some(tmp.path())).unwrap();
         assert_eq!(runtime_file(&d), d.join("runtime.json"));
         assert_eq!(logs_dir(&d), d.join("logs"));

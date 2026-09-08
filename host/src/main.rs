@@ -2,6 +2,10 @@ use anyhow::{bail, Context, Result};
 use std::sync::Arc;
 use termx_host::{config, history, paths, registry::Registry, server};
 
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
+
 /// Strict CLI parse: `--data-dir <path>` only. A typo'd flag or a missing
 /// value is an error, not a silent fall-through to the default data dir
 /// (which would quietly run against the wrong state).
@@ -89,6 +93,9 @@ fn clean_old_logs(dir: &std::path::Path, keep: std::time::Duration) {
             .and_then(|mtime| now.duration_since(mtime).ok())
             .is_some_and(|age| age > keep);
         if stale {
+            #[cfg(test)]
+            test_support::preserve_before_remove_if_needed(&entry.path(), "old-host-log-cleanup")
+                .expect("preserve or validate synthetic host log before cleanup");
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -261,7 +268,7 @@ mod tests {
     fn stale_runtime_json_with_foreign_listener_is_not_already_running() {
         // A dead pid + a random process listening on the recorded port is the
         // post-crash port-reuse scenario; startup must NOT be blocked.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         // A REAL dead pid: spawn-and-reap a throwaway process. (An absurd
@@ -305,13 +312,13 @@ mod tests {
 
     #[test]
     fn missing_runtime_json_is_not_already_running() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         assert!(already_running(tmp.path()).unwrap().is_none());
     }
 
     #[test]
     fn malformed_runtime_json_fails_closed() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         std::fs::write(paths::runtime_file(tmp.path()), "{ not json").unwrap();
         let err = already_running(tmp.path()).unwrap_err();
         assert!(
@@ -322,7 +329,7 @@ mod tests {
 
     #[test]
     fn clean_old_logs_removes_only_stale_host_logs() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         let log = tmp.path().join("host.log.2020-01-01");
         let other = tmp.path().join("keep-me.txt");
         std::fs::write(&log, "old").unwrap();
@@ -335,5 +342,22 @@ mod tests {
         clean_old_logs(tmp.path(), std::time::Duration::ZERO);
         assert!(!log.exists(), "stale rotated log must be removed");
         assert!(other.exists(), "non-log files must never be touched");
+    }
+
+    #[test]
+    fn test_log_cleanup_refuses_to_delete_when_preservation_rejects_a_reparse_subject() {
+        let tmp = test_support::retained_dir().unwrap();
+        let target = tmp.path().join("outside-log.txt");
+        std::fs::write(&target, b"log bytes must survive").unwrap();
+        let link = tmp.path().join("host.log.linked");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let outcome =
+            std::panic::catch_unwind(|| clean_old_logs(tmp.path(), std::time::Duration::ZERO));
+
+        assert!(outcome.is_err(), "test log cleanup must fail closed");
+        assert!(link.exists(), "the unpreserved log link was removed");
+        assert_eq!(std::fs::read(target).unwrap(), b"log bytes must survive");
     }
 }

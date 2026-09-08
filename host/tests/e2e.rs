@@ -1,9 +1,296 @@
 //! Black-box test of the real binary: the M1 acceptance test.
 
+mod support;
+
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
+
+#[test]
+fn retained_test_directories_are_unique_and_survive_drop() {
+    let first = support::retained_dir().expect("first retained directory");
+    let second = support::retained_dir().expect("second retained directory");
+    assert_ne!(first.path(), second.path());
+    assert!(
+        !first
+            .path()
+            .as_os_str()
+            .to_string_lossy()
+            .starts_with(r"\\?\"),
+        "test-facing paths must remain usable as cmd.exe working directories"
+    );
+    let first_path = first.path().to_path_buf();
+    std::fs::write(first.path().join("survives.txt"), b"retained bytes").unwrap();
+
+    drop(first);
+
+    assert_eq!(
+        std::fs::read(first_path.join("survives.txt")).unwrap(),
+        b"retained bytes"
+    );
+}
+
+#[test]
+fn retained_snapshot_rejects_sources_outside_the_owned_fixture_root() {
+    let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let error = support::snapshot_fixture_tree(&outside, "forbidden-escape")
+        .err()
+        .expect("an external source must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn retained_snapshot_rejects_reparse_entries_without_following_them() {
+    let fixture = support::retained_dir().unwrap();
+    let outside = support::retained_dir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), b"outside bytes").unwrap();
+    let link = fixture.path().join("linked-outside");
+    std::os::windows::fs::symlink_dir(outside.path(), &link)
+        .expect("create owned directory symlink fixture");
+
+    let error = support::snapshot_fixture_tree(fixture.path(), "linked-tree")
+        .err()
+        .expect("a reparse entry must be rejected");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        std::fs::read(outside.path().join("secret.txt")).unwrap(),
+        b"outside bytes"
+    );
+}
+
+#[test]
+fn retained_snapshot_rejects_an_aliased_source_root_before_resolution() {
+    let fixture = support::retained_dir().unwrap();
+    let source = fixture.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("subject.txt"), b"aliased bytes").unwrap();
+    let alias = fixture.path().join("source-alias");
+    std::os::windows::fs::symlink_dir(&source, &alias).unwrap();
+
+    let error = support::snapshot_fixture_tree(&alias, "aliased-source-root")
+        .err()
+        .expect("the original reparse root must be rejected before canonicalization");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        std::fs::read(source.join("subject.txt")).unwrap(),
+        b"aliased bytes"
+    );
+}
+
+#[test]
+fn retained_snapshot_copies_only_the_owned_fixture_tree() {
+    let fixture = support::retained_dir().unwrap();
+    std::fs::create_dir(fixture.path().join("nested")).unwrap();
+    std::fs::write(fixture.path().join("root.txt"), b"root bytes").unwrap();
+    std::fs::write(fixture.path().join("nested/child.txt"), b"child bytes").unwrap();
+
+    let snapshot = support::snapshot_fixture_tree(fixture.path(), "positive-copy").unwrap();
+
+    assert_eq!(
+        std::fs::read(snapshot.path().join("root.txt")).unwrap(),
+        b"root bytes"
+    );
+    assert_eq!(
+        std::fs::read(snapshot.path().join("nested/child.txt")).unwrap(),
+        b"child bytes"
+    );
+}
+
+#[test]
+fn cleanup_subject_is_preserved_before_the_working_copy_is_removed() {
+    let fixture = support::retained_dir().unwrap();
+    let subject = fixture.path().join("history.bin");
+    std::fs::write(&subject, b"history before cleanup").unwrap();
+
+    let retained = support::preserve_file_before_remove(&subject, "history-delete-test").unwrap();
+    std::fs::remove_file(&subject).unwrap();
+
+    assert!(!subject.exists(), "the synthetic working copy was removed");
+    assert_eq!(std::fs::read(retained).unwrap(), b"history before cleanup");
+}
+
+#[test]
+fn pre_removal_gate_preserves_regular_refuses_reparse_and_keeps_plain_directory_semantics() {
+    let fixture = support::retained_dir().unwrap();
+    let regular = fixture.path().join("regular.bin");
+    std::fs::write(&regular, b"regular bytes").unwrap();
+    support::preserve_before_remove_if_needed(&regular, "regular-gate").unwrap();
+    std::fs::remove_file(&regular).unwrap();
+    assert!(!regular.exists());
+
+    support::preserve_before_remove_if_needed(&fixture.path().join("missing.bin"), "missing-gate")
+        .unwrap();
+
+    let directory = fixture.path().join("plain-directory");
+    std::fs::create_dir(&directory).unwrap();
+    support::preserve_before_remove_if_needed(&directory, "directory-gate").unwrap();
+    std::fs::remove_file(&directory)
+        .expect_err("the production remove_file semantics still reject a plain directory");
+    assert!(directory.is_dir());
+
+    let alias = fixture.path().join("directory-alias");
+    std::os::windows::fs::symlink_dir(&directory, &alias).unwrap();
+    let error = support::preserve_before_remove_if_needed(&alias, "reparse-gate")
+        .expect_err("a reparse cleanup subject must stop removal");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(alias.exists());
+    assert!(directory.is_dir());
+}
+
+#[test]
+fn startup_cleanup_diagnostic_keeps_primary_identity_and_every_cleanup_failure() {
+    let failures = vec![
+        "terminating exact child job failed: access denied".to_owned(),
+        "exact child stayed active past startup-cleanup deadline".to_owned(),
+    ];
+
+    let diagnostic = support::format_startup_cleanup_diagnostic_for_test(
+        "controlled-child",
+        4242,
+        "resuming assigned child",
+        "thread disappeared",
+        &failures,
+    );
+
+    assert!(diagnostic.contains("label=controlled-child"));
+    assert!(diagnostic.contains("pid=4242"));
+    assert!(diagnostic.contains("stage=resuming assigned child"));
+    assert!(diagnostic.contains("primary=thread disappeared"));
+    for failure in failures {
+        assert!(diagnostic.contains(&failure));
+    }
+}
+
+#[test]
+fn explicit_test_file_retirement_moves_only_the_named_subject() {
+    let fixture = support::retained_dir().unwrap();
+    let subject = fixture.path().join("state.json");
+    let sibling = fixture.path().join("unrelated.txt");
+    std::fs::write(&subject, b"durable state").unwrap();
+    std::fs::write(&sibling, b"leave me").unwrap();
+
+    let retained = support::retire_file(&subject, "state-failure-fixture").unwrap();
+
+    assert!(!subject.exists());
+    assert_eq!(std::fs::read(retained).unwrap(), b"durable state");
+    assert_eq!(std::fs::read(sibling).unwrap(), b"leave me");
+}
+
+#[test]
+fn bounded_reader_rejects_growth_after_the_source_handle_is_opened() {
+    let fixture = support::retained_dir().unwrap();
+    let subject = fixture.path().join("growing.bin");
+    std::fs::write(&subject, b"1234").unwrap();
+
+    let error = support::read_owned_file_bounded_for_test(&subject, 4, || {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&subject)
+            .unwrap();
+        use std::io::Write;
+        file.write_all(b"5").unwrap();
+        file.sync_all().unwrap();
+    })
+    .expect_err("growth after open must cross the actual capped read");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&subject).unwrap(), b"12345");
+}
+
+#[test]
+fn owned_child_drop_terminates_and_reaps_only_its_assigned_job() {
+    let fixture = support::retained_dir().unwrap();
+    let ready = fixture.path().join("target-ready.txt");
+    let script = fixture.path().join("target.ps1");
+    std::fs::write(
+        &script,
+        r#"param([string]$Ready)
+$descendant = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','while ($true) { Start-Sleep -Seconds 60 }') -WindowStyle Hidden -PassThru
+[IO.File]::WriteAllText($Ready, "$PID,$($descendant.Id)")
+Wait-Process -Id $descendant.Id
+"#,
+    )
+    .unwrap();
+    let mut target_command = std::process::Command::new("powershell.exe");
+    target_command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-File",
+        script.to_str().unwrap(),
+        "-Ready",
+        ready.to_str().unwrap(),
+    ]);
+    let target = support::OwnedChild::spawn(
+        &mut target_command,
+        fixture.path(),
+        "target-with-descendant",
+    )
+    .expect("spawn suspended target, assign its exact job, then resume it");
+    let target_probe = target.process_probe().unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !ready.is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "target never confirmed descendant startup"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let identities = std::fs::read_to_string(&ready).unwrap();
+    let mut identities = identities.trim().split(',');
+    assert_eq!(
+        identities.next().unwrap().parse::<u32>().unwrap(),
+        target.id()
+    );
+    let descendant_pid = identities.next().unwrap().parse::<u32>().unwrap();
+    assert!(identities.next().is_none());
+    let descendant_probe = support::ProcessProbe::open(descendant_pid).unwrap();
+
+    let mut unrelated_command = std::process::Command::new("powershell.exe");
+    unrelated_command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "while ($true) { Start-Sleep -Seconds 60 }",
+    ]);
+    let unrelated = support::OwnedChild::spawn(
+        &mut unrelated_command,
+        fixture.path(),
+        "separately-owned-unrelated",
+    )
+    .unwrap();
+    let unrelated_probe = unrelated.process_probe().unwrap();
+    assert!(!target_probe.exited().unwrap());
+    assert!(!descendant_probe.exited().unwrap());
+    assert!(!unrelated_probe.exited().unwrap());
+
+    drop(target);
+
+    assert!(
+        target_probe.wait_exited(Duration::from_secs(1)).unwrap(),
+        "exact target handle stayed live"
+    );
+    assert!(
+        descendant_probe
+            .wait_exited(Duration::from_secs(1))
+            .unwrap(),
+        "assigned descendant handle stayed live"
+    );
+    assert!(
+        !unrelated_probe.exited().unwrap(),
+        "terminating the target job touched a separately owned process"
+    );
+    drop(unrelated);
+    assert!(
+        unrelated_probe.wait_exited(Duration::from_secs(1)).unwrap(),
+        "the unrelated guard did not reap its own exact handle"
+    );
+}
 
 fn read_runtime(dir: &std::path::Path) -> Option<Value> {
     let text = std::fs::read_to_string(dir.join("runtime.json")).ok()?;
@@ -21,7 +308,7 @@ async fn ws_connect(
 
 #[test]
 fn malformed_runtime_error_is_written_to_host_log() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = support::retained_dir().unwrap();
     std::fs::write(tmp.path().join("runtime.json"), "{ not json").unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_termx-host"))
         .args(["--data-dir", tmp.path().to_str().unwrap()])
@@ -46,7 +333,7 @@ fn malformed_runtime_error_is_written_to_host_log() {
 
 #[test]
 fn fatal_config_error_is_written_to_host_log() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = support::retained_dir().unwrap();
     std::fs::write(tmp.path().join("config.json"), "{ not json").unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_termx-host"))
         .args(["--data-dir", tmp.path().to_str().unwrap()])
@@ -71,14 +358,15 @@ fn fatal_config_error_is_written_to_host_log() {
 
 #[tokio::test]
 async fn full_lifecycle_against_real_binary() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = support::retained_dir().unwrap();
     let exe = env!("CARGO_BIN_EXE_termx-host");
-    let mut host = std::process::Command::new(exe)
+    let mut host_command = std::process::Command::new(exe);
+    host_command
         .args(["--data-dir", tmp.path().to_str().unwrap()])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn termx-host");
+        .stderr(std::process::Stdio::null());
+    let mut host = support::OwnedChild::spawn(&mut host_command, tmp.path(), "primary-host")
+        .expect("spawn termx-host in exact owned job");
 
     // Wait for runtime.json (boot signal), up to 15s.
     let rt = {
@@ -213,6 +501,21 @@ async fn full_lifecycle_against_real_binary() {
     .unwrap();
     let saved = next_control(&mut ws).await;
     assert_eq!(saved["type"], "layout_saved", "{saved}");
+    support::preserve_file_before_remove(
+        &tmp.path().join("runtime.json"),
+        "primary-runtime-before-shutdown",
+    )
+    .unwrap();
+    support::preserve_file_before_remove(
+        &tmp.path().join("state.json"),
+        "primary-state-before-shutdown",
+    )
+    .unwrap();
+    support::preserve_file_before_remove(
+        &termx_host::history::session_file(tmp.path(), session_id.try_into().unwrap()),
+        "primary-history-before-shutdown",
+    )
+    .unwrap();
     ws.send(Message::Text(
         serde_json::json!({"type": "shutdown"}).to_string(),
     ))
@@ -262,12 +565,15 @@ async fn full_lifecycle_against_real_binary() {
 
     // Restart continuity: a fresh host on the same data dir must serve the
     // persisted layout and never recycle session ids.
-    let mut host2 = std::process::Command::new(exe)
+    let _between_hosts =
+        support::snapshot_fixture_tree(tmp.path(), "between-primary-and-restart").unwrap();
+    let mut host2_command = std::process::Command::new(exe);
+    host2_command
         .args(["--data-dir", tmp.path().to_str().unwrap()])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("respawn termx-host");
+        .stderr(std::process::Stdio::null());
+    let mut host2 = support::OwnedChild::spawn(&mut host2_command, tmp.path(), "restart-host")
+        .expect("respawn termx-host in exact owned job");
     let rt2 = {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
@@ -319,6 +625,22 @@ async fn full_lifecycle_against_real_binary() {
         created2["info"]["id"].as_u64().unwrap() > session_id,
         "session ids must not recycle across restarts: {created2}"
     );
+    support::preserve_file_before_remove(
+        &tmp.path().join("runtime.json"),
+        "restart-runtime-before-shutdown",
+    )
+    .unwrap();
+    support::preserve_file_before_remove(
+        &tmp.path().join("state.json"),
+        "restart-state-before-shutdown",
+    )
+    .unwrap();
+    let restarted_session_id = created2["info"]["id"].as_u64().unwrap();
+    support::preserve_file_before_remove(
+        &termx_host::history::session_file(tmp.path(), restarted_session_id.try_into().unwrap()),
+        "restart-history-before-shutdown",
+    )
+    .unwrap();
     ws2.send(Message::Text(
         serde_json::json!({"type": "shutdown"}).to_string(),
     ))

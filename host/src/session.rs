@@ -94,7 +94,10 @@ impl CwdScanner {
     }
 
     fn with_intro(intro: Vec<u8>) -> Self {
-        Self { pending: Vec::new(), intro }
+        Self {
+            pending: Vec::new(),
+            intro,
+        }
     }
 
     /// Feed the next chunk of (DSR-stripped) pty output. Returns the LAST
@@ -446,44 +449,86 @@ struct PromptState {
     reading: bool,
 }
 
-enum Submission { Text, Edited, Blank(u64) }
+enum Submission {
+    Text,
+    Edited,
+    Blank(u64),
+}
 
 impl PromptState {
-    fn new(token: String) -> Self { Self { token, ..Self::default() } }
+    fn new(token: String) -> Self {
+        Self {
+            token,
+            ..Self::default()
+        }
+    }
     fn input(&mut self, data: &[u8]) {
-        if data.is_empty() { return; }
+        if data.is_empty() {
+            return;
+        }
         self.reading = false;
         self.cancelled = false;
         // PSReadLine's bracketed paste inserts a single editable buffer. Its
         // embedded newlines are not queued command submissions. Only recognize
         // the complete framing while this reader is known to own the input.
-        if self.ready > self.accepted && self.submissions.is_empty() && !self.poisoned
-            && data.starts_with(b"\x1b[200~") && data.ends_with(b"\x1b[201~") {
+        if self.ready > self.accepted
+            && self.submissions.is_empty()
+            && !self.poisoned
+            && data.starts_with(b"\x1b[200~")
+            && data.ends_with(b"\x1b[201~")
+        {
             let body = &data[6..data.len() - 6];
             if !body.contains(&0x1b) && !body.contains(&0) {
-                self.edited = true; self.partial = true; return;
+                self.edited = true;
+                self.partial = true;
+                return;
             }
         }
         // Normal readline navigation edits a line but never accepts it. Keep
         // tracking its eventual Enter rather than disabling this shell forever.
-        if matches!(data, b"\x1b[A" | b"\x1b[B" | b"\x1b[C" | b"\x1b[D" | b"\x1b[H" | b"\x1b[F" | b"\x1b[3~") {
-            self.edited = true; self.partial = true; return;
+        if matches!(
+            data,
+            b"\x1b[A" | b"\x1b[B" | b"\x1b[C" | b"\x1b[D" | b"\x1b[H" | b"\x1b[F" | b"\x1b[3~"
+        ) {
+            self.edited = true;
+            self.partial = true;
+            return;
         }
         for &byte in data {
             self.cancelled = false;
             match byte {
                 b'\r' | b'\n' => {
-                    if self.submissions.len() >= 1024 { self.poisoned = true; }
-                    else {
-                        self.submissions.push_back(if self.edited { Submission::Edited }
-                            else if self.partial { Submission::Text }
-                            else { Submission::Blank(if self.ready > self.accepted { self.ready } else { 0 }) });
+                    if self.submissions.len() >= 1024 {
+                        self.poisoned = true;
+                    } else {
+                        self.submissions.push_back(if self.edited {
+                            Submission::Edited
+                        } else if self.partial {
+                            Submission::Text
+                        } else {
+                            Submission::Blank(if self.ready > self.accepted {
+                                self.ready
+                            } else {
+                                0
+                            })
+                        });
                     }
-                    self.partial = false; self.edited = false;
+                    self.partial = false;
+                    self.edited = false;
                 }
-                3 => { self.cancelled = true; self.partial = true; self.edited = true; }
-                8 | 9 | 127 => { self.edited = true; self.partial = true; }
-                0..=31 => { self.poisoned = true; self.partial = true; }
+                3 => {
+                    self.cancelled = true;
+                    self.partial = true;
+                    self.edited = true;
+                }
+                8 | 9 | 127 => {
+                    self.edited = true;
+                    self.partial = true;
+                }
+                0..=31 => {
+                    self.poisoned = true;
+                    self.partial = true;
+                }
                 _ => self.partial = true,
             }
         }
@@ -493,15 +538,25 @@ impl PromptState {
         let kind = parts.next().unwrap_or_default();
         let sequence = parts.next().unwrap_or_default();
         let empty = parts.next() == Some("E");
-        let Ok(sequence) = sequence.parse::<u64>() else { self.poisoned = true; return; };
-        if kind == "R" && self.cancelled && self.submissions.is_empty()
-            && self.ready.checked_add(1) == Some(sequence) {
+        let Ok(sequence) = sequence.parse::<u64>() else {
+            self.poisoned = true;
+            return;
+        };
+        if kind == "R"
+            && self.cancelled
+            && self.submissions.is_empty()
+            && self.ready.checked_add(1) == Some(sequence)
+        {
             self.accepted = self.ready;
-            self.partial = false; self.edited = false; self.cancelled = false;
+            self.partial = false;
+            self.edited = false;
+            self.cancelled = false;
         }
         match kind {
-            "R" if sequence > 0 && self.accepted.checked_add(1) == Some(sequence)
-                && self.ready == self.accepted => {
+            "R" if sequence > 0
+                && self.accepted.checked_add(1) == Some(sequence)
+                && self.ready == self.accepted =>
+            {
                 self.ready = sequence;
                 self.reading = true;
             }
@@ -512,12 +567,19 @@ impl PromptState {
                 // reconcile earlier nonblank input consumed by Read-Host. The
                 // hook confirms the actual returned command was blank; no old
                 // blank/edited submission or later input may impersonate it.
-                let blank_recovery = empty && !self.partial
+                let blank_recovery = empty
+                    && !self.partial
                     && matches!(self.submissions.back(), Some(Submission::Blank(generation)) if *generation == sequence)
-                    && self.submissions.iter().take(self.submissions.len().saturating_sub(1))
+                    && self
+                        .submissions
+                        .iter()
+                        .take(self.submissions.len().saturating_sub(1))
                         .all(|submission| matches!(submission, Submission::Text));
-                if blank_recovery { self.submissions.clear(); }
-                else if self.submissions.pop_front().is_none() && !self.cancelled { self.poisoned = true; }
+                if blank_recovery {
+                    self.submissions.clear();
+                } else if self.submissions.pop_front().is_none() && !self.cancelled {
+                    self.poisoned = true;
+                }
             }
             // Replay/redraw of an already-seen marker cannot clear input.
             "R" if sequence == self.ready => {}
@@ -525,7 +587,11 @@ impl PromptState {
         }
     }
     fn identity(&self) -> Option<String> {
-        (self.reading && !self.poisoned && !self.partial && self.submissions.is_empty() && self.ready > 0)
+        (self.reading
+            && !self.poisoned
+            && !self.partial
+            && self.submissions.is_empty()
+            && self.ready > 0)
             .then(|| format!("{}:{}", self.token, self.ready))
     }
 }
@@ -586,7 +652,16 @@ impl Session {
         ring_cap: usize,
         broadcast_cap: usize,
     ) -> Result<Session> {
-        Self::spawn_inner(profile, cwd, cols, rows, ring_cap, broadcast_cap, None, None)
+        Self::spawn_inner(
+            profile,
+            cwd,
+            cols,
+            rows,
+            ring_cap,
+            broadcast_cap,
+            None,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)] // spawn inputs are intentionally explicit
@@ -617,7 +692,10 @@ impl Session {
         }
         let prompt_token = format!("{:032x}", rand::random::<u128>());
         cmd.env("TERMX_PROMPT_TOKEN", &prompt_token);
-        let directory_supported = profile.args.iter().any(|arg| arg.contains("function global:PSConsoleHostReadLine"));
+        let directory_supported = profile
+            .args
+            .iter()
+            .any(|arg| arg.contains("function global:PSConsoleHostReadLine"));
         let prompt = Arc::new(Mutex::new(PromptState::new(prompt_token.clone())));
         if let Some(dir) = cwd {
             cmd.cwd(dir);
@@ -683,7 +761,8 @@ impl Session {
             // registry hears only actual directory CHANGES.
             let mut cwd_scanner = on_cwd.as_ref().map(|_| CwdScanner::new());
             let mut last_cwd: Option<String> = None;
-            let mut prompt_scanner = CwdScanner::with_intro(format!("\x1b]9;79;{prompt_token};").into_bytes());
+            let mut prompt_scanner =
+                CwdScanner::with_intro(format!("\x1b]9;79;{prompt_token};").into_bytes());
             // RefCell, not a captured `mut`: `publish` is handed to
             // `answer_dsr_then_publish` by value on every read, which requires
             // it to stay Copy — so its spill state is borrowed, not owned.
@@ -735,7 +814,9 @@ impl Session {
                         let markers = prompt_scanner.feed_all(&clean);
                         if !markers.is_empty() {
                             let mut state = prompt_r.lock().unwrap();
-                            for marker in markers { state.marker(&marker); }
+                            for marker in markers {
+                                state.marker(&marker);
+                            }
                         }
                         if let (Some(scanner), Some(report)) =
                             (cwd_scanner.as_mut(), on_cwd.as_ref())
@@ -798,24 +879,48 @@ impl Session {
     }
 
     pub fn prompt_status(&self) -> (Option<bool>, Option<String>) {
-        if !self.directory_supported { return (None, None); }
-        let id = if self.exited().is_none() { self.prompt.lock().unwrap().identity() } else { None };
+        if !self.directory_supported {
+            return (None, None);
+        }
+        let id = if self.exited().is_none() {
+            self.prompt.lock().unwrap().identity()
+        } else {
+            None
+        };
         (Some(id.is_some()), id)
     }
 
     /// Guard verification and enqueue share the same lock as every ordinary
     /// terminal input write. The prompt identity is consumed exactly once.
     pub fn change_directory(&self, expected_pid: u32, prompt_id: &str, cwd: &str) -> bool {
-        if !self.directory_supported || self.child_pid != Some(expected_pid)
-            || cwd.is_empty() || cwd.len() > 24 * 1024 || cwd.chars().any(char::is_control)
-            || !Path::new(cwd).is_absolute() || !Path::new(cwd).is_dir() { return false; }
-        let command = format!("Microsoft.PowerShell.Management\\Set-Location -LiteralPath '{}'\r", cwd.replace('\'', "''"));
+        if !self.directory_supported
+            || self.child_pid != Some(expected_pid)
+            || cwd.is_empty()
+            || cwd.len() > 24 * 1024
+            || cwd.chars().any(char::is_control)
+            || !Path::new(cwd).is_absolute()
+            || !Path::new(cwd).is_dir()
+        {
+            return false;
+        }
+        let command = format!(
+            "Microsoft.PowerShell.Management\\Set-Location -LiteralPath '{}'\r",
+            cwd.replace('\'', "''")
+        );
         let mut prompt = self.prompt.lock().unwrap();
         if prompt.identity().as_deref() != Some(prompt_id)
-            || self.process_identity.as_ref().is_none_or(|process| !process.is_running())
-            || self.has_child_processes() { return false; }
+            || self
+                .process_identity
+                .as_ref()
+                .is_none_or(|process| !process.is_running())
+            || self.has_child_processes()
+        {
+            return false;
+        }
         prompt.input(command.as_bytes());
-        self.writer_queues.try_send_data(command.into_bytes()).is_ok()
+        self.writer_queues
+            .try_send_data(command.into_bytes())
+            .is_ok()
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -947,12 +1052,20 @@ mod tests {
         prompt.input(b"Start-Sleep 10\r");
         assert_eq!(prompt.identity(), None);
         prompt.marker("A;1");
-        assert_eq!(prompt.identity(), None, "accepted command may be an in-process builtin");
+        assert_eq!(
+            prompt.identity(),
+            None,
+            "accepted command may be an in-process builtin"
+        );
         prompt.marker("R;2");
         assert_eq!(prompt.identity().as_deref(), Some("secret:2"));
         prompt.input(b"Read-Host");
         prompt.marker("R;2");
-        assert_eq!(prompt.identity(), None, "a repeated marker cannot erase unfinished input");
+        assert_eq!(
+            prompt.identity(),
+            None,
+            "a repeated marker cannot erase unfinished input"
+        );
     }
 
     #[test]
@@ -963,7 +1076,11 @@ mod tests {
         assert_eq!(prompt.identity(), None);
         prompt.marker("A;1");
         prompt.marker("R;2");
-        assert_eq!(prompt.identity(), None, "a second queued command is still pending");
+        assert_eq!(
+            prompt.identity(),
+            None,
+            "a second queued command is still pending"
+        );
         prompt.marker("A;2");
         assert_eq!(prompt.identity(), None);
         prompt.marker("R;3");
@@ -1003,7 +1120,9 @@ mod tests {
         assert_eq!(prompt.identity().as_deref(), Some("secret:3"));
         prompt.input(b"\x1b[200~Write-Output one\nWrite-Output two\x1b[201~");
         assert_eq!(prompt.identity(), None);
-        prompt.input(b"\r"); prompt.marker("A;3;T"); prompt.marker("R;4");
+        prompt.input(b"\r");
+        prompt.marker("A;3;T");
+        prompt.marker("R;4");
         assert_eq!(prompt.identity().as_deref(), Some("secret:4"));
     }
 
@@ -1011,50 +1130,84 @@ mod tests {
     fn prompt_guard_blank_recovery_cannot_skip_queued_blank_or_later_input() {
         let mut prompt = super::PromptState::new("secret".into());
         prompt.marker("R;1");
-        prompt.input(b"Read-Host\r"); prompt.marker("A;1;T");
-        prompt.input(b"answer\r"); prompt.marker("R;2");
+        prompt.input(b"Read-Host\r");
+        prompt.marker("A;1;T");
+        prompt.input(b"answer\r");
+        prompt.marker("R;2");
         assert_eq!(prompt.identity(), None);
-        prompt.input(b"\r"); prompt.marker("A;2;E"); prompt.marker("R;3");
+        prompt.input(b"\r");
+        prompt.marker("A;2;E");
+        prompt.marker("R;3");
         assert_eq!(prompt.identity().as_deref(), Some("secret:3"));
         let mut prompt = super::PromptState::new("secret".into());
-        prompt.input(b"\rRead-Host\r"); prompt.marker("R;1");
-        prompt.input(b"\r"); prompt.marker("A;1;E"); prompt.marker("R;2");
-        assert_eq!(prompt.identity(), None, "an earlier blank cannot acknowledge the recovery Enter");
+        prompt.input(b"\rRead-Host\r");
+        prompt.marker("R;1");
+        prompt.input(b"\r");
+        prompt.marker("A;1;E");
+        prompt.marker("R;2");
+        assert_eq!(
+            prompt.identity(),
+            None,
+            "an earlier blank cannot acknowledge the recovery Enter"
+        );
     }
 
     #[test]
     fn prompt_guard_changes_directory_once_and_refuses_running_powershell_builtins() {
         let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let target = tmp.path().join("folder with ' and [brackets]");
         std::fs::create_dir(&target).unwrap();
         let current = Arc::new(Mutex::new(String::new()));
         let observed = Arc::clone(&current);
         let profile = profiles::resolve("powershell", true).unwrap();
-        let s = Session::spawn_with_history(&profile, Some(tmp.path()), 120, 30, 1024 * 1024,
-            None, Some(Box::new(move |cwd| *observed.lock().unwrap() = cwd.to_string()))).unwrap();
+        let s = Session::spawn_with_history(
+            &profile,
+            Some(tmp.path()),
+            120,
+            30,
+            1024 * 1024,
+            None,
+            Some(Box::new(move |cwd| {
+                *observed.lock().unwrap() = cwd.to_string()
+            })),
+        )
+        .unwrap();
         fn wait_prompt(s: &Session, after: u64) -> String {
             let deadline = std::time::Instant::now() + Duration::from_secs(25);
             loop {
                 if s.prompt.lock().unwrap().ready > after {
-                    if let Some(id) = s.prompt_status().1 { return id; }
+                    if let Some(id) = s.prompt_status().1 {
+                        return id;
+                    }
                 }
-                assert!(std::time::Instant::now() < deadline,
-                    "no trusted prompt; output: {}", String::from_utf8_lossy(&s.snapshot().1));
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "no trusted prompt; output: {}",
+                    String::from_utf8_lossy(&s.snapshot().1)
+                );
                 std::thread::sleep(Duration::from_millis(30));
             }
         }
         let first = wait_prompt(&s, 0);
-        assert!(!s.change_directory(s.pid().unwrap().wrapping_add(1), &first, &target.to_string_lossy()));
+        assert!(!s.change_directory(
+            s.pid().unwrap().wrapping_add(1),
+            &first,
+            &target.to_string_lossy()
+        ));
         assert!(s.change_directory(s.pid().unwrap(), &first, &target.to_string_lossy()));
         assert!(!s.change_directory(s.pid().unwrap(), &first, &target.to_string_lossy()));
         let second = wait_prompt(&s, 1);
         assert_eq!(*current.lock().unwrap(), target.to_string_lossy());
         s.write_input(b"Start-Sleep -Milliseconds 800\r").unwrap();
-        assert!(!s.has_child_processes(), "the builtin is invisible to the child-process probe");
+        assert!(
+            !s.has_child_processes(),
+            "the builtin is invisible to the child-process probe"
+        );
         assert!(!s.change_directory(s.pid().unwrap(), &second, &tmp.path().to_string_lossy()));
         let third = wait_prompt(&s, 2);
-        s.write_input(b"Read-Host -Prompt 'TermX read host safety'\r").unwrap();
+        s.write_input(b"Read-Host -Prompt 'TermX read host safety'\r")
+            .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while s.prompt.lock().unwrap().accepted < 3 {
             assert!(std::time::Instant::now() < deadline);
@@ -1062,19 +1215,27 @@ mod tests {
         }
         assert!(!s.has_child_processes());
         assert!(!s.change_directory(s.pid().unwrap(), &third, &tmp.path().to_string_lossy()));
-        assert!(s.exited().is_none(), "refusing must leave the original shell running");
+        assert!(
+            s.exited().is_none(),
+            "refusing must leave the original shell running"
+        );
         s.write_input(b"answer\r").unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while s.prompt.lock().unwrap().ready < 4 {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(30));
         }
-        assert_eq!(s.prompt_status().1, None, "builtin-consumed input must not be guessed away");
+        assert_eq!(
+            s.prompt_status().1,
+            None,
+            "builtin-consumed input must not be guessed away"
+        );
         s.write_input(b"\r").unwrap();
         wait_prompt(&s, 4);
         // Real history navigation edits the buffer; Enter then a fresh prompt
         // must restore the chooser rather than poison this session permanently.
-        s.write_input(b"Write-Output termx_history_recovery\r").unwrap();
+        s.write_input(b"Write-Output termx_history_recovery\r")
+            .unwrap();
         wait_prompt(&s, 5);
         s.write_input(b"\x1b[A").unwrap();
         s.write_input(b"\r").unwrap();
@@ -1092,8 +1253,11 @@ mod tests {
     fn prompt_scanner_keeps_all_ready_and_accepted_markers_in_stream_order() {
         let mut scanner = super::CwdScanner::with_intro(b"\x1b]9;79;secret;".to_vec());
         assert!(scanner.feed_all(b"\x1b]9;79;sec").is_empty());
-        assert_eq!(scanner.feed_all(b"ret;R;1\x1b\\noise\x1b]9;79;secret;A;1\x07\x1b]9;79;secret;R;2\x1b\\"),
-            vec!["R;1", "A;1", "R;2"]);
+        assert_eq!(
+            scanner
+                .feed_all(b"ret;R;1\x1b\\noise\x1b]9;79;secret;A;1\x07\x1b]9;79;secret;R;2\x1b\\"),
+            vec!["R;1", "A;1", "R;2"]
+        );
     }
 
     use super::*;
@@ -1246,9 +1410,7 @@ mod tests {
     fn cwd_scanner_takes_the_last_report_and_ignores_other_osc9_channels() {
         let mut scanner = CwdScanner::new();
         // 9;78 is the conversation-capture channel — same prefix, not a cwd.
-        let out = scanner.feed(
-            b"\x1b]9;9;C:\\one\x07\x1b]9;78;claude;abc\x07\x1b]9;9;C:\\two\x07",
-        );
+        let out = scanner.feed(b"\x1b]9;9;C:\\one\x07\x1b]9;78;claude;abc\x07\x1b]9;9;C:\\two\x07");
         assert_eq!(out, Some("C:\\two".to_string()));
     }
 
@@ -1364,7 +1526,7 @@ mod tests {
 
     #[test]
     fn respects_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let profile = profiles::resolve("cmd", false).unwrap();
         let mut p = profile.clone();
         p.args = vec!["/c".into(), "cd".into()]; // `cd` with no args prints cwd
@@ -1484,7 +1646,7 @@ mod tests {
     /// output and is the reason this can only be proven by spawning.
     fn shell_integration_follows_cd(profile_name: &str, ready_secs: u64) {
         let _serial = crate::HEAVY_PTY_TEST.blocking_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let child = tmp.path().join("termx_parent").join("termx_child");
         std::fs::create_dir_all(&child).unwrap();
 

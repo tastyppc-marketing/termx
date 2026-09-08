@@ -95,14 +95,8 @@ fn stamp_termx_env(
         "TERM_PROGRAM_VERSION".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
     ));
-    env.push((
-        "TERMX_HOST_EXE".to_string(),
-        host_exe.display().to_string(),
-    ));
-    env.push((
-        "TERMX_DATA_DIR".to_string(),
-        data_dir.display().to_string(),
-    ));
+    env.push(("TERMX_HOST_EXE".to_string(), host_exe.display().to_string()));
+    env.push(("TERMX_DATA_DIR".to_string(), data_dir.display().to_string()));
 }
 
 impl Registry {
@@ -375,8 +369,7 @@ impl Registry {
         // next_id watermark starts past every persisted id — but guard anyway:
         // a live session is always the truth about its own id.
         {
-            let live: std::collections::HashSet<SessionId> =
-                infos.iter().map(|i| i.id).collect();
+            let live: std::collections::HashSet<SessionId> = infos.iter().map(|i| i.id).collect();
             let corpses = self.corpses.lock().unwrap();
             infos.extend(corpses.values().filter(|c| !live.contains(&c.id)).cloned());
         }
@@ -397,19 +390,28 @@ impl Registry {
         };
         // The busy check walks the OS process snapshot — do it OUTSIDE the
         // entries lock so a slow snapshot never stalls create/close/list.
-        let alive =
-            !self.shutting_down.load(Ordering::SeqCst) && session.exited().is_none();
+        let alive = !self.shutting_down.load(Ordering::SeqCst) && session.exited().is_none();
         let busy = alive && session.has_child_processes();
         (alive, busy)
     }
 
     pub fn prompt_status(&self, id: SessionId) -> (Option<bool>, Option<String>) {
-        self.get(id).map(|session| session.prompt_status()).unwrap_or((None, None))
+        self.get(id)
+            .map(|session| session.prompt_status())
+            .unwrap_or((None, None))
     }
 
-    pub fn change_directory(&self, id: SessionId, expected_pid: u32, prompt_id: &str, cwd: &str) -> bool {
-        !self.shutting_down.load(Ordering::SeqCst) && self.get(id)
-            .is_some_and(|session| session.change_directory(expected_pid, prompt_id, cwd))
+    pub fn change_directory(
+        &self,
+        id: SessionId,
+        expected_pid: u32,
+        prompt_id: &str,
+        cwd: &str,
+    ) -> bool {
+        !self.shutting_down.load(Ordering::SeqCst)
+            && self
+                .get(id)
+                .is_some_and(|session| session.change_directory(expected_pid, prompt_id, cwd))
     }
 
     /// Returns the persist result so callers can tell the client whether the
@@ -524,8 +526,8 @@ impl Registry {
 mod tests {
     use super::*;
 
-    fn test_registry() -> (tempfile::TempDir, Arc<Registry>) {
-        let tmp = tempfile::tempdir().unwrap();
+    fn test_registry() -> (crate::test_support::RetainedDir, Arc<Registry>) {
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         (tmp, reg)
     }
@@ -582,7 +584,7 @@ mod tests {
     /// corpse drops the record and persists.
     #[test]
     fn corpse_records_survive_a_daemon_death_until_closed() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(
             tmp.path().join("state.json"),
             serde_json::json!({
@@ -602,12 +604,22 @@ mod tests {
 
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let listed = reg.list();
-        assert_eq!(listed.len(), 2, "both parseable records survive, junk is dropped");
+        assert_eq!(
+            listed.len(),
+            2,
+            "both parseable records survive, junk is dropped"
+        );
         let corpse = listed.iter().find(|s| s.id == 7).unwrap();
-        assert!(!corpse.alive, "a corpse is never alive, whatever the file said");
+        assert!(
+            !corpse.alive,
+            "a corpse is never alive, whatever the file said"
+        );
         assert_eq!(corpse.cwd.as_deref(), Some(r"C:\Dev\TermX"));
         assert_eq!(corpse.profile, "powershell");
-        assert_eq!(corpse.pid, None, "a dead record must not point at a live pid");
+        assert_eq!(
+            corpse.pid, None,
+            "a dead record must not point at a live pid"
+        );
 
         // Corpses ride through persist, so a second restart still knows them.
         reg.persist().unwrap();
@@ -618,10 +630,15 @@ mod tests {
         assert!(reg2.close_session(7), "a corpse can be closed");
         assert!(reg2.list().iter().all(|s| s.id != 7));
         let reg3 = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
-        assert!(reg3.list().iter().all(|s| s.id != 7), "the dismissal persisted");
+        assert!(
+            reg3.list().iter().all(|s| s.id != 7),
+            "the dismissal persisted"
+        );
 
         // The id watermark still respects corpse ids: nothing recycles 41.
-        let (info, s) = reg3.create_session(Some("cmd"), None, 80, 25, false).unwrap();
+        let (info, s) = reg3
+            .create_session(Some("cmd"), None, 80, 25, false)
+            .unwrap();
         assert!(info.id >= 42, "new ids start past the persisted watermark");
         reg3.close_session(info.id);
         assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
@@ -635,7 +652,7 @@ mod tests {
     /// folder.
     #[test]
     fn recorded_cwd_follows_the_shell_into_state_json_and_the_corpse() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let target = tmp.path().join("termx_cd_target");
         std::fs::create_dir(&target).unwrap();
         let target_str = target.to_string_lossy().to_string();
@@ -643,9 +660,7 @@ mod tests {
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         // Created WITHOUT a cwd — exactly the pane shape that used to persist
         // null forever. shell_integration on: the prompt hook is the channel.
-        let (info, s) = reg
-            .create_session(Some("cmd"), None, 80, 25, true)
-            .unwrap();
+        let (info, s) = reg.create_session(Some("cmd"), None, 80, 25, true).unwrap();
         assert_eq!(info.cwd, None, "creation records what was asked: nothing");
 
         s.write_input(format!("cd /d \"{target_str}\"\r\n").as_bytes())
@@ -668,10 +683,9 @@ mod tests {
         }
 
         // The change persisted on its own — no lifecycle event in between.
-        let state: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(tmp.path().join("state.json")).unwrap(),
-        )
-        .unwrap();
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join("state.json")).unwrap())
+                .unwrap();
         let row = state["sessions"]
             .as_array()
             .unwrap()
@@ -759,7 +773,7 @@ mod tests {
 
     #[test]
     fn ids_do_not_recycle_across_restarts() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(
             tmp.path().join("state.json"),
             r#"{"layout": {"keep": true}, "sessions": [{"id": 41, "profile": "cmd", "cwd": null, "cols": 80, "rows": 25, "alive": false}]}"#,
@@ -788,7 +802,7 @@ mod tests {
 
     #[test]
     fn configured_default_profile_applies_when_profile_omitted() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(
             tmp.path().to_path_buf(),
             Config {
@@ -805,11 +819,15 @@ mod tests {
 
     #[test]
     fn concurrent_failed_layout_updates_cannot_rollback_each_other() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let original = serde_json::json!({"groups": ["original"]});
         reg.set_layout(original.clone()).unwrap();
-        std::fs::remove_file(tmp.path().join("state.json")).unwrap();
+        crate::test_support::retire_file(
+            &tmp.path().join("state.json"),
+            "concurrent-layout-persist-failure",
+        )
+        .unwrap();
         std::fs::create_dir(tmp.path().join("state.json")).unwrap();
 
         let persist_guard = reg.persist_lock.lock().unwrap();
@@ -830,11 +848,12 @@ mod tests {
 
     #[test]
     fn failed_layout_persist_rolls_back_in_memory_state() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         reg.set_layout(serde_json::json!({"groups": ["durable"]}))
             .unwrap();
-        std::fs::remove_file(tmp.path().join("state.json")).unwrap();
+        crate::test_support::retire_file(&tmp.path().join("state.json"), "layout-persist-failure")
+            .unwrap();
         std::fs::create_dir(tmp.path().join("state.json")).unwrap();
 
         assert!(reg
@@ -846,7 +865,7 @@ mod tests {
 
     #[test]
     fn layout_blob_persists_across_instances() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         {
             let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
             reg.set_layout(serde_json::json!({"groups": [{"name": "client work"}]}))
@@ -858,7 +877,7 @@ mod tests {
 
     #[test]
     fn corrupt_state_json_degrades_to_empty_layout() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(tmp.path().join("state.json"), "{ not json at all").unwrap();
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         assert_eq!(reg.layout(), serde_json::Value::Null);
@@ -922,7 +941,7 @@ mod tests {
 
     #[test]
     fn validated_cwd_preserves_user_selected_path() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let selected = tmp.path().to_path_buf();
 
         let validated = validate_cwd(Some(&selected)).unwrap().unwrap();
@@ -935,7 +954,7 @@ mod tests {
 
     #[test]
     fn cwd_must_be_an_existing_absolute_directory() {
-        let (_tmp, reg) = test_registry();
+        let (tmp, reg) = test_registry();
         assert!(
             reg.create_session(Some("cmd"), Some(Path::new("relative")), 80, 25, false)
                 .is_err(),
@@ -945,9 +964,10 @@ mod tests {
         assert!(reg
             .create_session(Some("cmd"), Some(&missing), 80, 25, false)
             .is_err());
-        let file = tempfile::NamedTempFile::new().unwrap();
+        let file = tmp.path().join("cwd-is-a-file.txt");
+        std::fs::write(&file, b"retained cwd file fixture").unwrap();
         assert!(reg
-            .create_session(Some("cmd"), Some(file.path()), 80, 25, false)
+            .create_session(Some("cmd"), Some(&file), 80, 25, false)
             .is_err());
     }
 
@@ -955,7 +975,7 @@ mod tests {
     fn ids_do_not_recycle_even_when_no_sessions_were_persisted() {
         // Close-everything-then-restart: the sessions list persists as empty,
         // so the watermark must come from the explicit next_id field.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let first_id = {
             let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
             let (info, s) = reg
@@ -993,7 +1013,7 @@ mod tests {
 
     #[test]
     fn shutdown_persists_sessions_as_not_alive() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let (_info, session) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
@@ -1017,7 +1037,7 @@ mod tests {
 
     #[test]
     fn repeated_shutdown_preserves_final_session_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(tmp.path().to_path_buf(), Config::default()));
         let (info, _session) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
@@ -1049,7 +1069,7 @@ mod tests {
 
     #[test]
     fn tiny_scrollback_config_bounds_the_ring() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(
             tmp.path().to_path_buf(),
             Config {
@@ -1301,7 +1321,7 @@ mod tests {
 
     #[test]
     fn zero_history_bytes_creates_no_spill_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let reg = Arc::new(Registry::new(
             tmp.path().to_path_buf(),
             Config {
@@ -1396,8 +1416,14 @@ mod tests {
             seen = String::from_utf8_lossy(&s.snapshot().1).into_owned();
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(seen.contains(&format!("HX:{host}")), "host exe stamp missing: {seen:?}");
-        assert!(seen.contains(&format!("DD:{data}")), "data dir stamp missing: {seen:?}");
+        assert!(
+            seen.contains(&format!("HX:{host}")),
+            "host exe stamp missing: {seen:?}"
+        );
+        assert!(
+            seen.contains(&format!("DD:{data}")),
+            "data dir stamp missing: {seen:?}"
+        );
         reg.close_session(info.id);
         assert!(s.wait_exit_blocking(std::time::Duration::from_secs(10)));
     }

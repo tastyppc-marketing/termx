@@ -29,6 +29,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+#[cfg(test)]
+#[path = "../../tests/support/mod.rs"]
+mod test_support;
+
 /// Sidecar file name, shared by convention with `ui/src-tauri/src/outputs.rs`
 /// (the reader). Versioned in the name so a future shape change is a new file
 /// rather than a migration of an append-only log.
@@ -313,10 +317,7 @@ mod tests {
             vec!["a.txt", "--label", "x", "--label", "y"],
             vec![""],
         ] {
-            assert!(
-                parse_args(args(&argv)).is_err(),
-                "should reject {argv:?}"
-            );
+            assert!(parse_args(args(&argv)).is_err(), "should reject {argv:?}");
         }
     }
 
@@ -347,7 +348,7 @@ mod tests {
 
     #[test]
     fn appends_a_record_with_session_key_and_label() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         let sidecar = tmp.path().join("nested").join(SIDECAR_NAME);
         let (code, stdout) = run_ok(
             &["out/report.md", "--label", "Report", "--session", "s-1"],
@@ -372,7 +373,7 @@ mod tests {
 
     #[test]
     fn without_session_flag_the_key_is_null() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         let sidecar = tmp.path().join(SIDECAR_NAME);
         run_ok(&[r"C:\out\a.txt"], Path::new(r"C:\work"), &sidecar, None);
         let rows = lines(&sidecar);
@@ -382,7 +383,7 @@ mod tests {
 
     #[test]
     fn emits_osc_and_records_pane_id_only_when_env_is_set() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         let sidecar = tmp.path().join(SIDECAR_NAME);
         let (code, stdout) = run_ok(
             &[r"C:\out\a.txt"],
@@ -397,16 +398,21 @@ mod tests {
 
     #[test]
     fn an_empty_session_env_is_treated_as_unset() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         let sidecar = tmp.path().join(SIDECAR_NAME);
-        let (_, stdout) = run_ok(&[r"C:\out\a.txt"], Path::new(r"C:\work"), &sidecar, Some(""));
+        let (_, stdout) = run_ok(
+            &[r"C:\out\a.txt"],
+            Path::new(r"C:\work"),
+            &sidecar,
+            Some(""),
+        );
         assert_eq!(stdout, "");
         assert_eq!(lines(&sidecar)[0]["termxSession"], Value::Null);
     }
 
     #[test]
     fn records_append_never_replace() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         let sidecar = tmp.path().join(SIDECAR_NAME);
         run_ok(&[r"C:\out\a.txt"], Path::new(r"C:\work"), &sidecar, None);
         run_ok(&[r"C:\out\b.txt"], Path::new(r"C:\work"), &sidecar, None);
@@ -418,7 +424,7 @@ mod tests {
 
     #[test]
     fn a_failed_sidecar_write_still_exits_zero_and_still_emits_the_osc() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         // A directory where the sidecar file should be: every open-for-append
         // fails, which is as close as a test gets to a locked/read-only log.
         let sidecar = tmp.path().join(SIDECAR_NAME);
@@ -435,7 +441,7 @@ mod tests {
 
     #[test]
     fn a_bad_command_line_exits_two_and_writes_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = test_support::retained_dir().unwrap();
         let sidecar = tmp.path().join(SIDECAR_NAME);
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -449,7 +455,9 @@ mod tests {
         );
         assert_eq!(code, EXIT_USAGE);
         assert!(out.is_empty());
-        assert!(String::from_utf8(err).unwrap().contains("usage: termx-output"));
+        assert!(String::from_utf8(err)
+            .unwrap()
+            .contains("usage: termx-output"));
         assert!(!sidecar.exists());
     }
 }

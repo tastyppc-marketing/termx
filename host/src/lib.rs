@@ -9,6 +9,10 @@ pub mod ring;
 pub mod server;
 pub mod session;
 
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+pub(crate) mod test_support;
+
 /// Serializes the firehose-class PTY tests: several concurrent multi-thousand
 /// -line conhost sessions starve each other under the parallel test runner
 /// and blow per-test deadlines. Heavy tests take this lock (`.lock().await`

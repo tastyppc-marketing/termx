@@ -280,7 +280,7 @@ fn main() {
 
     #[test]
     fn powershell_wrapper_round_trips_typed_arguments_through_structured_json() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let fake_host = build_host_argv_dumper(tmp.path());
         let profile = resolve("powershell", true).unwrap();
         let script = format!(
@@ -288,7 +288,13 @@ fn main() {
             profile.args.last().unwrap()
         );
         let status = std::process::Command::new(profile.command)
-            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ])
             .current_dir(tmp.path())
             .env("TERMX_HOST_EXE", &fake_host)
             .status()
@@ -309,17 +315,18 @@ fn main() {
 
     #[test]
     fn cmd_macro_round_trips_typed_arguments_to_the_native_agent_mode() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let fake_host = build_host_argv_dumper(tmp.path());
         let mut profile = resolve("cmd", true).unwrap();
-        profile.env.push((
-            "TERMX_HOST_EXE".into(),
-            fake_host.display().to_string(),
-        ));
-        let session = crate::session::Session::spawn(&profile, Some(tmp.path()), 100, 30, 64 * 1024)
-            .unwrap();
+        profile
+            .env
+            .push(("TERMX_HOST_EXE".into(), fake_host.display().to_string()));
+        let session =
+            crate::session::Session::spawn(&profile, Some(tmp.path()), 100, 30, 64 * 1024).unwrap();
         session
-            .write_input("claude plain \"\" \"a b\" \"x&y\" \"^caret\" \"50%\" \"雪だるま\"\r\n".as_bytes())
+            .write_input(
+                "claude plain \"\" \"a b\" \"x&y\" \"^caret\" \"50%\" \"雪だるま\"\r\n".as_bytes(),
+            )
             .unwrap();
         let dump = tmp.path().join("host-argv.dump");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -335,7 +342,18 @@ fn main() {
         );
         assert_eq!(
             read_host_dump(&dump),
-            vec!["--agent", "claude", "--", "plain", "", "a b", "x&y", "^caret", "50%", "雪だるま"]
+            vec![
+                "--agent",
+                "claude",
+                "--",
+                "plain",
+                "",
+                "a b",
+                "x&y",
+                "^caret",
+                "50%",
+                "雪だるま"
+            ]
         );
     }
 }

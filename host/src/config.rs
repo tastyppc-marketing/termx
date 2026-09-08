@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn creates_defaults_when_missing() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         let cfg = load_or_create(tmp.path()).unwrap();
         assert_eq!(cfg.scrollback_bytes, 4 * 1024 * 1024);
         assert_eq!(cfg.history_bytes, 64 * 1024 * 1024);
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn reads_existing_and_fills_missing_keys() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(
             tmp.path().join("config.json"),
             r#"{ "scrollback_bytes": 1024 }"#,
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn zero_scrollback_is_replaced_with_default() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(
             tmp.path().join("config.json"),
             r#"{ "scrollback_bytes": 0 }"#,
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn oversized_scrollback_is_clamped() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(
             tmp.path().join("config.json"),
             r#"{ "scrollback_bytes": 999999999999 }"#,
@@ -149,7 +149,7 @@ mod tests {
     /// scrollback_bytes, where 0 would panic ring construction.
     #[test]
     fn zero_history_disables_the_spill_and_is_preserved() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(tmp.path().join("config.json"), r#"{ "history_bytes": 0 }"#).unwrap();
         let cfg = load_or_create(tmp.path()).unwrap();
         assert_eq!(cfg.history_bytes, 0);
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn oversized_history_is_clamped() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(
             tmp.path().join("config.json"),
             r#"{ "history_bytes": 999999999999 }"#,
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn malformed_json_is_an_error_not_a_silent_reset() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::test_support::retained_dir().unwrap();
         std::fs::write(tmp.path().join("config.json"), "{ not json").unwrap();
         assert!(
             load_or_create(tmp.path()).is_err(),
