@@ -21,6 +21,8 @@ pub enum AuthorityError {
     InsecureDiscovery,
     #[error("discovery document uses an unsupported future version")]
     FutureDiscovery,
+    #[error("discovery publication stayed contended past its bounded retry deadline")]
+    Contended,
     #[error("native authority unavailable")]
     Native,
     #[error("authority I/O unavailable")]

@@ -25,7 +25,17 @@ base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects"] }
+termx-swarm-core = { path = "../swarm-core" }
+termx-swarm-client = { path = "../swarm-client" }
+
+[features]
+# Library-only seams for exact-owned test generations: trusted bindings,
+# trusted sources and fixture source readers. Never reachable over the wire
+# or the command line, and absent from ordinary builds.
+swarm-test-seams = []
 
 [dev-dependencies]
 tempfile = "3"
+rusqlite = { version = "=0.40.2", features = ["bundled", "hooks"] }
+termx-host = { path = ".", features = ["swarm-test-seams"] }

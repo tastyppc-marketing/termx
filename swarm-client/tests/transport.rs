@@ -26,6 +26,7 @@ fn discovery_rejects_unbounded_pipe_name_vocabulary() {
         "boot-1",
         ProcessIdentity::new(1, 1),
         "\\\\.\\pipe\\valid-prefix\nspoofed-line",
+        "\\\\.\\pipe\\valid-peer",
     );
     assert!(!discovery.validate());
 }

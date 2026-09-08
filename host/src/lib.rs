@@ -8,6 +8,7 @@ pub mod registry;
 pub mod ring;
 pub mod server;
 pub mod session;
+pub mod swarm;
 
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]

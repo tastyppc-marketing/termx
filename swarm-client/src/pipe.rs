@@ -1002,7 +1002,8 @@ pub(crate) async fn connect_owner(
     options: TransportOptions,
 ) -> Result<VerifiedPipe, WireError> {
     let pipe =
-        VerifiedPipe::connect_with_options(&discovery.pipe_name, discovery.server, options).await?;
+        VerifiedPipe::connect_with_options(&discovery.owner_pipe_name, discovery.server, options)
+            .await?;
     let handshake = async {
         hello(&pipe, discovery).await?;
         pipe.send_bytes(
@@ -1030,7 +1031,8 @@ pub(crate) async fn connect_peer(
     options: TransportOptions,
 ) -> Result<VerifiedPipe, WireError> {
     let pipe =
-        VerifiedPipe::connect_with_options(&discovery.pipe_name, discovery.server, options).await?;
+        VerifiedPipe::connect_with_options(&discovery.peer_pipe_name, discovery.server, options)
+            .await?;
     run_handshake_deadline(&pipe, options.handshake_timeout, hello(&pipe, discovery)).await?;
     Ok(pipe)
 }

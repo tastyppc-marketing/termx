@@ -17,6 +17,29 @@ fn pipe(label: &str) -> String {
     )
 }
 
+/// Version 2 discovery whose owner endpoint is `name`; the peer endpoint is a
+/// distinct never-bound sibling so an owner test cannot cross endpoints.
+fn owner_discovery(boot_id: &str, server: ProcessIdentity, name: &str) -> DiscoveryRecord {
+    DiscoveryRecord::new(
+        "authority-1",
+        boot_id,
+        server,
+        name,
+        format!("{name}-unbound-peer"),
+    )
+}
+
+/// Version 2 discovery whose peer endpoint is `name`.
+fn peer_discovery(boot_id: &str, server: ProcessIdentity, name: &str) -> DiscoveryRecord {
+    DiscoveryRecord::new(
+        "authority-1",
+        boot_id,
+        server,
+        format!("{name}-unbound-owner"),
+        name,
+    )
+}
+
 fn retained(label: &str) -> std::path::PathBuf {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../retired/test-artifacts/swarm-client")
@@ -153,7 +176,7 @@ async fn owner_auth_follows_verified_boot_hello() {
     let credential = claim.load_or_create_owner_credential().unwrap();
     let name = pipe("auth");
     let mut server = PipeServer::bind(&name, FrameBudget::new(1024 * 1024)).unwrap();
-    let discovery = DiscoveryRecord::new("authority-1", "boot-1", server.identity(), &name);
+    let discovery = owner_discovery("boot-1", server.identity(), &name);
     let serving = tokio::spawn(async move {
         let accepted = server.accept().await?;
         accepted.authenticate_owner("boot-1", &credential).await
@@ -176,7 +199,7 @@ async fn external_client_bootstraps_while_broker_claim_remains_held() {
     let credential = claim.load_or_create_owner_credential().unwrap();
     let name = pipe("external-owner-bootstrap");
     let mut server = PipeServer::bind(&name, FrameBudget::new(1024 * 1024)).unwrap();
-    let discovery = DiscoveryRecord::new("authority-1", "boot-1", server.identity(), &name);
+    let discovery = owner_discovery("boot-1", server.identity(), &name);
     claim.publish_discovery(&discovery).unwrap();
 
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -227,7 +250,7 @@ async fn rejected_boot_sends_zero_owner_credential_bytes() {
     let credential = claim.load_or_create_owner_credential().unwrap();
     let name = pipe("wrong-boot");
     let mut server = PipeServer::bind(&name, FrameBudget::new(1024 * 1024)).unwrap();
-    let discovery = DiscoveryRecord::new("authority-1", "wrong-boot", server.identity(), &name);
+    let discovery = owner_discovery("wrong-boot", server.identity(), &name);
     let observed = tokio::spawn(async move {
         let accepted = server.accept().await.unwrap();
         let hello = accepted.recv_request().await.unwrap();
@@ -280,7 +303,7 @@ async fn peer_hello_rejects_oversized_boot_identifier() {
 async fn peer_client_uses_verified_boot_hello() {
     let name = pipe("peer-auth");
     let mut server = PipeServer::bind(&name, FrameBudget::new(1024 * 1024)).unwrap();
-    let discovery = DiscoveryRecord::new("authority-1", "boot-1", server.identity(), &name);
+    let discovery = peer_discovery("boot-1", server.identity(), &name);
     let serving = tokio::spawn(async move {
         let accepted = server.accept().await?;
         accepted.authenticate_peer("boot-1").await
@@ -294,7 +317,7 @@ async fn peer_client_uses_verified_boot_hello() {
 async fn typed_client_round_trip_preserves_correlation() {
     let name = pipe("typed-round-trip");
     let mut server = PipeServer::bind(&name, FrameBudget::new(1024 * 1024)).unwrap();
-    let discovery = DiscoveryRecord::new("authority-1", "boot-1", server.identity(), &name);
+    let discovery = peer_discovery("boot-1", server.identity(), &name);
     let serving = tokio::spawn(async move {
         let accepted = server.accept().await?;
         accepted.authenticate_peer("boot-1").await?;
@@ -332,7 +355,7 @@ async fn idle_handshake_does_not_block_later_accept_and_authentication() {
             .await
     });
 
-    let discovery = DiscoveryRecord::new("authority-1", "boot-1", server.identity(), &name);
+    let discovery = peer_discovery("boot-1", server.identity(), &name);
     let serving = tokio::spawn(async move {
         let accepted = server.accept().await?;
         accepted.authenticate_peer("boot-1").await
@@ -441,7 +464,7 @@ async fn owner_connect_requires_server_acceptance_and_rejects_wrong_credential()
     let wrong = claim_two.load_or_create_owner_credential().unwrap();
     let name = pipe("owner-auth-acceptance");
     let mut server = PipeServer::bind(&name, FrameBudget::new(1024 * 1024)).unwrap();
-    let discovery = DiscoveryRecord::new("authority-1", "boot-1", server.identity(), &name);
+    let discovery = owner_discovery("boot-1", server.identity(), &name);
     let serving = tokio::spawn(async move {
         let accepted = server.accept().await?;
         accepted.authenticate_owner("boot-1", &expected).await
@@ -469,7 +492,7 @@ async fn owner_connect_times_out_when_auth_reply_is_held() {
     let credential = claim.load_or_create_owner_credential().unwrap();
     let name = pipe("owner-auth-held");
     let mut server = PipeServer::bind(&name, FrameBudget::new(1024 * 1024)).unwrap();
-    let discovery = DiscoveryRecord::new("authority-1", "boot-1", server.identity(), &name);
+    let discovery = owner_discovery("boot-1", server.identity(), &name);
     let holding = tokio::spawn(async move {
         let accepted = server.accept().await.unwrap();
         let hello = accepted.recv_request().await.unwrap();
@@ -504,7 +527,7 @@ async fn owner_connect_fails_when_auth_reply_connection_is_dropped() {
     let credential = claim.load_or_create_owner_credential().unwrap();
     let name = pipe("owner-auth-dropped");
     let mut server = PipeServer::bind(&name, FrameBudget::new(1024 * 1024)).unwrap();
-    let discovery = DiscoveryRecord::new("authority-1", "boot-1", server.identity(), &name);
+    let discovery = owner_discovery("boot-1", server.identity(), &name);
     let dropping = tokio::spawn(async move {
         let accepted = server.accept().await.unwrap();
         let hello = accepted.recv_request().await.unwrap();

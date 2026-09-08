@@ -35,6 +35,31 @@ impl OwnedChild {
         fixture_root: &Path,
         label: impl Into<String>,
     ) -> std::io::Result<Self> {
+        Self::spawn_with_job(command, fixture_root, label, JobPolicy::KillOnClose)
+    }
+
+    /// Same exact ownership, but the child's job additionally permits
+    /// breakaway so a launcher under test can attempt a detached launch.
+    /// The job still kills the launcher itself on close.
+    pub fn spawn_breakaway_permitted(
+        command: &mut Command,
+        fixture_root: &Path,
+        label: impl Into<String>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_with_job(
+            command,
+            fixture_root,
+            label,
+            JobPolicy::KillOnCloseBreakawayOk,
+        )
+    }
+
+    fn spawn_with_job(
+        command: &mut Command,
+        fixture_root: &Path,
+        label: impl Into<String>,
+        policy: JobPolicy,
+    ) -> std::io::Result<Self> {
         let fixture_root = validate_owned_path(fixture_root)?;
         let label = label.into();
         #[cfg(windows)]
@@ -46,7 +71,7 @@ impl OwnedChild {
         }
         let mut child = command.spawn()?;
         #[cfg(windows)]
-        let job = match OwnedJob::assign(&child) {
+        let job = match OwnedJob::assign(&child, policy) {
             Ok(job) => job,
             Err(error) => {
                 return Err(cleanup_failed_start(
@@ -79,6 +104,13 @@ impl OwnedChild {
 
     pub fn id(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Takes the piped stdin handle so a test can close it deliberately.
+    /// Closing it is the explicit "launcher finished" signal for foreground
+    /// broker children; the exact job still bounds the child's lifetime.
+    pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
     }
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
@@ -372,6 +404,14 @@ fn resume_initial_thread(child: &Child) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Job limits applied to an exactly owned child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobPolicy {
+    KillOnClose,
+    /// Kill on close, and children of the member may break away.
+    KillOnCloseBreakawayOk,
+}
+
 #[cfg(windows)]
 struct OwnedJob {
     handle: isize,
@@ -379,12 +419,17 @@ struct OwnedJob {
 
 #[cfg(windows)]
 impl OwnedJob {
-    fn assign(child: &Child) -> std::io::Result<Self> {
-        use std::ffi::c_void;
+    fn assign(child: &Child, policy: JobPolicy) -> std::io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
+        Self::assign_handle(child.as_raw_handle() as isize, policy)
+    }
+
+    fn assign_handle(process: isize, policy: JobPolicy) -> std::io::Result<Self> {
+        use std::ffi::c_void;
 
         const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
         const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+        const JOB_OBJECT_LIMIT_BREAKAWAY_OK: u32 = 0x0000_0800;
 
         #[repr(C)]
         #[derive(Clone, Copy, Default)]
@@ -440,7 +485,12 @@ impl OwnedJob {
             return Err(std::io::Error::last_os_error());
         }
         let mut information = ExtendedLimitInformation::default();
-        information.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        information.basic_limit_information.limit_flags = match policy {
+            JobPolicy::KillOnClose => JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JobPolicy::KillOnCloseBreakawayOk => {
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+            }
+        };
         let configured = unsafe {
             SetInformationJobObject(
                 handle,
@@ -454,7 +504,7 @@ impl OwnedJob {
             unsafe { CloseHandle(handle) };
             return Err(error);
         }
-        let assigned = unsafe { AssignProcessToJobObject(handle, child.as_raw_handle() as isize) };
+        let assigned = unsafe { AssignProcessToJobObject(handle, process) };
         if assigned == 0 {
             let error = std::io::Error::last_os_error();
             unsafe { CloseHandle(handle) };
@@ -526,6 +576,115 @@ impl OwnedJob {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+
+/// Exact ownership of an already running process generation that this test
+/// did not spawn directly (for example a broker launched by an owned
+/// launcher helper). The process is verified by PID and creation FILETIME,
+/// then placed in a fresh kill-on-close job that this value owns.
+#[cfg(windows)]
+pub struct OwnedProcess {
+    handle: isize,
+    pid: u32,
+    job: OwnedJob,
+}
+
+#[cfg(windows)]
+impl OwnedProcess {
+    pub fn adopt(pid: u32, expected_creation_filetime: u64) -> std::io::Result<Self> {
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        };
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION
+                    | PROCESS_SYNCHRONIZE
+                    | PROCESS_TERMINATE
+                    | PROCESS_SET_QUOTA,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut creation = zero;
+        let mut exit = zero;
+        let mut kernel = zero;
+        let mut user = zero;
+        let queried =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+        if queried == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+        let actual = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+        if actual != expected_creation_filetime {
+            unsafe { CloseHandle(handle) };
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "process generation does not match the expected creation time",
+            ));
+        }
+        let job = match OwnedJob::assign_handle(handle as isize, JobPolicy::KillOnClose) {
+            Ok(job) => job,
+            Err(error) => {
+                unsafe { CloseHandle(handle) };
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            handle: handle as isize,
+            pid,
+            job,
+        })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn exited(&self) -> std::io::Result<bool> {
+        self.wait_exited(Duration::ZERO)
+    }
+
+    pub fn wait_exited(&self, timeout: Duration) -> std::io::Result<bool> {
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+        match unsafe { WaitForSingleObject(self.handle as _, timeout_ms) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
+
+    /// Terminates through the owned job (never by name or bare PID) and
+    /// waits for the exact process to exit.
+    pub fn terminate(&self) -> std::io::Result<bool> {
+        self.job.terminate()?;
+        self.wait_exited(Duration::from_secs(5))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        let _ = self.job.terminate();
+        let _ = self.wait_exited(Duration::from_secs(5));
+        unsafe {
+            CloseHandle(self.handle as _);
+        }
+        // The job handle closes in OwnedJob::drop.
     }
 }
 

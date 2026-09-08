@@ -130,6 +130,14 @@ impl ResponseEnvelope {
     }
 }
 
+/// Discovery document schema version. Independent of the frame protocol
+/// [`WIRE_VERSION`]: version 2 documents describe two version 1 endpoints.
+pub const DISCOVERY_VERSION: u16 = 2;
+
+/// Discovery version 2: one authority, boot and exact server generation with
+/// two distinct endpoints. The owner endpoint requires the native owner
+/// credential after the boot hello; the peer endpoint requires the boot
+/// hello only. Ordinary readers accept exactly this schema.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DiscoveryRecord {
@@ -137,34 +145,41 @@ pub struct DiscoveryRecord {
     pub authority_id: String,
     pub boot_id: String,
     pub server: super::ProcessIdentity,
-    pub pipe_name: String,
+    pub owner_pipe_name: String,
+    pub peer_pipe_name: String,
 }
 impl DiscoveryRecord {
     pub fn new(
         authority_id: impl Into<String>,
         boot_id: impl Into<String>,
         server: super::ProcessIdentity,
-        pipe_name: impl Into<String>,
+        owner_pipe_name: impl Into<String>,
+        peer_pipe_name: impl Into<String>,
     ) -> Self {
         Self {
-            version: WIRE_VERSION,
+            version: DISCOVERY_VERSION,
             authority_id: authority_id.into(),
             boot_id: boot_id.into(),
             server,
-            pipe_name: pipe_name.into(),
+            owner_pipe_name: owner_pipe_name.into(),
+            peer_pipe_name: peer_pipe_name.into(),
         }
     }
     pub fn validate(&self) -> bool {
-        self.version == WIRE_VERSION
+        self.version == DISCOVERY_VERSION
             && valid_id(&self.authority_id)
             && valid_id(&self.boot_id)
             && self.server.pid != 0
             && self.server.creation_filetime.get() != 0
-            && self
-                .pipe_name
-                .strip_prefix(r"\\.\pipe\")
-                .is_some_and(valid_id)
+            && valid_pipe_name(&self.owner_pipe_name)
+            && valid_pipe_name(&self.peer_pipe_name)
+            && !self
+                .owner_pipe_name
+                .eq_ignore_ascii_case(&self.peer_pipe_name)
     }
+}
+pub(crate) fn valid_pipe_name(value: &str) -> bool {
+    value.strip_prefix(r"\\.\pipe\").is_some_and(valid_id)
 }
 pub(crate) fn valid_id(value: &str) -> bool {
     !value.is_empty()

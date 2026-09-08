@@ -108,6 +108,13 @@ fn main() -> Result<()> {
     if let Some(code) = termx_host::agent_launch::dispatch_early(std::env::args_os().skip(1)) {
         std::process::exit(code);
     }
+    // Swarm companion modes are selected by the first OS token only, after
+    // agent helpers and before ordinary argument parsing, log cleanup,
+    // history sweeps, logging or PTY/TCP startup. A recognized token always
+    // yields an exit code here; it never falls through to the host parser.
+    if let Some(code) = termx_host::swarm::dispatch_early(std::env::args_os().skip(1)) {
+        std::process::exit(code);
+    }
     let override_dir = parse_args_from(std::env::args().skip(1))?;
     let data_dir = paths::resolve_data_dir(override_dir.as_deref())?;
 

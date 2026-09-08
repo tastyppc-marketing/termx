@@ -362,6 +362,21 @@ pub struct Worker {
 }
 impl Worker {
     pub async fn open(path: PathBuf, config: WorkerConfig) -> Result<Self, WorkerError> {
+        Self::open_with_lifetime(path, config, Arc::new(())).await
+    }
+
+    /// Retains an external lifetime until the SQLite store has been dropped
+    /// and its native join reaper has finished cleaning up queued work.
+    ///
+    /// Dropping this worker, or cancelling open/shutdown, closes admission but
+    /// does not release the lifetime while native work can still run. Client
+    /// clones and replies already handed to callers do not retain the lifetime.
+    /// As with `open`, dropping an accepted reply does not roll back its work.
+    pub async fn open_with_lifetime<T: Send + Sync + 'static>(
+        path: PathBuf,
+        config: WorkerConfig,
+        lifetime: Arc<T>,
+    ) -> Result<Self, WorkerError> {
         if config.max_requests == 0
             || config.max_request_bytes == 0
             || config.max_responses == 0
@@ -385,9 +400,13 @@ impl Worker {
         let (ready_tx, ready_rx) = oneshot::channel();
         let (exit_tx, exit_rx) = oneshot::channel();
         let thread_shared = shared.clone();
+        let thread_lifetime = Arc::clone(&lifetime);
         let thread = std::thread::Builder::new()
             .name("swarm-sqlite".into())
             .spawn(move || {
+                // Declaration order matters: the Store (and its connection)
+                // must drop before this guard on return or unwind.
+                let _lifetime = thread_lifetime;
                 let mut store = match Store::open(path) {
                     Ok(store) => store,
                     Err(error) => {
@@ -405,6 +424,9 @@ impl Worker {
         let reaper = std::thread::Builder::new()
             .name("swarm-sqlite-join".into())
             .spawn(move || {
+                // Independent of Worker/open/shutdown future ownership, and
+                // retained through the join and queued-response cleanup below.
+                let _lifetime = lifetime;
                 let result = thread.join().map_err(|_| WorkerError::Panicked);
                 let queued = {
                     let mut state = lock(&shared);

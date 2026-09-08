@@ -101,7 +101,8 @@ fn discovery_rejects_malformed_predecessor_and_atomically_retires_valid_one() {
         "authority-1",
         "boot-1",
         identity,
-        r"\\.\pipe\termx-test-discovery",
+        r"\\.\pipe\termx-test-discovery-owner",
+        r"\\.\pipe\termx-test-discovery-peer",
     );
     claim.publish_discovery(&first).unwrap();
     fs::write(dir.join("discovery.json"), b"{malformed").unwrap();
@@ -131,7 +132,8 @@ fn discovery_rejects_malformed_predecessor_and_atomically_retires_valid_one() {
         "authority-1",
         "boot-2",
         identity,
-        r"\\.\pipe\termx-test-discovery-2",
+        r"\\.\pipe\termx-test-discovery-2-owner",
+        r"\\.\pipe\termx-test-discovery-2-peer",
     );
     claim3.publish_discovery(&second).unwrap();
     assert_eq!(claim3.read_discovery().unwrap(), second);
@@ -159,7 +161,8 @@ fn insecure_existing_discovery_is_rejected_and_preserved() {
         "authority-1",
         "boot-1",
         identity,
-        r"\\.\pipe\termx-test-insecure-discovery",
+        r"\\.\pipe\termx-test-insecure-discovery-owner",
+        r"\\.\pipe\termx-test-insecure-discovery-peer",
     );
     let bytes = serde_json::to_vec(&discovery).unwrap();
     fs::write(dir.join("discovery.json"), &bytes).unwrap();

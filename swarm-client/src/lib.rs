@@ -40,7 +40,8 @@ pub fn assert_deserialize_owned<T: serde::de::DeserializeOwned>() {}
 pub use security::{AuthorityClaim, AuthorityError, ClientBootstrap, OwnerCredential};
 #[cfg(windows)]
 pub use wire::{
-    DecimalU64, DiscoveryRecord, Hello, RequestEnvelope, ResponseEnvelope, WIRE_VERSION,
+    DecimalU64, DiscoveryRecord, Hello, RequestEnvelope, ResponseEnvelope, DISCOVERY_VERSION,
+    WIRE_VERSION,
 };
 
 #[cfg(windows)]
@@ -80,6 +81,13 @@ impl OwnerClient {
     pub async fn recv_response(&self) -> Result<ResponseEnvelope, WireError> {
         self.pipe.recv_response().await
     }
+    /// The authenticated owner connection for domain-level framing.
+    pub fn pipe(&self) -> &VerifiedPipe {
+        &self.pipe
+    }
+    pub fn into_pipe(self) -> VerifiedPipe {
+        self.pipe
+    }
 }
 #[cfg(windows)]
 impl PeerClient {
@@ -102,5 +110,13 @@ impl PeerClient {
     }
     pub async fn recv_response(&self) -> Result<ResponseEnvelope, WireError> {
         self.pipe.recv_response().await
+    }
+    /// The boot-verified peer connection for domain-level framing. The hello
+    /// proves the boot generation only; it never identifies an enrolled peer.
+    pub fn pipe(&self) -> &VerifiedPipe {
+        &self.pipe
+    }
+    pub fn into_pipe(self) -> VerifiedPipe {
+        self.pipe
     }
 }
