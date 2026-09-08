@@ -9,6 +9,7 @@ dist-portable/
 *.tsbuildinfo
 .superpowers/
 .worktrees/
+retired/test-artifacts/swarm-core/
 
 # Python bytecode from tools/claude-hooks
 __pycache__/
