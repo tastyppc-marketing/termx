@@ -93,6 +93,8 @@ The retained RPC helper passed 17 tests. The shared-runtime characterization is 
 
 The corrected live run passed 1/1 in 71.27 seconds. The live probe uses its owned app-server child handle for termination and checks that the child exited. It archives only its newly created durable synthetic thread; archiving retains that synthetic history in the normal user store. Separate native snapshots captured 31, 44, and 44 process generations in earlier failing runs, and 45 in the final passing run. Every captured generation was verified exited after its respective run. Independent code review and exact commands are recorded with this milestone's implementation plan.
 
+Subsequent review hardening added five tests for malformed JSON/binary frames and required metadata presence/shape. The combined default suite passed 22 tests with one live skip. A fresh live run of those validators passed 1/1 in 82.39 seconds; all 45 captured process generations from that run also exited. Both review findings were independently re-reviewed as resolved. The published checkpoint and continued internal-core work remain distinct from a shipped collaboration feature.
+
 ## Remaining gates before shipping
 
 - Session-scoped activation of tools and inbound policy in arbitrary already-running sessions, without a deliberate restart/handoff; managed/project policy precedence and full accept/hold/refuse matrix.

@@ -6,6 +6,7 @@ Run the dependency-free transport tests with Node 24 or newer:
 
 ```powershell
 node --test tools/swarm-proof/rpc.test.mjs
+node --test tools/swarm-proof/codex-remote-helpers.test.mjs
 node --test tools/swarm-proof/codex-remote.test.mjs
 ```
 
