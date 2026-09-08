@@ -8,6 +8,8 @@
 
 **Starting checkpoint:** `eb5ffb5`, published on both feature branches. GitHub backup `backup/pre-swarm-2026-09-08` remains at `41a72fc`. Existing TermX host and user sessions stay running.
 
+**Progress:** Task 1 completed and independently reviewed through `94ceaa3`: 1 schema unit test and 20 integration tests passed, with package formatting and clippy clean. The bundled SQLite is 3.53.2. Task 2 is in progress; delivery/continuation, worker recovery, sustained testing, and native/UI integration remain ahead. This is an internal library, not yet a usable collaboration control in TermX.
+
 ## Global constraints
 
 - Never delete filesystem artifacts as cleanup. Preserve them, or move artifacts needing removal into `retired/<date-and-reason>/` with their original paths recorded. Verify any move's absolute source/destination stay within the intended workspace. Do not run clean/prune/reset commands. New durable-test directories are retained under ignored `retired/test-artifacts/`; avoid auto-deleting temporary-directory guards in new tests.
@@ -51,12 +53,12 @@ The real Codex probe accepted two pending rows with one client correlation key. 
 
 **Scope:** Establish the typed internal contract and schema foundation only. No pipe/CLI/UI, no native harness calls, no shared global data directory.
 
-- [ ] Write meaningful failing tests for new-store initialization, reopen preserving authority, unrelated/future schema rejection without file mutation, explicit durability pragmas, transactional migration failure, and compiled SQLite fixed-version baseline. Tests retain unique file-backed fixtures under ignored `retired/test-artifacts/swarm-core/`.
-- [ ] Add the workspace member and dependency lock entries. Do not alter existing host dependency versions unnecessarily. Check that this crate can be tested independently with `cargo test -p termx-swarm-core`.
-- [ ] Define validated IDs, errors, binding/group/message/delivery/receipt records, and distinct trusted-principal versus serialized-request types. Enforce finite field lengths and integer conversions; never deserialize an owner/peer principal from untrusted JSON.
-- [ ] Create versioned tables/indexes for authority metadata, peers/current and historical bindings, groups/memberships, messages, recipient deliveries, acknowledgements, delivery attempts, and continuation records. Reserve no arbitrary SQL/path execution surface. Use foreign keys and unique constraints for structural invariants.
-- [ ] Implement conservative open/initialize and an integrity/durability inspection method for tests/diagnostics that returns metadata only. Unknown schema and failed initialization remain preserved; no catch-and-recreate fallback.
-- [ ] Run targeted tests, `cargo fmt --all -- --check` (format only owned files if existing unrelated code differs), and `cargo clippy -p termx-swarm-core --all-targets -- -D warnings`. Obtain independent review and commit.
+- [x] Write meaningful failing tests for new-store initialization, reopen preserving authority, unrelated/future schema rejection without file mutation, explicit durability pragmas, transactional migration failure, and compiled SQLite fixed-version baseline. Tests retain unique file-backed fixtures under ignored `retired/test-artifacts/swarm-core/`.
+- [x] Add the workspace member and dependency lock entries. Do not alter existing host dependency versions unnecessarily. Check that this crate can be tested independently with `cargo test -p termx-swarm-core`.
+- [x] Define validated IDs, errors, binding/group/message/delivery/receipt records, and distinct trusted-principal versus serialized-request types. Enforce finite field lengths and integer conversions; never deserialize an owner/peer principal from untrusted JSON.
+- [x] Create versioned tables/indexes for authority metadata, peers/current and historical bindings, groups/memberships, messages, recipient deliveries, acknowledgements, delivery attempts, and continuation records. Reserve no arbitrary SQL/path execution surface. Use foreign keys and unique constraints for structural invariants.
+- [x] Implement conservative open/initialize and an integrity/durability inspection method for tests/diagnostics that returns metadata only. Unknown schema and failed initialization remain preserved; no catch-and-recreate fallback.
+- [x] Run targeted tests, `cargo fmt --all -- --check` (format only owned files if existing unrelated code differs), and `cargo clippy -p termx-swarm-core --all-targets -- -D warnings`. Obtain independent review and commit.
 
 ## Task 2: Transactional membership and message mailbox
 

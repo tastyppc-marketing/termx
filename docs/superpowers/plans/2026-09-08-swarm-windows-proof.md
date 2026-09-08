@@ -72,7 +72,7 @@ const loaded = await client.request('thread/loaded/list', {});
 - [x] Run a synthetic shared problem after only a broad collaboration introduction. Let agents choose context reads and messages, observe at least one reverse-path context read and message, then observe a chosen message wake an idle peer. Distinguish scripted transport probes from this autonomous scenario. A diagnostic timeout stops the test process only; it is not a product conversation policy.
 - [x] Close only handles/processes created by the probes and verify exit. Record every scenario as observed pass, observed failure, or not exercised with the exact reason.
 - [ ] Verify the user's custom Claude/Astra launcher and full effective configuration-source/permission parity. Launcher details were requested but unavailable for this milestone.
-- [ ] Prove scoped tool activation in arbitrary already-running sessions, including managed/project policy precedence. The observed MCP path used a deliberate handoff of disposable sessions.
+- [ ] Prove scoped tool activation in arbitrary already-running sessions, including managed/project policy precedence. The observed MCP path used a deliberate handoff of disposable sessions. A separate fresh-session test verified project-local `refuse` overriding launch-scoped `accept`; other precedence combinations and arbitrary live activation remain open.
 
 ## Task 3: Review and publish the capability evidence
 
