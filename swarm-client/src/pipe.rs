@@ -1,5 +1,8 @@
 use crate::{
-    framing::{decode_body, encode_message_body, ConnectionPermit, FramePermit},
+    framing::{
+        decode_body, encode_message_body, padded_arc_allocation_bytes, ConnectionPermit,
+        FramePermit,
+    },
     wire::valid_id,
     DiscoveryRecord, FrameBudget, OwnerCredential, ProcessIdentity, ReceivedFrame, RequestEnvelope,
     ResponseEnvelope, VerifiedProcess, WireError, MAX_FRAME_BYTES,
@@ -189,7 +192,6 @@ impl Drop for ProgressGuard {
 
 struct FrameReservation {
     _permit: FramePermit,
-    connection: Arc<ConnectionState>,
     reserved_bytes: usize,
     body_capacity: usize,
 }
@@ -197,8 +199,10 @@ struct FrameReservation {
 /// One exclusive right to send a single reserved frame on one `VerifiedPipe`.
 ///
 /// Not `Clone` and not `Deserialize`. `send_reserved` consumes the token once.
-/// Share reservation lifetime with [`FrameCreditHandle`]; cloning a handle does
-/// not duplicate this send right or reserve more bytes.
+/// The token retains this endpoint's `Arc<ConnectionState>` through every
+/// pre-I/O check, write, and drop. Share reservation lifetime with
+/// [`FrameCreditHandle`]; cloning a handle does not duplicate this send right,
+/// reserve more bytes, or keep the endpoint alive.
 ///
 /// ```
 /// use termx_swarm_client::ReservedFrameSend;
@@ -244,12 +248,14 @@ struct FrameReservation {
 /// ```
 pub struct ReservedFrameSend {
     reservation: Arc<FrameReservation>,
+    connection: Arc<ConnectionState>,
 }
 
 /// Shared ownership of one actual frame reservation. Cannot authorize a send.
 ///
 /// Cloning does not reserve more bytes or release the original credit. Debug
-/// reports only the reserved byte count.
+/// reports only the reserved byte count. The handle does not retain the
+/// endpoint or watch graph; only the send token does.
 #[derive(Clone)]
 pub struct FrameCreditHandle {
     reservation: Arc<FrameReservation>,
@@ -288,13 +294,41 @@ impl ReservedFrameSend {
     }
 
     fn belongs_to(&self, state: &Arc<ConnectionState>) -> bool {
-        Arc::ptr_eq(&self.reservation.connection, state)
+        Arc::ptr_eq(&self.connection, state)
     }
 }
 
 impl FrameCreditHandle {
     pub fn reserved_bytes(&self) -> usize {
         self.reservation.reserved_bytes
+    }
+
+    /// Conservative allocation-request layout bound retained beyond this
+    /// handle's inline size.
+    ///
+    /// Counts both the `Arc<FrameReservation>` allocation and the permit's
+    /// shared `Arc<std::sync::Mutex<BudgetState>>` allocation, including
+    /// padded atomic reference-count headers. The result is a stable
+    /// allocation-request layout bound, not reserved frame capacity,
+    /// output-buffer size, allocator usable size, or RSS.
+    ///
+    /// Every handle charges both complete shared allocations even when other
+    /// handles or connections share them. Clone counts change neither the
+    /// result nor reservation ownership. A containing host wrapper's inline
+    /// size is counted separately by the core constructor. The sole send
+    /// token, connection, futures, and extra buffers remain separately
+    /// bounded runtime owners.
+    ///
+    /// Layout arithmetic matches the current Windows/std `Arc` and mutex
+    /// representation on this toolchain (Rust 1.97, 64-bit Windows, futex
+    /// mutex with inline poison and counters). Review it on toolchain or
+    /// target changes. `BudgetState` is fixed scalar counters; this handle
+    /// does not retain the connection/watch graph, source bytes, response
+    /// copies, or queue collections.
+    pub fn owned_heap_bytes(&self) -> usize {
+        padded_arc_allocation_bytes::<FrameReservation>()
+            .checked_add(FramePermit::shared_state_arc_heap_bytes())
+            .expect("credit-handle metadata layout overflow")
     }
 }
 
@@ -316,10 +350,10 @@ fn reserve_send_on(
     Ok(ReservedFrameSend {
         reservation: Arc::new(FrameReservation {
             _permit: permit,
-            connection: state.clone(),
             reserved_bytes,
             body_capacity,
         }),
+        connection: state.clone(),
     })
 }
 
@@ -1437,11 +1471,108 @@ mod tests {
         let (first, second) = clone_handle(token.credit_handle());
         assert_eq!(first.reserved_bytes(), 6);
         assert_eq!(second.reserved_bytes(), 6);
+        assert_eq!(first.owned_heap_bytes(), second.owned_heap_bytes());
         assert_eq!(budget.usage(), (6, 1));
         drop(token);
         drop(first);
         assert_eq!(budget.usage(), (6, 1));
         drop(second);
         assert_eq!(budget.usage(), (0, 0));
+    }
+
+    #[test]
+    fn credit_handle_does_not_retain_endpoint_after_token_and_state_drop() {
+        let state = ConnectionState::new();
+        let weak = Arc::downgrade(&state);
+        let budget = FrameBudget::new(1024);
+        let token = reserve_send_on(&state, &budget, 4).unwrap();
+        let handle = token.credit_handle();
+        assert_eq!(handle.reserved_bytes(), 8);
+        assert_eq!(budget.usage(), (8, 1));
+        drop(state);
+        assert!(
+            weak.upgrade().is_some(),
+            "token must keep the endpoint allocation alive after the original state drops"
+        );
+        drop(token);
+        assert!(
+            weak.upgrade().is_none(),
+            "credit-only handle must not keep ConnectionState or its watch graph alive"
+        );
+        assert_eq!(handle.reserved_bytes(), 8);
+        assert_eq!(budget.usage(), (8, 1));
+        drop(handle);
+        assert_eq!(budget.usage(), (0, 0));
+    }
+
+    #[test]
+    fn credit_handle_owned_heap_bytes_is_stable_layout_sum() {
+        let evidence = retained("credit-handle-owned-heap");
+        const CORE_GUARD_METADATA_CAP: usize = 64 * 1024;
+        let state = ConnectionState::new();
+        let budget = FrameBudget::new(MAX_FRAME_BYTES + 16);
+        let zero = reserve_send_on(&state, &budget, 0).unwrap();
+        let small = reserve_send_on(&state, &budget, 4).unwrap();
+        let large = reserve_send_on(&state, &budget, MAX_FRAME_BYTES).unwrap();
+        let zero_handle = zero.credit_handle();
+        let small_handle = small.credit_handle();
+        let large_handle = large.credit_handle();
+        let cloned = small_handle.clone();
+
+        let reservation_heap = padded_arc_allocation_bytes::<FrameReservation>();
+        let budget_heap = FramePermit::shared_state_arc_heap_bytes();
+        let expected = reservation_heap
+            .checked_add(budget_heap)
+            .expect("test metadata layout overflow");
+        let inline = std::mem::size_of::<FrameCreditHandle>();
+        let wrapper_total = inline
+            .checked_add(expected)
+            .expect("inline plus heap overflow");
+
+        assert_ne!(expected, 0);
+        assert_eq!(zero_handle.owned_heap_bytes(), expected);
+        assert_eq!(small_handle.owned_heap_bytes(), expected);
+        assert_eq!(large_handle.owned_heap_bytes(), expected);
+        assert_eq!(cloned.owned_heap_bytes(), expected);
+        assert_eq!(zero_handle.reserved_bytes(), 4);
+        assert_eq!(small_handle.reserved_bytes(), 8);
+        assert_eq!(large_handle.reserved_bytes(), MAX_FRAME_BYTES + 4);
+        assert_ne!(expected, small_handle.reserved_bytes());
+        assert!(wrapper_total < CORE_GUARD_METADATA_CAP);
+
+        let weak_budget = budget.downgrade_shared_state();
+        let usage_after_reserve = budget.usage();
+        drop(budget);
+        drop(zero);
+        drop(small);
+        drop(large);
+        drop(state);
+        assert_eq!(small_handle.owned_heap_bytes(), expected);
+        assert_eq!(cloned.owned_heap_bytes(), expected);
+        assert!(weak_budget.can_upgrade());
+        assert_eq!(usage_after_reserve, (MAX_FRAME_BYTES + 16, 3));
+        drop(zero_handle);
+        drop(large_handle);
+        drop(cloned);
+        assert!(weak_budget.can_upgrade());
+        drop(small_handle);
+        assert!(!weak_budget.can_upgrade());
+
+        fs::write(
+            evidence.join("result.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "reservation_payload_size": std::mem::size_of::<FrameReservation>(),
+                "reservation_payload_align": std::mem::align_of::<FrameReservation>(),
+                "reservation_arc_heap_bytes": reservation_heap,
+                "budget_mutex_arc_heap_bytes": budget_heap,
+                "owned_heap_bytes": expected,
+                "credit_handle_inline_bytes": inline,
+                "host_wrapper_inline_plus_heap": wrapper_total,
+                "core_guard_metadata_cap": CORE_GUARD_METADATA_CAP,
+                "below_core_guard_cap": wrapper_total < CORE_GUARD_METADATA_CAP,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 }

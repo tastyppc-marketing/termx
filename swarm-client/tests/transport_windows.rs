@@ -672,6 +672,11 @@ async fn reserved_send_admission_includes_length_prefix() {
     assert_eq!(token.reserved_bytes(), 8);
     let handle = token.credit_handle();
     assert_eq!(handle.reserved_bytes(), 8);
+    let heap = handle.owned_heap_bytes();
+    assert_ne!(heap, 0);
+    assert_ne!(heap, handle.reserved_bytes());
+    const CORE_GUARD_METADATA_CAP: usize = 64 * 1024;
+    assert!(std::mem::size_of_val(&handle).checked_add(heap).unwrap() < CORE_GUARD_METADATA_CAP);
     assert_eq!(budget.usage(), (8, 1));
     assert!(matches!(accepted.reserve_send(0), Err(WireError::Capacity)));
     let debug = format!("{handle:?}");
@@ -781,11 +786,15 @@ async fn shared_reservation_releases_only_after_all_owners_drop() {
     let token = accepted.reserve_send(4).unwrap();
     let handle_a = token.credit_handle();
     let handle_b = handle_a.clone();
+    let heap = handle_a.owned_heap_bytes();
+    assert_eq!(heap, handle_b.owned_heap_bytes());
     assert_eq!(budget.usage(), (8, 1));
     drop(token);
     assert_eq!(budget.usage(), (8, 1));
+    assert_eq!(handle_a.owned_heap_bytes(), heap);
     drop(handle_a);
     assert_eq!(budget.usage(), (8, 1));
+    assert_eq!(handle_b.owned_heap_bytes(), heap);
     drop(handle_b);
     assert_eq!(budget.usage(), (0, 0));
     accepted.send_bytes(b"zz").await.unwrap();
