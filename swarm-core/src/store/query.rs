@@ -4,8 +4,8 @@ use crate::error::{StoreError, ValidationError};
 use crate::model::{
     AcknowledgementResult, AttachmentRecord, AuthorityId, GroupId, MailboxAfterRequest,
     MailboxCursor, MailboxEntry, MailboxNavigation, MailboxPage, MailboxPageRequest, MessageId,
-    MessageRecord, PeerId, PeerPrincipal, ReceiptRecord, Revision, SourceId, SourceReferenceId,
-    MAX_MAILBOX_PAGE_BYTES,
+    MessageRecord, NavigationPosition, NavigationScope, PeerId, PeerPrincipal, ReceiptRecord,
+    Revision, SourceId, SourceReferenceId, MAX_MAILBOX_PAGE_BYTES,
 };
 
 use super::policy::revision_from_sql;
@@ -31,20 +31,42 @@ impl ReadKind {
             Self::Outgoing => "outgoing",
         }
     }
+
+    /// Whether a position's scope names exactly this read kind and selector.
+    fn matches(self, scope: &NavigationScope, selector: Option<&str>) -> bool {
+        match (self, scope) {
+            (Self::Mailbox, NavigationScope::Mailbox) => selector.is_none(),
+            (Self::Thread, NavigationScope::Thread { root }) => selector == Some(root.as_str()),
+            (Self::Outgoing, NavigationScope::Outgoing) => selector.is_none(),
+            _ => false,
+        }
+    }
+
+    fn scope(self, selector: Option<&str>) -> Result<NavigationScope, StoreError> {
+        Ok(match self {
+            Self::Mailbox => NavigationScope::Mailbox,
+            Self::Outgoing => NavigationScope::Outgoing,
+            Self::Thread => NavigationScope::Thread {
+                root: MessageId::parse(selector.ok_or(StoreError::CursorScope)?)?,
+            },
+        })
+    }
 }
 
-/// Where a bounded read starts. `Fresh` and `After` freeze a new watermark;
-/// `Cursor` continues a frozen one. A position is navigation only.
+/// Where a bounded read starts. `Fresh`, `After` and `Position` freeze a new
+/// watermark; `Cursor` continues a frozen one. Positions are navigation only.
 pub(super) enum InboxStart {
     Fresh,
     After(u64),
+    Position(NavigationPosition),
     Cursor(MailboxCursor),
 }
 
 impl From<MailboxNavigation> for InboxStart {
     fn from(navigation: MailboxNavigation) -> Self {
         match navigation {
-            MailboxNavigation::After { after_sequence } => Self::After(after_sequence),
+            MailboxNavigation::Position(position) => Self::Position(position),
+            MailboxNavigation::ResetAfter { after_sequence } => Self::After(after_sequence),
             MailboxNavigation::Cursor(cursor) => Self::Cursor(cursor),
         }
     }
@@ -53,6 +75,56 @@ impl From<MailboxNavigation> for InboxStart {
 pub(super) struct Frozen {
     pub snapshot_high: i64,
     pub position: i64,
+}
+
+impl Frozen {
+    /// Store-built position to continue after this page under a fresh
+    /// watermark: the last included item of a partial page, or the frozen
+    /// high watermark of a complete one.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn resume_position(
+        &self,
+        principal: &PeerPrincipal,
+        group_id: &GroupId,
+        policy_revision: Revision,
+        kind: ReadKind,
+        selector: Option<&str>,
+        last_included: Option<u64>,
+        more_exists: bool,
+    ) -> Result<NavigationPosition, StoreError> {
+        let after_sequence = match (more_exists, last_included) {
+            (true, Some(last)) => last,
+            (true, None) => sequence_from_sql(self.position)?,
+            (false, _) => sequence_from_sql(self.snapshot_high)?,
+        };
+        Ok(NavigationPosition::new(
+            group_id.clone(),
+            principal.peer_id.clone(),
+            principal.binding_revision,
+            policy_revision,
+            kind.scope(selector)?,
+            after_sequence,
+        ))
+    }
+
+    /// Widest possible resume position for pessimistic envelope sizing.
+    pub(super) fn sizing_position(
+        &self,
+        principal: &PeerPrincipal,
+        group_id: &GroupId,
+        policy_revision: Revision,
+        kind: ReadKind,
+        selector: Option<&str>,
+    ) -> Result<NavigationPosition, StoreError> {
+        Ok(NavigationPosition::new(
+            group_id.clone(),
+            principal.peer_id.clone(),
+            principal.binding_revision,
+            policy_revision,
+            kind.scope(selector)?,
+            i64::MAX as u64,
+        ))
+    }
 }
 
 impl Store {
@@ -132,11 +204,19 @@ impl Store {
         )?;
         let mut messages = Vec::new();
         let sizing_cursor = MailboxCursor::generate();
-        // IDs have fixed serialized length. Reserve the same full Some(cursor)
-        // envelope as before, even when this ultimately becomes the last page.
+        // IDs have fixed serialized length. Reserve the full Some(cursor)
+        // envelope and the widest resume position, even when this ultimately
+        // becomes the last page.
         let mut sizing = super::page_size::PageSize::new(&MailboxPage {
             messages: Vec::new(),
             next_cursor: Some(sizing_cursor),
+            resume_position: frozen.sizing_position(
+                principal,
+                group_id,
+                authorized.policy_revision,
+                ReadKind::Mailbox,
+                None,
+            )?,
             snapshot_high_sequence: sequence_from_sql(frozen.snapshot_high)?,
         })?;
         let mut more_exists = false;
@@ -202,10 +282,20 @@ impl Store {
         } else {
             None
         };
+        let resume_position = frozen.resume_position(
+            principal,
+            group_id,
+            authorized.policy_revision,
+            ReadKind::Mailbox,
+            None,
+            messages.last().map(|entry| entry.message.group_sequence),
+            more_exists,
+        )?;
         transaction.commit()?;
         Ok(MailboxPage {
             messages,
             next_cursor,
+            resume_position,
             snapshot_high_sequence: sequence_from_sql(frozen.snapshot_high)?,
         })
     }
@@ -296,28 +386,50 @@ pub(super) fn resolve_navigation(
             selector,
             cursor,
         ),
-        InboxStart::Fresh | InboxStart::After(_) => {
+        InboxStart::Fresh | InboxStart::After(_) | InboxStart::Position(_) => {
+            let after = match start {
+                InboxStart::After(after) => Some(*after),
+                InboxStart::Position(position) => {
+                    // Scope first: another reader, group or read kind is never
+                    // a silent reposition. Then binding and policy: a position
+                    // built before a continuation or policy change is stale
+                    // and must be reset explicitly.
+                    if position.group_id() != group_id
+                        || position.peer_id() != &principal.peer_id
+                        || !kind.matches(position.scope(), selector)
+                    {
+                        return Err(StoreError::PositionScope);
+                    }
+                    if position.binding_revision() != principal.binding_revision
+                        || position.policy_revision() != policy_revision
+                    {
+                        return Err(StoreError::StalePosition);
+                    }
+                    Some(position.after_sequence())
+                }
+                _ => None,
+            };
             let next_sequence = transaction.query_row(
                 "SELECT next_sequence FROM groups WHERE group_id=?1",
                 [group_id.as_str()],
                 |row| row.get::<_, i64>(0),
             )?;
             let snapshot_high = next_sequence - 1;
-            let position = match start {
-                InboxStart::After(after) => {
+            let position = match after {
+                Some(after) => {
                     let position =
-                        i64::try_from(*after).map_err(|_| ValidationError::IntegerRange {
+                        i64::try_from(after).map_err(|_| ValidationError::IntegerRange {
                             field: "after_sequence",
                         })?;
                     if position > snapshot_high {
                         return Err(StoreError::InvalidPosition {
-                            position: *after,
+                            position: after,
                             snapshot_high: sequence_from_sql(snapshot_high)?,
                         });
                     }
                     position
                 }
-                _ => 0,
+                None => 0,
             };
             Ok(Frozen {
                 snapshot_high,

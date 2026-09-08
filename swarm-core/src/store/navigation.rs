@@ -5,8 +5,15 @@
 //! exact current-binding delivery of it. Thread reads record fetch evidence
 //! for the caller's own deliveries exactly like a mailbox read; outgoing reads
 //! never touch delivery evidence.
+//!
+//! Thread candidates come from two bounded key ranges, each fetched with the
+//! page limit and merged in Rust: messages the caller sent in the thread
+//! (`messages_by_sender_thread`) and current deliveries to the caller's exact
+//! binding in the thread (`current_thread_delivery_page`). Work is bounded by
+//! the page size, never by the size of hidden branches or retained history.
+//! A retained sender/self row appears in both ranges and is emitted once.
 
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, Transaction, TransactionBehavior};
 
 use crate::error::StoreError;
 use crate::model::{
@@ -19,7 +26,7 @@ use super::page_size::PageSize;
 use super::policy::revision_from_sql;
 use super::query::{
     insert_cursor, load_receipt, mark_fetched, message_record, message_row, page_limit,
-    resolve_navigation, sequence_from_sql, InboxStart, ReadKind,
+    resolve_navigation, sequence_from_sql, Frozen, InboxStart, MessageRow, ReadKind,
 };
 use super::revision::bump_delivery;
 use super::{authorize_peer, now_millis, Store};
@@ -37,6 +44,7 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let authorized = authorize_peer(&transaction, &authority_id, principal, &request.group_id)?;
         let start = InboxStart::from(request.navigation.clone());
+        let selector = Some(request.root.as_str());
         let frozen = resolve_navigation(
             &transaction,
             &authority_id,
@@ -44,7 +52,7 @@ impl Store {
             &request.group_id,
             authorized.policy_revision,
             ReadKind::Thread,
-            Some(request.root.as_str()),
+            selector,
             &start,
         )?;
         // The selector must be a thread root in this exact group that the
@@ -65,37 +73,36 @@ impl Store {
             });
         }
         let now = now_millis(&transaction)?;
-        let mut statement = transaction.prepare(
-            "SELECT m.message_id,m.group_sequence,m.sender_peer_id,m.sender_binding_revision,m.client_key,m.body,m.topic,m.reply_to_message_id FROM messages m INDEXED BY messages_by_thread WHERE m.group_id=?1 AND m.thread_root_message_id=?2 AND m.group_sequence>?3 AND m.group_sequence<=?4 AND (m.sender_peer_id=?5 OR EXISTS(SELECT 1 FROM current_deliveries d WHERE d.message_id=m.message_id AND d.recipient_peer_id=?5 AND d.recipient_binding_revision=?6)) ORDER BY m.group_sequence LIMIT ?7",
-        )?;
-        let mut rows = statement.query_map(
-            params![
-                request.group_id.as_str(),
-                request.root.as_str(),
-                frozen.position,
-                frozen.snapshot_high,
-                principal.peer_id.as_str(),
-                principal.binding_revision.as_sql_i64(),
-                page_limit(request.max_items),
-            ],
-            message_row,
+        let candidates = thread_candidates(
+            &transaction,
+            principal,
+            &request,
+            &frozen,
+            request.max_items,
         )?;
         let snapshot_high_sequence = sequence_from_sql(frozen.snapshot_high)?;
         let mut sizing = PageSize::new(&ThreadPage {
             root: request.root.clone(),
             messages: Vec::new(),
             next_cursor: Some(MailboxCursor::generate()),
+            resume_position: frozen.sizing_position(
+                principal,
+                &request.group_id,
+                authorized.policy_revision,
+                ReadKind::Thread,
+                selector,
+            )?,
             snapshot_high_sequence,
         })?;
         let mut messages: Vec<ThreadEntry> = Vec::new();
         let mut more_exists = false;
         let mut newly_fetched = Vec::new();
-        for row in &mut rows {
+        for message_id in &candidates {
             if messages.len() == request.max_items {
                 more_exists = true;
                 break;
             }
-            let row = row?;
+            let row = load_message_row(&transaction, message_id)?;
             let message = message_record(&transaction, &request.group_id, &row)?;
             let mut receipt = load_receipt(&transaction, principal, &message.message_id)?;
             let fresh = matches!(&receipt, Some(receipt) if receipt.fetched_at_millis.is_none());
@@ -119,17 +126,14 @@ impl Store {
             }
             messages.push(entry);
         }
-        drop(rows);
-        drop(statement);
         for message_id in &newly_fetched {
             mark_fetched(&transaction, principal, message_id, now)?;
         }
         if !newly_fetched.is_empty() {
             bump_delivery(&transaction)?;
         }
-        let last_position = messages
-            .last()
-            .map_or(frozen.position, |entry| entry.message.group_sequence as i64);
+        let last_included = messages.last().map(|entry| entry.message.group_sequence);
+        let last_position = last_included.map_or(frozen.position, |sequence| sequence as i64);
         let next_cursor = if more_exists {
             Some(insert_cursor(
                 &transaction,
@@ -138,7 +142,7 @@ impl Store {
                 &request.group_id,
                 authorized.policy_revision,
                 ReadKind::Thread,
-                Some(request.root.as_str()),
+                selector,
                 frozen.snapshot_high,
                 last_position,
                 now,
@@ -146,11 +150,21 @@ impl Store {
         } else {
             None
         };
+        let resume_position = frozen.resume_position(
+            principal,
+            &request.group_id,
+            authorized.policy_revision,
+            ReadKind::Thread,
+            selector,
+            last_included,
+            more_exists,
+        )?;
         transaction.commit()?;
         Ok(ThreadPage {
             root: request.root,
             messages,
             next_cursor,
+            resume_position,
             snapshot_high_sequence,
         })
     }
@@ -197,6 +211,13 @@ impl Store {
         let mut sizing = PageSize::new(&OutgoingPage {
             messages: Vec::new(),
             next_cursor: Some(MailboxCursor::generate()),
+            resume_position: frozen.sizing_position(
+                principal,
+                &request.group_id,
+                authorized.policy_revision,
+                ReadKind::Outgoing,
+                None,
+            )?,
             snapshot_high_sequence,
         })?;
         let mut messages: Vec<MessageStateEntry> = Vec::new();
@@ -226,9 +247,8 @@ impl Store {
         }
         drop(rows);
         drop(statement);
-        let last_position = messages
-            .last()
-            .map_or(frozen.position, |entry| entry.message.group_sequence as i64);
+        let last_included = messages.last().map(|entry| entry.message.group_sequence);
+        let last_position = last_included.map_or(frozen.position, |sequence| sequence as i64);
         let next_cursor = if more_exists {
             Some(insert_cursor(
                 &transaction,
@@ -245,13 +265,100 @@ impl Store {
         } else {
             None
         };
+        let resume_position = frozen.resume_position(
+            principal,
+            &request.group_id,
+            authorized.policy_revision,
+            ReadKind::Outgoing,
+            None,
+            last_included,
+            more_exists,
+        )?;
         transaction.commit()?;
         Ok(OutgoingPage {
             messages,
             next_cursor,
+            resume_position,
             snapshot_high_sequence,
         })
     }
+}
+
+/// Up to `max_items + 1` visible thread message IDs in sequence order, from
+/// the two bounded key ranges merged and deduplicated by sequence.
+fn thread_candidates(
+    transaction: &Transaction<'_>,
+    principal: &PeerPrincipal,
+    request: &ThreadPageRequest,
+    frozen: &Frozen,
+    max_items: usize,
+) -> Result<Vec<MessageId>, StoreError> {
+    let limit = page_limit(max_items);
+    let mut sent_statement = transaction.prepare_cached(
+        "SELECT group_sequence,message_id FROM messages INDEXED BY messages_by_sender_thread WHERE group_id=?1 AND sender_peer_id=?2 AND thread_root_message_id=?3 AND group_sequence>?4 AND group_sequence<=?5 ORDER BY group_sequence LIMIT ?6",
+    )?;
+    let sent = sent_statement
+        .query_map(
+            params![
+                request.group_id.as_str(),
+                principal.peer_id.as_str(),
+                request.root.as_str(),
+                frozen.position,
+                frozen.snapshot_high,
+                limit,
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut received_statement = transaction.prepare_cached(
+        "SELECT group_sequence,message_id FROM current_thread_deliveries INDEXED BY current_thread_delivery_page WHERE group_id=?1 AND recipient_peer_id=?2 AND recipient_binding_revision=?3 AND thread_root_message_id=?4 AND group_sequence>?5 AND group_sequence<=?6 ORDER BY group_sequence LIMIT ?7",
+    )?;
+    let received = received_statement
+        .query_map(
+            params![
+                request.group_id.as_str(),
+                principal.peer_id.as_str(),
+                principal.binding_revision.as_sql_i64(),
+                request.root.as_str(),
+                frozen.position,
+                frozen.snapshot_high,
+                limit,
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut merged = Vec::with_capacity(max_items + 1);
+    let (mut sent, mut received) = (sent.into_iter().peekable(), received.into_iter().peekable());
+    while merged.len() <= max_items {
+        let next = match (sent.peek(), received.peek()) {
+            (Some(a), Some(b)) if a.0 == b.0 => {
+                // The same sequence is the same message: a retained
+                // sender/self row is emitted once.
+                received.next();
+                sent.next()
+            }
+            (Some(a), Some(b)) if a.0 < b.0 => sent.next(),
+            (Some(_), Some(_)) => received.next(),
+            (Some(_), None) => sent.next(),
+            (None, Some(_)) => received.next(),
+            (None, None) => None,
+        };
+        match next {
+            Some((_, message_id)) => merged.push(MessageId::parse(&message_id)?),
+            None => break,
+        }
+    }
+    Ok(merged)
+}
+
+fn load_message_row(
+    transaction: &Transaction<'_>,
+    message_id: &MessageId,
+) -> Result<MessageRow, StoreError> {
+    let mut statement = transaction.prepare_cached(
+        "SELECT message_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,body,topic,reply_to_message_id FROM messages WHERE message_id=?1",
+    )?;
+    Ok(statement.query_row([message_id.as_str()], message_row)?)
 }
 
 /// Durable per-recipient state of one message: the original frozen binding,

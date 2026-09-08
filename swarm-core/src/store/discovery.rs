@@ -76,7 +76,9 @@ impl Store {
             model_metadata: binding.2,
             is_live: authenticated.live,
             memberships: Vec::new(),
-            next_after_group: None,
+            // Sized with a full-width continuation key; cleared when the page
+            // turns out to be the last one.
+            next_after_group: Some(GroupId::generate()),
             inventory_revision: revisions.inventory_revision,
             run_revision: revisions.run_revision,
         };
@@ -123,9 +125,11 @@ impl Store {
         }
         drop(rows);
         drop(statement);
-        if more_exists {
-            view.next_after_group = view.memberships.last().map(|m| m.group_id.clone());
-        }
+        view.next_after_group = if more_exists {
+            view.memberships.last().map(|m| m.group_id.clone())
+        } else {
+            None
+        };
         transaction.commit()?;
         Ok(view)
     }
@@ -145,7 +149,7 @@ impl Store {
         let authorized = authorize_peer(&transaction, &authority_id, principal, &request.group_id)?;
         let after = request.after_peer.as_ref().map_or("", PeerId::as_str);
         let mut statement = transaction.prepare(
-            "SELECT gm.peer_id,gm.added_policy_revision,p.current_binding_revision,b.launch_id,b.harness,b.model_metadata_json,b.live FROM group_memberships gm JOIN peers p ON p.peer_id=gm.peer_id JOIN peer_bindings b ON b.peer_id=p.peer_id AND b.binding_revision=p.current_binding_revision WHERE gm.group_id=?1 AND gm.removed_policy_revision IS NULL AND gm.peer_id>?2 ORDER BY gm.peer_id LIMIT ?3",
+            "SELECT gm.peer_id,gm.added_policy_revision,p.current_binding_revision,b.launch_id,b.harness,b.model_metadata_json,b.live FROM group_memberships gm INDEXED BY membership_active_by_group JOIN peers p ON p.peer_id=gm.peer_id JOIN peer_bindings b ON b.peer_id=p.peer_id AND b.binding_revision=p.current_binding_revision WHERE gm.group_id=?1 AND gm.removed_policy_revision IS NULL AND gm.peer_id>?2 ORDER BY gm.peer_id LIMIT ?3",
         )?;
         let mut rows = statement.query_map(
             params![
@@ -170,7 +174,7 @@ impl Store {
             policy_revision: authorized.policy_revision,
             inventory_revision: read_revisions(&transaction)?.inventory_revision,
             peers: Vec::new(),
-            next_after_peer: None,
+            next_after_peer: Some(PeerId::generate()),
         };
         let mut sizing = PageSize::new(&page)?;
         let mut more_exists = false;
@@ -207,9 +211,11 @@ impl Store {
         }
         drop(rows);
         drop(statement);
-        if more_exists {
-            page.next_after_peer = page.peers.last().map(|p| p.peer_id.clone());
-        }
+        page.next_after_peer = if more_exists {
+            page.peers.last().map(|p| p.peer_id.clone())
+        } else {
+            None
+        };
         transaction.commit()?;
         Ok(page)
     }

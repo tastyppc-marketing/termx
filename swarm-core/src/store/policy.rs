@@ -193,7 +193,7 @@ impl Store {
         let group = read_group(&transaction, group_id)?;
         require_policy(&group, expected_policy_revision)?;
         let is_active = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM group_memberships WHERE group_id=?1 AND peer_id=?2 AND removed_policy_revision IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM group_memberships INDEXED BY membership_active_by_group WHERE group_id=?1 AND peer_id=?2 AND removed_policy_revision IS NULL)",
             [group_id.as_str(), peer_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;

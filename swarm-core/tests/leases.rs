@@ -1,7 +1,10 @@
+#[path = "support/credits.rs"]
+mod credits;
 mod support;
 
 use std::collections::BTreeSet;
 
+use credits::TestBudget;
 use termx_swarm_core::error::{StoreError, ValidationError};
 use termx_swarm_core::model::*;
 use termx_swarm_core::store::Store;
@@ -57,13 +60,6 @@ fn rebind(peer: &EnrolledPeer, terminal: &str) -> VerifiedContinuation {
     .unwrap()
 }
 
-fn identity(reference: &str) -> PublicationIdentity {
-    PublicationIdentity {
-        response_reference: reference.to_owned(),
-        reserved_bytes: 4096,
-    }
-}
-
 struct Fixture {
     store: Store,
     owner: OwnerPrincipal,
@@ -72,6 +68,8 @@ struct Fixture {
     carol: EnrolledPeer,
     group: GroupRecord,
     source: SourceRegistration,
+    budget: TestBudget,
+    destination: PublicationDestinationId,
 }
 
 impl Fixture {
@@ -103,6 +101,8 @@ impl Fixture {
             carol,
             group,
             source,
+            budget: TestBudget::new(1 << 20),
+            destination: PublicationDestinationId::generate(),
         }
     }
     fn acquire(&mut self) -> ContextGrantLease {
@@ -113,6 +113,33 @@ impl Fixture {
                 &self.source.source_id,
             )
             .unwrap()
+    }
+    fn acquire_for(&mut self, who: &EnrolledPeer) -> ContextGrantLease {
+        self.store
+            .acquire_context_grant(&who.principal, &self.group.group_id, &self.source.source_id)
+            .unwrap()
+    }
+    /// Source I/O and credit reservation happen here, outside the writer.
+    fn prepare(&self, lease: ContextGrantLease, body: &str) -> PreparedPublication {
+        let observation =
+            SourceSnapshotObservation::trusted(&lease, format!("snapshot:{body}"), Some(40))
+                .unwrap();
+        let reservation = DestinationReservation::from_owned(
+            self.destination.clone(),
+            self.budget.reserve(4096).expect("budget"),
+        )
+        .unwrap();
+        PreparedPublication::prepare(lease, observation, body.as_bytes().to_vec(), reservation)
+            .unwrap()
+    }
+    fn validate(
+        &mut self,
+        principal: &PeerPrincipal,
+        lease: ContextGrantLease,
+        body: &str,
+    ) -> Result<CommittedPublication, StoreError> {
+        let prepared = self.prepare(lease, body);
+        self.store.validate_context_grant(principal, prepared)
     }
 }
 
@@ -137,11 +164,12 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
             f.group.policy_revision,
         )
         .unwrap();
+    let alice = f.alice.principal.clone();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, lease, identity("policy")),
+        f.validate(&alice, lease, "policy"),
         Err(StoreError::StalePolicy { .. })
     ));
+    assert_eq!(f.budget.usage(), 0, "every rejection releases the credits");
 
     // Pause before validation.
     let mut f = Fixture::new("lease-barrier-pause");
@@ -149,11 +177,12 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
     f.store
         .set_group_paused(&f.owner, &f.group.group_id, true, f.group.policy_revision)
         .unwrap();
+    let alice = f.alice.principal.clone();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, lease, identity("pause")),
+        f.validate(&alice, lease, "pause"),
         Err(StoreError::GroupPaused)
     ));
+    assert_eq!(f.budget.usage(), 0);
 
     // Caller removed.
     let mut f = Fixture::new("lease-barrier-caller-removed");
@@ -167,11 +196,12 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
             f.group.policy_revision,
         )
         .unwrap();
+    let alice = f.alice.principal.clone();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, lease, identity("caller-removed")),
+        f.validate(&alice, lease, "caller-removed"),
         Err(StoreError::Unauthorized { .. })
     ));
+    assert_eq!(f.budget.usage(), 0);
 
     // Source owner removed.
     let mut f = Fixture::new("lease-barrier-owner-removed");
@@ -185,11 +215,12 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
             f.group.policy_revision,
         )
         .unwrap();
+    let alice = f.alice.principal.clone();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, lease, identity("owner-removed")),
+        f.validate(&alice, lease, "owner-removed"),
         Err(StoreError::StalePolicy { .. }) | Err(StoreError::Unauthorized { .. })
     ));
+    assert_eq!(f.budget.usage(), 0);
 
     // Caller rebinding.
     let mut f = Fixture::new("lease-barrier-caller-rebind");
@@ -204,16 +235,16 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
         )
         .unwrap();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&alice2.principal, lease, identity("caller-rebind")),
+        f.validate(&alice2.principal, lease, "caller-rebind"),
         Err(StoreError::Unauthorized { .. })
     ));
     let lease = f.acquire_for(&alice2);
+    let alice = f.alice.principal.clone();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, lease, identity("caller-stale")),
+        f.validate(&alice, lease, "caller-stale"),
         Err(StoreError::Unauthorized { .. })
     ));
+    assert_eq!(f.budget.usage(), 0);
 
     // Source owner rebinding without re-establishment.
     let mut f = Fixture::new("lease-barrier-owner-rebind");
@@ -226,11 +257,12 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
             [(f.group.group_id.clone(), f.group.policy_revision)].into(),
         )
         .unwrap();
+    let alice = f.alice.principal.clone();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, lease, identity("owner-rebind")),
+        f.validate(&alice, lease, "owner-rebind"),
         Err(StoreError::SourceUnavailable { .. })
     ));
+    assert_eq!(f.budget.usage(), 0);
 
     // Withdrawal, re-establishment and replacement.
     let mut f = Fixture::new("lease-barrier-withdraw");
@@ -245,9 +277,9 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
             },
         )
         .unwrap();
+    let alice = f.alice.principal.clone();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, lease, identity("withdrawn")),
+        f.validate(&alice, lease, "withdrawn"),
         Err(StoreError::SourceUnavailable { .. })
     ));
     assert!(matches!(
@@ -285,16 +317,11 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
         )
         .unwrap();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, lease, identity("replaced")),
+        f.validate(&alice, lease, "replaced"),
         Err(StoreError::SourceUnavailable { .. })
     ));
     assert!(matches!(
-        f.store.validate_context_grant(
-            &f.alice.principal,
-            stale_epoch_lease,
-            identity("replaced-2")
-        ),
+        f.validate(&alice, stale_epoch_lease, "replaced-2"),
         Err(StoreError::SourceUnavailable { .. })
     ));
     let fresh = f
@@ -306,13 +333,18 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
         )
         .unwrap();
     assert_eq!(fresh.resolver_key(), "C:\\secret\\resolver\\bob-v2.jsonl");
-    let commitment = f
-        .store
-        .validate_context_grant(&f.alice.principal, fresh, identity("fresh"))
-        .unwrap();
-    assert_eq!(commitment.source_id(), &replacement.source_id);
-    assert_eq!(commitment.response_reference(), "fresh");
-    assert_eq!(commitment.reserved_bytes(), 4096);
+    let committed = f.validate(&alice, fresh, "fresh").unwrap();
+    assert_eq!(committed.record().source_id(), &replacement.source_id);
+    assert_eq!(committed.record().reserved_bytes(), 4096);
+    assert_eq!(committed.record().body_bytes(), "fresh".len() as u64);
+    assert_eq!(committed.record().snapshot_identity(), "snapshot:fresh");
+    assert_eq!(
+        f.budget.usage(),
+        4096,
+        "the committed response holds its credits"
+    );
+    drop(committed);
+    assert_eq!(f.budget.usage(), 0);
 
     // A lease from another authority or a forged principal is rejected.
     let mut other = Store::open(support::retained_db("lease-other-authority")).unwrap();
@@ -326,8 +358,9 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
             &replacement.source_id,
         )
         .unwrap();
+    let prepared = f.prepare(lease, "alien");
     assert!(matches!(
-        other.validate_context_grant(&alien.principal, lease, identity("alien")),
+        other.validate_context_grant(&alien.principal, prepared),
         Err(StoreError::AuthorityMismatch)
     ));
     let lease = f
@@ -338,13 +371,15 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
             &replacement.source_id,
         )
         .unwrap();
+    let carol = f.carol.principal.clone();
     assert!(matches!(
-        f.store
-            .validate_context_grant(&f.carol.principal, lease, identity("carol-steals")),
+        f.validate(&carol, lease, "carol-steals"),
         Err(StoreError::Unauthorized { .. })
     ));
+    assert_eq!(f.budget.usage(), 0);
 
-    // Identity bounds: credits and a non-empty exact response reference are required.
+    // Prepared bounds: credits and a non-empty body are required; a claimed
+    // reference string is no longer an input at all.
     let lease = f
         .store
         .acquire_context_grant(
@@ -353,36 +388,15 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
             &replacement.source_id,
         )
         .unwrap();
+    let observation = SourceSnapshotObservation::trusted(&lease, "s".into(), None).unwrap();
+    let reservation =
+        DestinationReservation::from_owned(f.destination.clone(), f.budget.reserve(1).unwrap())
+            .unwrap();
     assert!(matches!(
-        f.store.validate_context_grant(
-            &f.alice.principal,
-            lease,
-            PublicationIdentity {
-                response_reference: "no-credits".into(),
-                reserved_bytes: 0
-            }
-        ),
-        Err(StoreError::Validation(ValidationError::Empty { .. }))
+        PreparedPublication::prepare(lease, observation, Vec::new(), reservation),
+        Err(ValidationError::Empty { field: "body" })
     ));
-    let lease = f
-        .store
-        .acquire_context_grant(
-            &f.alice.principal,
-            &f.group.group_id,
-            &replacement.source_id,
-        )
-        .unwrap();
-    assert!(matches!(
-        f.store.validate_context_grant(
-            &f.alice.principal,
-            lease,
-            PublicationIdentity {
-                response_reference: String::new(),
-                reserved_bytes: 1
-            }
-        ),
-        Err(StoreError::Validation(ValidationError::Empty { .. }))
-    ));
+    assert_eq!(f.budget.usage(), 0);
 
     // Non-members cannot acquire; a lease is not a source id.
     assert!(matches!(
@@ -403,45 +417,31 @@ fn lease_binds_every_authorization_fact_and_each_barrier_rejects_validation() {
     ));
 }
 
-impl Fixture {
-    fn acquire_for(&mut self, who: &EnrolledPeer) -> ContextGrantLease {
-        self.store
-            .acquire_context_grant(&who.principal, &self.group.group_id, &self.source.source_id)
-            .unwrap()
-    }
-}
-
 #[test]
 fn committed_response_is_single_use_and_survives_later_revocation_only_for_itself() {
     let mut f = Fixture::new("lease-single-use");
     let lease = f.acquire();
     let lease_id = lease.lease_id().clone();
-    let commitment = f
-        .store
-        .validate_context_grant(&f.alice.principal, lease, identity("response-1"))
-        .unwrap();
-    assert_eq!(commitment.lease_id(), &lease_id);
-    assert_eq!(commitment.response_reference(), "response-1");
-    assert_eq!(commitment.caller_peer_id(), &f.alice.record.peer_id);
+    let alice = f.alice.principal.clone();
+    let committed = f.validate(&alice, lease, "response-1").unwrap();
+    assert_eq!(committed.record().lease_id(), &lease_id);
+    assert_eq!(committed.record().caller_peer_id(), &f.alice.record.peer_id);
+    assert_eq!(committed.body(), b"response-1");
 
-    // The same response identity cannot be committed again under a new lease,
-    // and a consumed lease cannot validate a second buffer.
-    let second = f.acquire();
-    assert!(matches!(
-        f.store
-            .validate_context_grant(&f.alice.principal, second, identity("response-1")),
-        Err(StoreError::ResponseAlreadyCommitted)
-    ));
+    let commitment_id = committed.record().commitment_id().clone();
+    let record = committed.into_send(&f.destination).unwrap().finish();
+    assert_eq!(record.commitment_id(), &commitment_id);
+    assert_eq!(f.budget.usage(), 0);
 
     // Later revocation is nonretroactive to the committed response itself.
     let paused = f
         .store
         .set_group_paused(&f.owner, &f.group.group_id, true, f.group.policy_revision)
         .unwrap();
-    assert_eq!(commitment.policy_revision(), f.group.policy_revision);
+    assert_eq!(record.policy_revision(), f.group.policy_revision);
     assert!(f
         .store
-        .publication_committed(&f.owner, commitment.commitment_id())
+        .publication_committed(&f.owner, record.commitment_id())
         .unwrap());
     // Every new read checks current state.
     assert!(matches!(
@@ -452,12 +452,11 @@ fn committed_response_is_single_use_and_survives_later_revocation_only_for_itsel
     f.store
         .set_group_paused(&f.owner, &f.group.group_id, false, paused.policy_revision)
         .unwrap();
-    let lease = f.acquire();
-    let next = f
-        .store
-        .validate_context_grant(&f.alice.principal, lease, identity("response-2"))
-        .unwrap();
-    assert_ne!(next.commitment_id(), commitment.commitment_id());
+    // A fresh lease under the current policy is a distinct response.
+    let second = f.acquire();
+    let next = f.validate(&alice, second, "response-2").unwrap();
+    assert_ne!(next.record().commitment_id(), record.commitment_id());
+    drop(next);
     // Publication is neither delivery nor ACK: no delivery rows or receipts exist.
     let candidates = {
         f.store.recover_trusted_new_run(&f.owner).unwrap();
@@ -552,17 +551,23 @@ async fn unpolled_validation_result_stays_consumable_after_pause_and_rebind_thro
     };
     // Source I/O happens here, outside the writer, then credits are reserved
     // by the consumer before final validation.
-    let validation = loop {
-        match client.submit(Command::ValidateContextGrant(
-            alice.principal.clone(),
-            lease.clone(),
-            identity("unpolled-response"),
-        )) {
-            Ok(pending) => break pending,
-            Err(AdmissionError::Contended) => tokio::task::yield_now().await,
-            Err(error) => panic!("admission: {error}"),
-        }
+    let budget = TestBudget::new(1 << 20);
+    let destination = PublicationDestinationId::generate();
+    let prepare = |lease: ContextGrantLease, body: &str| {
+        let observation =
+            SourceSnapshotObservation::trusted(&lease, "snapshot".into(), Some(7)).unwrap();
+        let reservation =
+            DestinationReservation::from_owned(destination.clone(), budget.reserve(4096).unwrap())
+                .unwrap();
+        PreparedPublication::prepare(lease, observation, body.as_bytes().to_vec(), reservation)
+            .unwrap()
     };
+    let validation = client
+        .submit(Command::ValidateContextGrant(
+            alice.principal.clone(),
+            prepare(lease.clone(), "unpolled-response"),
+        ))
+        .unwrap();
     // Pause and rebind before the validation result is polled.
     let Response::Group(paused) = call(&client, || {
         Command::Pause(
@@ -588,21 +593,32 @@ async fn unpolled_validation_result_stays_consumable_after_pause_and_rebind_thro
     .unwrap() else {
         panic!()
     };
-    let Response::Commitment(commitment) = validation.await.unwrap() else {
+    let Response::CommittedPublication(committed) = validation.await.unwrap() else {
         panic!("the already committed response remains consumable exactly once")
     };
-    assert_eq!(commitment.response_reference(), "unpolled-response");
-    assert_eq!(commitment.caller_binding_revision(), alice.record.revision);
+    assert_eq!(committed.body(), b"unpolled-response");
+    assert_eq!(
+        committed.record().caller_binding_revision(),
+        alice.record.revision
+    );
+    assert_eq!(budget.usage(), 4096);
     // A second or new read fails current authorization.
-    assert!(matches!(
-        call(&client, || Command::ValidateContextGrant(
+    let outcome = client
+        .submit(Command::ValidateContextGrant(
             alice.principal.clone(),
-            lease.clone(),
-            identity("second-buffer")
+            prepare(lease.clone(), "second-buffer"),
         ))
-        .await,
+        .unwrap()
+        .await;
+    assert!(matches!(
+        outcome,
         Err(OperationError::Store(StoreError::StaleBinding))
     ));
+    assert_eq!(
+        budget.usage(),
+        4096,
+        "the rejected second buffer released its credits"
+    );
     assert!(matches!(
         call(&client, || Command::AcquireContextGrant(
             alice2.principal.clone(),
@@ -612,6 +628,8 @@ async fn unpolled_validation_result_stays_consumable_after_pause_and_rebind_thro
         .await,
         Err(OperationError::Store(StoreError::GroupPaused))
     ));
+    drop(committed);
+    assert_eq!(budget.usage(), 0);
     worker.shutdown().await.unwrap();
 }
 

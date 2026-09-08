@@ -104,7 +104,7 @@ impl Fixture {
             &self.bob.principal,
             MailboxAfterRequest {
                 group_id: self.group.group_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence },
+                navigation: MailboxNavigation::ResetAfter { after_sequence },
                 max_items,
             },
         )
@@ -367,7 +367,7 @@ fn positioned_cursors_bind_scope_policy_and_binding_and_reset_on_continuation() 
             &bob2.principal,
             MailboxAfterRequest {
                 group_id: f.group.group_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 8,
             },
         )
@@ -535,7 +535,7 @@ fn thread_and_outgoing_reads_authorize_per_message_and_never_leak_private_replie
     // Carol can see the root and the public reply, but not the private branch,
     // through the root, the descendant IDs, outgoing navigation or paging.
     let mut seen = Vec::new();
-    let mut navigation = MailboxNavigation::After { after_sequence: 0 };
+    let mut navigation = MailboxNavigation::ResetAfter { after_sequence: 0 };
     loop {
         let page = f
             .store
@@ -576,7 +576,7 @@ fn thread_and_outgoing_reads_authorize_per_message_and_never_leak_private_replie
             ThreadPageRequest {
                 group_id: f.group.group_id.clone(),
                 root: private.message_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 8,
             },
         ),
@@ -588,7 +588,7 @@ fn thread_and_outgoing_reads_authorize_per_message_and_never_leak_private_replie
             &f.carol.principal,
             OutgoingPageRequest {
                 group_id: f.group.group_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 8,
             },
         )
@@ -603,7 +603,7 @@ fn thread_and_outgoing_reads_authorize_per_message_and_never_leak_private_replie
             ThreadPageRequest {
                 group_id: f.group.group_id.clone(),
                 root: root.message_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 8,
             },
         )
@@ -636,7 +636,7 @@ fn thread_and_outgoing_reads_authorize_per_message_and_never_leak_private_replie
             &f.bob.principal,
             OutgoingPageRequest {
                 group_id: f.group.group_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 8,
             },
         )
@@ -660,7 +660,7 @@ fn thread_and_outgoing_reads_authorize_per_message_and_never_leak_private_replie
             ThreadPageRequest {
                 group_id: f.group.group_id.clone(),
                 root: root.message_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 1,
             },
         )
@@ -754,7 +754,7 @@ fn thread_and_outgoing_reads_authorize_per_message_and_never_leak_private_replie
             ThreadPageRequest {
                 group_id: other.group_id.clone(),
                 root: root.message_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 8
             }
         ),

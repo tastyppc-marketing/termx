@@ -683,12 +683,26 @@ fn owner_snapshots_are_owner_authenticated_revision_coherent_and_side_effect_fre
     ];
     expected.sort();
     assert_eq!(all, expected);
-    let bob_view = views
+    assert!(views
         .iter()
-        .find(|p| p.binding.peer_id == bob.record.peer_id)
-        .unwrap();
-    assert_eq!(bob_view.memberships.len(), 1);
-    assert_eq!(bob_view.memberships[0].group_id, group.group_id);
+        .any(|p| p.binding.peer_id == bob.record.peer_id));
+    let OwnerSnapshotPage::PeerMemberships(bob_memberships) = store
+        .owner_snapshot(
+            &owner,
+            OwnerSnapshotRequest::PeerMemberships {
+                peer_id: bob.record.peer_id.clone(),
+                expected_inventory_revision: Some(current.inventory_revision),
+                after_group: None,
+                max_items: 8,
+            },
+        )
+        .unwrap()
+    else {
+        panic!("peer memberships page")
+    };
+    assert_eq!(bob_memberships.revisions, current);
+    assert_eq!(bob_memberships.memberships.len(), 1);
+    assert_eq!(bob_memberships.memberships[0].group_id, group.group_id);
 
     let OwnerSnapshotPage::Groups(groups) = store
         .owner_snapshot(
@@ -708,7 +722,21 @@ fn owner_snapshots_are_owner_authenticated_revision_coherent_and_side_effect_fre
     assert_eq!(groups.groups[0].high_sequence, 1);
     let mut pair = vec![alice.record.peer_id.clone(), bob.record.peer_id.clone()];
     pair.sort();
-    assert_eq!(groups.groups[0].members, pair);
+    let OwnerSnapshotPage::GroupMembers(group_members) = store
+        .owner_snapshot(
+            &owner,
+            OwnerSnapshotRequest::GroupMembers {
+                group_id: group.group_id.clone(),
+                expected_inventory_revision: Some(groups.revisions.inventory_revision),
+                after_peer: None,
+                max_items: 8,
+            },
+        )
+        .unwrap()
+    else {
+        panic!("group members page")
+    };
+    assert_eq!(group_members.members, pair);
 
     let OwnerSnapshotPage::Messages(messages) = store
         .owner_snapshot(
@@ -1018,12 +1046,13 @@ fn source_registration_transitions_use_owner_cas_and_preserve_history() {
     assert_eq!(replacement.state, SourceState::Active);
     assert_eq!(replacement.registration_epoch, Revision::new(1).unwrap());
     let old = {
-        let OwnerSnapshotPage::Peers(page) = store
+        let OwnerSnapshotPage::PeerSources(page) = store
             .owner_snapshot(
                 &owner,
-                OwnerSnapshotRequest::Peers {
+                OwnerSnapshotRequest::PeerSources {
+                    peer_id: bob.record.peer_id.clone(),
                     expected_inventory_revision: None,
-                    after_peer: None,
+                    after_source: None,
                     max_items: 8,
                 },
             )
@@ -1031,11 +1060,7 @@ fn source_registration_transitions_use_owner_cas_and_preserve_history() {
         else {
             panic!()
         };
-        page.peers
-            .into_iter()
-            .find(|p| p.binding.peer_id == bob.record.peer_id)
-            .unwrap()
-            .sources
+        page.sources
     };
     assert_eq!(old.len(), 2, "historical registration is retained");
     let retired = old

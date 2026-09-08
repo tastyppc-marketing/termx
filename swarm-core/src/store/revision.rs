@@ -1,7 +1,7 @@
 //! Durable owner state revisions, advanced inside the transaction whose
 //! visible state they describe. See `StateRevisions` for the dimensions.
 
-use rusqlite::{Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, Transaction};
 
 use crate::error::StoreError;
 use crate::model::{Revision, StateRevisions};
@@ -41,17 +41,4 @@ pub(super) fn read_revisions(connection: &Connection) -> Result<StateRevisions, 
         delivery_revision: revision_from_sql(delivery)?,
         run_revision: run.map(revision_from_sql).transpose()?,
     })
-}
-
-pub(super) fn inventory_revision(connection: &Connection) -> Result<Revision, StoreError> {
-    let value: Option<i64> = connection
-        .query_row(
-            "SELECT inventory_revision FROM owner_state WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    revision_from_sql(value.ok_or(StoreError::NotFound {
-        kind: "owner state",
-    })?)
 }

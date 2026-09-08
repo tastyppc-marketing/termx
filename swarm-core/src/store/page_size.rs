@@ -44,9 +44,22 @@ fn serialized_size(value: &impl Serialize) -> Result<usize, ValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MailboxCursor, MailboxPage};
+    use crate::model::{
+        GroupId, MailboxCursor, MailboxPage, NavigationPosition, NavigationScope, PeerId, Revision,
+    };
     use serde::Serialize;
     use std::cell::Cell;
+
+    fn position(after_sequence: u64) -> NavigationPosition {
+        NavigationPosition::new(
+            GroupId::generate(),
+            PeerId::generate(),
+            Revision::new(1).unwrap(),
+            Revision::new(1).unwrap(),
+            NavigationScope::Mailbox,
+            after_sequence,
+        )
+    }
 
     #[test]
     fn complete_envelope_and_commas_match_real_json() {
@@ -54,6 +67,7 @@ mod tests {
             let page = MailboxPage {
                 messages: vec![],
                 next_cursor: Some(MailboxCursor::generate()),
+                resume_position: position(high),
                 snapshot_high_sequence: high,
             };
             let envelope = serde_json::to_vec(&page).unwrap().len();
@@ -87,6 +101,7 @@ mod tests {
         let page = MailboxPage {
             messages: vec![],
             next_cursor: Some(MailboxCursor::generate()),
+            resume_position: position(123),
             snapshot_high_sequence: 123,
         };
         let mut size = PageSize::new(&page).unwrap();

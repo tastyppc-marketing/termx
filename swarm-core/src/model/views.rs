@@ -118,21 +118,101 @@ pub struct AttachmentView {
 // Navigation
 // ---------------------------------------------------------------------------
 
-/// A fresh position and an existing cursor are mutually exclusive by type. A
-/// position is navigation only: not authorization, fetch evidence or ACK.
+/// Which bounded read a position continues. A thread position carries its
+/// exact root selector; positions never cross read kinds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum NavigationScope {
+    Mailbox,
+    Thread { root: MessageId },
+    Outgoing,
+}
+
+/// A store-built resume position: navigation only, never authorization,
+/// fetch evidence or ACK. It names the exact reader, group, binding, policy
+/// revision and read scope it was built under. A position presented by a
+/// different reader or under a different scope is a scope error; one built
+/// under an older binding or policy is stale and must be reset explicitly.
+/// Retagging a position to the caller's own current scope grants nothing
+/// beyond what an explicit reset to the same sequence would.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NavigationPosition {
+    group_id: GroupId,
+    peer_id: PeerId,
+    binding_revision: Revision,
+    policy_revision: Revision,
+    scope: NavigationScope,
+    after_sequence: u64,
+}
+
+impl NavigationPosition {
+    pub(crate) fn new(
+        group_id: GroupId,
+        peer_id: PeerId,
+        binding_revision: Revision,
+        policy_revision: Revision,
+        scope: NavigationScope,
+        after_sequence: u64,
+    ) -> Self {
+        Self {
+            group_id,
+            peer_id,
+            binding_revision,
+            policy_revision,
+            scope,
+            after_sequence,
+        }
+    }
+
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer_id
+    }
+    pub fn binding_revision(&self) -> Revision {
+        self.binding_revision
+    }
+    pub fn policy_revision(&self) -> Revision {
+        self.policy_revision
+    }
+    pub fn scope(&self) -> &NavigationScope {
+        &self.scope
+    }
+    pub fn after_sequence(&self) -> u64 {
+        self.after_sequence
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        sqlite_i64("after_sequence", self.after_sequence)?;
+        Ok(())
+    }
+}
+
+/// Where a bounded read starts. `Position` continues from a store-built
+/// resume position under a fresh watermark; `ResetAfter` is a deliberate bare
+/// reposition (for example after a continuation) that freezes a new watermark;
+/// `Cursor` continues an existing frozen watermark. A position and a cursor
+/// are mutually exclusive by type, and none of them authorizes anything.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MailboxNavigation {
-    After { after_sequence: u64 },
+    Position(NavigationPosition),
+    ResetAfter { after_sequence: u64 },
     Cursor(MailboxCursor),
 }
 
 impl MailboxNavigation {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        if let Self::After { after_sequence } = self {
-            sqlite_i64("after_sequence", *after_sequence)?;
+        match self {
+            Self::Position(position) => position.validate(),
+            Self::ResetAfter { after_sequence } => {
+                sqlite_i64("after_sequence", *after_sequence)?;
+                Ok(())
+            }
+            Self::Cursor(_) => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -210,6 +290,7 @@ pub struct ThreadPage {
     pub root: MessageId,
     pub messages: Vec<ThreadEntry>,
     pub next_cursor: Option<MailboxCursor>,
+    pub resume_position: NavigationPosition,
     pub snapshot_high_sequence: u64,
 }
 
@@ -236,6 +317,7 @@ pub struct MessageStateEntry {
 pub struct OutgoingPage {
     pub messages: Vec<MessageStateEntry>,
     pub next_cursor: Option<MailboxCursor>,
+    pub resume_position: NavigationPosition,
     pub snapshot_high_sequence: u64,
 }
 
@@ -606,88 +688,6 @@ impl ContextGrantLease {
     }
 }
 
-/// Identity of one exact immutable response buffer whose destination/output
-/// credits the consumer has already reserved.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublicationIdentity {
-    /// Exact immutable response/read identity chosen by the trusted consumer.
-    pub response_reference: String,
-    /// Credits reserved before validation; must be positive.
-    pub reserved_bytes: u64,
-}
-
-impl PublicationIdentity {
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        validate_nonempty(
-            "response_reference",
-            &self.response_reference,
-            MAX_METADATA_BYTES,
-        )?;
-        if self.reserved_bytes == 0 {
-            return Err(ValidationError::Empty {
-                field: "reserved_bytes",
-            });
-        }
-        sqlite_i64("reserved_bytes", self.reserved_bytes)?;
-        Ok(())
-    }
-}
-
-/// Durable single-use commitment of one exact response for publication.
-/// Successful writer validation is the authorization linearization point.
-/// This is not delivery, not fetch evidence and not an ACK, and it is not a
-/// reusable capability: it names one buffer that may be published once.
-#[derive(Debug)]
-pub struct PublicationCommitment {
-    pub(crate) commitment_id: PublicationCommitmentId,
-    pub(crate) lease_id: LeaseId,
-    pub(crate) response_reference: String,
-    pub(crate) group_id: GroupId,
-    pub(crate) policy_revision: Revision,
-    pub(crate) caller_peer_id: PeerId,
-    pub(crate) caller_binding_revision: Revision,
-    pub(crate) source_id: SourceId,
-    pub(crate) registration_epoch: Revision,
-    pub(crate) reserved_bytes: u64,
-    pub(crate) committed_at_millis: i64,
-}
-
-impl PublicationCommitment {
-    pub fn commitment_id(&self) -> &PublicationCommitmentId {
-        &self.commitment_id
-    }
-    pub fn lease_id(&self) -> &LeaseId {
-        &self.lease_id
-    }
-    pub fn response_reference(&self) -> &str {
-        &self.response_reference
-    }
-    pub fn group_id(&self) -> &GroupId {
-        &self.group_id
-    }
-    pub fn policy_revision(&self) -> Revision {
-        self.policy_revision
-    }
-    pub fn caller_peer_id(&self) -> &PeerId {
-        &self.caller_peer_id
-    }
-    pub fn caller_binding_revision(&self) -> Revision {
-        self.caller_binding_revision
-    }
-    pub fn source_id(&self) -> &SourceId {
-        &self.source_id
-    }
-    pub fn registration_epoch(&self) -> Revision {
-        self.registration_epoch
-    }
-    pub fn reserved_bytes(&self) -> u64 {
-        self.reserved_bytes
-    }
-    pub fn committed_at_millis(&self) -> i64 {
-        self.committed_at_millis
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Owner snapshots
 // ---------------------------------------------------------------------------
@@ -708,14 +708,38 @@ pub struct StateRevisions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerSnapshotRequest {
+    /// Scalar peer records (full binding). Nested inventory is paged
+    /// separately by `PeerMemberships` and `PeerSources`.
     Peers {
         expected_inventory_revision: Option<Revision>,
         after_peer: Option<PeerId>,
         max_items: usize,
     },
+    /// Scalar group records. Members are paged separately by `GroupMembers`.
     Groups {
         expected_inventory_revision: Option<Revision>,
         after_group: Option<GroupId>,
+        max_items: usize,
+    },
+    /// One peer's active memberships with current statuses, by group.
+    PeerMemberships {
+        peer_id: PeerId,
+        expected_inventory_revision: Option<Revision>,
+        after_group: Option<GroupId>,
+        max_items: usize,
+    },
+    /// One peer's registrations in every retained state, by source.
+    PeerSources {
+        peer_id: PeerId,
+        expected_inventory_revision: Option<Revision>,
+        after_source: Option<SourceId>,
+        max_items: usize,
+    },
+    /// One group's active members, by peer.
+    GroupMembers {
+        group_id: GroupId,
+        expected_inventory_revision: Option<Revision>,
+        after_peer: Option<PeerId>,
         max_items: usize,
     },
     Messages {
@@ -730,7 +754,44 @@ pub enum OwnerSnapshotRequest {
 impl OwnerSnapshotRequest {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         match self {
-            Self::Peers { max_items, .. } | Self::Groups { max_items, .. } => {
+            Self::Peers {
+                expected_inventory_revision,
+                after_peer,
+                max_items,
+            } => {
+                require_continuation_revision(after_peer.is_some(), expected_inventory_revision)?;
+                validate_page_items(*max_items, MAX_METADATA_PAGE_ITEMS)
+            }
+            Self::Groups {
+                expected_inventory_revision,
+                after_group,
+                max_items,
+            }
+            | Self::PeerMemberships {
+                expected_inventory_revision,
+                after_group,
+                max_items,
+                ..
+            } => {
+                require_continuation_revision(after_group.is_some(), expected_inventory_revision)?;
+                validate_page_items(*max_items, MAX_METADATA_PAGE_ITEMS)
+            }
+            Self::PeerSources {
+                expected_inventory_revision,
+                after_source,
+                max_items,
+                ..
+            } => {
+                require_continuation_revision(after_source.is_some(), expected_inventory_revision)?;
+                validate_page_items(*max_items, MAX_METADATA_PAGE_ITEMS)
+            }
+            Self::GroupMembers {
+                expected_inventory_revision,
+                after_peer,
+                max_items,
+                ..
+            } => {
+                require_continuation_revision(after_peer.is_some(), expected_inventory_revision)?;
                 validate_page_items(*max_items, MAX_METADATA_PAGE_ITEMS)
             }
             Self::Messages {
@@ -749,6 +810,21 @@ impl OwnerSnapshotRequest {
     }
 }
 
+/// A continuation key is only meaningful at the inventory revision that
+/// produced it; without that revision a continued page could silently skip
+/// or repeat items across an inventory change.
+fn require_continuation_revision(
+    continuing: bool,
+    expected: &Option<Revision>,
+) -> Result<(), ValidationError> {
+    if continuing && expected.is_none() {
+        return Err(ValidationError::Empty {
+            field: "expected_inventory_revision",
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerMembershipView {
     pub group_id: GroupId,
@@ -761,8 +837,6 @@ pub struct OwnerMembershipView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerPeerView {
     pub binding: PeerBindingRecord,
-    pub memberships: Vec<OwnerMembershipView>,
-    pub sources: Vec<SourceRegistration>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -776,7 +850,6 @@ pub struct OwnerPeerPage {
 pub struct OwnerGroupView {
     pub group: GroupRecord,
     pub high_sequence: u64,
-    pub members: Vec<PeerId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -784,6 +857,30 @@ pub struct OwnerGroupPage {
     pub revisions: StateRevisions,
     pub groups: Vec<OwnerGroupView>,
     pub next_after_group: Option<GroupId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerPeerMembershipPage {
+    pub peer_id: PeerId,
+    pub revisions: StateRevisions,
+    pub memberships: Vec<OwnerMembershipView>,
+    pub next_after_group: Option<GroupId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerPeerSourcePage {
+    pub peer_id: PeerId,
+    pub revisions: StateRevisions,
+    pub sources: Vec<SourceRegistration>,
+    pub next_after_source: Option<SourceId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerGroupMemberPage {
+    pub group_id: GroupId,
+    pub revisions: StateRevisions,
+    pub members: Vec<PeerId>,
+    pub next_after_peer: Option<PeerId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -800,6 +897,9 @@ pub struct OwnerMessagePage {
 pub enum OwnerSnapshotPage {
     Peers(OwnerPeerPage),
     Groups(OwnerGroupPage),
+    PeerMemberships(OwnerPeerMembershipPage),
+    PeerSources(OwnerPeerSourcePage),
+    GroupMembers(OwnerGroupMemberPage),
     Messages(OwnerMessagePage),
 }
 

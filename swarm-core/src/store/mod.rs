@@ -213,7 +213,7 @@ pub(super) fn authorize_peer(
         return Err(StoreError::GroupPaused);
     }
     let member = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM group_memberships WHERE group_id=?1 AND peer_id=?2 AND removed_policy_revision IS NULL)",
+        "SELECT EXISTS(SELECT 1 FROM group_memberships INDEXED BY membership_active_by_group WHERE group_id=?1 AND peer_id=?2 AND removed_policy_revision IS NULL)",
         [group_id.as_str(), principal.peer_id.as_str()],
         |row| row.get::<_, bool>(0),
     )?;

@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -100,6 +100,9 @@ pub(super) fn validate_recognized_schema(
     if identity.schema_version >= 8 {
         expected.execute_batch(MIGRATION_V8)?;
     }
+    if identity.schema_version >= 9 {
+        expected.execute_batch(MIGRATION_V9)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -165,6 +168,9 @@ fn migrate_with_final_sql(
     }
     if identity.schema_version < 8 {
         transaction.execute_batch(MIGRATION_V8)?;
+    }
+    if identity.schema_version < 9 {
+        transaction.execute_batch(MIGRATION_V9)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
@@ -637,6 +643,46 @@ CREATE TABLE publication_commitments (
     reserved_bytes INTEGER NOT NULL CHECK (reserved_bytes >= 1),
     committed_at_millis INTEGER NOT NULL
 ) STRICT;
+"#;
+
+// Task 2 fix-1: bounded owner subpages (I1), two-range thread reads (I2) and
+// publication ownership audit (C1). Additive only: no historical row changes
+// meaning, legacy commitment rows keep NULL in the new columns, and the thread
+// projection is derived from current deliveries by transactional triggers.
+const MIGRATION_V9: &str = r#"
+CREATE INDEX membership_active_by_group ON group_memberships(group_id, peer_id) WHERE removed_policy_revision IS NULL;
+CREATE INDEX source_registrations_active_by_binding ON source_registrations(peer_id, binding_revision, source_id) WHERE state = 'active';
+
+CREATE INDEX messages_by_sender_thread ON messages(group_id, sender_peer_id, thread_root_message_id, group_sequence);
+CREATE TABLE current_thread_deliveries (
+    message_id TEXT NOT NULL,
+    recipient_peer_id TEXT NOT NULL,
+    recipient_binding_revision INTEGER NOT NULL CHECK (recipient_binding_revision >= 1),
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    thread_root_message_id TEXT NOT NULL REFERENCES messages(message_id),
+    group_sequence INTEGER NOT NULL CHECK (group_sequence >= 1),
+    sender_peer_id TEXT NOT NULL REFERENCES peers(peer_id),
+    PRIMARY KEY (message_id, recipient_peer_id),
+    FOREIGN KEY (message_id, recipient_peer_id) REFERENCES current_deliveries(message_id, recipient_peer_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX current_thread_delivery_page ON current_thread_deliveries(group_id, recipient_peer_id, recipient_binding_revision, thread_root_message_id, group_sequence);
+INSERT INTO current_thread_deliveries(message_id, recipient_peer_id, recipient_binding_revision, group_id, thread_root_message_id, group_sequence, sender_peer_id)
+    SELECT d.message_id, d.recipient_peer_id, d.recipient_binding_revision, d.group_id, COALESCE(m.thread_root_message_id, m.message_id), d.group_sequence, m.sender_peer_id
+    FROM current_deliveries d JOIN messages m ON m.message_id = d.message_id;
+CREATE TRIGGER project_current_thread_delivery AFTER INSERT ON current_deliveries BEGIN
+    INSERT INTO current_thread_deliveries(message_id, recipient_peer_id, recipient_binding_revision, group_id, thread_root_message_id, group_sequence, sender_peer_id)
+    SELECT NEW.message_id, NEW.recipient_peer_id, NEW.recipient_binding_revision, NEW.group_id, COALESCE(m.thread_root_message_id, m.message_id), NEW.group_sequence, m.sender_peer_id
+    FROM messages m WHERE m.message_id = NEW.message_id;
+END;
+CREATE TRIGGER rebind_current_thread_delivery AFTER UPDATE OF recipient_binding_revision ON current_deliveries BEGIN
+    UPDATE current_thread_deliveries SET recipient_binding_revision = NEW.recipient_binding_revision
+    WHERE message_id = NEW.message_id AND recipient_peer_id = NEW.recipient_peer_id;
+END;
+
+ALTER TABLE publication_commitments ADD COLUMN destination_id TEXT CHECK (destination_id IS NULL OR length(CAST(destination_id AS BLOB)) BETWEEN 1 AND 256);
+ALTER TABLE publication_commitments ADD COLUMN body_bytes INTEGER CHECK (body_bytes IS NULL OR body_bytes BETWEEN 1 AND 8388608);
+ALTER TABLE publication_commitments ADD COLUMN snapshot_identity TEXT CHECK (snapshot_identity IS NULL OR length(CAST(snapshot_identity AS BLOB)) BETWEEN 1 AND 4096);
+ALTER TABLE publication_commitments ADD COLUMN captured_through INTEGER CHECK (captured_through IS NULL OR captured_through >= 0);
 "#;
 
 #[cfg(test)]
@@ -1731,7 +1777,7 @@ mod v8_migration_tests {
     const CURSOR: &str = "c_00000000000000000000000000000007";
 
     /// Exact v7 database with a reply chain and a retained v7 mailbox cursor.
-    fn fixture(name: &str) -> (std::path::PathBuf, Connection) {
+    pub(super) fn fixture(name: &str) -> (std::path::PathBuf, Connection) {
         let (path, mut connection) = super::v3_migration_tests::fixture(name);
         connection.execute_batch(MIGRATION_V4).unwrap();
         connection.execute_batch(MIGRATION_V5).unwrap();
@@ -1776,8 +1822,8 @@ mod v8_migration_tests {
         drop(connection);
         let mut store = Store::open(&path).unwrap();
         let inspection = store.inspect().unwrap();
-        assert_eq!(inspection.schema_version, 8);
-        assert_eq!(inspection.table_count, 28);
+        assert_eq!(inspection.schema_version, SCHEMA_VERSION);
+        assert_eq!(inspection.table_count, 29);
         assert!(inspection.integrity_ok);
         for (message, expected_root) in [
             (ROOT, ROOT),
@@ -1858,7 +1904,7 @@ mod v8_migration_tests {
                 ThreadPageRequest {
                     group_id: group.clone(),
                     root: MessageId::parse(ROOT).unwrap(),
-                    navigation: MailboxNavigation::After { after_sequence: 0 },
+                    navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                     max_items: 8,
                 },
             )
@@ -1940,7 +1986,616 @@ mod v8_migration_tests {
         );
         drop(connection);
         let store = Store::open(path).unwrap();
-        assert_eq!(store.inspect().unwrap().schema_version, 8);
+        assert_eq!(store.inspect().unwrap().schema_version, SCHEMA_VERSION);
         assert!(store.inspect().unwrap().integrity_ok);
+    }
+}
+
+#[cfg(test)]
+mod v9_migration_tests {
+    use super::*;
+    use crate::{model::*, store::Store};
+    use rusqlite::params;
+
+    const AUTHORITY: &str = "a_00000000000000000000000000000001";
+    const GROUP: &str = "g_00000000000000000000000000000001";
+    const OTHER_GROUP: &str = "g_00000000000000000000000000000002";
+    const SENDER: &str = "p_00000000000000000000000000000001";
+    const RECIPIENT: &str = "p_00000000000000000000000000000002";
+    const CONTINUED: &str = "p_00000000000000000000000000000003";
+    const ROOT: &str = "m_00000000000000000000000000000001";
+    const TRANSFERRED: &str = "m_00000000000000000000000000000005";
+    const SELF_ROW: &str = "m_00000000000000000000000000000006";
+    const THREAD_CURSOR: &str = "c_00000000000000000000000000000008";
+    const ACTIVE_SOURCE: &str = "src_00000000000000000000000000000001";
+    const WITHDRAWN_SOURCE: &str = "src_00000000000000000000000000000002";
+    const LEGACY_COMMITMENT: &str = "pub_00000000000000000000000000000001";
+    const LEGACY_LEASE: &str = "lease_00000000000000000000000000000001";
+
+    /// Exact populated v8 database: legacy commitment row, active and
+    /// withdrawn registrations with history, a source reference, a thread
+    /// cursor, statuses, a legacy self delivery, a removed membership and a
+    /// continuation-transferred current delivery.
+    fn fixture(name: &str) -> (std::path::PathBuf, Connection) {
+        let (path, mut connection) = super::v8_migration_tests::fixture(name);
+        connection.execute_batch(MIGRATION_V8).unwrap();
+        connection.pragma_update(None, "user_version", 8).unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute("INSERT INTO peers VALUES(?1,2,1)", [CONTINUED])
+            .unwrap();
+        for revision in 1..=2 {
+            tx.execute(
+                "INSERT INTO peer_bindings VALUES(?1,?2,?3,'peer-3','codex','peer-3',NULL,100,1000,1,1)",
+                params![CONTINUED, revision, format!("l_{:032x}", 2 + revision)],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO group_memberships VALUES(?1,?2,1,NULL)",
+            [GROUP, CONTINUED],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO groups VALUES(?1,?2,2,1,'removed-history',0,1)",
+            [OTHER_GROUP, AUTHORITY],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO group_memberships VALUES(?1,?2,1,2)",
+            [OTHER_GROUP, CONTINUED],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO group_memberships VALUES(?1,?2,1,NULL)",
+            [OTHER_GROUP, SENDER],
+        )
+        .unwrap();
+        // Transferred: the root and a reply delivered to binding 1, moved to
+        // binding 2 unfetched by a continuation.
+        tx.execute(
+            "INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,reply_to_message_id,committed_at_millis) VALUES(?1,?2,5,?3,1,'key-5','{}','transferred',?4,1)",
+            params![TRANSFERRED, GROUP, SENDER, ROOT],
+        )
+        .unwrap();
+        for (message, sequence) in [(ROOT, 1), (TRANSFERRED, 5)] {
+            tx.execute(
+                "INSERT INTO recipient_deliveries(message_id,recipient_peer_id,recipient_binding_revision,saved_at_millis,delivery_generation) VALUES(?1,?2,1,1,1)",
+                params![message, CONTINUED],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO delivery_generations VALUES(?1,?2,2,2)",
+                params![message, CONTINUED],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE current_deliveries SET recipient_binding_revision=2,delivery_generation=2 WHERE message_id=?1 AND recipient_peer_id=?2",
+                params![message, CONTINUED],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO recipient_ack_order VALUES(?1,?2,?3,?4,2,2,0)",
+                params![message, CONTINUED, GROUP, sequence],
+            )
+            .unwrap();
+        }
+        // Legacy self row: sender is its own current recipient, no ACK order.
+        tx.execute(
+            "INSERT INTO messages(message_id,group_id,group_sequence,sender_peer_id,sender_binding_revision,client_key,semantic_payload_json,body,reply_to_message_id,committed_at_millis) VALUES(?1,?2,6,?3,1,'key-6','{}','self',?4,1)",
+            params![SELF_ROW, GROUP, RECIPIENT, ROOT],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO recipient_deliveries(message_id,recipient_peer_id,recipient_binding_revision,saved_at_millis,delivery_generation) VALUES(?1,?2,1,1,1)",
+            params![SELF_ROW, RECIPIENT],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE groups SET next_sequence=7 WHERE group_id=?1",
+            [GROUP],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO mailbox_cursors(cursor_id,authority_id,group_id,peer_id,binding_revision,policy_revision,snapshot_high_sequence,position_sequence,created_at_millis,expires_at_millis,read_kind,selector) VALUES(?1,?2,?3,?4,1,1,6,1,1,9223372036854775807,'thread',?5)",
+            params![THREAD_CURSOR, AUTHORITY, GROUP, RECIPIENT, ROOT],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO peer_statuses VALUES(?1,?2,1,1,'legacy status',1,1)",
+            [GROUP, RECIPIENT],
+        )
+        .unwrap();
+        for (source, state, epoch) in [
+            (ACTIVE_SOURCE, "active", 1),
+            (WITHDRAWN_SOURCE, "withdrawn", 2),
+        ] {
+            tx.execute(
+                "INSERT INTO source_registrations VALUES(?1,?2,1,'peer-2','codex-jsonl',?3,?4,?5,?6,?7,NULL,1,1)",
+                params![
+                    source,
+                    RECIPIENT,
+                    format!("resolver-{source}"),
+                    format!("object-{source}"),
+                    format!("evidence-{source}"),
+                    state,
+                    epoch
+                ],
+            )
+            .unwrap();
+            for history_epoch in 1..=epoch {
+                tx.execute(
+                    "INSERT INTO source_registration_history VALUES(?1,?2,?3,?4,1,?5,?6,?7,1)",
+                    params![
+                        source,
+                        history_epoch,
+                        if history_epoch == epoch {
+                            state
+                        } else {
+                            "active"
+                        },
+                        RECIPIENT,
+                        format!("resolver-{source}"),
+                        format!("object-{source}"),
+                        format!("evidence-{source}")
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        tx.execute(
+            "INSERT INTO message_source_references VALUES('s_00000000000000000000000000000001',?1,0,?2,'codex-jsonl',?3,1,'snapshot-1',1)",
+            params![TRANSFERRED, ACTIVE_SOURCE, RECIPIENT],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO publication_commitments VALUES(?1,?2,'legacy response reference',?3,?4,1,?5,1,?6,1,1,77,5)",
+            params![LEGACY_COMMITMENT, LEGACY_LEASE, AUTHORITY, GROUP, SENDER, ACTIVE_SOURCE],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        (path, connection)
+    }
+
+    fn projection(
+        connection: &Connection,
+    ) -> Vec<(String, String, i64, String, String, i64, String)> {
+        let mut statement = connection
+            .prepare("SELECT message_id,recipient_peer_id,recipient_binding_revision,group_id,thread_root_message_id,group_sequence,sender_peer_id FROM current_thread_deliveries ORDER BY message_id,recipient_peer_id")
+            .unwrap();
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    fn expected_projection(
+        connection: &Connection,
+    ) -> Vec<(String, String, i64, String, String, i64, String)> {
+        let mut statement = connection
+            .prepare("SELECT d.message_id,d.recipient_peer_id,d.recipient_binding_revision,d.group_id,m.thread_root_message_id,d.group_sequence,m.sender_peer_id FROM current_deliveries d JOIN messages m ON m.message_id=d.message_id ORDER BY d.message_id,d.recipient_peer_id")
+            .unwrap();
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    type LegacyCommitment = (
+        (String, String, String, String, String, i64),
+        (String, i64, String, i64, i64, i64, i64),
+    );
+
+    fn legacy_commitment(connection: &Connection) -> LegacyCommitment {
+        connection
+            .query_row(
+                "SELECT commitment_id,lease_id,response_reference,authority_id,group_id,policy_revision,caller_peer_id,caller_binding_revision,source_id,source_owner_binding_revision,registration_epoch,reserved_bytes,committed_at_millis FROM publication_commitments WHERE commitment_id=?1",
+                [LEGACY_COMMITMENT],
+                |r| {
+                    Ok((
+                        (
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ),
+                        (
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                            r.get(10)?,
+                            r.get(11)?,
+                            r.get(12)?,
+                        ),
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
+    fn principal(peer: &str, revision: u64) -> PeerPrincipal {
+        PeerPrincipal::new(
+            AuthorityId::parse(AUTHORITY).unwrap(),
+            PeerId::parse(peer).unwrap(),
+            Revision::new(revision).unwrap(),
+        )
+    }
+
+    #[test]
+    fn exact_populated_v8_migrates_to_v9_preserving_rows_and_completing_the_projection() {
+        let (path, connection) = fixture("v8-to-v9");
+        let before_commitment = legacy_commitment(&connection);
+        let before_sources: Vec<(String, String, i64)> = {
+            let mut statement = connection
+                .prepare("SELECT source_id,state,registration_epoch FROM source_registrations ORDER BY source_id")
+                .unwrap();
+            let rows = statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let before_deliveries: Vec<(String, String, i64, i64)> = {
+            let mut statement = connection
+                .prepare("SELECT message_id,recipient_peer_id,recipient_binding_revision,delivery_generation FROM current_deliveries ORDER BY message_id,recipient_peer_id")
+                .unwrap();
+            let rows = statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        assert_eq!(before_deliveries.len(), 7);
+        drop(connection);
+
+        let mut store = Store::open(&path).unwrap();
+        let inspection = store.inspect().unwrap();
+        assert_eq!(inspection.schema_version, 9);
+        assert_eq!(inspection.table_count, 29);
+        assert!(inspection.integrity_ok);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        // Legacy rows keep their exact bytes; the additive columns are NULL.
+        assert_eq!(legacy_commitment(&store.connection), before_commitment);
+        assert!(store
+            .connection
+            .query_row(
+                "SELECT destination_id IS NULL AND body_bytes IS NULL AND snapshot_identity IS NULL AND captured_through IS NULL FROM publication_commitments WHERE commitment_id=?1",
+                [LEGACY_COMMITMENT],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap());
+        let after_sources: Vec<(String, String, i64)> = {
+            let mut statement = store
+                .connection
+                .prepare("SELECT source_id,state,registration_epoch FROM source_registrations ORDER BY source_id")
+                .unwrap();
+            let rows = statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        assert_eq!(after_sources, before_sources);
+        let after_deliveries: Vec<(String, String, i64, i64)> = {
+            let mut statement = store
+                .connection
+                .prepare("SELECT message_id,recipient_peer_id,recipient_binding_revision,delivery_generation FROM current_deliveries ORDER BY message_id,recipient_peer_id")
+                .unwrap();
+            let rows = statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        assert_eq!(after_deliveries, before_deliveries);
+        // The projection is complete and exact, including the transferred
+        // binding and the legacy self row.
+        let projected = projection(&store.connection);
+        assert_eq!(projected, expected_projection(&store.connection));
+        assert_eq!(projected.len(), 7);
+        assert!(projected
+            .iter()
+            .any(|row| row.0 == TRANSFERRED && row.1 == CONTINUED && row.2 == 2 && row.4 == ROOT));
+        assert!(projected
+            .iter()
+            .any(|row| row.0 == SELF_ROW && row.1 == RECIPIENT && row.6 == RECIPIENT));
+        for object in [
+            "current_thread_deliveries",
+            "current_thread_delivery_page",
+            "messages_by_sender_thread",
+            "membership_active_by_group",
+            "source_registrations_active_by_binding",
+            "project_current_thread_delivery",
+            "rebind_current_thread_delivery",
+        ] {
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_schema WHERE name=?1",
+                        [object],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1,
+                "{object}"
+            );
+        }
+
+        // The retained thread cursor keeps its exact frozen meaning.
+        let recipient = principal(RECIPIENT, 1);
+        let group = GroupId::parse(GROUP).unwrap();
+        let root = MessageId::parse(ROOT).unwrap();
+        let thread = store
+            .read_thread(
+                &recipient,
+                ThreadPageRequest {
+                    group_id: group.clone(),
+                    root: root.clone(),
+                    navigation: MailboxNavigation::Cursor(
+                        MailboxCursor::parse(THREAD_CURSOR).unwrap(),
+                    ),
+                    max_items: 8,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            thread
+                .messages
+                .iter()
+                .map(|e| e.message.group_sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 6]
+        );
+        assert_eq!(thread.snapshot_high_sequence, 6);
+        let self_entry = &thread.messages[2];
+        assert_eq!(self_entry.message.message_id.as_str(), SELF_ROW);
+        assert!(self_entry.receipt.is_some());
+        assert!(matches!(
+            store.acknowledge_message(&recipient, &group, &MessageId::parse(SELF_ROW).unwrap()),
+            Err(StoreError::Unauthorized { .. })
+        ));
+        // The transferred row is visible to the successor binding only.
+        let successor = principal(CONTINUED, 2);
+        let page = store
+            .read_thread(
+                &successor,
+                ThreadPageRequest {
+                    group_id: group.clone(),
+                    root: root.clone(),
+                    navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
+                    max_items: 8,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|e| e.message.group_sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 5]
+        );
+        assert!(matches!(
+            store.read_thread(
+                &principal(CONTINUED, 1),
+                ThreadPageRequest {
+                    group_id: group.clone(),
+                    root: root.clone(),
+                    navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
+                    max_items: 8,
+                },
+            ),
+            Err(StoreError::StaleBinding)
+        ));
+
+        // New owner subpages read the migrated inventory.
+        let owner = store.trusted_owner();
+        let OwnerSnapshotPage::PeerSources(sources) = store
+            .owner_snapshot(
+                &owner,
+                OwnerSnapshotRequest::PeerSources {
+                    peer_id: PeerId::parse(RECIPIENT).unwrap(),
+                    expected_inventory_revision: None,
+                    after_source: None,
+                    max_items: 8,
+                },
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            sources
+                .sources
+                .iter()
+                .map(|s| (s.source_id.as_str().to_owned(), s.state))
+                .collect::<Vec<_>>(),
+            vec![
+                (ACTIVE_SOURCE.to_owned(), SourceState::Active),
+                (WITHDRAWN_SOURCE.to_owned(), SourceState::Withdrawn)
+            ]
+        );
+        let OwnerSnapshotPage::PeerMemberships(memberships) = store
+            .owner_snapshot(
+                &owner,
+                OwnerSnapshotRequest::PeerMemberships {
+                    peer_id: PeerId::parse(CONTINUED).unwrap(),
+                    expected_inventory_revision: None,
+                    after_group: None,
+                    max_items: 8,
+                },
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            memberships
+                .memberships
+                .iter()
+                .map(|m| m.group_id.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            vec![GROUP.to_owned()]
+        );
+        let OwnerSnapshotPage::GroupMembers(members) = store
+            .owner_snapshot(
+                &owner,
+                OwnerSnapshotRequest::GroupMembers {
+                    group_id: GroupId::parse(OTHER_GROUP).unwrap(),
+                    expected_inventory_revision: None,
+                    after_peer: None,
+                    max_items: 8,
+                },
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            members
+                .members
+                .iter()
+                .map(|p| p.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            vec![SENDER.to_owned()]
+        );
+        // The migrated database is recognized as exact v9 on reopen.
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.inspect().unwrap().schema_version, 9);
+    }
+
+    #[test]
+    fn late_v9_migration_failure_keeps_exact_v8_schema_and_data() {
+        let (path, mut connection) = fixture("v8-to-v9-rollback");
+        let before = schema_manifest(&connection).unwrap();
+        let before_commitment = legacy_commitment(&connection);
+        let identity = DatabaseIdentity {
+            application_id: APPLICATION_ID,
+            schema_version: 8,
+            has_objects: true,
+        };
+        assert!(migrate_with_final_sql(
+            &mut connection,
+            identity,
+            Some("INSERT INTO owner_state(singleton,inventory_revision,delivery_revision) VALUES(1,1,1)")
+        )
+        .is_err());
+        assert_eq!(schema_manifest(&connection).unwrap(), before);
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name IN ('current_thread_deliveries','current_thread_delivery_page','messages_by_sender_thread','membership_active_by_group','source_registrations_active_by_binding')",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(legacy_commitment(&connection), before_commitment);
+        assert!(connection
+            .query_row(
+                "SELECT destination_id FROM publication_commitments LIMIT 1",
+                [],
+                |r| r.get::<_, Option<String>>(0)
+            )
+            .is_err());
+        // The exact v8 database is still recognized and migrates cleanly.
+        let expected = Connection::open_in_memory().unwrap();
+        expected.execute_batch(SCHEMA_V1).unwrap();
+        for migration in [
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V5,
+            MIGRATION_V6,
+            MIGRATION_V7,
+            MIGRATION_V8,
+        ] {
+            expected.execute_batch(migration).unwrap();
+        }
+        assert_eq!(
+            schema_manifest(&connection).unwrap(),
+            schema_manifest(&expected).unwrap()
+        );
+        drop(connection);
+        let store = Store::open(path).unwrap();
+        assert_eq!(store.inspect().unwrap().schema_version, 9);
+        assert!(store.inspect().unwrap().integrity_ok);
+        assert_eq!(
+            projection(&store.connection),
+            expected_projection(&store.connection)
+        );
+    }
+
+    #[test]
+    fn fresh_v9_manifest_matches_the_migrated_manifest_and_unknown_schemas_stay_untouched() {
+        let (path, connection) = fixture("v8-to-v9-manifest");
+        drop(connection);
+        let migrated = Store::open(&path).unwrap();
+        let migrated_manifest = schema_manifest(&migrated.connection).unwrap();
+        let fresh_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../retired/test-artifacts/swarm-core")
+            .join(format!("v9-fresh-{}", LaunchId::generate().as_str()));
+        std::fs::create_dir_all(&fresh_dir).unwrap();
+        let fresh_path = fresh_dir.join("fresh.sqlite");
+        let fresh = Store::open(&fresh_path).unwrap();
+        assert_eq!(
+            schema_manifest(&fresh.connection).unwrap(),
+            migrated_manifest
+        );
+        assert_eq!(fresh.inspect().unwrap().table_count, 29);
+        // A v9 database with one extra index is not recognized and is left
+        // byte-for-byte untouched. (A separately created store, not a file
+        // copy: the open store's pages still live in its WAL.)
+        let foreign_path = fresh_path.with_file_name("foreign.sqlite");
+        drop(Store::open(&foreign_path).unwrap());
+        let foreign = Connection::open(&foreign_path).unwrap();
+        foreign
+            .execute_batch("CREATE INDEX foreign_extra ON messages(client_key);")
+            .unwrap();
+        drop(foreign);
+        let before = std::fs::read(&foreign_path).unwrap();
+        assert!(matches!(
+            Store::open(&foreign_path),
+            Err(StoreError::UnrecognizedDatabase {
+                schema_version: 9,
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read(&foreign_path).unwrap(), before);
     }
 }

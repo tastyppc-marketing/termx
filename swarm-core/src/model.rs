@@ -67,6 +67,34 @@ macro_rules! opaque_id {
     };
 }
 
+/// Serialize-only opaque local identity. Values are minted in-process and
+/// never accepted from a wire: there is deliberately no `Deserialize`.
+macro_rules! opaque_local_id {
+    ($name:ident, $prefix:literal) => {
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn generate() -> Self {
+                let mut bytes = [0_u8; 16];
+                OsRng.fill_bytes(&mut bytes);
+                let mut value = String::with_capacity($prefix.len() + 32);
+                value.push_str($prefix);
+                for byte in bytes {
+                    use std::fmt::Write as _;
+                    write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+                }
+                Self(value)
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    };
+}
+
 opaque_id!(AuthorityId, "a_");
 opaque_id!(PeerId, "p_");
 opaque_id!(LaunchId, "l_");
@@ -76,7 +104,9 @@ opaque_id!(DeliveryAttemptId, "d_");
 opaque_id!(SourceReferenceId, "s_");
 opaque_id!(MailboxCursor, "c_");
 
+mod publication;
 mod views;
+pub use publication::*;
 pub use views::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -307,6 +337,10 @@ pub struct MailboxEntry {
 pub struct MailboxPage {
     pub messages: Vec<MailboxEntry>,
     pub next_cursor: Option<MailboxCursor>,
+    /// Store-built position to continue this reader's mailbox after this page
+    /// under a fresh watermark: the last included item of a partial page, or
+    /// the frozen high watermark of a complete one. Navigation only.
+    pub resume_position: NavigationPosition,
     pub snapshot_high_sequence: u64,
 }
 

@@ -13,16 +13,16 @@ use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::error::{StoreError, ValidationError};
 use crate::model::{
-    AttachmentView, ContextGrantLease, GroupId, LeaseId, OwnerPrincipal, PeerId, PeerPrincipal,
-    PublicationCommitment, PublicationCommitmentId, PublicationIdentity, Revision,
-    SourceAttachment, SourceAvailability, SourceId, SourceReferenceId, SourceRegistration,
-    SourceState, SourceSummary, SourceTransition, VerifiedSourceDescriptor,
+    AttachmentView, CommittedPublication, ContextGrantLease, GroupId, LeaseId, OwnerPrincipal,
+    PeerId, PeerPrincipal, PreparedPublication, PublicationCommitment, PublicationCommitmentId,
+    Revision, SourceAttachment, SourceAvailability, SourceId, SourceReferenceId,
+    SourceRegistration, SourceState, SourceSummary, SourceTransition, VerifiedSourceDescriptor,
     MAX_ACTIVE_SOURCES_PER_BINDING,
 };
 
 use super::policy::revision_from_sql;
-use super::query::load_attachments;
-use super::revision::{bump_inventory, inventory_revision};
+use super::query::{load_attachments, page_limit};
+use super::revision::bump_inventory;
 use super::{authorize_peer, now_millis, Store};
 
 /// Stored registration row used by every authorization decision.
@@ -313,18 +313,22 @@ impl Store {
         })
     }
 
-    /// Final writer validation of one exact response buffer read under a lease.
-    /// Credits must already be reserved. Every authorization fact recorded in
-    /// the lease is re-checked against current state; success durably commits
-    /// the response identity once. Later revocation never retracts it, and a
-    /// consumed lease or reused identity never validates again.
+    /// Final writer validation of one exact prepared response.
+    ///
+    /// The prepared value already binds the buffer to a lease-scoped source
+    /// observation and an actually owned destination reservation. Every
+    /// authorization fact recorded in the lease and the observation is
+    /// re-checked against current state under the writer; success durably
+    /// commits the response identity once and returns the same buffer and
+    /// guard as a `CommittedPublication`. Any rejection consumes the prepared
+    /// value, releasing its credits. Later revocation never retracts a
+    /// commitment, and a consumed lease or reused identity never validates.
     pub fn validate_context_grant(
         &mut self,
         principal: &PeerPrincipal,
-        lease: ContextGrantLease,
-        identity: PublicationIdentity,
-    ) -> Result<PublicationCommitment, StoreError> {
-        identity.validate()?;
+        prepared: PreparedPublication,
+    ) -> Result<CommittedPublication, StoreError> {
+        let (lease, observation, response_id, body, reservation) = prepared.into_parts();
         if lease.authority_id != self.authority_id || principal.authority_id != self.authority_id {
             return Err(StoreError::AuthorityMismatch);
         }
@@ -348,10 +352,18 @@ impl Store {
         }
         let registration = load_registration(&transaction, &lease.source_id)?
             .ok_or(StoreError::NotFound { kind: "source" })?;
-        if registration.registration_epoch != lease.registration_epoch.as_sql_i64()
-            || registration.binding_revision != lease.source_owner_binding_revision.as_sql_i64()
-            || registration.peer_id != lease.source_owner_peer_id
-        {
+        let lease_matches = registration.registration_epoch
+            == lease.registration_epoch.as_sql_i64()
+            && registration.binding_revision == lease.source_owner_binding_revision.as_sql_i64()
+            && registration.peer_id == lease.source_owner_peer_id
+            && registration.object_identity == lease.object_identity;
+        let observation_matches = registration.source_id == *observation.source_id()
+            && registration.registration_epoch == observation.registration_epoch().as_sql_i64()
+            && registration.binding_revision
+                == observation.source_owner_binding_revision().as_sql_i64()
+            && registration.peer_id == *observation.source_owner_peer_id()
+            && registration.object_identity == observation.object_identity();
+        if !lease_matches || !observation_matches {
             return Err(StoreError::SourceUnavailable {
                 reason: "source registration changed after the lease was acquired",
             });
@@ -367,7 +379,7 @@ impl Store {
         }
         let committed = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM publication_commitments WHERE response_reference=?1)",
-            [identity.response_reference.as_str()],
+            [response_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         if committed {
@@ -375,16 +387,20 @@ impl Store {
         }
         let now = now_millis(&transaction)?;
         let commitment_id = PublicationCommitmentId::generate();
-        let reserved =
-            i64::try_from(identity.reserved_bytes).map_err(|_| ValidationError::IntegerRange {
+        let reserved_bytes = u64::try_from(reservation.reserved_bytes()).map_err(|_| {
+            ValidationError::IntegerRange {
                 field: "reserved_bytes",
-            })?;
+            }
+        })?;
+        let body_bytes = u64::try_from(body.len()).map_err(|_| ValidationError::IntegerRange {
+            field: "body_bytes",
+        })?;
         transaction.execute(
-            "INSERT INTO publication_commitments(commitment_id,lease_id,response_reference,authority_id,group_id,policy_revision,caller_peer_id,caller_binding_revision,source_id,source_owner_binding_revision,registration_epoch,reserved_bytes,committed_at_millis) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            "INSERT INTO publication_commitments(commitment_id,lease_id,response_reference,authority_id,group_id,policy_revision,caller_peer_id,caller_binding_revision,source_id,source_owner_binding_revision,registration_epoch,reserved_bytes,committed_at_millis,destination_id,body_bytes,snapshot_identity,captured_through) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 commitment_id.as_str(),
                 lease.lease_id.as_str(),
-                identity.response_reference,
+                response_id.as_str(),
                 authority_id.as_str(),
                 lease.group_id.as_str(),
                 lease.policy_revision.as_sql_i64(),
@@ -393,24 +409,36 @@ impl Store {
                 lease.source_id.as_str(),
                 lease.source_owner_binding_revision.as_sql_i64(),
                 lease.registration_epoch.as_sql_i64(),
-                reserved,
-                now
+                crate::model::sqlite_i64("reserved_bytes", reserved_bytes)?,
+                now,
+                reservation.destination_id().as_str(),
+                crate::model::sqlite_i64("body_bytes", body_bytes)?,
+                observation.snapshot_identity(),
+                observation
+                    .captured_through()
+                    .map(|through| crate::model::sqlite_i64("captured_through", through))
+                    .transpose()?,
             ],
         )?;
         transaction.commit()?;
-        Ok(PublicationCommitment {
+        let record = PublicationCommitment {
             commitment_id,
             lease_id: lease.lease_id,
-            response_reference: identity.response_reference,
+            response_id,
+            destination_id: reservation.destination_id().clone(),
             group_id: lease.group_id,
             policy_revision: lease.policy_revision,
             caller_peer_id: lease.caller_peer_id,
             caller_binding_revision: lease.caller_binding_revision,
             source_id: lease.source_id,
             registration_epoch: lease.registration_epoch,
-            reserved_bytes: identity.reserved_bytes,
+            body_bytes,
+            reserved_bytes,
+            snapshot_identity: observation.snapshot_identity().to_owned(),
+            captured_through: observation.captured_through(),
             committed_at_millis: now,
-        })
+        };
+        Ok(CommittedPublication::new(record, body, reservation))
     }
 
     /// Owner audit: whether a commitment was durably recorded.
@@ -448,7 +476,7 @@ fn owner_authorization(
         return Ok(OwnerAuthorization::StaleBinding);
     }
     let member = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM group_memberships WHERE group_id=?1 AND peer_id=?2 AND removed_policy_revision IS NULL)",
+        "SELECT EXISTS(SELECT 1 FROM group_memberships INDEXED BY membership_active_by_group WHERE group_id=?1 AND peer_id=?2 AND removed_policy_revision IS NULL)",
         [group_id.as_str(), registration.peer_id.as_str()],
         |row| row.get::<_, bool>(0),
     )?;
@@ -547,7 +575,7 @@ fn require_active_capacity(
     excluding: Option<&SourceId>,
 ) -> Result<(), StoreError> {
     let active: i64 = transaction.query_row(
-        "SELECT count(*) FROM source_registrations WHERE peer_id=?1 AND binding_revision=?2 AND state='active' AND source_id IS NOT ?3",
+        "SELECT count(*) FROM source_registrations INDEXED BY source_registrations_active_by_binding WHERE peer_id=?1 AND binding_revision=?2 AND state='active' AND source_id IS NOT ?3",
         params![
             descriptor.peer_id.as_str(),
             descriptor.binding_revision.as_sql_i64(),
@@ -687,44 +715,57 @@ fn registration_view(
     })
 }
 
-/// Every registration of a peer in every state, for owner views.
-pub(super) fn registrations_for_peer(
+/// One bounded key-ordered page of a peer's registrations in every retained
+/// state. `consume` receives at most `max_items + 1` rows and reports whether
+/// more exist beyond what it accepted.
+pub(super) fn registration_page(
     transaction: &Transaction<'_>,
     peer_id: &PeerId,
-) -> Result<Vec<SourceRegistration>, StoreError> {
-    let inventory = inventory_revision(transaction)?;
+    after_source: Option<&SourceId>,
+    max_items: usize,
+    inventory: Revision,
+    consume: impl FnOnce(
+        &mut dyn Iterator<Item = Result<SourceRegistration, StoreError>>,
+    ) -> Result<bool, StoreError>,
+) -> Result<bool, StoreError> {
     let mut statement = transaction.prepare_cached(
-        "SELECT source_id,peer_id,binding_revision,conversation_id,source_kind,resolver_key,object_identity,evidence_reference,state,registration_epoch,replaced_by_source_id,registered_at_millis,transitioned_at_millis FROM source_registrations WHERE peer_id=?1 ORDER BY source_id",
+        "SELECT source_id,peer_id,binding_revision,conversation_id,source_kind,resolver_key,object_identity,evidence_reference,state,registration_epoch,replaced_by_source_id,registered_at_millis,transitioned_at_millis FROM source_registrations INDEXED BY source_registrations_by_peer WHERE peer_id=?1 AND source_id>?2 ORDER BY source_id LIMIT ?3",
     )?;
-    let registrations = statement
-        .query_map([peer_id.as_str()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                (
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                    row.get(11)?,
-                    row.get(12)?,
-                ),
-            ))
-        })?
+    let mut rows = statement
+        .query_map(
+            params![
+                peer_id.as_str(),
+                after_source.map_or("", SourceId::as_str),
+                page_limit(max_items)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                    ),
+                ))
+            },
+        )?
         .map(|row| {
             let (source_id, row) = row?;
             registration_view(
                 &registration_from_row(SourceId::parse(&source_id)?, row)?,
                 inventory,
             )
-        })
-        .collect::<Result<Vec<_>, StoreError>>()?;
-    Ok(registrations)
+        });
+    consume(&mut rows)
 }
 
 /// Active registrations bound to the peer's exact current binding.
@@ -734,7 +775,7 @@ pub(super) fn active_source_summaries(
     current_binding: i64,
 ) -> Result<Vec<SourceSummary>, StoreError> {
     let mut statement = transaction.prepare_cached(
-        "SELECT source_id,source_kind,registration_epoch FROM source_registrations WHERE peer_id=?1 AND binding_revision=?2 AND state='active' ORDER BY source_id",
+        "SELECT source_id,source_kind,registration_epoch FROM source_registrations INDEXED BY source_registrations_active_by_binding WHERE peer_id=?1 AND binding_revision=?2 AND state='active' ORDER BY source_id",
     )?;
     let sources = statement
         .query_map(params![peer_id.as_str(), current_binding], |row| {

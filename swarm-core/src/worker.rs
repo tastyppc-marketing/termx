@@ -65,7 +65,7 @@ pub enum Command {
     RegisterSource(OwnerPrincipal, VerifiedSourceDescriptor),
     TransitionSource(OwnerPrincipal, SourceTransition),
     AcquireContextGrant(PeerPrincipal, GroupId, SourceId),
-    ValidateContextGrant(PeerPrincipal, ContextGrantLease, PublicationIdentity),
+    ValidateContextGrant(PeerPrincipal, PreparedPublication),
     OwnerSnapshot(OwnerPrincipal, OwnerSnapshotRequest),
     StateRevisions(OwnerPrincipal),
     #[cfg(test)]
@@ -95,7 +95,7 @@ pub enum Response {
     Attachment(AttachmentView),
     Source(SourceRegistration),
     Lease(ContextGrantLease),
-    Commitment(PublicationCommitment),
+    CommittedPublication(CommittedPublication),
     Snapshot(OwnerSnapshotPage),
     Revisions(StateRevisions),
     Unit,
@@ -556,31 +556,32 @@ impl Response {
                 .saturating_add(view.attachment.source_kind.capacity()),
             Self::Source(registration) => registration_bytes(registration),
             Self::Lease(lease) => lease.estimated_bytes(),
-            Self::Commitment(commitment) => commitment.response_reference().len(),
-            Self::Snapshot(OwnerSnapshotPage::Peers(page)) => {
-                page.peers
-                    .iter()
-                    .fold(page.peers.capacity().saturating_mul(2048), |size, peer| {
-                        size.saturating_add(record_bytes(&peer.binding))
-                            .saturating_add(peer.memberships.iter().fold(
-                                peer.memberships.capacity().saturating_mul(512),
-                                |size, m| size.saturating_add(status_bytes(&m.status)),
-                            ))
-                            .saturating_add(
-                                peer.sources.iter().fold(
-                                    peer.sources.capacity().saturating_mul(1024),
-                                    |size, s| size.saturating_add(registration_bytes(s)),
-                                ),
-                            )
-                    })
-            }
+            Self::CommittedPublication(committed) => committed.estimated_bytes(),
+            Self::Snapshot(OwnerSnapshotPage::Peers(page)) => page
+                .peers
+                .iter()
+                .fold(page.peers.capacity().saturating_mul(2048), |size, peer| {
+                    size.saturating_add(record_bytes(&peer.binding))
+                }),
             Self::Snapshot(OwnerSnapshotPage::Groups(page)) => page.groups.iter().fold(
                 page.groups.capacity().saturating_mul(1024),
-                |size, group| {
-                    size.saturating_add(group.group.label.capacity())
-                        .saturating_add(group.members.capacity().saturating_mul(64))
-                },
+                |size, group| size.saturating_add(group.group.label.capacity()),
             ),
+            Self::Snapshot(OwnerSnapshotPage::PeerMemberships(page)) => {
+                page.memberships.iter().fold(
+                    page.memberships.capacity().saturating_mul(512),
+                    |size, m| size.saturating_add(status_bytes(&m.status)),
+                )
+            }
+            Self::Snapshot(OwnerSnapshotPage::PeerSources(page)) => page
+                .sources
+                .iter()
+                .fold(page.sources.capacity().saturating_mul(1024), |size, s| {
+                    size.saturating_add(registration_bytes(s))
+                }),
+            Self::Snapshot(OwnerSnapshotPage::GroupMembers(page)) => {
+                page.members.capacity().saturating_mul(64)
+            }
             Self::Snapshot(OwnerSnapshotPage::Messages(page)) => {
                 state_entries_bytes(&page.messages)
             }
@@ -713,8 +714,8 @@ impl Command {
             Self::AcquireContextGrant(p, g, s) => {
                 Response::Lease(store.acquire_context_grant(&p, &g, &s)?)
             }
-            Self::ValidateContextGrant(p, l, i) => {
-                Response::Commitment(store.validate_context_grant(&p, l, i)?)
+            Self::ValidateContextGrant(p, prepared) => {
+                Response::CommittedPublication(store.validate_context_grant(&p, prepared)?)
             }
             Self::OwnerSnapshot(o, r) => Response::Snapshot(store.owner_snapshot(&o, r)?),
             Self::StateRevisions(o) => Response::Revisions(store.state_revisions(&o)?),
@@ -750,9 +751,9 @@ impl Command {
                 SourceTransition::Reestablish { descriptor, .. }
                 | SourceTransition::Replace { descriptor, .. },
             ) => descriptor.estimated_bytes(),
-            Self::ValidateContextGrant(_, lease, identity) => lease
-                .estimated_bytes()
-                .saturating_add(identity.response_reference.capacity()),
+            // The real body travels with the command and is retained by the
+            // committed response; charge it in both accounting domains.
+            Self::ValidateContextGrant(_, prepared) => prepared.estimated_bytes(),
             Self::CreateGroup(_, label, members) => label
                 .capacity()
                 .saturating_add(members.len().saturating_mul(256)),
@@ -781,6 +782,9 @@ impl Command {
             Self::WhoAmI(..) | Self::ListPeers(..) | Self::OwnerSnapshot(..) => 8 * 1024 * 1024,
             Self::Send(..) => 2 * 1024 * 1024,
             Self::Candidates(..) => 128 * 1024,
+            Self::ValidateContextGrant(_, prepared) => {
+                prepared.estimated_bytes().saturating_add(64 * 1024)
+            }
             _ => 64 * 1024,
         }
     }

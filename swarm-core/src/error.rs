@@ -16,6 +16,14 @@ pub enum ValidationError {
     IntegerRange { field: &'static str },
     #[error("canonical payload could not be serialized: {0}")]
     CanonicalSerialization(String),
+    #[error("{field} in the source observation does not match the lease")]
+    EvidenceMismatch { field: &'static str },
+    #[error(
+        "destination reservation of {reserved} bytes does not cover the {required}-byte response"
+    )]
+    InsufficientReservation { reserved: usize, required: usize },
+    #[error("committed response is bound to a different destination")]
+    DestinationMismatch,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +78,10 @@ pub enum StoreError {
     CursorScope,
     #[error("mailbox cursor was issued under an older binding or policy")]
     StaleCursor,
+    #[error("navigation position belongs to another reader, group or read kind")]
+    PositionScope,
+    #[error("navigation position was built under an older binding or policy")]
+    StalePosition,
     #[error("one mailbox item cannot fit in the bounded page envelope")]
     PageItemTooLarge,
     #[error(

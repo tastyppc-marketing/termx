@@ -772,7 +772,7 @@ async fn companion_reads_reserve_their_page_bound_and_leave_a_small_response_slo
             ThreadPageRequest {
                 group_id: group.group_id.clone(),
                 root: MessageId::generate(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 1,
             },
         )
@@ -798,7 +798,7 @@ async fn companion_reads_reserve_their_page_bound_and_leave_a_small_response_slo
             recipient.principal.clone(),
             MailboxAfterRequest {
                 group_id: group.group_id.clone(),
-                navigation: MailboxNavigation::After { after_sequence: 0 },
+                navigation: MailboxNavigation::ResetAfter { after_sequence: 0 },
                 max_items: 1
             }
         ))
