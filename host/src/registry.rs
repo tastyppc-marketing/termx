@@ -530,6 +530,51 @@ mod tests {
         (tmp, reg)
     }
 
+    fn spill_snapshot_is_ready(ring_start: u64, ring: &[u8], page: &history::HistorySlice) -> bool {
+        const FINAL_OUTPUT: &[u8] = b"history_line_400";
+
+        if ring_start == 0 || page.start_offset + page.data.len() as u64 != ring_start {
+            return false;
+        }
+
+        page.data
+            .iter()
+            .chain(ring)
+            .copied()
+            .collect::<Vec<_>>()
+            .windows(FINAL_OUTPUT.len())
+            .any(|window| window == FINAL_OUTPUT)
+    }
+
+    fn retained_host_fixture(name: &str) -> PathBuf {
+        static NEXT_FIXTURE: AtomicU32 = AtomicU32::new(0);
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must follow the Unix epoch")
+            .as_nanos();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("host package must be inside the repository")
+            .join("retired")
+            .join("test-artifacts")
+            .join("host")
+            .join(format!(
+                "{name}-{unique}-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir_all(&fixture).expect("create retained host fixture");
+        fixture
+    }
+
+    fn retain_fixture_file(fixture: &Path, name: &str, data: &[u8], errors: &mut Vec<String>) {
+        let path = fixture.join(name);
+        if let Err(error) = std::fs::write(&path, data) {
+            errors.push(format!("writing {}: {error}", path.display()));
+        }
+    }
+
     /// The daemon dies (a reboot); its state.json still names the sessions
     /// it ran. The NEXT daemon must serve those as corpse records — dead,
     /// with their cwd and profile intact — so a client can restart a dead
@@ -1027,10 +1072,78 @@ mod tests {
     /// The whole point of the spill file: what the ring forgets, disk keeps —
     /// at the SAME absolute offsets, so the two windows meet without a gap.
     #[test]
+    fn spill_snapshot_readiness_requires_completion_and_a_matching_seam() {
+        struct Case {
+            name: &'static str,
+            ring_start: u64,
+            ring: &'static [u8],
+            history: &'static [u8],
+            old_expected: bool,
+            expected: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "matching seam with only the echoed command",
+                ring_start: 41,
+                ring: b"prompt> for /L %i do echo history_line_%i",
+                history: b"startup bytes that reached the spill seam",
+                old_expected: true,
+                expected: false,
+            },
+            Case {
+                name: "completed ring while the spill seam still lags",
+                ring_start: 42,
+                ring: b"history_line_399\r\nhistory_line_400\r\n",
+                history: b"startup bytes that reached the spill seam",
+                old_expected: false,
+                expected: false,
+            },
+            Case {
+                name: "completed logical prefix with a matching seam",
+                ring_start: 41,
+                ring: b"history_line_399\r\nhistory_line_400\r\n",
+                history: b"startup bytes that reached the spill seam",
+                old_expected: true,
+                expected: true,
+            },
+        ];
+
+        for case in cases {
+            let page = history::HistorySlice {
+                start_offset: 0,
+                data: case.history.to_vec(),
+                at_start: true,
+            };
+            let old_seam_only_ready = case.ring_start > 0
+                && page.start_offset + page.data.len() as u64 == case.ring_start;
+            assert_eq!(old_seam_only_ready, case.old_expected, "old: {}", case.name);
+            assert_eq!(
+                spill_snapshot_is_ready(case.ring_start, case.ring, &page),
+                case.expected,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
     fn ring_eviction_spills_to_the_history_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        struct SpillCapture {
+            ring_start: u64,
+            ring: Vec<u8>,
+            page: Option<history::HistorySlice>,
+            ready: bool,
+            history_error: Option<String>,
+        }
+
+        const COMMAND: &[u8] = b"for /L %i in (1,1,400) do @echo history_line_%i\r\n";
+
+        let fixture = retained_host_fixture("ring-eviction-spill");
+        let data_dir = fixture.join("session-data");
+        std::fs::create_dir_all(&data_dir).expect("create retained fixture data directory");
         let reg = Arc::new(Registry::new(
-            tmp.path().to_path_buf(),
+            data_dir.clone(),
             Config {
                 scrollback_bytes: 2048,
                 ..Config::default()
@@ -1039,42 +1152,151 @@ mod tests {
         let (info, session) = reg
             .create_session(Some("cmd"), None, 80, 25, false)
             .unwrap();
-        session
-            .write_input(b"for /L %i in (1,1,400) do @echo history_line_%i\r\n")
-            .unwrap();
+        let command_error = session
+            .write_input(COMMAND)
+            .err()
+            .map(|error| error.to_string());
 
         // The ring is updated before the spill append, so a snapshot taken
         // between the two can briefly show the file lagging. Poll until the
-        // shell falls quiet and the two windows meet exactly.
+        // captured ring contains the command's final output and the two
+        // captured windows meet exactly.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let (ring_start, page) = loop {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ring never evicted into history"
-            );
-            let (ring_start, _) = session.snapshot();
-            let page = history::read_history(tmp.path(), info.id, ring_start, 512 * 1024)
-                .unwrap()
-                .expect("history file must exist once a session is created");
-            if ring_start > 0 && page.start_offset + page.data.len() as u64 == ring_start {
-                break (ring_start, page);
+        let capture = loop {
+            let (ring_start, ring) = session.snapshot();
+            let (page, history_error) =
+                match history::read_history(&data_dir, info.id, ring_start, 512 * 1024) {
+                    Ok(page) => (page, None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+            let ready = page
+                .as_ref()
+                .is_some_and(|page| spill_snapshot_is_ready(ring_start, &ring, page));
+            let capture = SpillCapture {
+                ring_start,
+                ring,
+                page,
+                ready,
+                history_error,
+            };
+            if capture.ready || command_error.is_some() || std::time::Instant::now() >= deadline {
+                break capture;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         };
+
+        // Preserve the exact prefix under test before close_session exercises
+        // the normal delete-on-close behavior for its working history file.
+        let history_prefix = capture
+            .page
+            .as_ref()
+            .map_or_else(Vec::new, |page| page.data.clone());
+        let mut logical_prefix = history_prefix.clone();
+        logical_prefix.extend_from_slice(&capture.ring);
+        let capture_metadata = serde_json::to_vec_pretty(&serde_json::json!({
+            "fixture": fixture.display().to_string(),
+            "session_id": info.id,
+            "shell_pid": session.pid(),
+            "command": String::from_utf8_lossy(COMMAND),
+            "command_error": command_error,
+            "ready": capture.ready,
+            "ring_start": capture.ring_start,
+            "ring_len": capture.ring.len(),
+            "history_start": capture.page.as_ref().map(|page| page.start_offset),
+            "history_len": history_prefix.len(),
+            "history_at_start": capture.page.as_ref().map(|page| page.at_start),
+            "history_error": capture.history_error,
+            "final_output_observed": logical_prefix
+                .windows(b"history_line_400".len())
+                .any(|window| window == b"history_line_400"),
+        }))
+        .unwrap_or_else(|error| {
+            format!("capture metadata serialization failed: {error}").into_bytes()
+        });
+        let mut evidence_errors = Vec::new();
+        retain_fixture_file(&fixture, "command.txt", COMMAND, &mut evidence_errors);
+        retain_fixture_file(
+            &fixture,
+            "ring-prefix.bin",
+            &capture.ring,
+            &mut evidence_errors,
+        );
+        retain_fixture_file(
+            &fixture,
+            "history-prefix.bin",
+            &history_prefix,
+            &mut evidence_errors,
+        );
+        retain_fixture_file(
+            &fixture,
+            "logical-prefix.bin",
+            &logical_prefix,
+            &mut evidence_errors,
+        );
+        retain_fixture_file(
+            &fixture,
+            "capture.json",
+            &capture_metadata,
+            &mut evidence_errors,
+        );
+
+        let close_accepted = reg.close_session(info.id);
+        if !close_accepted {
+            session.kill();
+        }
+        let history_exists_after_close = history::session_file(&data_dir, info.id).exists();
+        let mut reaped = session.wait_exit_blocking(std::time::Duration::from_secs(10));
+        if !reaped {
+            session.kill();
+            reaped = session.wait_exit_blocking(std::time::Duration::from_secs(10));
+        }
+        let close_metadata = serde_json::to_vec_pretty(&serde_json::json!({
+            "close_accepted": close_accepted,
+            "history_exists_after_close": history_exists_after_close,
+            "session_reaped": reaped,
+            "native_exit": session.exited(),
+            "reader_error": session.reader_error(),
+            "kill_error": session.kill_error(),
+        }))
+        .expect("serialize close metadata");
+        retain_fixture_file(
+            &fixture,
+            "close-result.json",
+            &close_metadata,
+            &mut evidence_errors,
+        );
+        eprintln!("retained host fixture: {}", fixture.display());
+
+        assert!(evidence_errors.is_empty(), "{evidence_errors:#?}");
+        assert!(
+            command_error.is_none(),
+            "command input failed: {command_error:?}"
+        );
+        assert!(
+            capture.ready,
+            "ring/history never formed a completed coherent prefix; retained {}",
+            fixture.display()
+        );
+        let page = capture
+            .page
+            .as_ref()
+            .expect("a ready capture always has a history page");
         assert_eq!(page.start_offset, 0, "nothing was truncated at this size");
         assert!(page.at_start);
-        assert_eq!(page.data.len() as u64, ring_start);
+        assert_eq!(page.data.len() as u64, capture.ring_start);
         assert!(
             String::from_utf8_lossy(&page.data).contains("history_line_"),
             "the spill must hold the real evicted stream"
         );
-
-        reg.close_session(info.id);
         assert!(
-            !history::session_file(tmp.path(), info.id).exists(),
+            close_accepted,
+            "the exact test-created session must remain owned until close"
+        );
+        assert!(
+            !history_exists_after_close,
             "closing a session forgets its history"
         );
-        assert!(session.wait_exit_blocking(std::time::Duration::from_secs(10)));
+        assert!(reaped, "the exact test-created session was not reaped");
     }
 
     #[test]
