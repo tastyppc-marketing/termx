@@ -1,0 +1,9 @@
+# Swarm MCP protocol foundation validation
+
+This pure Rust crate adds exact typed JSON-RPC IDs, initialization state, and move-only active request leases for the future TermX MCP adapter. It preserves exact integral signed64-bit numeric values, including values above JavaScript safe integer precision, while keeping string IDs distinct. It detects collisions before capacity rejection, reserves concurrent control admission, and retains each registration through cancellation until terminal send or drop. Only a successful original initialization response advances the handshake.
+
+Independent review found and repaired retained Arc/ID ownership after successful sends, an invalid initialization outcome transition, and initialize cancellation classification. Regression tests include actual strong/Weak ownership, mixed typed IDs, filled-capacity collisions, handshake interleavings, cancellation isolation, and compile-fail ownership restrictions with positive controls.
+
+Final verification on Windows with rustc/cargo1.97.1: 50 package tests and3 doctests passed; package formatting, strict Clippy and release build passed. Root independently reconciled26 frozen inputs,14 command manifests,28 logs and9 artifacts at2026-09-08T22:36:08UTC. Final source manifest SHA25618504ce90fec2dfe82330fb0db13dc909b7cb586e06a449de051626b6a38317d; evidence manifest468c600b96f49259d5f0276f9b50178697033252f8cc81cc99f8ca974fdc94f4. All failure evidence remains under the retained phase-a-fix-1-20260908T221856311762Z tree.
+
+This is a protocol foundation, not a runnable MCP server. Native enrollment, request-envelope validation, bounded response serialization, harness negotiation and collaboration UI integration remain separate work. Accounting reports documented payload and slot ownership, not total process memory. No live TermX process or user session was changed; no collaboration productivity result is claimed.

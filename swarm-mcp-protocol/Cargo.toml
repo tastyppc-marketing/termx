@@ -1,0 +1,10 @@
+[package]
+name = "termx-swarm-mcp-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Pure MCP request-ID normalization, handshake admission, and bounded active-ID leases"
+publish = false
+license = "MIT"
+
+[dependencies]
+serde_json = "1"
