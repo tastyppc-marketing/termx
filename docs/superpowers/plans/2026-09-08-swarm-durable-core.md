@@ -8,7 +8,7 @@
 
 **Starting checkpoint:** `eb5ffb5`, published on both feature branches. GitHub backup `backup/pre-swarm-2026-09-08` remains at `41a72fc`. Existing TermX host and user sessions stay running.
 
-**Progress:** Tasks 1 and 2 completed and independently reviewed through `30596fb`: 36 tests passed, with package formatting and clippy clean. The bundled SQLite is 3.53.2. The mailbox preserves exact retries across migration, uses bounded snapshot pages, and advances acknowledgements without rescanning resolved history. Delivery/continuation, worker recovery, sustained testing, and native/UI integration remain ahead. This is an internal library, not yet a usable collaboration control in TermX.
+**Progress:** Tasks 1–3 completed and independently reviewed through `6171a5d`: 59 tests passed, with package formatting and clippy clean. The bundled SQLite is 3.53.2; schema v6 preserves recognized historical layouts and delivery evidence. The core supports exact message retries, bounded snapshot pages, binding-wide acknowledgement progress, persisted delivery attempts, explicit recovery and owner-authorized continuation. Review caught and fixed late-completion ordering, mixed-generation acknowledgement gaps, and repair of already-materialized older delivery state. The serialized worker, actual subprocess crashes, sustained testing, and native/UI integration remain ahead. This is an internal library, not yet a usable collaboration control in TermX.
 
 ## Global constraints
 
@@ -75,12 +75,12 @@ The real Codex probe accepted two pending rows with one client correlation key. 
 
 **Files:** focused delivery/continuation modules and tests under `swarm-core/src/store/`.
 
-- [ ] Commit a unique delivery-attempt ticket before invoking any future adapter. A ticket binds group policy, recipient binding, and message/notification revision. Native I/O is outside the database connection/transaction.
-- [ ] Record outcomes only for the matching attempt. Stale completions cannot overwrite a successor binding or acknowledge content. Transport-written/native-queued remain evidence, not agent receipt. During explicit trusted new-run recovery after reopening, unfinished attempts become uncertain and are not blindly dispatched again. Merely opening an additional library connection must not invalidate a live attempt; the future exclusive companion must establish prior-run exit and invoke recovery before dispatch.
-- [ ] Candidate queries return bounded work for exact live authorized bindings. One held/unavailable recipient does not stall another. Pause/removal blocks future candidates while retaining messages and prior native evidence.
-- [ ] Implement owner-only compare-and-swap continuation using expected old binding, verified same-conversation/branch evidence, explicit continuation intent, and expected policy revisions. Two successors cannot win. Record predecessor/successor and original versus new delivery bindings.
-- [ ] Carry pending known-not-delivered backlog only through this transaction. Preserve acknowledged rows; preserve uncertain native outcomes for reconciliation rather than auto-resending them. An unrelated conversation/new pane occupant cannot inherit backlog or grants.
-- [ ] Test crashes before/after commit, lost reply/retry, pause during dispatch, stale attempt completion, competing continuation, acknowledged backlog preservation, and unknown outcome after process exit. Review/lint/commit.
+- [x] Commit a unique delivery-attempt ticket before invoking any future adapter. A ticket binds group policy, recipient binding, and message/notification revision. Native I/O is outside the database connection/transaction.
+- [x] Record outcomes only for the matching attempt. Stale completions cannot overwrite a successor binding or acknowledge content. Transport-written/native-queued remain evidence, not agent receipt. During explicit trusted new-run recovery after reopening, unfinished attempts become uncertain and are not blindly dispatched again. Merely opening an additional library connection must not invalidate a live attempt; the future exclusive companion must establish prior-run exit and invoke recovery before dispatch.
+- [x] Candidate queries return bounded work for exact live authorized bindings. One held/unavailable recipient does not stall another. Pause/removal blocks future candidates while retaining messages and prior native evidence.
+- [x] Implement owner-only compare-and-swap continuation using expected old binding, verified same-conversation/branch evidence, explicit continuation intent, and expected policy revisions. Two successors cannot win. Record predecessor/successor and original versus new delivery bindings.
+- [x] Carry pending known-not-delivered backlog only through this transaction. Preserve acknowledged rows; preserve uncertain native outcomes for reconciliation rather than auto-resending them. An unrelated conversation/new pane occupant cannot inherit backlog or grants.
+- [x] Test transaction failures before/after commit, lost reply/retry, pause during dispatch, stale attempt completion, competing continuation, acknowledged backlog preservation, and explicit new-run uncertainty. Review/lint/commit. Task 3 uses commit-hook rollback and reopen tests; actual abrupt subprocess exit is covered by Task 4 below.
 
 ## Task 4: Bounded serialized worker and crash/recovery harness
 
