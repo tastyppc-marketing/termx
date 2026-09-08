@@ -1,3 +1,5 @@
+mod continuation;
+mod delivery;
 mod message;
 mod policy;
 mod query;
@@ -18,6 +20,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Store {
     pub(super) connection: Connection,
     pub(super) authority_id: AuthorityId,
+    pub(super) run_revision: Option<Revision>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +51,7 @@ impl Store {
         Ok(Self {
             connection,
             authority_id,
+            run_revision: None,
         })
     }
 

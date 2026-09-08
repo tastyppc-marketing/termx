@@ -45,7 +45,7 @@ impl Store {
 
         let now = now_millis(&transaction)?;
         let mut statement = transaction.prepare(
-            "SELECT m.message_id,m.group_sequence,m.sender_peer_id,m.sender_binding_revision,m.client_key,m.body,m.topic,m.reply_to_message_id,d.delivery_generation,a.fetched_at_millis,a.acknowledged_at_millis FROM messages m JOIN recipient_deliveries d ON d.message_id=m.message_id LEFT JOIN acknowledgements a ON a.message_id=d.message_id AND a.recipient_peer_id=d.recipient_peer_id AND a.binding_revision=d.recipient_binding_revision AND a.generation=d.delivery_generation WHERE m.group_id=?1 AND d.recipient_peer_id=?2 AND d.recipient_binding_revision=?3 AND m.group_sequence>?4 AND m.group_sequence<=?5 ORDER BY m.group_sequence LIMIT ?6",
+            "SELECT m.message_id,m.group_sequence,m.sender_peer_id,m.sender_binding_revision,m.client_key,m.body,m.topic,m.reply_to_message_id,d.delivery_generation,a.fetched_at_millis,a.acknowledged_at_millis FROM messages m JOIN current_deliveries d ON d.message_id=m.message_id LEFT JOIN acknowledgements a ON a.message_id=d.message_id AND a.recipient_peer_id=d.recipient_peer_id AND a.binding_revision=d.recipient_binding_revision AND a.generation=d.delivery_generation WHERE m.group_id=?1 AND d.recipient_peer_id=?2 AND d.recipient_binding_revision=?3 AND m.group_sequence>?4 AND m.group_sequence<=?5 ORDER BY m.group_sequence LIMIT ?6",
         )?;
         let mut rows = statement.query_map(
             params![
@@ -172,7 +172,7 @@ impl Store {
             params![message_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64(), generation, now],
         )?;
         transaction.execute(
-            "UPDATE recipient_deliveries SET acknowledged_generation=?1, acknowledged_at_millis=COALESCE(acknowledged_at_millis,?2) WHERE message_id=?3 AND recipient_peer_id=?4",
+            "UPDATE current_deliveries SET acknowledged_generation=?1, acknowledged_at_millis=COALESCE(acknowledged_at_millis,?2) WHERE message_id=?3 AND recipient_peer_id=?4",
             params![generation, now, message_id.as_str(), principal.peer_id.as_str()],
         )?;
         transaction.execute(
@@ -281,7 +281,7 @@ fn mark_fetched(
     now: i64,
 ) -> Result<(), StoreError> {
     let generation = transaction.query_row(
-        "SELECT delivery_generation FROM recipient_deliveries WHERE message_id=?1 AND recipient_peer_id=?2",
+        "SELECT delivery_generation FROM current_deliveries WHERE message_id=?1 AND recipient_peer_id=?2",
         [message_id.as_str(), principal.peer_id.as_str()],
         |row| row.get::<_, i64>(0),
     )?;
@@ -290,7 +290,7 @@ fn mark_fetched(
         params![message_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64(), generation, now],
     )?;
     transaction.execute(
-        "UPDATE recipient_deliveries SET fetched_generation=COALESCE(fetched_generation,?1), fetched_at_millis=COALESCE(fetched_at_millis,?2) WHERE message_id=?3 AND recipient_peer_id=?4",
+        "UPDATE current_deliveries SET fetched_generation=COALESCE(fetched_generation,?1), fetched_at_millis=COALESCE(fetched_at_millis,?2) WHERE message_id=?3 AND recipient_peer_id=?4",
         params![generation, now, message_id.as_str(), principal.peer_id.as_str()],
     )?;
     Ok(())

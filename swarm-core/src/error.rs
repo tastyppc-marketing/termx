@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
+    #[error("continuation must identify a distinct launch of the same conversation and harness")]
+    InvalidContinuation,
     #[error("{field} must not be empty")]
     Empty { field: &'static str },
     #[error("{field} exceeds its maximum length of {max} bytes")]
@@ -18,6 +20,14 @@ pub enum ValidationError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("trusted new-run recovery is required before dispatch")]
+    RecoveryRequired,
+    #[error("delivery candidate is no longer eligible")]
+    StaleCandidate,
+    #[error("attempt already has a different definitive outcome")]
+    AttemptConflict,
+    #[error("continuation must cover the complete active membership group set")]
+    ContinuationGroups,
     #[error("database at {path:?} belongs to an unrecognized application (application_id={application_id}, schema_version={schema_version})")]
     UnrecognizedDatabase {
         path: PathBuf,

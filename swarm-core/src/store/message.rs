@@ -107,8 +107,8 @@ impl Store {
         }
         if let Some(reply_to) = &request.reply_to {
             transaction.execute(
-                "UPDATE recipient_deliveries SET replied_by_message_id=?1 WHERE message_id=?2 AND recipient_peer_id=?3",
-                params![message_id.as_str(), reply_to.as_str(), principal.peer_id.as_str()],
+                "UPDATE current_deliveries SET replied_by_message_id=?1 WHERE message_id=?2 AND recipient_peer_id=?3 AND recipient_binding_revision=?4",
+                params![message_id.as_str(), reply_to.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64()],
             )?;
         }
         let receipt = SendReceipt {
@@ -167,8 +167,8 @@ fn validate_reply(
         return Ok(());
     };
     let accessible = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM messages m WHERE m.message_id=?1 AND m.group_id=?2 AND (m.sender_peer_id=?3 OR EXISTS(SELECT 1 FROM recipient_deliveries d WHERE d.message_id=m.message_id AND d.recipient_peer_id=?3)))",
-        params![reply_to.as_str(), request.group_id.as_str(), principal.peer_id.as_str()],
+        "SELECT EXISTS(SELECT 1 FROM messages m WHERE m.message_id=?1 AND m.group_id=?2 AND (m.sender_peer_id=?3 OR EXISTS(SELECT 1 FROM current_deliveries d WHERE d.message_id=m.message_id AND d.recipient_peer_id=?3 AND d.recipient_binding_revision=?4)))",
+        params![reply_to.as_str(), request.group_id.as_str(), principal.peer_id.as_str(), principal.binding_revision.as_sql_i64()],
         |row| row.get::<_, bool>(0),
     )?;
     if !accessible {

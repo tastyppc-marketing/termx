@@ -256,7 +256,7 @@ impl Store {
         Ok(result)
     }
 
-    fn ensure_owner(&self, owner: &OwnerPrincipal) -> Result<(), StoreError> {
+    pub(super) fn ensure_owner(&self, owner: &OwnerPrincipal) -> Result<(), StoreError> {
         if owner.authority_id != self.authority_id {
             return Err(StoreError::AuthorityMismatch);
         }
@@ -317,7 +317,7 @@ fn read_group(
         .ok_or(StoreError::NotFound { kind: "group" })
 }
 
-fn read_binding(
+pub(super) fn read_binding(
     transaction: &Transaction<'_>,
     peer_id: &PeerId,
     revision: i64,

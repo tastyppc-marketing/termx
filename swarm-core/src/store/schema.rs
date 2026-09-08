@@ -6,7 +6,7 @@ use crate::error::StoreError;
 use crate::model::AuthorityId;
 
 pub const APPLICATION_ID: i64 = 0x5458_4d31;
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub(super) struct DatabaseIdentity {
     pub application_id: i64,
@@ -85,6 +85,9 @@ pub(super) fn validate_recognized_schema(
     if identity.schema_version >= 3 {
         expected.execute_batch(MIGRATION_V3)?;
     }
+    if identity.schema_version >= 4 {
+        expected.execute_batch(MIGRATION_V4)?;
+    }
     if schema_manifest(connection)? != schema_manifest(&expected)? {
         return Err(StoreError::UnrecognizedDatabase {
             path: path.to_path_buf(),
@@ -135,6 +138,9 @@ fn migrate_with_final_sql(
     }
     if identity.schema_version < 3 {
         transaction.execute_batch(MIGRATION_V3)?;
+    }
+    if identity.schema_version < 4 {
+        transaction.execute_batch(MIGRATION_V4)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     if let Some(sql) = final_sql {
@@ -330,6 +336,128 @@ SELECT d.message_id,d.recipient_peer_id,m.group_id,m.group_sequence,d.recipient_
 FROM recipient_deliveries d
 JOIN messages m ON m.message_id=d.message_id
 WHERE m.sender_peer_id <> d.recipient_peer_id;
+"#;
+
+const MIGRATION_V4: &str = r#"
+CREATE TABLE delivery_generations (
+ message_id TEXT NOT NULL,
+ recipient_peer_id TEXT NOT NULL,
+ binding_revision INTEGER NOT NULL,
+ generation INTEGER NOT NULL CHECK(generation >= 1),
+ PRIMARY KEY(message_id,recipient_peer_id,binding_revision,generation),
+ FOREIGN KEY(message_id,recipient_peer_id) REFERENCES recipient_deliveries(message_id,recipient_peer_id),
+ FOREIGN KEY(recipient_peer_id,binding_revision) REFERENCES peer_bindings(peer_id,binding_revision)
+) STRICT;
+INSERT INTO delivery_generations
+ SELECT message_id,recipient_peer_id,recipient_binding_revision,delivery_generation FROM recipient_deliveries
+ UNION SELECT message_id,recipient_peer_id,binding_revision,generation FROM acknowledgements
+ UNION SELECT message_id,recipient_peer_id,binding_revision,generation FROM delivery_attempts;
+
+-- Keep the exact predecessor evidence tables as migration archives. New active
+-- history tables reference real immutable generation identities, not latest rows.
+ALTER TABLE acknowledgements RENAME TO acknowledgements_v3_archive;
+CREATE TABLE acknowledgements (
+ message_id TEXT NOT NULL,
+ recipient_peer_id TEXT NOT NULL,
+ binding_revision INTEGER NOT NULL CHECK(binding_revision >= 1),
+ generation INTEGER NOT NULL CHECK(generation >= 1),
+ fetched_at_millis INTEGER,
+ acknowledged_at_millis INTEGER,
+ PRIMARY KEY(message_id,recipient_peer_id,binding_revision,generation),
+ FOREIGN KEY(message_id,recipient_peer_id,binding_revision,generation) REFERENCES delivery_generations(message_id,recipient_peer_id,binding_revision,generation),
+ CHECK(fetched_at_millis IS NOT NULL OR acknowledged_at_millis IS NOT NULL)
+) STRICT;
+INSERT INTO acknowledgements SELECT * FROM acknowledgements_v3_archive;
+ALTER TABLE delivery_attempts RENAME TO delivery_attempts_v3_archive;
+CREATE TABLE delivery_attempts (
+ attempt_id TEXT PRIMARY KEY,
+ message_id TEXT NOT NULL,
+ recipient_peer_id TEXT NOT NULL,
+ binding_revision INTEGER NOT NULL CHECK(binding_revision >= 1),
+ generation INTEGER NOT NULL CHECK(generation >= 1),
+ attempt_number INTEGER NOT NULL CHECK(attempt_number >= 1),
+ started_at_millis INTEGER NOT NULL,
+ completed_at_millis INTEGER,
+ outcome TEXT CHECK(length(CAST(outcome AS BLOB)) <= 4096),
+ native_reference TEXT CHECK(length(CAST(native_reference AS BLOB)) <= 4096),
+ recovered_uncertain_at_millis INTEGER,
+ UNIQUE(message_id,recipient_peer_id,binding_revision,generation,attempt_number),
+ FOREIGN KEY(message_id,recipient_peer_id,binding_revision,generation) REFERENCES delivery_generations(message_id,recipient_peer_id,binding_revision,generation),
+ CHECK((completed_at_millis IS NULL AND outcome IS NULL) OR (completed_at_millis IS NOT NULL AND outcome IS NOT NULL))
+) STRICT;
+INSERT INTO delivery_attempts(attempt_id,message_id,recipient_peer_id,binding_revision,generation,attempt_number,started_at_millis,completed_at_millis,outcome,native_reference) SELECT * FROM delivery_attempts_v3_archive;
+CREATE INDEX active_attempts_unfinished ON delivery_attempts(started_at_millis) WHERE completed_at_millis IS NULL;
+
+CREATE TABLE current_deliveries (
+ message_id TEXT NOT NULL,
+ recipient_peer_id TEXT NOT NULL,
+ recipient_binding_revision INTEGER NOT NULL,
+ delivery_generation INTEGER NOT NULL CHECK(delivery_generation >= 1),
+ group_id TEXT NOT NULL REFERENCES groups(group_id),
+ group_sequence INTEGER NOT NULL CHECK(group_sequence >= 1),
+ notification_revision INTEGER NOT NULL DEFAULT 1 CHECK(notification_revision >= 1),
+ route_state TEXT NOT NULL DEFAULT 'ready' CHECK(route_state IN ('ready','held','in_flight','transport_written','native_queued','uncertain')),
+ last_attempt_id TEXT REFERENCES delivery_attempts(attempt_id),
+ fetched_generation INTEGER,
+ fetched_at_millis INTEGER,
+ acknowledged_generation INTEGER,
+ acknowledged_at_millis INTEGER,
+ replied_by_message_id TEXT REFERENCES messages(message_id),
+ PRIMARY KEY(message_id,recipient_peer_id),
+ FOREIGN KEY(message_id,recipient_peer_id,recipient_binding_revision,delivery_generation) REFERENCES delivery_generations(message_id,recipient_peer_id,binding_revision,generation),
+ CHECK((fetched_generation IS NULL) = (fetched_at_millis IS NULL)),
+ CHECK((acknowledged_generation IS NULL) = (acknowledged_at_millis IS NULL))
+) STRICT;
+INSERT INTO current_deliveries(message_id,recipient_peer_id,recipient_binding_revision,delivery_generation,group_id,group_sequence,route_state,fetched_generation,fetched_at_millis,acknowledged_generation,acknowledged_at_millis,replied_by_message_id)
+ SELECT d.message_id,d.recipient_peer_id,d.recipient_binding_revision,d.delivery_generation,m.group_id,m.group_sequence,
+ CASE WHEN EXISTS(SELECT 1 FROM delivery_attempts a WHERE a.message_id=d.message_id AND a.recipient_peer_id=d.recipient_peer_id) THEN 'uncertain' ELSE 'ready' END,
+ d.fetched_generation,d.fetched_at_millis,d.acknowledged_generation,d.acknowledged_at_millis,d.replied_by_message_id
+ FROM recipient_deliveries d JOIN messages m ON m.message_id=d.message_id;
+CREATE INDEX current_delivery_candidates ON current_deliveries(group_id,recipient_peer_id,recipient_binding_revision,group_sequence) WHERE route_state='ready' AND fetched_at_millis IS NULL AND acknowledged_at_millis IS NULL AND replied_by_message_id IS NULL;
+CREATE INDEX current_delivery_binding ON current_deliveries(recipient_peer_id,recipient_binding_revision,group_id);
+CREATE INDEX current_delivery_attempt ON current_deliveries(last_attempt_id);
+CREATE TRIGGER original_delivery_identity_immutable BEFORE UPDATE OF recipient_binding_revision,delivery_generation ON recipient_deliveries
+ BEGIN SELECT RAISE(ABORT,'original delivery identity is immutable'); END;
+CREATE TRIGGER initialize_current_delivery AFTER INSERT ON recipient_deliveries BEGIN
+ INSERT INTO delivery_generations VALUES(NEW.message_id,NEW.recipient_peer_id,NEW.recipient_binding_revision,NEW.delivery_generation);
+ INSERT INTO current_deliveries(message_id,recipient_peer_id,recipient_binding_revision,delivery_generation,group_id,group_sequence,fetched_generation,fetched_at_millis,acknowledged_generation,acknowledged_at_millis,replied_by_message_id)
+ SELECT NEW.message_id,NEW.recipient_peer_id,NEW.recipient_binding_revision,NEW.delivery_generation,m.group_id,m.group_sequence,NEW.fetched_generation,NEW.fetched_at_millis,NEW.acknowledged_generation,NEW.acknowledged_at_millis,NEW.replied_by_message_id FROM messages m WHERE m.message_id=NEW.message_id;
+ END;
+CREATE TRIGGER preserve_original_generation_evidence AFTER UPDATE OF fetched_at_millis,acknowledged_at_millis,replied_by_message_id ON current_deliveries BEGIN
+ UPDATE recipient_deliveries SET fetched_generation=NEW.fetched_generation,fetched_at_millis=NEW.fetched_at_millis,acknowledged_generation=NEW.acknowledged_generation,acknowledged_at_millis=NEW.acknowledged_at_millis,replied_by_message_id=NEW.replied_by_message_id
+ WHERE message_id=NEW.message_id AND recipient_peer_id=NEW.recipient_peer_id AND recipient_binding_revision=NEW.recipient_binding_revision AND delivery_generation=NEW.delivery_generation;
+ END;
+CREATE TABLE broker_runs (
+ run_revision INTEGER PRIMARY KEY CHECK(run_revision >= 1),
+ recovered_at_millis INTEGER NOT NULL
+) STRICT;
+CREATE TABLE delivery_tickets (
+ attempt_id TEXT PRIMARY KEY REFERENCES delivery_attempts(attempt_id),
+ authority_id TEXT NOT NULL REFERENCES authority_metadata(authority_id),
+ group_id TEXT NOT NULL REFERENCES groups(group_id),
+ policy_revision INTEGER NOT NULL CHECK(policy_revision >= 1),
+ notification_revision INTEGER NOT NULL CHECK(notification_revision >= 1),
+ run_revision INTEGER NOT NULL REFERENCES broker_runs(run_revision),
+ binding_snapshot_json TEXT NOT NULL
+) STRICT;
+CREATE TABLE attempt_not_submitted_reconciliations (
+ attempt_id TEXT PRIMARY KEY REFERENCES delivery_attempts(attempt_id),
+ evidence_reference TEXT NOT NULL CHECK(length(CAST(evidence_reference AS BLOB)) BETWEEN 1 AND 4096),
+ reconciled_at_millis INTEGER NOT NULL
+) STRICT;
+CREATE TABLE continuation_intents (
+ peer_id TEXT NOT NULL,
+ predecessor_binding_revision INTEGER NOT NULL,
+ successor_binding_revision INTEGER NOT NULL,
+ intent_reference TEXT NOT NULL CHECK(length(CAST(intent_reference AS BLOB)) BETWEEN 1 AND 4096),
+ branch_evidence TEXT NOT NULL CHECK(length(CAST(branch_evidence AS BLOB)) BETWEEN 1 AND 4096),
+ semantic_json TEXT NOT NULL,
+ committed_at_millis INTEGER NOT NULL,
+ PRIMARY KEY(peer_id,predecessor_binding_revision),
+ FOREIGN KEY(peer_id,predecessor_binding_revision) REFERENCES peer_bindings(peer_id,binding_revision),
+ FOREIGN KEY(peer_id,successor_binding_revision) REFERENCES peer_bindings(peer_id,binding_revision),
+ CHECK(successor_binding_revision > predecessor_binding_revision)
+) STRICT;
 "#;
 
 #[cfg(test)]
@@ -722,5 +850,174 @@ mod tests {
                 .unwrap(),
             (1, 1, 11)
         );
+    }
+}
+
+#[cfg(test)]
+mod v3_migration_tests {
+    use super::*;
+    use crate::{model::*, store::Store};
+    use rusqlite::params;
+
+    fn fixture(name: &str) -> (std::path::PathBuf, Connection) {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../retired/test-artifacts/swarm-core")
+            .join(format!("{name}-{}", LaunchId::generate().as_str()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("swarm.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
+        super::super::configure_connection(&connection).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection.execute_batch(MIGRATION_V2).unwrap();
+        connection.execute_batch(MIGRATION_V3).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO authority_metadata VALUES(1,'a_00000000000000000000000000000001',1)",
+            [],
+        )
+        .unwrap();
+        for n in 1..=2 {
+            let peer = format!("p_{n:032x}");
+            let launch = format!("l_{n:032x}");
+            tx.execute("INSERT INTO peers VALUES(?1,1,1)", [&peer])
+                .unwrap();
+            tx.execute(
+                "INSERT INTO peer_bindings VALUES(?1,1,?2,?3,'codex',?3,NULL,100,1000,1,1)",
+                params![peer, launch, format!("peer-{n}")],
+            )
+            .unwrap();
+        }
+        tx.execute("INSERT INTO groups VALUES('g_00000000000000000000000000000001','a_00000000000000000000000000000001',1,3,'v3',0,1)",[]).unwrap();
+        for n in 1..=2 {
+            tx.execute("INSERT INTO group_memberships VALUES('g_00000000000000000000000000000001',?1,1,NULL)",[format!("p_{n:032x}")]).unwrap();
+            let message = format!("m_{n:032x}");
+            tx.execute("INSERT INTO messages VALUES(?1,'g_00000000000000000000000000000001',?2,'p_00000000000000000000000000000001',1,?3,'{}',?4,NULL,NULL,1)",params![message,n,format!("key-{n}"),"preserved \"body\"\n\u{1}"]).unwrap();
+            tx.execute("INSERT INTO recipient_deliveries(message_id,recipient_peer_id,recipient_binding_revision,saved_at_millis,delivery_generation) VALUES(?1,'p_00000000000000000000000000000002',1,1,1)",[&message]).unwrap();
+            tx.execute("INSERT INTO recipient_ack_order VALUES(?1,'p_00000000000000000000000000000002','g_00000000000000000000000000000001',?2,1,1,?3)",params![message,n,n==1]).unwrap();
+        }
+        tx.execute("UPDATE recipient_deliveries SET fetched_generation=1,fetched_at_millis=2,acknowledged_generation=1,acknowledged_at_millis=3 WHERE message_id='m_00000000000000000000000000000001'",[]).unwrap();
+        tx.execute("INSERT INTO acknowledgements VALUES('m_00000000000000000000000000000001','p_00000000000000000000000000000002',1,1,2,3)",[]).unwrap();
+        tx.execute("INSERT INTO delivery_attempts VALUES('d_00000000000000000000000000000001','m_00000000000000000000000000000002','p_00000000000000000000000000000002',1,1,1,4,NULL,NULL,'legacy-native-reference')",[]).unwrap();
+        tx.commit().unwrap();
+        (path, connection)
+    }
+
+    #[test]
+    fn populated_exact_v3_reopens_with_preserved_evidence_and_live_history_foreign_keys() {
+        let (path, connection) = fixture("populated-v3");
+        drop(connection);
+        let mut store = Store::open(&path).unwrap();
+        let owner = store.trusted_owner();
+        let id = DeliveryAttemptId::parse("d_00000000000000000000000000000001").unwrap();
+        assert_eq!(store.delivery_attempt(&owner, &id).unwrap().outcome, None);
+        let db = &store.connection;
+        assert_eq!(
+            db.query_row("SELECT body FROM messages LIMIT 1", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "preserved \"body\"\n\u{1}"
+        );
+        assert_eq!(db.query_row("SELECT count(*) FROM acknowledgements WHERE fetched_at_millis=2 AND acknowledged_at_millis=3",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM acknowledgements_v3_archive",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(db.query_row("SELECT count(*) FROM delivery_attempts_v3_archive WHERE outcome IS NULL AND native_reference='legacy-native-reference'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        for table in [
+            "acknowledgements",
+            "delivery_attempts",
+            "current_deliveries",
+            "delivery_tickets",
+            "attempt_not_submitted_reconciliations",
+        ] {
+            let references: Vec<String> = db
+                .prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1)")
+                .unwrap()
+                .query_map([table], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert!(!references.is_empty());
+            assert!(
+                references.iter().all(|r| !r.ends_with("_archive")),
+                "live table {table} points at archive: {references:?}"
+            );
+        }
+        assert_eq!(store.recover_trusted_new_run(&owner).unwrap(), 1);
+        assert_eq!(
+            store.delivery_attempt(&owner, &id).unwrap().outcome,
+            Some(AttemptOutcome::Uncertain)
+        );
+        assert!(store
+            .delivery_candidates(
+                &owner,
+                &GroupId::parse("g_00000000000000000000000000000001").unwrap(),
+                &PeerId::parse("p_00000000000000000000000000000002").unwrap(),
+                Revision::new(1).unwrap(),
+                128
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        drop(store);
+        assert!(Store::open(path).unwrap().inspect().unwrap().integrity_ok);
+    }
+
+    #[test]
+    fn late_v3_migration_failure_keeps_exact_previous_schema_and_evidence_usable() {
+        let (path, mut connection) = fixture("v3-rollback");
+        let before = schema_manifest(&connection).unwrap();
+        let identity = DatabaseIdentity {
+            application_id: APPLICATION_ID,
+            schema_version: 3,
+            has_objects: true,
+        };
+        assert!(migrate_with_final_sql(
+            &mut connection,
+            identity,
+            Some("INSERT INTO deliberately_missing_migration_target VALUES(1)")
+        )
+        .is_err());
+        assert_eq!(schema_manifest(&connection).unwrap(), before);
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(connection.query_row("SELECT count(*) FROM delivery_attempts WHERE outcome IS NULL AND native_reference='legacy-native-reference'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT acknowledged_at_millis FROM acknowledgements",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            3
+        );
+        drop(connection);
+        let mut store = Store::open(path).unwrap();
+        let owner = store.trusted_owner();
+        assert_eq!(store.recover_trusted_new_run(&owner).unwrap(), 1);
+        assert!(store.inspect().unwrap().integrity_ok);
     }
 }

@@ -19,7 +19,7 @@ fn new_store_initializes_complete_schema_and_authority() {
 
     assert_eq!(inspection.application_id, APPLICATION_ID);
     assert_eq!(inspection.schema_version, SCHEMA_VERSION);
-    assert_eq!(inspection.table_count, 13);
+    assert_eq!(inspection.table_count, 21);
     assert!(inspection.integrity_ok);
     assert_ne!(inspection.authority_id.as_str(), "");
 }

@@ -486,3 +486,175 @@ pub struct SourceReferenceRecord {
     pub source_kind: String,
     pub(crate) opaque_reference: String,
 }
+
+pub const MAX_DELIVERY_CANDIDATES: usize = 128;
+
+/// A store-issued candidate, never accepted from peer deserialization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DeliveryCandidate {
+    pub(crate) authority_id: AuthorityId,
+    pub(crate) group_id: GroupId,
+    pub(crate) policy_revision: Revision,
+    pub(crate) message_id: MessageId,
+    pub(crate) recipient_peer_id: PeerId,
+    pub(crate) binding_revision: Revision,
+    pub(crate) generation: Revision,
+    pub(crate) notification_revision: Revision,
+    pub(crate) last_attempt_id: Option<DeliveryAttemptId>,
+}
+impl DeliveryCandidate {
+    pub fn authority_id(&self) -> &AuthorityId {
+        &self.authority_id
+    }
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+    pub fn policy_revision(&self) -> Revision {
+        self.policy_revision
+    }
+    pub fn recipient_peer_id(&self) -> &PeerId {
+        &self.recipient_peer_id
+    }
+    pub fn binding_revision(&self) -> Revision {
+        self.binding_revision
+    }
+    pub fn notification_revision(&self) -> Revision {
+        self.notification_revision
+    }
+    pub fn message_id(&self) -> &MessageId {
+        &self.message_id
+    }
+    pub fn generation(&self) -> Revision {
+        self.generation
+    }
+}
+
+/// Durable authority and immutable process/message evidence for a future adapter.
+/// Native I/O must happen after `begin_delivery` returns, outside any transaction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DeliveryTicket {
+    pub(crate) attempt_id: DeliveryAttemptId,
+    pub(crate) candidate: DeliveryCandidate,
+    pub(crate) recipient_binding: PeerBindingRecord,
+    pub(crate) attempt_number: u64,
+    pub(crate) run_revision: Revision,
+}
+impl DeliveryTicket {
+    pub fn run_revision(&self) -> Revision {
+        self.run_revision
+    }
+    pub fn attempt_id(&self) -> &DeliveryAttemptId {
+        &self.attempt_id
+    }
+    pub fn message_id(&self) -> &MessageId {
+        &self.candidate.message_id
+    }
+    pub fn recipient_binding(&self) -> &PeerBindingRecord {
+        &self.recipient_binding
+    }
+    pub fn candidate(&self) -> &DeliveryCandidate {
+        &self.candidate
+    }
+    pub fn attempt_number(&self) -> u64 {
+        self.attempt_number
+    }
+}
+
+/// Transport evidence only. None of these outcomes constitutes recipient ACK.
+/// `KnownNotSubmitted` is positive pre-submission failure evidence. `Held` may
+/// represent a native queued item that can arrive later and is NOT retryable.
+/// `TransportWritten`, `NativeQueued`, and `Uncertain` also block automatic retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttemptOutcome {
+    KnownNotSubmitted,
+    Held,
+    TransportWritten,
+    NativeQueued,
+    Uncertain,
+}
+impl AttemptOutcome {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::KnownNotSubmitted => "known_not_submitted",
+            Self::Held => "held",
+            Self::TransportWritten => "transport_written",
+            Self::NativeQueued => "native_queued",
+            Self::Uncertain => "uncertain",
+        }
+    }
+    pub(crate) fn from_stored(value: &str) -> Self {
+        match value {
+            "known_not_submitted" => Self::KnownNotSubmitted,
+            "held" => Self::Held,
+            "transport_written" => Self::TransportWritten,
+            "native_queued" => Self::NativeQueued,
+            _ => Self::Uncertain,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AttemptStatus {
+    pub attempt_id: DeliveryAttemptId,
+    pub outcome: Option<AttemptOutcome>,
+    pub completed_at_millis: Option<i64>,
+    pub recovered_uncertain_at_millis: Option<i64>,
+    pub reconciled_not_submitted_at_millis: Option<i64>,
+}
+
+/// Trusted source-binder assertion of the same conversation AND branch.
+/// No Deserialize: constructing this is not OS/process/source authentication.
+/// `branch_evidence` identifies already-verified evidence; equality of conversation
+/// names, a pane, or this string alone never establishes continuity in the core.
+#[derive(Clone, Debug)]
+pub struct VerifiedContinuation {
+    pub(crate) predecessor: PeerBindingRecord,
+    pub(crate) successor: VerifiedBinding,
+    pub(crate) branch_evidence: String,
+}
+impl VerifiedContinuation {
+    pub fn trusted(
+        predecessor: &PeerBindingRecord,
+        successor: VerifiedBinding,
+        branch_evidence: String,
+    ) -> Result<Self, ValidationError> {
+        predecessor.validate()?;
+        validate_nonempty("branch_evidence", &branch_evidence, MAX_METADATA_BYTES)?;
+        if predecessor.conversation_id != successor.conversation_id
+            || predecessor.harness != successor.harness
+            || predecessor.launch_id == successor.launch_id
+        {
+            return Err(ValidationError::InvalidContinuation);
+        }
+        Ok(Self {
+            predecessor: predecessor.clone(),
+            successor,
+            branch_evidence,
+        })
+    }
+}
+
+/// Trusted binder proof for this exact attempt that the native item has never
+/// been delivered and cannot arrive later. Merely clicking release, seeing a
+/// warning, or observing no ACK is not this evidence. No OS verification or
+/// authentication is performed by this non-deserializable library constructor.
+#[derive(Clone, Debug)]
+pub struct VerifiedNotSubmitted {
+    pub(crate) attempt_id: DeliveryAttemptId,
+    pub(crate) evidence_reference: String,
+}
+impl VerifiedNotSubmitted {
+    pub fn trusted(
+        attempt_id: DeliveryAttemptId,
+        evidence_reference: String,
+    ) -> Result<Self, ValidationError> {
+        validate_nonempty(
+            "not_submitted_evidence",
+            &evidence_reference,
+            MAX_METADATA_BYTES,
+        )?;
+        Ok(Self {
+            attempt_id,
+            evidence_reference,
+        })
+    }
+}
