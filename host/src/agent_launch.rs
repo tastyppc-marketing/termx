@@ -476,10 +476,19 @@ fn capture_lock(data_dir: &Path) -> Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     loop {
-        match std::fs::OpenOptions::new().read(true).write(true).create(true).share_mode(0)
-            .open(data_dir.join(CAPTURE_LOCK_FILE)) {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(data_dir.join(CAPTURE_LOCK_FILE))
+        {
             Ok(file) => return Ok(file),
-            Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) && std::time::Instant::now() < deadline => {
+            Err(error)
+                if matches!(error.raw_os_error(), Some(32 | 33))
+                    && std::time::Instant::now() < deadline =>
+            {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             Err(error) => return Err(error).context("locking capture transaction"),
