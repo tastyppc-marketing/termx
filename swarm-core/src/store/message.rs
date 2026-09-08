@@ -114,6 +114,16 @@ impl Store {
                     recipient.generation.as_sql_i64(),
                 ],
             )?;
+            transaction.execute(
+                "INSERT INTO notice_coverage(recipient_peer_id,recipient_binding_revision,group_id,covered_through_sequence,noticed_through_sequence,last_attempt_id,updated_at_millis) VALUES(?1,?2,?3,?4,0,NULL,?5) ON CONFLICT(recipient_peer_id,recipient_binding_revision,group_id) DO UPDATE SET covered_through_sequence=MAX(notice_coverage.covered_through_sequence,excluded.covered_through_sequence),updated_at_millis=excluded.updated_at_millis",
+                params![
+                    recipient.peer_id.as_str(),
+                    recipient.binding_revision.as_sql_i64(),
+                    request.group_id.as_str(),
+                    group_sequence,
+                    now,
+                ],
+            )?;
         }
         if let Some(reply_to) = &request.reply_to {
             transaction.execute(

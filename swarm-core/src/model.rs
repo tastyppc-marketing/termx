@@ -103,6 +103,20 @@ opaque_id!(MessageId, "m_");
 opaque_id!(DeliveryAttemptId, "d_");
 opaque_id!(SourceReferenceId, "s_");
 opaque_id!(MailboxCursor, "c_");
+opaque_local_id!(NoticeAttemptId, "n_");
+impl NoticeAttemptId {
+    pub(crate) fn parse(value: &str) -> Result<Self, ValidationError> {
+        let suffix = value.strip_prefix("n_").ok_or(ValidationError::InvalidId {
+            kind: "NoticeAttemptId",
+        })?;
+        if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ValidationError::InvalidId {
+                kind: "NoticeAttemptId",
+            });
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+}
 
 mod publication;
 mod views;
@@ -652,6 +666,268 @@ pub struct AttemptStatus {
     pub completed_at_millis: Option<i64>,
     pub recovered_uncertain_at_millis: Option<i64>,
     pub reconciled_not_submitted_at_millis: Option<i64>,
+}
+
+pub const MAX_NOTICE_EXAMINED_SCOPES: usize = 128;
+pub const MAX_NOTICE_GAP_ITEMS: usize = 8;
+pub const MAX_NOTICE_GROUPS_PER_ITEM: usize = 16;
+pub const MAX_NOTICE_GAP_REQUEST_LIMIT: usize = 8;
+
+/// Store-issued continuation over the ordered notice-coverage primary key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeGapCursor {
+    pub(crate) after_peer: PeerId,
+    pub(crate) after_binding: Revision,
+    pub(crate) after_group: GroupId,
+}
+impl NoticeGapCursor {
+    pub fn after_peer(&self) -> &PeerId {
+        &self.after_peer
+    }
+    pub fn after_binding(&self) -> Revision {
+        self.after_binding
+    }
+    pub fn after_group(&self) -> &GroupId {
+        &self.after_group
+    }
+}
+
+/// Current per-group authority and coverage frozen into a store candidate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeGroupWatermark {
+    pub(crate) group_id: GroupId,
+    pub(crate) policy_revision: Revision,
+    pub(crate) covered_through_sequence: u64,
+    pub(crate) last_attempt_id: Option<NoticeAttemptId>,
+}
+impl NoticeGroupWatermark {
+    pub fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
+    pub fn policy_revision(&self) -> Revision {
+        self.policy_revision
+    }
+    pub fn covered_through_sequence(&self) -> u64 {
+        self.covered_through_sequence
+    }
+}
+
+/// Compact store-issued slice for one exact current binding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeCandidate {
+    pub(crate) authority_id: AuthorityId,
+    pub(crate) recipient_peer_id: PeerId,
+    pub(crate) binding_revision: Revision,
+    pub(crate) run_revision: Revision,
+    pub(crate) groups: Vec<NoticeGroupWatermark>,
+    pub(crate) more_groups: bool,
+}
+impl NoticeCandidate {
+    pub fn recipient_peer_id(&self) -> &PeerId {
+        &self.recipient_peer_id
+    }
+    pub fn binding_revision(&self) -> Revision {
+        self.binding_revision
+    }
+    pub fn run_revision(&self) -> Revision {
+        self.run_revision
+    }
+    pub fn groups(&self) -> &[NoticeGroupWatermark] {
+        &self.groups
+    }
+    pub fn more_groups(&self) -> bool {
+        self.more_groups
+    }
+
+    pub(crate) fn estimated_retained_bytes(&self) -> usize {
+        1024usize
+            .saturating_add(self.authority_id.0.capacity())
+            .saturating_add(self.recipient_peer_id.0.capacity())
+            .saturating_add(self.groups.iter().fold(
+                self.groups.capacity().saturating_mul(256),
+                |bytes, group| {
+                    bytes
+                        .saturating_add(group.group_id.0.capacity())
+                        .saturating_add(
+                            group
+                                .last_attempt_id
+                                .as_ref()
+                                .map_or(0, |attempt| attempt.0.capacity()),
+                        )
+                },
+            ))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeCandidatePage {
+    pub(crate) candidates: Vec<NoticeCandidate>,
+    pub(crate) next: Option<NoticeGapCursor>,
+    pub(crate) examined_scopes: usize,
+}
+impl NoticeCandidatePage {
+    pub fn candidates(&self) -> &[NoticeCandidate] {
+        &self.candidates
+    }
+    pub fn next(&self) -> Option<&NoticeGapCursor> {
+        self.next.as_ref()
+    }
+    pub fn examined_scopes(&self) -> usize {
+        self.examined_scopes
+    }
+
+    pub fn estimated_retained_bytes(&self) -> usize {
+        let candidates = self.candidates.iter().fold(
+            self.candidates.capacity().saturating_mul(128),
+            |bytes, candidate| bytes.saturating_add(candidate.estimated_retained_bytes()),
+        );
+        4096usize
+            .saturating_add(candidates)
+            .saturating_add(self.next.as_ref().map_or(0, |cursor| {
+                cursor
+                    .after_peer
+                    .0
+                    .capacity()
+                    .saturating_add(cursor.after_group.0.capacity())
+                    .saturating_add(128)
+            }))
+    }
+}
+
+/// Durable ticket committed before native notice I/O begins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeTicket {
+    pub(crate) attempt_id: NoticeAttemptId,
+    pub(crate) candidate: NoticeCandidate,
+    pub(crate) recipient_binding: PeerBindingRecord,
+    pub(crate) attempt_number: u64,
+    pub(crate) run_revision: Revision,
+}
+impl NoticeTicket {
+    pub fn attempt_id(&self) -> &NoticeAttemptId {
+        &self.attempt_id
+    }
+    pub fn candidate(&self) -> &NoticeCandidate {
+        &self.candidate
+    }
+    pub fn recipient_binding(&self) -> &PeerBindingRecord {
+        &self.recipient_binding
+    }
+    pub fn attempt_number(&self) -> u64 {
+        self.attempt_number
+    }
+    pub fn run_revision(&self) -> Revision {
+        self.run_revision
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeReceiptRecord {
+    pub native_record_kind: String,
+    pub provenance_reference: String,
+    pub enrolled_source_identity: String,
+    pub enrolled_generation: String,
+    pub native_item_identity: String,
+    pub received_at_millis: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NoticeAttemptStatus {
+    pub(crate) attempt_id: NoticeAttemptId,
+    pub(crate) outcome: Option<AttemptOutcome>,
+    pub(crate) completed_at_millis: Option<i64>,
+    pub(crate) recovered_uncertain_at_millis: Option<i64>,
+    pub(crate) reconciled_not_submitted_at_millis: Option<i64>,
+    pub(crate) receipt: Option<NoticeReceiptRecord>,
+}
+impl NoticeAttemptStatus {
+    pub fn attempt_id(&self) -> &NoticeAttemptId {
+        &self.attempt_id
+    }
+    pub fn outcome(&self) -> Option<AttemptOutcome> {
+        self.outcome
+    }
+    pub fn completed_at_millis(&self) -> Option<i64> {
+        self.completed_at_millis
+    }
+    pub fn recovered_uncertain_at_millis(&self) -> Option<i64> {
+        self.recovered_uncertain_at_millis
+    }
+    pub fn reconciled_not_submitted_at_millis(&self) -> Option<i64> {
+        self.reconciled_not_submitted_at_millis
+    }
+    pub fn receipt(&self) -> Option<&NoticeReceiptRecord> {
+        self.receipt.as_ref()
+    }
+}
+
+/// Trusted proof that one exact notice attempt was not submitted. This type
+/// deliberately has no `Deserialize`; construction is not native verification.
+#[derive(Clone, Debug)]
+pub struct VerifiedNoticeNotSubmitted {
+    pub(crate) attempt_id: NoticeAttemptId,
+    pub(crate) evidence_reference: String,
+}
+impl VerifiedNoticeNotSubmitted {
+    pub fn trusted(
+        attempt_id: NoticeAttemptId,
+        evidence_reference: String,
+    ) -> Result<Self, ValidationError> {
+        validate_nonempty(
+            "notice_not_submitted_evidence",
+            &evidence_reference,
+            MAX_METADATA_BYTES,
+        )?;
+        Ok(Self {
+            attempt_id,
+            evidence_reference,
+        })
+    }
+}
+
+/// Trusted positive native receipt for one exact ticket target. This type has
+/// no `Deserialize`; an adapter must authenticate all evidence before calling.
+#[derive(Clone, Debug)]
+pub struct VerifiedNoticeReceipt {
+    pub(crate) attempt_id: NoticeAttemptId,
+    pub(crate) recipient_binding: PeerBindingRecord,
+    pub(crate) native_record_kind: String,
+    pub(crate) provenance_reference: String,
+    pub(crate) enrolled_source_identity: String,
+    pub(crate) enrolled_generation: String,
+    pub(crate) native_item_identity: String,
+}
+impl VerifiedNoticeReceipt {
+    #[allow(clippy::too_many_arguments)]
+    pub fn trusted(
+        attempt_id: NoticeAttemptId,
+        recipient_binding: &PeerBindingRecord,
+        native_record_kind: String,
+        provenance_reference: String,
+        enrolled_source_identity: String,
+        enrolled_generation: String,
+        native_item_identity: String,
+    ) -> Result<Self, ValidationError> {
+        recipient_binding.validate()?;
+        validate_nonempty("native_record_kind", &native_record_kind, MAX_LABEL_BYTES)?;
+        for (field, value) in [
+            ("provenance_reference", &provenance_reference),
+            ("enrolled_source_identity", &enrolled_source_identity),
+            ("enrolled_generation", &enrolled_generation),
+            ("native_item_identity", &native_item_identity),
+        ] {
+            validate_nonempty(field, value, MAX_METADATA_BYTES)?;
+        }
+        Ok(Self {
+            attempt_id,
+            recipient_binding: recipient_binding.clone(),
+            native_record_kind,
+            provenance_reference,
+            enrolled_source_identity,
+            enrolled_generation,
+            native_item_identity,
+        })
+    }
 }
 
 /// Trusted source-binder assertion of the same conversation AND branch.

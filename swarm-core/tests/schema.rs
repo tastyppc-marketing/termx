@@ -19,7 +19,7 @@ fn new_store_initializes_complete_schema_and_authority() {
 
     assert_eq!(inspection.application_id, APPLICATION_ID);
     assert_eq!(inspection.schema_version, SCHEMA_VERSION);
-    assert_eq!(inspection.table_count, 29);
+    assert_eq!(inspection.table_count, 35);
     assert!(inspection.integrity_ok);
     assert_ne!(inspection.authority_id.as_str(), "");
 }
@@ -283,6 +283,14 @@ fn current_schema_with_extra_view_is_rejected_without_mutation() {
     assert_extra_schema_object_is_rejected(
         "extra-view",
         "CREATE VIEW exposed_messages AS SELECT body FROM messages;",
+    );
+}
+
+#[test]
+fn current_schema_with_extra_index_is_rejected_without_mutation() {
+    assert_extra_schema_object_is_rejected(
+        "extra-index",
+        "CREATE INDEX unrecognized_notice_index ON notice_coverage(updated_at_millis);",
     );
 }
 
