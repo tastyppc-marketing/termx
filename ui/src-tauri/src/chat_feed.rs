@@ -16,6 +16,10 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use serde_json::Value;
+use termx_swarm_context::owner::{
+    OwnerBodyKind, OwnerBodyOrigin, OwnerLineDisposition, OwnerParser, OwnerRecord,
+};
+use termx_swarm_context::Provider;
 
 /// Initial window: the last 256 KiB of the transcript (spec §3).
 pub const WINDOW_BYTES: u64 = 256 * 1024;
@@ -44,15 +48,6 @@ const PENDING_USER_CAP: usize = 32;
 /// How many unanswered tool calls to remember across polls, so a `tool_result`
 /// that lands in a later batch than its `tool_use` still knows its own name.
 const OPEN_TOOLS_CAP: usize = 512;
-
-/// Top-level record types that are real and deliberately not rendered. Listed
-/// so that a genuinely unknown type still counts as unreadable.
-const IGNORED_TYPES: [&str; 4] = [
-    "attachment",
-    "last-prompt",
-    "file-history-snapshot",
-    "x-command",
-];
 
 /// Where a tool call stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -113,13 +108,28 @@ struct OpenTool {
 /// Stateful on purpose: a feed reads a transcript in batches, and both of the
 /// format's cross-line relationships — a queued prompt echoed as a later
 /// `user` line, and a `tool_use` answered by a later `tool_result` — routinely
-/// straddle a batch boundary.
-#[derive(Debug, Default)]
+/// straddle a batch boundary. Structural JSON parsing is delegated to the
+/// identity-free owner parser; queue/tool maps, IDs, timestamps, and
+/// presentation stay here.
+#[derive(Debug)]
 pub struct ChatNormalizer {
     seq: u64,
     pending_user: VecDeque<String>,
     open_tools: HashMap<String, OpenTool>,
     open_order: VecDeque<String>,
+    parser: OwnerParser,
+}
+
+impl Default for ChatNormalizer {
+    fn default() -> Self {
+        Self {
+            seq: 0,
+            pending_user: VecDeque::new(),
+            open_tools: HashMap::new(),
+            open_order: VecDeque::new(),
+            parser: OwnerParser::strict(Provider::Claude),
+        }
+    }
 }
 
 impl ChatNormalizer {
@@ -180,51 +190,8 @@ impl ChatNormalizer {
             if line.is_empty() {
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                unreadable += 1;
-                continue;
-            };
-            let ts = parse_timestamp(value.get("timestamp").and_then(Value::as_str));
-            let uuid = value.get("uuid").and_then(Value::as_str).map(str::to_string);
-
-            match value.get("type").and_then(Value::as_str) {
-                Some("queue-operation") => {
-                    self.push_queue_operation(&value, ts, &mut out);
-                }
-                Some("user") => {
-                    if !self.push_user(&value, ts, uuid, &mut out, &mut batch_tools) {
-                        unreadable += 1;
-                    }
-                }
-                Some("assistant") => {
-                    self.push_assistant(&value, ts, uuid, &mut out, &mut batch_tools);
-                }
-                Some("system") => {
-                    let text = value
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .or_else(|| value.get("subtype").and_then(Value::as_str))
-                        .unwrap_or("System notice");
-                    let id = uuid.unwrap_or_else(|| self.next_id());
-                    out.push(ChatEntry::System {
-                        id,
-                        ts,
-                        text: cap_chars(text, SYSTEM_MAX_CHARS),
-                    });
-                }
-                Some("summary") => {
-                    if let Some(text) = value.get("summary").and_then(Value::as_str) {
-                        let id = uuid.unwrap_or_else(|| self.next_id());
-                        out.push(ChatEntry::System {
-                            id,
-                            ts,
-                            text: cap_chars(text, SYSTEM_MAX_CHARS),
-                        });
-                    }
-                }
-                Some(other) if IGNORED_TYPES.contains(&other) => {}
-                _ => unreadable += 1,
-            }
+            let outcome = self.parser.project_line(line);
+            self.consume_outcome(outcome, &mut out, &mut batch_tools, &mut unreadable);
         }
 
         if unreadable > 0 {
@@ -238,71 +205,175 @@ impl ChatNormalizer {
         out
     }
 
-    fn push_queue_operation(&mut self, value: &Value, ts: i64, out: &mut Vec<ChatEntry>) {
-        if value.get("operation").and_then(Value::as_str) != Some("enqueue") {
-            return;
-        }
-        let Some(content) = value.get("content").and_then(Value::as_str) else {
-            return;
-        };
-        let text = content.trim();
-        if text.is_empty() {
-            return;
-        }
-        self.remember_pending(text);
-        let id = self.next_id();
-        out.push(ChatEntry::User {
-            id,
-            ts,
-            text: text.to_string(),
-        });
-    }
-
-    /// A `user` record: the person speaking, a tool answering, or a compaction
-    /// recap. Returns false when the record carried nothing usable at all.
-    fn push_user(
+    fn consume_outcome(
         &mut self,
-        value: &Value,
-        ts: i64,
-        uuid: Option<String>,
+        outcome: termx_swarm_context::owner::OwnerLineOutcome,
         out: &mut Vec<ChatEntry>,
         batch_tools: &mut HashMap<String, usize>,
-    ) -> bool {
-        // Meta turns are hook output and command echoes wearing a user role.
-        if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
-            return true;
+        unreadable: &mut usize,
+    ) {
+        if matches!(outcome.disposition, OwnerLineDisposition::KnownIgnored(_)) {
+            return;
         }
-        let Some(content) = value.get("message").and_then(|m| m.get("content")) else {
-            return false;
-        };
 
-        // The post-compaction recap is a boundary marker, not a thing the user
-        // said; rendering it as a prompt bubble buries the real conversation.
-        let is_recap = value.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
-
-        if let Some(text) = content.as_str() {
-            self.emit_user_text(text, ts, uuid, is_recap, out);
-            return true;
-        }
-        let Some(blocks) = content.as_array() else {
-            return false;
-        };
-        let mut used = false;
-        for block in blocks {
-            match block.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    if let Some(text) = block.get("text").and_then(Value::as_str) {
-                        self.emit_user_text(text, ts, uuid.clone(), is_recap, out);
-                        used = true;
+        let ts = parse_timestamp(outcome.source.timestamp.as_deref());
+        let uuid = outcome.source.native_record_id.clone();
+        match outcome.source.native_kind.as_deref() {
+            Some("queue-operation") => {
+                for block in &outcome.records {
+                    if let OwnerRecord::QueuedUser { text } = &block.record {
+                        let trimmed = text.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        self.remember_pending(trimmed);
+                        let id = self.next_id();
+                        out.push(ChatEntry::User {
+                            id,
+                            ts,
+                            text: trimmed.to_string(),
+                        });
                     }
                 }
-                Some("tool_result") => {
-                    used |= self.apply_tool_result(value, block, ts, out, batch_tools);
-                }
-                _ => {}
             }
+            Some("user") => {
+                if outcome.source.body_origin != Some(OwnerBodyOrigin::NestedContent) {
+                    *unreadable += 1;
+                    return;
+                }
+                match outcome.source.body_kind {
+                    Some(OwnerBodyKind::String) => {
+                        // A native string body is usable even when trimming leaves
+                        // nothing to render.
+                        for block in &outcome.records {
+                            match &block.record {
+                                OwnerRecord::UserText { text } => {
+                                    self.emit_user_text(text, ts, uuid.clone(), false, out);
+                                }
+                                OwnerRecord::Compaction { text, recap: true } => {
+                                    self.emit_user_text(text, ts, uuid.clone(), true, out);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some(OwnerBodyKind::Array) => {
+                        // Legacy chat counts a native text block with a string
+                        // field as used even when the string is empty.
+                        let mut used = outcome.present_text_string_blocks > 0;
+                        for block in &outcome.records {
+                            match (block.native_kind.as_deref(), &block.record) {
+                                (Some("text"), OwnerRecord::UserText { text }) => {
+                                    self.emit_user_text(text, ts, uuid.clone(), false, out);
+                                }
+                                (Some("text"), OwnerRecord::Compaction { text, recap: true }) => {
+                                    self.emit_user_text(text, ts, uuid.clone(), true, out);
+                                }
+                                (Some("tool_result"), record @ OwnerRecord::ToolResult { .. }) => {
+                                    used |=
+                                        self.apply_owner_tool_result(record, ts, out, batch_tools);
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !used {
+                            *unreadable += 1;
+                        }
+                    }
+                    _ => *unreadable += 1,
+                }
+            }
+            Some("assistant") => {
+                if outcome.source.body_origin != Some(OwnerBodyOrigin::NestedContent)
+                    || outcome.source.body_kind != Some(OwnerBodyKind::Array)
+                {
+                    return;
+                }
+                for block in &outcome.records {
+                    match (block.native_kind.as_deref(), &block.record) {
+                        (Some("text"), OwnerRecord::AssistantText { text }) => {
+                            if text.trim().is_empty() {
+                                continue;
+                            }
+                            let id = block_id(&uuid, block.index.unwrap_or(0), || self.next_id());
+                            out.push(ChatEntry::Assistant {
+                                id,
+                                ts,
+                                markdown: text.to_string(),
+                            });
+                        }
+                        (Some("thinking"), OwnerRecord::Thinking { text }) => {
+                            if text.trim().is_empty() {
+                                continue;
+                            }
+                            let id = block_id(&uuid, block.index.unwrap_or(0), || self.next_id());
+                            out.push(ChatEntry::Thinking {
+                                id,
+                                ts,
+                                text: text.to_string(),
+                            });
+                        }
+                        (
+                            Some("tool_use"),
+                            OwnerRecord::ToolCall {
+                                native_id,
+                                native_name,
+                                native_input_json,
+                                ..
+                            },
+                        ) => {
+                            let name = native_name.as_deref().unwrap_or("tool").to_string();
+                            let id = native_id.clone().unwrap_or_else(|| {
+                                block_id(&uuid, block.index.unwrap_or(0), || self.next_id())
+                            });
+                            let input = native_input_json.as_ref().unwrap_or(&Value::Null);
+                            let (title, summary) = tool_chip(&name, input);
+                            self.remember_tool(
+                                &id,
+                                OpenTool {
+                                    name: name.clone(),
+                                    title: title.clone(),
+                                    summary: summary.clone(),
+                                    ts,
+                                },
+                            );
+                            batch_tools.insert(id.clone(), out.len());
+                            out.push(ChatEntry::Tool {
+                                id,
+                                ts,
+                                name,
+                                title,
+                                summary,
+                                status: ToolStatus::Running,
+                                detail: String::new(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("system") | Some("summary") => {
+                for block in &outcome.records {
+                    let text = match &block.record {
+                        OwnerRecord::SystemNotice { text } => {
+                            text.as_deref().unwrap_or("System notice")
+                        }
+                        OwnerRecord::Compaction { text, .. } => text.as_str(),
+                        _ => continue,
+                    };
+                    let id = uuid.clone().unwrap_or_else(|| self.next_id());
+                    out.push(ChatEntry::System {
+                        id,
+                        ts,
+                        text: cap_chars(text, SYSTEM_MAX_CHARS),
+                    });
+                }
+            }
+            _ if matches!(outcome.disposition, OwnerLineDisposition::Unreadable(_)) => {
+                *unreadable += 1
+            }
+            _ => {}
         }
-        used
     }
 
     fn emit_user_text(
@@ -339,19 +410,29 @@ impl ChatNormalizer {
 
     /// Close out a tool call. Returns false for a result whose call is unknown
     /// — that is a hole in the window, and the caller counts it.
-    fn apply_tool_result(
+    fn apply_owner_tool_result(
         &mut self,
-        record: &Value,
-        block: &Value,
+        record: &OwnerRecord,
         ts: i64,
         out: &mut Vec<ChatEntry>,
         batch_tools: &mut HashMap<String, usize>,
     ) -> bool {
-        let Some(tool_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+        let OwnerRecord::ToolResult {
+            content_json,
+            raw_result_json,
+            native_tool_use_id,
+            native_is_error,
+            ..
+        } = record
+        else {
             return false;
         };
-        let raw_result = record.get("toolUseResult");
-        let status = if block.get("is_error").and_then(Value::as_bool) == Some(true)
+        let tool_id = native_tool_use_id.as_deref();
+        let raw_result = raw_result_json.as_deref();
+        let Some(tool_id) = tool_id else {
+            return false;
+        };
+        let status = if *native_is_error == Some(true)
             || raw_result
                 .and_then(Value::as_str)
                 .is_some_and(|s| s.starts_with("Error:"))
@@ -360,7 +441,10 @@ impl ChatNormalizer {
         } else {
             ToolStatus::Ok
         };
-        let detail = cap_chars(&result_detail(block, raw_result), DETAIL_MAX_CHARS);
+        let detail = cap_chars(
+            &result_detail(content_json.as_ref(), raw_result),
+            DETAIL_MAX_CHARS,
+        );
 
         if let Some(index) = batch_tools.remove(tool_id) {
             self.take_tool(tool_id);
@@ -402,89 +486,6 @@ impl ChatNormalizer {
         });
         true
     }
-
-    fn push_assistant(
-        &mut self,
-        value: &Value,
-        ts: i64,
-        uuid: Option<String>,
-        out: &mut Vec<ChatEntry>,
-        batch_tools: &mut HashMap<String, usize>,
-    ) {
-        let Some(blocks) = value
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
-        else {
-            return;
-        };
-        for (index, block) in blocks.iter().enumerate() {
-            match block.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    let Some(text) = block.get("text").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    let id = block_id(&uuid, index, || self.next_id());
-                    out.push(ChatEntry::Assistant {
-                        id,
-                        ts,
-                        markdown: text.to_string(),
-                    });
-                }
-                Some("thinking") => {
-                    let Some(text) = block.get("thinking").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    let id = block_id(&uuid, index, || self.next_id());
-                    out.push(ChatEntry::Thinking {
-                        id,
-                        ts,
-                        text: text.to_string(),
-                    });
-                }
-                Some("tool_use") => {
-                    let name = block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .to_string();
-                    let id = block
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| block_id(&uuid, index, || self.next_id()));
-                    let input = block.get("input").unwrap_or(&Value::Null);
-                    let (title, summary) = tool_chip(&name, input);
-                    self.remember_tool(
-                        &id,
-                        OpenTool {
-                            name: name.clone(),
-                            title: title.clone(),
-                            summary: summary.clone(),
-                            ts,
-                        },
-                    );
-                    batch_tools.insert(id.clone(), out.len());
-                    out.push(ChatEntry::Tool {
-                        id,
-                        ts,
-                        name,
-                        title,
-                        summary,
-                        status: ToolStatus::Running,
-                        detail: String::new(),
-                    });
-                }
-                _ => {}
-            }
-        }
-    }
 }
 
 /// One batch, no carried state — the pure entry point fixtures drive. A feed
@@ -515,8 +516,8 @@ fn block_id(uuid: &Option<String>, index: usize, fallback: impl FnOnce() -> Stri
 
 /// Readable body of a tool result: the block's own content when it is text,
 /// otherwise whatever the harness recorded alongside it.
-fn result_detail(block: &Value, raw_result: Option<&Value>) -> String {
-    if let Some(content) = block.get("content") {
+fn result_detail(content: Option<&Value>, raw_result: Option<&Value>) -> String {
+    if let Some(content) = content {
         let text = value_text(content);
         if !text.trim().is_empty() {
             return text;
@@ -721,7 +722,9 @@ static FEEDS: Mutex<Option<HashMap<u64, Feed>>> = Mutex::new(None);
 static NEXT_FEED_ID: AtomicU64 = AtomicU64::new(1);
 
 fn with_feeds<T>(action: impl FnOnce(&mut HashMap<u64, Feed>) -> T) -> T {
-    let mut guard = FEEDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = FEEDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     action(guard.get_or_insert_with(HashMap::new))
 }
 
@@ -791,8 +794,8 @@ pub fn open_feed(
         return Err("That transcript is outside the session folders.".to_string());
     }
     let mut normalizer = ChatNormalizer::new();
-    let (entries, offset) =
-        open_window(path, &mut normalizer).ok_or_else(|| "The transcript could not be read.".to_string())?;
+    let (entries, offset) = open_window(path, &mut normalizer)
+        .ok_or_else(|| "The transcript could not be read.".to_string())?;
     let feed_id = NEXT_FEED_ID.fetch_add(1, Ordering::Relaxed);
     with_feeds(|feeds| {
         feeds.insert(
@@ -918,6 +921,14 @@ pub fn chat_feed_close(feed_id: u64) {
 }
 
 #[cfg(test)]
+#[path = "legacy_chat_oracle.rs"]
+mod legacy_chat_oracle;
+
+#[cfg(test)]
+#[path = "chat_owner_parity.rs"]
+mod chat_owner_parity;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -972,15 +983,18 @@ mod tests {
         assert_eq!(
             kinds(&entries),
             [
-                "user",      // the queued prompt
-                "thinking", "assistant", // opening turn
+                "user", // the queued prompt
+                "thinking",
+                "assistant", // opening turn
                 "tool",      // Edit + its result
                 "tool",      // Grep + its result
-                "thinking", "assistant", "tool", // Bash that failed
-                "system",  // compact boundary
-                "system",  // the compaction recap turn
-                "user",    // a queued message with no echoed user line
-                "tool",    // Read + its result
+                "thinking",
+                "assistant",
+                "tool",   // Bash that failed
+                "system", // compact boundary
+                "system", // the compaction recap turn
+                "user",   // a queued message with no echoed user line
+                "tool",   // Read + its result
             ],
             "{:#?}",
             kinds(&entries)
@@ -999,7 +1013,11 @@ mod tests {
             .collect();
         assert_eq!(prompts.len(), 2, "{prompts:#?}");
         assert!(prompts[0].starts_with("# T5"), "{:?}", prompts[0]);
-        assert!(prompts[1].starts_with("<task-notification>"), "{:?}", prompts[1]);
+        assert!(
+            prompts[1].starts_with("<task-notification>"),
+            "{:?}",
+            prompts[1]
+        );
     }
 
     #[test]
@@ -1041,8 +1059,14 @@ mod tests {
             unreachable!()
         };
         assert_eq!(name, "Bash");
-        assert_eq!(title, "npx --prefix ui vitest run src/workspace/__tests__/AttachmentHub.test.ts");
-        assert_eq!(summary, "Confirm AttachmentHub tests fail before implementation");
+        assert_eq!(
+            title,
+            "npx --prefix ui vitest run src/workspace/__tests__/AttachmentHub.test.ts"
+        );
+        assert_eq!(
+            summary,
+            "Confirm AttachmentHub tests fail before implementation"
+        );
         assert_eq!(*status, ToolStatus::Error);
         assert!(detail.contains("Exit code 1"), "{detail}");
     }
@@ -1127,11 +1151,15 @@ mod tests {
         let lines: Vec<&str> = SESSION.lines().collect();
         let call = lines
             .iter()
-            .position(|line| line.contains("call_N36vynMuWhMm06MsT6yf76Yq") && line.contains("tool_use"))
+            .position(|line| {
+                line.contains("call_N36vynMuWhMm06MsT6yf76Yq") && line.contains("tool_use")
+            })
             .expect("the Edit call");
         let result = lines
             .iter()
-            .position(|line| line.contains("call_N36vynMuWhMm06MsT6yf76Yq") && line.contains("tool_result"))
+            .position(|line| {
+                line.contains("call_N36vynMuWhMm06MsT6yf76Yq") && line.contains("tool_result")
+            })
             .expect("the Edit result");
 
         let mut normalizer = ChatNormalizer::new();
@@ -1153,7 +1181,11 @@ mod tests {
         else {
             panic!("expected exactly one replacement chip: {second:#?}");
         };
-        assert_eq!(id, entry_id(&first[0]), "same identity, so the row is replaced");
+        assert_eq!(
+            id,
+            entry_id(&first[0]),
+            "same identity, so the row is replaced"
+        );
         assert_eq!(name, "Edit");
         assert_eq!(title, "Edited 2026-07-23-termx-t5-sidebar.md");
         assert_eq!(summary, "+1 −1");
@@ -1174,15 +1206,24 @@ mod tests {
     fn chip_lines_are_composed_per_tool() {
         let chip = |name: &str, input: serde_json::Value| tool_chip(name, &input);
         assert_eq!(
-            chip("Write", serde_json::json!({ "file_path": "C:\\Dev\\a\\App.tsx" })),
+            chip(
+                "Write",
+                serde_json::json!({ "file_path": "C:\\Dev\\a\\App.tsx" })
+            ),
             ("Wrote App.tsx".to_string(), String::new())
         );
         assert_eq!(
-            chip("Read", serde_json::json!({ "file_path": "/home/me/notes.md" })),
+            chip(
+                "Read",
+                serde_json::json!({ "file_path": "/home/me/notes.md" })
+            ),
             ("Read notes.md".to_string(), String::new())
         );
         assert_eq!(
-            chip("Bash", serde_json::json!({ "command": "cargo test\n--quiet", "description": "Run tests" })),
+            chip(
+                "Bash",
+                serde_json::json!({ "command": "cargo test\n--quiet", "description": "Run tests" })
+            ),
             ("cargo test".to_string(), "Run tests".to_string())
         );
         assert_eq!(
@@ -1205,8 +1246,14 @@ mod tests {
         assert_eq!(parse_timestamp(Some("1970-01-01T00:00:01.500Z")), 1_500);
         // Cross-checked against an independent epoch conversion of
         // 2026-07-23T09:03:08.502Z.
-        assert_eq!(parse_timestamp(Some("2026-07-23T09:03:08.502Z")), 1_784_797_388_502);
-        assert_eq!(parse_timestamp(Some("2026-07-23T09:03:08Z")), 1_784_797_388_000);
+        assert_eq!(
+            parse_timestamp(Some("2026-07-23T09:03:08.502Z")),
+            1_784_797_388_502
+        );
+        assert_eq!(
+            parse_timestamp(Some("2026-07-23T09:03:08Z")),
+            1_784_797_388_000
+        );
         for junk in ["", "yesterday", "2026-07-23", "20260723T090308Z"] {
             assert_eq!(parse_timestamp(Some(junk)), 0, "{junk:?}");
         }
@@ -1288,7 +1335,11 @@ mod tests {
         append(&store.transcript, &user_line("second"));
         let polled = poll_feed(opened.feed_id).unwrap();
         assert!(!polled.reset);
-        assert_eq!(texts(&polled.entries), ["second"], "no re-delivery of 'first'");
+        assert_eq!(
+            texts(&polled.entries),
+            ["second"],
+            "no re-delivery of 'first'"
+        );
 
         let idle = poll_feed(opened.feed_id).unwrap();
         assert!(idle.entries.is_empty(), "{:#?}", idle.entries);
@@ -1329,7 +1380,11 @@ mod tests {
 
         append(&store.transcript, fourth_tail);
         let rest = poll_feed(opened.feed_id).unwrap();
-        assert_eq!(texts(&rest.entries), ["fourth"], "the held remainder survived");
+        assert_eq!(
+            texts(&rest.entries),
+            ["fourth"],
+            "the held remainder survived"
+        );
         close_feed(opened.feed_id);
     }
 

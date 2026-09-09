@@ -33,7 +33,7 @@
 //! Neighboring field inspection compiles and observes owner-only structure:
 //!
 //! ```
-//! use termx_swarm_context::owner::{OwnerParser, OwnerRecord};
+//! use termx_swarm_context::owner::{OwnerBodyKind, OwnerBodyOrigin, OwnerParser, OwnerRecord};
 //! use termx_swarm_context::Provider;
 //!
 //! let parser = OwnerParser::new(Provider::Claude);
@@ -43,6 +43,11 @@
 //! assert_eq!(owner.source.native_record_id.as_deref(), Some("record"));
 //! assert_eq!(owner.source.native_kind.as_deref(), Some("user"));
 //! assert_eq!(owner.source.nested_message_role.as_deref(), None);
+//! assert_eq!(
+//!     owner.source.body_origin,
+//!     Some(OwnerBodyOrigin::NestedContent)
+//! );
+//! assert_eq!(owner.source.body_kind, Some(OwnerBodyKind::String));
 //! assert!(matches!(
 //!     &owner.records[0].record,
 //!     OwnerRecord::UserText { text } if text == "text"

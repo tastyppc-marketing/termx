@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use termx_swarm_context::owner::{
-    OwnerBlock, OwnerFamily, OwnerIgnoreReason, OwnerLineDisposition, OwnerLineOutcome,
-    OwnerParseMode, OwnerParser, OwnerRecord, OwnerUnreadableReason,
+    OwnerBlock, OwnerBodyKind, OwnerBodyOrigin, OwnerFamily, OwnerIgnoreReason,
+    OwnerLineDisposition, OwnerLineOutcome, OwnerParseMode, OwnerParser, OwnerRecord,
+    OwnerUnreadableReason,
 };
 use termx_swarm_context::{
     JsonlScanner, PeerRecord, Provider, ProviderParser, ToolStatus, UnavailableReason,
@@ -176,6 +177,7 @@ fn claude_queue_operation_enqueue_is_queued_user() {
         outcome.records,
         vec![OwnerBlock {
             index: None,
+            native_kind: None,
             record: OwnerRecord::QueuedUser {
                 text: "  queued prompt  ".to_owned()
             }
@@ -210,6 +212,7 @@ fn claude_user_and_assistant_text_keep_native_source_and_block_index() {
         user.records,
         vec![OwnerBlock {
             index: None,
+            native_kind: None,
             record: OwnerRecord::UserText {
                 text: "plain user".to_owned()
             }
@@ -228,12 +231,14 @@ fn claude_user_and_assistant_text_keep_native_source_and_block_index() {
         vec![
             OwnerBlock {
                 index: Some(0),
+                native_kind: Some("text".to_owned()),
                 record: OwnerRecord::UserText {
                     text: "first".to_owned()
                 }
             },
             OwnerBlock {
                 index: Some(1),
+                native_kind: Some("text".to_owned()),
                 record: OwnerRecord::UserText {
                     text: "second".to_owned()
                 }
@@ -253,12 +258,14 @@ fn claude_user_and_assistant_text_keep_native_source_and_block_index() {
         vec![
             OwnerBlock {
                 index: Some(0),
+                native_kind: Some("text".to_owned()),
                 record: OwnerRecord::AssistantText {
                     text: "alpha".to_owned()
                 }
             },
             OwnerBlock {
                 index: Some(1),
+                native_kind: Some("text".to_owned()),
                 record: OwnerRecord::AssistantText {
                     text: "beta".to_owned()
                 }
@@ -309,11 +316,15 @@ fn claude_tool_call_keeps_optional_identity_and_structured_input() {
         present.records[0],
         OwnerBlock {
             index: Some(0),
+            native_kind: Some("tool_use".to_owned()),
             record: OwnerRecord::ToolCall {
                 call_id: Some("call-1".to_owned()),
                 tool_name: Some("Write".to_owned()),
                 status: ToolStatus::Running,
                 input_json: Some(json!({"file_path":"ui/src/App.tsx","content":"body"})),
+                native_id: Some("call-1".to_owned()),
+                native_name: Some("Write".to_owned()),
+                native_input_json: Some(json!({"file_path":"ui/src/App.tsx","content":"body"})),
             }
         }
     );
@@ -375,6 +386,7 @@ fn claude_tool_result_stays_grouped_with_raw_patch_and_error_shape() {
             content_json,
             input_json,
             raw_result_json,
+            ..
         } => {
             assert_eq!(call_id.as_deref(), Some("call-1"));
             assert_eq!(*status, ToolStatus::Completed);
@@ -716,6 +728,7 @@ fn codex_function_custom_shell_and_web_search_calls_and_outputs() {
             tool_name,
             input_json,
             status,
+            ..
         } => {
             assert_eq!(call_id.as_deref(), Some("item-1"));
             assert_eq!(tool_name.as_deref(), Some("lookup"));
@@ -809,6 +822,7 @@ fn codex_function_custom_shell_and_web_search_calls_and_outputs() {
             input_json,
             raw_result_json,
             status,
+            ..
         } => {
             assert_eq!(call_id.as_deref(), Some("call-fn"));
             assert_eq!(*status, ToolStatus::Completed);
@@ -1676,4 +1690,334 @@ fn fixture_system_without_text_matches_structural_marker() {
         &outcome.records[0].record,
         OwnerRecord::SystemNotice { text: None }
     ));
+}
+
+#[test]
+fn source_body_origin_distinguishes_nested_content_text_and_outer_fallback() {
+    let nested_content = project(Provider::Claude, &claude_user(json!("plain user")));
+    assert_eq!(
+        nested_content.source.body_origin,
+        Some(OwnerBodyOrigin::NestedContent)
+    );
+    assert_eq!(nested_content.source.body_kind, Some(OwnerBodyKind::String));
+
+    let nested_array = project(
+        Provider::Claude,
+        &claude_user(json!([{"type":"text","text":"first"}])),
+    );
+    assert_eq!(
+        nested_array.source.body_origin,
+        Some(OwnerBodyOrigin::NestedContent)
+    );
+    assert_eq!(nested_array.source.body_kind, Some(OwnerBodyKind::Array));
+
+    let nested_text = project(
+        Provider::Claude,
+        &line(json!({"type":"user","message":{"text":"from-text"}})),
+    );
+    assert_eq!(
+        nested_text.source.body_origin,
+        Some(OwnerBodyOrigin::NestedText)
+    );
+    assert_eq!(nested_text.source.body_kind, Some(OwnerBodyKind::String));
+    assert!(matches!(
+        &nested_text.records[0].record,
+        OwnerRecord::UserText { text } if text == "from-text"
+    ));
+
+    let null_content_text = project(
+        Provider::Claude,
+        &line(json!({
+            "type":"user",
+            "message":{"content":null,"text":"from-text"}
+        })),
+    );
+    assert_eq!(
+        null_content_text.source.body_origin,
+        Some(OwnerBodyOrigin::NestedText)
+    );
+
+    let outer_content = project(
+        Provider::Claude,
+        &line(json!({"type":"user","content":"top-content"})),
+    );
+    assert_eq!(
+        outer_content.source.body_origin,
+        Some(OwnerBodyOrigin::OuterContent)
+    );
+    assert!(matches!(
+        &outer_content.records[0].record,
+        OwnerRecord::UserText { text } if text == "top-content"
+    ));
+
+    let outer_text = project(
+        Provider::Claude,
+        &line(json!({"type":"user","text":"top-level"})),
+    );
+    assert_eq!(
+        outer_text.source.body_origin,
+        Some(OwnerBodyOrigin::OuterText)
+    );
+
+    let wrong_type = project(
+        Provider::Claude,
+        &line(json!({"type":"user","message":{"content":{"not":"text"}}})),
+    );
+    assert_unreadable(&wrong_type, OwnerUnreadableReason::UnusableUser);
+    assert_eq!(
+        wrong_type.source.body_origin,
+        Some(OwnerBodyOrigin::NestedContent)
+    );
+    assert_eq!(wrong_type.source.body_kind, Some(OwnerBodyKind::Other));
+
+    let assistant_string = project(
+        Provider::Claude,
+        &line(json!({
+            "type":"assistant",
+            "message":{"content":"string-body"}
+        })),
+    );
+    assert_eq!(
+        assistant_string.source.body_origin,
+        Some(OwnerBodyOrigin::NestedContent)
+    );
+    assert_eq!(
+        assistant_string.source.body_kind,
+        Some(OwnerBodyKind::String)
+    );
+}
+
+#[test]
+fn native_block_kind_is_retained_for_chat_filters() {
+    let outcome = project(
+        Provider::Claude,
+        &claude_assistant(vec![
+            json!({"type":"text","text":"keep"}),
+            json!({"type":"thinking","thinking":"plan"}),
+            json!({"type":"tool_use","id":"call-1","name":"Read","input":{"path":"a.rs"}}),
+            json!({"type":"input_text","text":"transcript-only"}),
+        ]),
+    );
+    let kinds: Vec<Option<&str>> = outcome
+        .records
+        .iter()
+        .map(|block| block.native_kind.as_deref())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            Some("text"),
+            Some("thinking"),
+            Some("tool_use"),
+            Some("input_text")
+        ]
+    );
+
+    let user = project(
+        Provider::Claude,
+        &claude_user(json!([
+            {"type":"text","text":"ask"},
+            {"type":"tool_result","tool_use_id":"call-1","content":"ok"}
+        ])),
+    );
+    assert_eq!(user.records[0].native_kind.as_deref(), Some("text"));
+    assert_eq!(user.records[1].native_kind.as_deref(), Some("tool_result"));
+}
+
+#[test]
+fn native_tool_fields_stay_independent_of_transcript_union_selectors() {
+    let claude_null_input = project(
+        Provider::Claude,
+        &claude_assistant(vec![json!({
+            "type":"tool_use",
+            "id":"call-native",
+            "name":"Bash",
+            "input":null,
+            "arguments":{"command":"echo hijack"}
+        })]),
+    );
+    match &claude_null_input.records[0].record {
+        OwnerRecord::ToolCall {
+            call_id,
+            tool_name,
+            input_json,
+            native_id,
+            native_name,
+            native_input_json,
+            ..
+        } => {
+            assert_eq!(call_id.as_deref(), Some("call-native"));
+            assert_eq!(tool_name.as_deref(), Some("Bash"));
+            assert_eq!(input_json, &Some(json!({"command":"echo hijack"})));
+            assert_eq!(native_id.as_deref(), Some("call-native"));
+            assert_eq!(native_name.as_deref(), Some("Bash"));
+            assert_eq!(native_input_json, &Some(Value::Null));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let missing_input = project(
+        Provider::Claude,
+        &claude_assistant(vec![json!({
+            "type":"tool_use",
+            "id":"call-missing",
+            "name":"Bash",
+            "arguments":{"command":"echo hijack"}
+        })]),
+    );
+    match &missing_input.records[0].record {
+        OwnerRecord::ToolCall {
+            input_json,
+            native_input_json,
+            ..
+        } => {
+            assert_eq!(input_json, &Some(json!({"command":"echo hijack"})));
+            assert_eq!(native_input_json, &None);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let alias_id = project(
+        Provider::Claude,
+        &claude_assistant(vec![json!({
+            "type":"tool_use",
+            "tool_use_id":"from-alias",
+            "tool_name":"Aliased",
+            "input":{"file_path":"a.rs"}
+        })]),
+    );
+    match &alias_id.records[0].record {
+        OwnerRecord::ToolCall {
+            call_id,
+            tool_name,
+            native_id,
+            native_name,
+            native_input_json,
+            ..
+        } => {
+            assert_eq!(call_id.as_deref(), Some("from-alias"));
+            assert_eq!(tool_name.as_deref(), Some("Aliased"));
+            assert_eq!(native_id, &None);
+            assert_eq!(native_name, &None);
+            assert_eq!(native_input_json, &Some(json!({"file_path":"a.rs"})));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let result = project(
+        Provider::Claude,
+        &line(json!({
+            "type":"user",
+            "message":{"content":[{
+                "type":"tool_result",
+                "id":"not-the-join",
+                "tool_use_id":"call-join",
+                "call_id":"also-not",
+                "content":"ok"
+            }]}
+        })),
+    );
+    match &result.records[0].record {
+        OwnerRecord::ToolResult {
+            call_id,
+            native_tool_use_id,
+            ..
+        } => {
+            assert_eq!(call_id.as_deref(), Some("not-the-join"));
+            assert_eq!(native_tool_use_id.as_deref(), Some("call-join"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn present_text_string_blocks_count_empty_native_text() {
+    let empty_text = project(
+        Provider::Claude,
+        &claude_user(json!([{"type":"text","text":""}])),
+    );
+    assert_unreadable(&empty_text, OwnerUnreadableReason::UnusableUser);
+    assert_eq!(empty_text.present_text_string_blocks, 1);
+
+    let missing_text = project(Provider::Claude, &claude_user(json!([{"type":"text"}])));
+    assert_unreadable(&missing_text, OwnerUnreadableReason::UnusableUser);
+    assert_eq!(missing_text.present_text_string_blocks, 0);
+
+    let mixed = project(
+        Provider::Claude,
+        &claude_user(json!([
+            {"type":"text","text":"keep"},
+            {"type":"text","text":"   "},
+            {"type":"input_text","text":"ignored-for-count"}
+        ])),
+    );
+    assert_rendered(&mixed);
+    assert_eq!(mixed.present_text_string_blocks, 2);
+}
+
+#[test]
+fn native_tool_result_error_fact_is_independent_of_union_status() {
+    let explicit_false = project(
+        Provider::Claude,
+        &claude_user(json!([{
+            "type":"tool_result",
+            "tool_use_id":"call-false",
+            "status":"failed",
+            "is_error":false,
+            "content":"successful native result"
+        }])),
+    );
+    match &explicit_false.records[0].record {
+        OwnerRecord::ToolResult {
+            status,
+            native_is_error,
+            ..
+        } => {
+            assert_eq!(*status, ToolStatus::Failed, "transcript union is unchanged");
+            assert_eq!(*native_is_error, Some(false));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let absent = project(
+        Provider::Claude,
+        &claude_user(json!([{
+            "type":"tool_result",
+            "tool_use_id":"call-absent",
+            "status":"failed",
+            "content":"successful native result"
+        }])),
+    );
+    match &absent.records[0].record {
+        OwnerRecord::ToolResult {
+            status,
+            native_is_error,
+            ..
+        } => {
+            assert_eq!(*status, ToolStatus::Failed, "transcript union is unchanged");
+            assert_eq!(*native_is_error, None);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let explicit_true = project(
+        Provider::Claude,
+        &claude_user(json!([{
+            "type":"tool_result",
+            "tool_use_id":"call-true",
+            "is_error":true,
+            "content":"failed native result"
+        }])),
+    );
+    match &explicit_true.records[0].record {
+        OwnerRecord::ToolResult {
+            status,
+            native_is_error,
+            ..
+        } => {
+            assert_eq!(*status, ToolStatus::Failed);
+            assert_eq!(*native_is_error, Some(true));
+        }
+        other => panic!("{other:?}"),
+    }
 }
