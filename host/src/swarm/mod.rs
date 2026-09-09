@@ -12,6 +12,7 @@ pub mod lifetime;
 pub mod output;
 pub mod rpc;
 pub mod runtime;
+pub mod tools;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;

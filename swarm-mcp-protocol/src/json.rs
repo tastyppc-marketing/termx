@@ -5,7 +5,7 @@ pub const MAX_JSON_DEPTH: usize = 64;
 pub const MAX_JSON_KEYS_PER_OBJECT: usize = 64;
 pub const MAX_JSON_LIVE_KEYS: usize = 256;
 pub const MAX_JSON_KEY_BYTES: usize = 128;
-pub const MAX_JSON_NODES: usize = 524_288;
+pub const MAX_JSON_NODES: usize = 1_048_576;
 
 /// Conservative fixed and transient scanner storage. The scanner is iterative,
 /// so this includes its one key array, container-frame array, one temporary

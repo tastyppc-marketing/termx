@@ -663,6 +663,24 @@ mod tests {
         let (info, s) = reg.create_session(Some("cmd"), None, 80, 25, true).unwrap();
         assert_eq!(info.cwd, None, "creation records what was asked: nothing");
 
+        // Exercise cd at an observed shell prompt, as a user would. Sending
+        // input during cmd/ConPTY startup also tests startup input handling
+        // and can lose the command under concurrent native test load.
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while reg
+            .list()
+            .iter()
+            .find(|row| row.id == info.id)
+            .and_then(|row| row.cwd.as_ref())
+            .is_none()
+        {
+            assert!(
+                std::time::Instant::now() < ready_deadline,
+                "initial cmd prompt never reported its cwd"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
         s.write_input(format!("cd /d \"{target_str}\"\r\n").as_bytes())
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);

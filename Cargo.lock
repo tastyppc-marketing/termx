@@ -785,6 +785,7 @@ dependencies = [
  "termx-host",
  "termx-swarm-client",
  "termx-swarm-core",
+ "termx-swarm-mcp-protocol",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",
