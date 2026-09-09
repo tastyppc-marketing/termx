@@ -30,6 +30,7 @@ pub use identity::{
 pub use pipe::{
     FrameCreditHandle, PipeServer, ReservedFrameSend, TransportOptions, VerifiedPipe,
     DEFAULT_CONNECT_RETRY_INTERVAL, DEFAULT_CONNECT_TIMEOUT, DEFAULT_HANDSHAKE_TIMEOUT,
+    MAX_HANDSHAKE_FRAME_BYTES,
 };
 
 #[cfg(windows)]
@@ -100,6 +101,17 @@ impl PeerClient {
     ) -> Result<Self, WireError> {
         Ok(Self {
             pipe: pipe::connect_peer(discovery, options).await?,
+        })
+    }
+    /// Use caller-owned frame and connection capacity through hello and RPC.
+    /// A successful hello proves the server boot, not an enrolled peer identity.
+    pub async fn connect_with_options_and_budget(
+        discovery: &DiscoveryRecord,
+        options: TransportOptions,
+        budget: FrameBudget,
+    ) -> Result<Self, WireError> {
+        Ok(Self {
+            pipe: pipe::connect_peer_with_budget(discovery, options, budget).await?,
         })
     }
     pub fn server_identity(&self) -> ProcessIdentity {

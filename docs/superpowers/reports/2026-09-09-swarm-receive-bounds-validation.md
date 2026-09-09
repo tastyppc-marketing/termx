@@ -1,0 +1,11 @@
+# Receive limits before allocation
+
+The Windows swarm client now accepts caller-owned frame and connection budgets. A bounded receive checks the native frame's length prefix before reserving body credit or allocating memory. An oversized received prefix makes the connection unusable; an invalid caller limit consumes no input. Existing connection and receive APIs keep their previous defaults. Peer hello uses the supplied budget and a separate 16 KiB bound for its small fixed response shape.
+
+Seven new native tests cover exact-limit acceptance, retained frame credit after connection drop, shared connection admission, invalid limits, rejection of subsequent frames after an oversized prefix, and peer handshake accounting. Two tests leave the native writer open after sending only an oversized prefix, proving that rejection does not wait for the body. The production implementation checks the bound before the body allocation.
+
+All 78 client tests and 7 documentation tests passed. Strict all-target Clippy, formatting and release build passed. The first lint run found two needless borrows in the new tests; those were corrected and the seven focused tests rerun. Production source and other tests were unchanged from the full test run. The missing-API RED and original lint failure remain retained. An independent GPT-5.6-SOL review found no correctness, lifetime or compatibility defect in the source diff.
+
+The final snapshot contains 16 Cargo/source/test inputs. Evidence is retained in the receive-bounds worktree under `retired/test-artifacts/swarm-client/receive-bounds-20260909T075932887699Z/final-20260909T080511388366Z`. Final manifest SHA-256: `5283efc32b34e3ea8e111f05dba6ab4653c985c397e3b49f545d9c19e2d4c51b`. Release library SHA-256: `758f0c12f38e1cf1b26790aea1d28cd4fdc5bd3e0667ef3342edd0180639c42b` (1,547,398 bytes). The root-owned retained compiler cache was reused exclusively; no user process, data or installed binary was changed.
+
+This provides a transport primitive. The native helper must still select the operation's correct limit, reserve aggregate response capacity before dispatch, authenticate enrollment and retain request/output ownership. This checkpoint does not establish those integration behaviors or install collaboration into TermX.
