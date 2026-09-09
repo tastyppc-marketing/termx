@@ -3286,6 +3286,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "termx-swarm-context"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "termx-ui"
 version = "0.2.0"
 dependencies = [
@@ -3298,6 +3307,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "termx-swarm-context",
  "ureq",
  "windows-sys 0.61.2",
 ]

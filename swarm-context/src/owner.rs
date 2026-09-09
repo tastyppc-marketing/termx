@@ -11,11 +11,16 @@
 //!
 //! Record-level `toolUseResult` is stored once as `Arc<Value>` and shared by
 //! every grouped result on that native record. Block-local `content` and the
-//! transcript nullish input selector are stored independently. Message
-//! `content ?? text` follows TypeScript nullish coalescing: null/absent
+//! transcript nullish input selector are stored independently. Native `input`,
+//! `id`, `name`, `tool_use_id`, and boolean `is_error` are retained separately
+//! so a chat adapter can keep Claude's field-only tool chip and result status
+//! without re-reading provider JSON.
+//! Message `content ?? text` follows TypeScript nullish coalescing: null/absent
 //! content falls through to text; a non-null wrong-type content value does
-//! not. Nested `message.role` and outer native kind are retained as raw
-//! optional strings; this parser does not infer authority from them.
+//! not. The selected body's origin and JSON shape are recorded so chat can
+//! keep nested `message.content` filters while transcript keeps the union.
+//! Nested `message.role` and outer native kind are retained as raw optional
+//! strings; this parser does not infer authority from them.
 //!
 //! # Provider-family fallback
 //!
@@ -96,6 +101,25 @@ pub enum OwnerLineDisposition {
     Unreadable(OwnerUnreadableReason),
 }
 
+/// Where the selected message body was taken from. Chat requires nested
+/// `message.content`; transcript may use `text` or a top-level fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerBodyOrigin {
+    NestedContent,
+    NestedText,
+    OuterContent,
+    OuterText,
+}
+
+/// JSON shape of the selected message body. Chat users accept string or array;
+/// chat assistants accept array only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerBodyKind {
+    String,
+    Array,
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OwnerSource {
     pub native_record_id: Option<String>,
@@ -106,6 +130,11 @@ pub struct OwnerSource {
     /// authority enum: later transcript may honor a nested user/assistant
     /// override and chat may honor the outer kind without reparsing.
     pub nested_message_role: Option<String>,
+    /// Selected body origin when a message body was considered. Absent when
+    /// no `content`/`text` candidate existed.
+    pub body_origin: Option<OwnerBodyOrigin>,
+    /// JSON shape of that selected body.
+    pub body_kind: Option<OwnerBodyKind>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,7 +155,17 @@ pub enum OwnerRecord {
         call_id: Option<String>,
         tool_name: Option<String>,
         status: ToolStatus,
+        /// Transcript nullish selector: `input ?? arguments ?? args ?? action
+        /// ?? output ?? content`. Independent of the native `input` field.
         input_json: Option<Value>,
+        /// Native `id` field only. Chat uses this; `call_id` remains the union.
+        native_id: Option<String>,
+        /// Native `name` field only. Chat uses this; `tool_name` remains the union.
+        native_name: Option<String>,
+        /// Native `input` field only. `None` if the key is absent; `Some(Null)`
+        /// if the field is explicit JSON null. Chat must not substitute
+        /// `arguments` when this is null or missing.
+        native_input_json: Option<Value>,
     },
     ToolResult {
         call_id: Option<String>,
@@ -138,6 +177,12 @@ pub enum OwnerRecord {
         input_json: Option<Value>,
         /// Record-level `toolUseResult`, shared across result blocks.
         raw_result_json: Option<Arc<Value>>,
+        /// Native `tool_use_id` field only. Chat joins on this; `call_id` remains
+        /// the union selector.
+        native_tool_use_id: Option<String>,
+        /// Native `is_error` boolean only. This remains independent of the
+        /// transcript-facing status union.
+        native_is_error: Option<bool>,
     },
     SystemNotice {
         text: Option<String>,
@@ -151,6 +196,9 @@ pub enum OwnerRecord {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnerBlock {
     pub index: Option<usize>,
+    /// Raw native block `type` string when this record came from a content
+    /// block. Absent for string-bodied records and non-block forms.
+    pub native_kind: Option<String>,
     pub record: OwnerRecord,
 }
 
@@ -162,6 +210,10 @@ pub struct OwnerLineOutcome {
     pub records: Vec<OwnerBlock>,
     pub unknown_block_count: usize,
     pub unusable_block_count: usize,
+    /// Native `type == "text"` blocks whose `text` field was a JSON string,
+    /// including empty or whitespace. Chat treats those as a used user block
+    /// even when no record is emitted.
+    pub present_text_string_blocks: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +302,7 @@ struct BlockAcc {
     records: Vec<OwnerBlock>,
     unknown: usize,
     unusable: usize,
+    text_string_present: usize,
 }
 
 impl BlockAcc {
@@ -258,11 +311,16 @@ impl BlockAcc {
             records: Vec::new(),
             unknown: 0,
             unusable: 0,
+            text_string_present: 0,
         }
     }
 
-    fn push(&mut self, index: Option<usize>, record: OwnerRecord) {
-        self.records.push(OwnerBlock { index, record });
+    fn push(&mut self, index: Option<usize>, native_kind: Option<String>, record: OwnerRecord) {
+        self.records.push(OwnerBlock {
+            index,
+            native_kind,
+            record,
+        });
     }
 }
 
@@ -296,6 +354,8 @@ fn claude_source(value: &Value) -> OwnerSource {
         native_kind: owned_str(value, "type"),
         nested_message_role: nested_object(value, "message")
             .and_then(|message| owned_str(message, "role")),
+        body_origin: None,
+        body_kind: None,
     }
 }
 
@@ -313,6 +373,7 @@ fn parse_queue_operation(
             family,
             vec![OwnerBlock {
                 index: None,
+                native_kind: None,
                 record: OwnerRecord::QueuedUser {
                     text: text.to_owned(),
                 },
@@ -333,7 +394,9 @@ fn parse_claude_user(
         return ignored(source, family, OwnerIgnoreReason::MetaUser);
     }
     let recap = value.get("isCompactSummary").and_then(Value::as_bool) == Some(true);
-    match selected_message_body(value) {
+    let (body, origin) = selected_message_body_with_origin(value);
+    let source = with_body(source, body, origin);
+    match body {
         Some(Value::String(text)) => user_text_record(source, family, None, text, recap),
         Some(Value::Array(blocks)) => {
             let raw_result = shared_raw_result(value);
@@ -359,7 +422,9 @@ fn parse_claude_assistant(
     family: Option<OwnerFamily>,
     value: &Value,
 ) -> OwnerLineOutcome {
-    match selected_message_body(value) {
+    let (body, origin) = selected_message_body_with_origin(value);
+    let source = with_body(source, body, origin);
+    match body {
         Some(Value::Array(blocks)) => {
             let raw_result = shared_raw_result(value);
             let mut acc = BlockAcc::new();
@@ -380,6 +445,7 @@ fn parse_claude_assistant(
             family,
             vec![OwnerBlock {
                 index: None,
+                native_kind: None,
                 record: OwnerRecord::AssistantText {
                     text: text.to_owned(),
                 },
@@ -417,6 +483,7 @@ fn parse_claude_system(
         family,
         vec![OwnerBlock {
             index: None,
+            native_kind: None,
             record,
         }],
         0,
@@ -435,6 +502,7 @@ fn parse_claude_summary(
             family,
             vec![OwnerBlock {
                 index: None,
+                native_kind: None,
                 record: OwnerRecord::SystemNotice {
                     text: Some(text.to_owned()),
                 },
@@ -455,6 +523,8 @@ fn parse_codex(value: &Value) -> OwnerLineOutcome {
         timestamp: owned_str(value, "timestamp"),
         native_kind: owned_str(value, "type"),
         nested_message_role: payload.and_then(|payload| owned_str(payload, "role")),
+        body_origin: None,
+        body_kind: None,
     };
     let family = Some(OwnerFamily::Codex);
     match str_field(value, "type") {
@@ -561,6 +631,7 @@ fn parse_codex_tool_call(
         family,
         vec![OwnerBlock {
             index: None,
+            native_kind: None,
             record: OwnerRecord::ToolCall {
                 call_id: first_str(payload, &TOOL_ID_KEYS).map(str::to_owned),
                 tool_name: tool_name(payload, fallback_name),
@@ -570,6 +641,9 @@ fn parse_codex_tool_call(
                     _ => default_status,
                 },
                 input_json: nullish_first(payload, &TOOL_INPUT_KEYS).cloned(),
+                native_id: owned_str(payload, "id"),
+                native_name: owned_str(payload, "name"),
+                native_input_json: payload.get("input").cloned(),
             },
         }],
         0,
@@ -587,12 +661,15 @@ fn parse_codex_tool_result(
         family,
         vec![OwnerBlock {
             index: None,
+            native_kind: None,
             record: OwnerRecord::ToolResult {
                 call_id: first_str(payload, &TOOL_ID_KEYS).map(str::to_owned),
                 status: result_status(payload),
                 content_json: payload.get("content").cloned(),
                 input_json: nullish_first(payload, &TOOL_INPUT_KEYS).cloned(),
                 raw_result_json: None,
+                native_tool_use_id: owned_str(payload, "tool_use_id"),
+                native_is_error: payload.get("is_error").and_then(Value::as_bool),
             },
         }],
         0,
@@ -613,34 +690,43 @@ fn project_content_block(
         return;
     }
     match str_field(block, "type") {
-        Some("text") | Some("input_text") | Some("output_text") => match str_field(block, "text") {
-            Some(text) if !text.trim().is_empty() => match (role, recap) {
-                (_, true) => acc.push(
-                    index,
-                    OwnerRecord::Compaction {
-                        text: text.to_owned(),
-                        recap: true,
-                    },
-                ),
-                (BlockRole::User, false) => acc.push(
-                    index,
-                    OwnerRecord::UserText {
-                        text: text.to_owned(),
-                    },
-                ),
-                (BlockRole::Assistant, false) => acc.push(
-                    index,
-                    OwnerRecord::AssistantText {
-                        text: text.to_owned(),
-                    },
-                ),
-            },
-            _ => acc.unusable += 1,
-        },
+        Some(kind @ "text") | Some(kind @ "input_text") | Some(kind @ "output_text") => {
+            if kind == "text" && str_field(block, "text").is_some() {
+                acc.text_string_present += 1;
+            }
+            match str_field(block, "text") {
+                Some(text) if !text.trim().is_empty() => match (role, recap) {
+                    (_, true) => acc.push(
+                        index,
+                        Some(kind.to_owned()),
+                        OwnerRecord::Compaction {
+                            text: text.to_owned(),
+                            recap: true,
+                        },
+                    ),
+                    (BlockRole::User, false) => acc.push(
+                        index,
+                        Some(kind.to_owned()),
+                        OwnerRecord::UserText {
+                            text: text.to_owned(),
+                        },
+                    ),
+                    (BlockRole::Assistant, false) => acc.push(
+                        index,
+                        Some(kind.to_owned()),
+                        OwnerRecord::AssistantText {
+                            text: text.to_owned(),
+                        },
+                    ),
+                },
+                _ => acc.unusable += 1,
+            }
+        }
         Some("thinking") if matches!(role, BlockRole::Assistant) => {
             match str_field(block, "thinking") {
                 Some(text) if !text.trim().is_empty() => acc.push(
                     index,
+                    Some("thinking".to_owned()),
                     OwnerRecord::Thinking {
                         text: text.to_owned(),
                     },
@@ -648,24 +734,37 @@ fn project_content_block(
                 _ => acc.unusable += 1,
             }
         }
-        Some("tool_use") | Some("function_call") | Some("custom_tool_call") => acc.push(
-            index,
-            OwnerRecord::ToolCall {
-                call_id: first_str(block, &TOOL_ID_KEYS).map(str::to_owned),
-                tool_name: tool_name(block, None),
-                status: call_status(block),
-                input_json: nullish_first(block, &TOOL_INPUT_KEYS).cloned(),
-            },
-        ),
-        Some("tool_result") | Some("function_call_output") | Some("custom_tool_call_output") => {
+        Some(kind @ "tool_use")
+        | Some(kind @ "function_call")
+        | Some(kind @ "custom_tool_call") => {
             acc.push(
                 index,
+                Some(kind.to_owned()),
+                OwnerRecord::ToolCall {
+                    call_id: first_str(block, &TOOL_ID_KEYS).map(str::to_owned),
+                    tool_name: tool_name(block, None),
+                    status: call_status(block),
+                    input_json: nullish_first(block, &TOOL_INPUT_KEYS).cloned(),
+                    native_id: owned_str(block, "id"),
+                    native_name: owned_str(block, "name"),
+                    native_input_json: block.get("input").cloned(),
+                },
+            );
+        }
+        Some(kind @ "tool_result")
+        | Some(kind @ "function_call_output")
+        | Some(kind @ "custom_tool_call_output") => {
+            acc.push(
+                index,
+                Some(kind.to_owned()),
                 OwnerRecord::ToolResult {
                     call_id: first_str(block, &TOOL_ID_KEYS).map(str::to_owned),
                     status: result_status(block),
                     content_json: block.get("content").cloned(),
                     input_json: nullish_first(block, &TOOL_INPUT_KEYS).cloned(),
                     raw_result_json: raw_result.cloned(),
+                    native_tool_use_id: owned_str(block, "tool_use_id"),
+                    native_is_error: block.get("is_error").and_then(Value::as_bool),
                 },
             );
         }
@@ -693,7 +792,17 @@ fn user_text_record(
             text: text.to_owned(),
         }
     };
-    rendered(source, family, vec![OwnerBlock { index, record }], 0, 0)
+    rendered(
+        source,
+        family,
+        vec![OwnerBlock {
+            index,
+            native_kind: None,
+            record,
+        }],
+        0,
+        0,
+    )
 }
 
 fn text_record(
@@ -719,7 +828,17 @@ fn text_record(
             text: text.to_owned(),
         },
     };
-    rendered(source, family, vec![OwnerBlock { index, record }], 0, 0)
+    rendered(
+        source,
+        family,
+        vec![OwnerBlock {
+            index,
+            native_kind: None,
+            record,
+        }],
+        0,
+        0,
+    )
 }
 
 fn finish_user(
@@ -731,9 +850,12 @@ fn finish_user(
         let mut outcome = unreadable(source, family, OwnerUnreadableReason::UnusableUser);
         outcome.unknown_block_count = acc.unknown;
         outcome.unusable_block_count = acc.unusable;
+        outcome.present_text_string_blocks = acc.text_string_present;
         outcome
     } else {
-        rendered(source, family, acc.records, acc.unknown, acc.unusable)
+        let mut outcome = rendered(source, family, acc.records, acc.unknown, acc.unusable);
+        outcome.present_text_string_blocks = acc.text_string_present;
+        outcome
     }
 }
 
@@ -755,9 +877,12 @@ fn finish_role(
         let mut outcome = empty_for_role(source, family, role);
         outcome.unknown_block_count = acc.unknown;
         outcome.unusable_block_count = acc.unusable;
+        outcome.present_text_string_blocks = acc.text_string_present;
         outcome
     } else {
-        rendered(source, family, acc.records, acc.unknown, acc.unusable)
+        let mut outcome = rendered(source, family, acc.records, acc.unknown, acc.unusable);
+        outcome.present_text_string_blocks = acc.text_string_present;
+        outcome
     }
 }
 
@@ -780,10 +905,40 @@ fn nested_object<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     value.get(key).filter(|candidate| candidate.is_object())
 }
 
-fn selected_message_body(value: &Value) -> Option<&Value> {
-    match nested_object(value, "message") {
-        Some(message) => content_or_text(message),
-        None => content_or_text(value),
+fn selected_message_body_with_origin(value: &Value) -> (Option<&Value>, Option<OwnerBodyOrigin>) {
+    if let Some(message) = nested_object(value, "message") {
+        if let Some(content) = nullish_field(message, "content") {
+            return (Some(content), Some(OwnerBodyOrigin::NestedContent));
+        }
+        if let Some(text) = nullish_field(message, "text") {
+            return (Some(text), Some(OwnerBodyOrigin::NestedText));
+        }
+        return (None, None);
+    }
+    if let Some(content) = nullish_field(value, "content") {
+        return (Some(content), Some(OwnerBodyOrigin::OuterContent));
+    }
+    if let Some(text) = nullish_field(value, "text") {
+        return (Some(text), Some(OwnerBodyOrigin::OuterText));
+    }
+    (None, None)
+}
+
+fn with_body(
+    mut source: OwnerSource,
+    body: Option<&Value>,
+    origin: Option<OwnerBodyOrigin>,
+) -> OwnerSource {
+    source.body_origin = origin;
+    source.body_kind = body.map(body_kind);
+    source
+}
+
+fn body_kind(value: &Value) -> OwnerBodyKind {
+    match value {
+        Value::String(_) => OwnerBodyKind::String,
+        Value::Array(_) => OwnerBodyKind::Array,
+        _ => OwnerBodyKind::Other,
     }
 }
 
@@ -858,6 +1013,7 @@ fn rendered(
         records,
         unknown_block_count,
         unusable_block_count,
+        present_text_string_blocks: 0,
     }
 }
 
@@ -873,6 +1029,7 @@ fn ignored(
         records: Vec::new(),
         unknown_block_count: 0,
         unusable_block_count: 0,
+        present_text_string_blocks: 0,
     }
 }
 
@@ -888,5 +1045,6 @@ fn unreadable(
         records: Vec::new(),
         unknown_block_count: 0,
         unusable_block_count: 0,
+        present_text_string_blocks: 0,
     }
 }

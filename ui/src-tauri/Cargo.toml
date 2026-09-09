@@ -39,6 +39,8 @@ regex = "1.13"
 # Transporting DPAPI blobs (src/ssh.rs) as text through IPC and the credentials
 # file. Already in the lock file as a transitive dependency.
 base64 = "0.22"
+# Owner structural parser for Claude chat. Pure path crate; no Tokio/Windows.
+termx-swarm-context = { path = "../../swarm-context", default-features = false }
 # Power-broadcast listener (src/power.rs): the message-only window, its pump,
 # and RegisterSuspendResumeNotification. Plus DPAPI (src/ssh.rs). Same version
 # the host crate pins.
