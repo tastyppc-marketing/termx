@@ -1,0 +1,11 @@
+# Bounded MCP response formatting
+
+The pure MCP protocol crate now plans and streams ordinary JSON-RPC object results and MCP tool results. A tool response exposes the same document as structured content and as a JSON text block. It preserves exact request IDs and counts the entire encoded line, including LF, before allowing output. Lines above 32 MiB and literal line breaks are rejected before writing.
+
+The formatter borrows its inputs and uses one 8 KiB chunk, a 1024-byte canonical ID buffer and a 2 KiB metadata allowance. It creates no payload-sized tree, escaped copy or final-line buffer. Short and interrupted writes continue; terminal errors preserve the already-written prefix without automatic replay. Native authorization, domain-schema validation, request ownership and aggregate memory admission remain integration work.
+
+Validation: 76 tests and 3 documentation tests pass. Strict all-target Clippy, formatting check and release build pass. Root reviewed the complete implementation and tests, then independently verified 23 current/frozen inputs, 19 prior command manifests and 38 log hashes, and 2 release artifacts on 2026-09-09 at 07:54:57 UTC. Root also ran a fresh formatting check. Earlier failed attempts are retained and classified by their actual exit codes, including the two misleadingly named `green-bounds-scratch-sink-attempt*` directories that exited 101.
+
+Coverage includes exact 32 MiB output and one byte over, signed-i64 endpoints and IDs above 2^53, maximum string IDs, Unicode and escaping, large synthetic pages, and partial/short/zero writes. Synthetic recipient-heavy fixtures exercise more than 524,288 JSON work nodes. An independent host test uses the actual core OutgoingPage DTO (8,031,440 bytes / 614,671 nodes), explaining the accompanying node-cap correction to 1,048,576; fixed scanner storage is unchanged. The synthetic formatter fixtures do not establish domain-schema compatibility by themselves.
+
+Evidence is retained in the MCP worktree under `retired/test-artifacts/swarm-mcp-output/20260908T2358072205106Z`. Source manifest SHA-256: `0bf89ea8dec1052b85bafef48f0a111daa4320c7a4ed4aa7096234a7139e9ef2`. Release rlib SHA-256: `35bab22b1cc51a206f1f8a75e4249a919fbd6d892d0507ce3b4a5785daa0a90a` (456,990 bytes). This checkpoint does not install the swarm feature or demonstrate real-harness collaboration.

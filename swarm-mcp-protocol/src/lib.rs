@@ -58,6 +58,7 @@
 mod envelope;
 mod id;
 mod json;
+mod output;
 mod session;
 
 pub use envelope::{
@@ -68,6 +69,11 @@ pub use json::{
     validate_json, JsonError, JsonErrorKind, JsonValidationStats, ValidatedJson,
     JSON_VALIDATOR_SCRATCH_BYTES, MAX_JSON_DEPTH, MAX_JSON_INPUT_BYTES, MAX_JSON_KEYS_PER_OBJECT,
     MAX_JSON_KEY_BYTES, MAX_JSON_LIVE_KEYS, MAX_JSON_NODES,
+};
+pub use output::{
+    plan_result, plan_tool_result, OutputPlanError, ResponseLine, MAX_RESPONSE_LINE_BYTES,
+    MAX_RESPONSE_WRAPPER_BYTES, OUTPUT_CHUNK_BYTES, OUTPUT_FIXED_SCRATCH_BYTES, OUTPUT_ID_BYTES,
+    OUTPUT_MAX_FIXED_WIRE_BYTES, OUTPUT_METADATA_ALLOWANCE_BYTES,
 };
 pub use session::{
     AccountingSnapshot, ActiveRequest, AdmitError, CancelDisposition, Disposition,
