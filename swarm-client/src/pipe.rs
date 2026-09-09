@@ -57,6 +57,8 @@ use windows_sys::Win32::{
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DEFAULT_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Hello responses contain fixed fields and bounded identifiers only.
+pub const MAX_HANDSHAKE_FRAME_BYTES: usize = 16 * 1024;
 
 // CreateFile named-pipe SQOS flags: require the SQOS bits and cap impersonation
 // at identification when transferring the verified handle into Tokio.
@@ -643,12 +645,29 @@ impl VerifiedPipe {
         expected: ProcessIdentity,
         options: TransportOptions,
     ) -> Result<Self, WireError> {
+        Self::connect_with_options_and_budget(
+            name,
+            expected,
+            options,
+            FrameBudget::new(MAX_FRAME_BYTES * 2),
+        )
+        .await
+    }
+
+    /// Connect with caller-owned aggregate frame and connection admission.
+    /// The supplied budget remains shared through every received frame's drop.
+    pub async fn connect_with_options_and_budget(
+        name: &str,
+        expected: ProcessIdentity,
+        options: TransportOptions,
+        budget: FrameBudget,
+    ) -> Result<Self, WireError> {
         if options.connect_timeout.is_zero() || options.connect_retry_interval.is_zero() {
             return Err(WireError::InvalidFrame);
         }
         let deadline = Instant::now() + options.connect_timeout;
         loop {
-            match Self::try_connect(name, expected) {
+            match Self::try_connect(name, expected, &budget) {
                 Err(WireError::PipeBusy) => {
                     let now = Instant::now();
                     if now >= deadline {
@@ -661,7 +680,11 @@ impl VerifiedPipe {
         }
     }
 
-    fn try_connect(name: &str, expected: ProcessIdentity) -> Result<Self, WireError> {
+    fn try_connect(
+        name: &str,
+        expected: ProcessIdentity,
+        budget: &FrameBudget,
+    ) -> Result<Self, WireError> {
         unsafe {
             let handle = CreateFileW(
                 wide(OsStr::new(name)).as_ptr(),
@@ -711,11 +734,10 @@ impl VerifiedPipe {
                     return Err(WireError::Io);
                 }
             };
-            let budget = FrameBudget::new(MAX_FRAME_BYTES * 2);
             let connection = budget.reserve_connection()?;
             Ok(Self::from_stream(
                 PipeStream::Client(client),
-                budget,
+                budget.clone(),
                 server,
                 None,
                 connection,
@@ -776,6 +798,21 @@ impl VerifiedPipe {
     /// `Capacity` and `FrameTooLarge` occur after the prefix has been consumed,
     /// so they poison this connection. They do not imply application rollback.
     pub async fn recv_bytes(&self) -> Result<ReceivedFrame, WireError> {
+        self.recv_bytes_with_limit(MAX_FRAME_BYTES).await
+    }
+
+    /// Reject a declared body above `max_body_bytes` before reserving frame
+    /// credit or allocating its body. The valid range is 1..=MAX_FRAME_BYTES.
+    /// Invalid caller limits consume no input and leave the pipe usable.
+    /// An oversized received prefix poisons the connection: the caller must
+    /// not reinterpret remaining bytes or infer rollback of a submitted request.
+    pub async fn recv_bytes_with_limit(
+        &self,
+        max_body_bytes: usize,
+    ) -> Result<ReceivedFrame, WireError> {
+        if max_body_bytes == 0 || max_body_bytes > MAX_FRAME_BYTES {
+            return Err(WireError::InvalidFrame);
+        }
         if self.state.is_poisoned() {
             return Err(WireError::ConnectionPoisoned);
         }
@@ -783,7 +820,13 @@ impl VerifiedPipe {
         if self.state.is_poisoned() {
             return Err(WireError::ConnectionPoisoned);
         }
-        read_frame(&mut *reader, &self.budget, self.state.clone()).await
+        read_frame_with_limit(
+            &mut *reader,
+            &self.budget,
+            self.state.clone(),
+            max_body_bytes,
+        )
+        .await
     }
 
     pub async fn recv_request(&self) -> Result<RequestEnvelope, WireError> {
@@ -932,10 +975,20 @@ async fn write_frame<W: AsyncWrite + Unpin>(
     result
 }
 
+#[cfg(test)]
 async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
     budget: &FrameBudget,
     state: Arc<ConnectionState>,
+) -> Result<ReceivedFrame, WireError> {
+    read_frame_with_limit(reader, budget, state, MAX_FRAME_BYTES).await
+}
+
+async fn read_frame_with_limit<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    budget: &FrameBudget,
+    state: Arc<ConnectionState>,
+    max_body_bytes: usize,
 ) -> Result<ReceivedFrame, WireError> {
     if state.is_poisoned() {
         return Err(WireError::ConnectionPoisoned);
@@ -946,7 +999,7 @@ async fn read_frame<R: AsyncRead + Unpin>(
         let mut prefix = [0; 4];
         reader.read_exact(&mut prefix).await.map_err(map_io)?;
         let length = u32::from_le_bytes(prefix) as usize;
-        if length > MAX_FRAME_BYTES {
+        if length > max_body_bytes {
             return Err(WireError::FrameTooLarge);
         }
         let permit = budget.reserve(length + 4)?;
@@ -988,7 +1041,10 @@ async fn hello(pipe: &VerifiedPipe, discovery: &DiscoveryRecord) -> Result<(), W
         crate::Hello::new(discovery.boot_id.clone()),
     ))
     .await?;
-    let response = pipe.recv_response().await?;
+    let bytes = pipe
+        .recv_bytes_with_limit(MAX_HANDSHAKE_FRAME_BYTES)
+        .await?;
+    let response: ResponseEnvelope = decode_body(bytes.as_ref())?;
     if response.correlation_id() != discovery.boot_id || !response.accepted() {
         pipe.state.poison();
         return Err(WireError::AuthenticationRejected);
@@ -1030,9 +1086,21 @@ pub(crate) async fn connect_peer(
     discovery: &DiscoveryRecord,
     options: TransportOptions,
 ) -> Result<VerifiedPipe, WireError> {
-    let pipe =
-        VerifiedPipe::connect_with_options(&discovery.peer_pipe_name, discovery.server, options)
-            .await?;
+    connect_peer_with_budget(discovery, options, FrameBudget::new(MAX_FRAME_BYTES * 2)).await
+}
+
+pub(crate) async fn connect_peer_with_budget(
+    discovery: &DiscoveryRecord,
+    options: TransportOptions,
+    budget: FrameBudget,
+) -> Result<VerifiedPipe, WireError> {
+    let pipe = VerifiedPipe::connect_with_options_and_budget(
+        &discovery.peer_pipe_name,
+        discovery.server,
+        options,
+        budget,
+    )
+    .await?;
     run_handshake_deadline(&pipe, options.handshake_timeout, hello(&pipe, discovery)).await?;
     Ok(pipe)
 }
