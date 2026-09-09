@@ -10,6 +10,7 @@
 pub mod events;
 pub mod lifetime;
 pub mod output;
+pub mod response;
 pub mod rpc;
 pub mod runtime;
 pub mod tools;
