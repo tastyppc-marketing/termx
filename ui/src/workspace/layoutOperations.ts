@@ -193,6 +193,24 @@ export function firstSessionId(node: SplitNode): number {
   return node.kind === "pane" ? node.sessionId : firstSessionId(node.children[0]);
 }
 
+function paneInSplit(
+  node: SplitNode,
+  sessionId: number,
+): Extract<SplitNode, { kind: "pane" }> | undefined {
+  if (node.kind === "pane") {
+    return node.sessionId === sessionId ? node : undefined;
+  }
+  return paneInSplit(node.children[0], sessionId) ??
+    paneInSplit(node.children[1], sessionId);
+}
+
+export function paneTitleInSplit(
+  node: SplitNode,
+  sessionId: number,
+): string | undefined {
+  return paneInSplit(node, sessionId)?.title;
+}
+
 /// Child-index path from `node` to the pane holding `sessionId`, or null when
 /// the pane is not in this tree.
 export function pathToPaneNode(
@@ -403,7 +421,8 @@ export function extractSessionToTab(
   if (!tab || newTabId.length === 0 || newTabId in layout.tabs) {
     return null;
   }
-  if (pathToPaneNode(tab.split, sessionId) === null) {
+  const pane = paneInSplit(tab.split, sessionId);
+  if (pane === undefined) {
     return null;
   }
   const remaining = pruneNode(tab.split, new Set([sessionId]));
@@ -421,7 +440,7 @@ export function extractSessionToTab(
     title: null,
     color: nextTabColor(layout),
     fill: tab.fill,
-    split: { kind: "pane", sessionId },
+    split: pane,
   };
   return admitOrNull(withContainerItems(
     {

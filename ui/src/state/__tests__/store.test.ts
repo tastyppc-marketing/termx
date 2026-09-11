@@ -129,6 +129,60 @@ describe("renameTab", () => {
   });
 });
 
+describe("renamePane", () => {
+  it("trims a title and applies it to the matching nested pane", () => {
+    const s = store();
+    s.splitPane("t1", 1, "row", 10);
+    const before = s.getState();
+    const next = s.renamePane(10, "  logs  ");
+
+    expect(next).not.toBe(before);
+    expect(next.tabs.t1).not.toBe(before.tabs.t1);
+    expect(next.tabs.t2).toBe(before.tabs.t2);
+    expect(rootSplit(next, "t1")).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 1 },
+        { kind: "pane", sessionId: 10, title: "logs" },
+      ],
+    });
+  });
+
+  it("clears a pane title with null or a blank string", () => {
+    const s = store();
+    s.renamePane(1, "editor");
+    expect(s.renamePane(1, null).tabs.t1.split).toEqual({ kind: "pane", sessionId: 1 });
+    s.renamePane(1, "editor");
+    expect(s.renamePane(1, "   ").tabs.t1.split).toEqual({ kind: "pane", sessionId: 1 });
+  });
+
+  it("refuses an over-long title, missing session, and unchanged title", () => {
+    const s = store();
+    const initial = s.getState();
+    expect(s.renamePane(1, "x".repeat(65))).toBe(initial);
+    expect(s.renamePane(99, "logs")).toBe(initial);
+    s.renamePane(1, "logs");
+    expect(s.renamePane(1, " logs ")).toBe(s.getState());
+  });
+
+  it("keeps a pane title when splitting that pane", () => {
+    const s = store();
+    s.renamePane(1, "editor");
+    const next = s.splitPane("t1", 1, "row", 10);
+    expect(rootSplit(next, "t1")).toEqual({
+      kind: "split",
+      dir: "row",
+      sizes: [0.5, 0.5],
+      children: [
+        { kind: "pane", sessionId: 1, title: "editor" },
+        { kind: "pane", sessionId: 10 },
+      ],
+    });
+  });
+});
+
 describe("recolorTab / setActiveTab", () => {
   it("applies palette colors only", () => {
     const s = store();

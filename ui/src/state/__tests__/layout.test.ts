@@ -116,10 +116,18 @@ describe("parseLayout / serializeLayout", () => {
     const layout = baseLayout();
     layout.tabs.t1 = tab(
       "t1",
-      split("col", pane(1), split("row", pane(10), pane(11), [0.3, 0.7])),
+      split(
+        "col",
+        { kind: "pane", sessionId: 1, title: "editor" },
+        split("row", pane(10), pane(11), [0.3, 0.7]),
+      ),
       { title: "work" },
     );
     expect(parseLayout(serializeLayout(layout))).toEqual(layout);
+  });
+
+  it("accepts old pane leaves without a title", () => {
+    expect(parseLayout(serializeLayout(baseLayout()))).toEqual(baseLayout());
   });
 
   it("returns a copy detached from the input", () => {
@@ -183,6 +191,19 @@ describe("parseLayout / serializeLayout", () => {
       expect(parseLayout(layout)).toBeNull();
     }
   });
+
+  it.each(["", " ", "x".repeat(65), 42])(
+    "rejects invalid pane title %j",
+    (title) => {
+      const layout = serializeLayout(baseLayout()) as Record<string, unknown>;
+      const tabs = layout.tabs as Record<string, Record<string, unknown>>;
+      tabs.t1 = {
+        ...tabs.t1,
+        split: { kind: "pane", sessionId: 1, title },
+      };
+      expect(parseLayout(layout)).toBeNull();
+    },
+  );
 
   it("rejects invariant violations, not just bad shapes", () => {
     const twoContainers = serializeLayout(baseLayout()) as Record<string, unknown>;

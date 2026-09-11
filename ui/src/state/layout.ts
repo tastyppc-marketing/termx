@@ -1,7 +1,8 @@
 import type { JsonValue } from "../host/protocol";
 
 /// Shapes mirror docs/superpowers/specs/2026-08-09-termx-layout-v2.md plus the
-/// multi-window extension in docs/superpowers/specs/2026-08-26-multi-window-design.md.
+/// multi-window extension in docs/superpowers/specs/2026-08-26-multi-window-design.md
+/// and the pane-title extension in docs/pane-names.md.
 /// Nothing outside those documents may be added to the serialized blob. The v1
 /// and v2 shapes below survive as parse-only stepping stones: an old blob is
 /// shape-parsed, migrated, and then validated as v3 — nothing writes them again.
@@ -49,7 +50,7 @@ const SIZE_SUM_EPSILON = 1e-6;
 export type SplitDir = "row" | "col";
 
 export type SplitNode =
-  | { kind: "pane"; sessionId: number }
+  | { kind: "pane"; sessionId: number; title?: string }
   | {
     kind: "split";
     dir: SplitDir;
@@ -416,6 +417,14 @@ function validateSplit(
       problems.push(`tab ${tabId}: pane session id ${node.sessionId} is not a u32`);
       return;
     }
+    if (
+      node.title !== undefined &&
+      (!isValidName(node.title) || node.title.trim().length === 0)
+    ) {
+      problems.push(
+        `tab ${tabId}: pane title must be absent or 1..${MAX_NAME_LENGTH} non-whitespace chars`,
+      );
+    }
     if (seenSessions.has(node.sessionId)) {
       problems.push(`session ${node.sessionId} appears in more than one pane`);
     }
@@ -574,10 +583,16 @@ function parseSplit(value: unknown, depth: number): SplitNode | null {
     return null;
   }
   if (value.kind === "pane") {
-    if (!isValidSessionId(value.sessionId)) {
+    if (
+      !isValidSessionId(value.sessionId) ||
+      (value.title !== undefined &&
+        (!isValidName(value.title) || value.title.trim().length === 0))
+    ) {
       return null;
     }
-    return { kind: "pane", sessionId: value.sessionId };
+    return value.title === undefined
+      ? { kind: "pane", sessionId: value.sessionId }
+      : { kind: "pane", sessionId: value.sessionId, title: value.title };
   }
   if (value.kind === "split") {
     if (value.dir !== "row" && value.dir !== "col") {

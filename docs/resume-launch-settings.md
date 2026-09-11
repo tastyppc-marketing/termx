@@ -6,6 +6,20 @@ overrides, permission options, extra directories, tools, settings and plugin
 arguments. Repeated options retain their order. The initial user prompt and old
 conversation selector are not sent again.
 
+Resume also preserves newer standalone switches and `--option=value` settings
+without requiring a TermX update for every new flag. For Codex, options originally
+before `resume` remain before it; options after it remain after it. A fresh
+launch's options are kept before the added `resume <conversation-id>` selector.
+Attached short values such as `-mMODEL` and `-cKEY=VALUE` retain their exact spelling.
+
+An unknown separated option such as `--future-setting value` is ambiguous: its
+last word could be a setting value or the initial prompt. TermX refuses that
+ambiguity instead of dropping settings or sending the prompt again. Use
+`--future-setting=value`, or put a one-off prompt after an explicit
+`-- "one-off prompt"` boundary. Unknown value groups that could contain a Codex
+subcommand are also refused; inline values avoid that ambiguity. TermX forwards
+the saved flags; the installed harness still determines whether it supports them.
+
 New sessions use the native `termx-host` launcher. With shell integration on,
 new PowerShell panes wrap `claude` and `codex`, and new cmd panes provide matching
 macros. Existing aliases/functions/macros retain precedence. Explicit executable
@@ -13,10 +27,11 @@ paths, custom wrappers and shells started before the updated host can bypass
 capture. The native helper launches a fixed provider with an argument array;
 saved values are never evaluated as shell code.
 
-After updating the binaries, reopen the UI for its new controls. Capture also
-requires restarting the background host: after finishing active work, close
-TermX with **Stop everything**, then reopen it and create new shell panes.
-Closing with **Keep running** deliberately retains the old host and shells.
+After updating the UI binary, reopen the UI for its changes. Capture support
+requires an updated background host and new shell panes. If the host predates
+capture support, finish active work, close TermX with **Stop everything**, then
+reopen it and create new shell panes. Closing with **Keep running** retains the
+existing host and shells; a UI-only update does not require stopping them.
 
 ## Install the capture hooks
 
@@ -54,13 +69,15 @@ provider process so relative paths and `--cd` retain their meaning.
 
 Conversation-list resume, dead-pane resume, saved fresh restore and saved idle
 restore use the same configuration handling. Reattaching to a busy/live agent
-does not send a command. Unknown options or corrupt captured configuration
+does not send a command. Ambiguous arguments or corrupt captured configuration
 produce a refusal rather than silently launching with a subset of the settings.
 
 Older conversations whose arguments were never captured retain the previous
 resume behavior. Their full launch arguments cannot be reconstructed from a
 transcript. Referenced settings files and inherited environment variables are
-not frozen; their current contents still apply. SSH saves are separate from
+not frozen; their current contents still apply. The baseline is the first verified
+captured invocation: if capture first ran during a bare resume, it cannot recover
+options from an earlier unrecorded launch. SSH saves are separate from
 local identities; this change does not add remote launch capture.
 
 Provider interfaces checked against installed Codex 0.153.3 and Claude Code

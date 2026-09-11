@@ -7,7 +7,7 @@ const launch = (provider: "claude" | "codex", args: string[]) => ({ v: 1 as cons
 describe("launch configuration", () => {
   it("preserves Codex configuration ordering and repeats, replacing only selection and prompt", () => {
     expect(resumeArguments(launch("codex", ["-c", 'model_reasoning_effort="high"', "--model", "gpt-test", "resume", "old-id", "--last", "-c", 'features.foo=true', "--add-dir", "../shared", "--dangerously-bypass-approvals-and-sandbox", "initial prompt"]), "new-id")).toEqual([
-      "resume", "new-id", "-c", 'model_reasoning_effort="high"', "--model", "gpt-test", "-c", 'features.foo=true', "--add-dir", "../shared", "--dangerously-bypass-approvals-and-sandbox",
+      "-c", 'model_reasoning_effort="high"', "--model", "gpt-test", "resume", "new-id", "-c", 'features.foo=true', "--add-dir", "../shared", "--dangerously-bypass-approvals-and-sandbox",
     ]);
   });
 
@@ -17,11 +17,58 @@ describe("launch configuration", () => {
     ]);
   });
 
-  it("refuses ambiguous unknown flags and noninteractive modes instead of dropping settings", () => {
+  it("preserves new switches and inline settings without replaying an initial prompt", () => {
+    expect(resumeArguments(launch("codex", ["--flex", "--future-config=some value", "--dangerously-bypass-approvals-and-sandbox", "one-off prompt"]), "new-id"))
+      .toEqual(["--flex", "--future-config=some value", "--dangerously-bypass-approvals-and-sandbox", "resume", "new-id"]);
+    expect(resumeArguments(launch("claude", ["--future-config=some value", "--dangerously-skip-permissions", "one-off prompt", "--new-switch"]), "new-id"))
+      .toEqual(["--resume", "new-id", "--future-config=some value", "--dangerously-skip-permissions", "--new-switch"]);
+  });
+
+  it("keeps opaque option values before an explicit prompt boundary", () => {
+    expect(resumeArguments(launch("codex", ["--future-config", "some value", "--future-list", "first", "second", "--flex", "--", "one-off prompt"]), "new-id"))
+      .toEqual(["--future-config", "some value", "--future-list", "first", "second", "--flex", "resume", "new-id"]);
+  });
+
+  it("preserves Codex option placement around its resume subcommand", () => {
+    expect(resumeArguments(launch("codex", ["--future-root=enabled", "resume", "old-id", "--flex", "--model", "custom-model", "one-off prompt"]), "new-id"))
+      .toEqual(["--future-root=enabled", "resume", "new-id", "--flex", "--model", "custom-model"]);
+    expect(resumeArguments(launch("codex", ["-cmodel_reasoning_effort=high", "-mcustom-model", "one-off prompt"]), "new-id"))
+      .toEqual(["-cmodel_reasoning_effort=high", "-mcustom-model", "resume", "new-id"]);
+  });
+
+  it("removes attached old conversation selectors and one-off image attachments", () => {
+    expect(resumeArguments(launch("claude", ["-rold-id", "--dangerously-skip-permissions"]), "new-id"))
+      .toEqual(["--resume", "new-id", "--dangerously-skip-permissions"]);
+    expect(resumeArguments(launch("codex", ["-iinitial.png", "--flex"]), "new-id"))
+      .toEqual(["--flex", "resume", "new-id"]);
+  });
+
+  it("does not treat a terminal separator as proof that an unknown value was not the prompt", () => {
+    expect(resumeArguments(launch("codex", ["--future-switch", "one-off prompt", "--"]), "new-id")).toBeNull();
+  });
+
+  it("removes inline selection switches so they cannot conflict with the requested conversation", () => {
+    expect(resumeArguments(launch("claude", ["--continue=true", "-c=true", "--fork-session=true", "--model", "custom"]), "new-id"))
+      .toEqual(["--resume", "new-id", "--model", "custom"]);
+    expect(resumeArguments(launch("codex", ["resume", "old-id", "--last=true", "--all=true", "--include-non-interactive=true", "--flex"]), "new-id"))
+      .toEqual(["resume", "new-id", "--flex"]);
+  });
+
+  it("refuses an ambiguous Codex selector inside opaque values instead of duplicating resume", () => {
+    for (const args of [
+      ["--flex", "resume", "old-id", "--", "one-off prompt"],
+      ["--future-root", "value", "resume", "old-id", "--", "one-off prompt"],
+      ["--future-root", "value", "exec", "--", "one-off prompt"],
+    ]) expect(resumeArguments(launch("codex", args), "new-id")).toBeNull();
+  });
+
+  it("refuses ambiguous unknown values and noninteractive modes instead of dropping settings or replaying prompts", () => {
     for (const args of [["--new-unknown", "value"], ["exec", "prompt"], ["--model"]]) {
       expect(resumeArguments(launch("codex", args), "id")).toBeNull();
     }
     expect(resumeArguments(launch("claude", ["--print", "prompt"]), "id")).toBeNull();
+    expect(resumeArguments(launch("claude", ["--print"]), "id")).toBeNull();
+    expect(resumeArguments(launch("codex", ["--unknown-boolean", "one-off prompt"]), "id")).toBeNull();
   });
 
   it("requires bounded typed configuration with a matching provider", () => {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { emptyLayout, serializeLayout, type Layout } from "../../state/layout";
+import { paneTitleInSplit } from "../layoutOperations";
 import { createLayoutStore } from "../../state/store";
 import { LayoutPersistence } from "../LayoutPersistence";
 import { auxiliaryLayoutSync, mainLayoutSync, mergeLayout, LAYOUT_RECEIPT_TIMEOUT_MS } from "../layoutSync";
@@ -80,6 +81,23 @@ function replicas() {
 }
 
 describe("layout replica receipts", () => {
+  it("persists pane names from an auxiliary window alongside another tab's rename", async () => {
+    const { mainStore, auxStore, main, persistence, aux, save, notice } = replicas();
+    auxStore.renamePane(2, "Tests");
+    mainStore.renamePane(1, "Build");
+    await main.broadcast();
+    persistence.record(auxStore.getState(), "structural");
+    await persistence.flush();
+    for (const store of [mainStore, auxStore]) {
+      expect(paneTitleInSplit(store.getState().tabs.a!.split, 1)).toBe("Build");
+      expect(paneTitleInSplit(store.getState().tabs.b!.split, 2)).toBe("Tests");
+    }
+    expect(save).toHaveBeenCalledWith(mainStore.getState());
+    expect(notice).not.toHaveBeenCalled();
+    persistence.dispose();
+    aux.dispose();
+  });
+
   it("completes on a matching receipt even if the transport delivery promise hangs", async () => {
     const bus = loopbackBus();
     const store = createLayoutStore(layout());

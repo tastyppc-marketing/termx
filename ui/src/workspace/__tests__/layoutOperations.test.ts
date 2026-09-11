@@ -13,6 +13,7 @@ import {
   flattenTabIds,
   mergeTabIntoTab,
   nextTabColor,
+  paneTitleInSplit,
   pathToPaneNode,
   pruneSessionIds,
   removeGroupAndTabs,
@@ -280,6 +281,19 @@ describe("replaceSessionInTab (dead-pane relaunch)", () => {
   it("refuses a swap onto a session id already living in another pane", () => {
     expect(replaceSessionInTab(layout(), "t2", 3, 5)).toBeNull();
   });
+
+  it("keeps the pane title when replacing its session", () => {
+    const state = layout();
+    const nested = state.tabs.t2!.split;
+    if (nested.kind !== "split" || nested.children[1].kind !== "split") {
+      throw new Error("fixture must contain the expected nested split");
+    }
+    nested.children[1].children[0] = { kind: "pane", sessionId: 3, title: "server" };
+
+    const replaced = replaceSessionInTab(state, "t2", 3, 99)!;
+    expect(paneTitleInSplit(replaced.tabs.t2!.split, 99)).toBe("server");
+    expect(paneTitleInSplit(replaced.tabs.t2!.split, 3)).toBeUndefined();
+  });
 });
 
 describe("combine tabs side-by-side (spec §16)", () => {
@@ -344,11 +358,16 @@ describe("combine tabs side-by-side (spec §16)", () => {
 
   it("extracts a merged pane back into its own tab, restoring the shape", () => {
     const state = layout();
+    state.tabs.t3!.split = { kind: "pane", sessionId: 5, title: "database" };
     const merged = mergeTabIntoTab(state, "t3", "t1")!;
     const restored = extractSessionToTab(merged, "t1", 5, "t4")!;
 
     expect(restored.tabs.t1?.split).toEqual(state.tabs.t1!.split);
-    expect(restored.tabs.t4?.split).toEqual({ kind: "pane", sessionId: 5 });
+    expect(restored.tabs.t4?.split).toEqual({
+      kind: "pane",
+      sessionId: 5,
+      title: "database",
+    });
     expect(restored.tabs.t4?.title).toBeNull();
     expect(itemIds(restored, null)).toEqual(["t1", "t4", "g1", "g2", "g3"]);
     expect(validateInvariants(restored)).toEqual([]);

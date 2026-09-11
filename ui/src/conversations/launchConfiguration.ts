@@ -22,8 +22,9 @@ export function parseLaunchConfiguration(value: unknown, provider: string): Laun
 }
 
 const words = (value: string) => new Set(value.split(" "));
-// Explicit arities keep an unknown option's value from being mistaken for the
-// startup prompt. New provider options are refused until their arity is known.
+// Known arities identify positional prompts. They are not an allowlist:
+// self-contained future options pass through unchanged. Unknown separated
+// values need an explicit prompt boundary so no configuration is guessed away.
 const CODEX_VALUES = words("-c --config -m --model -p --profile -s --sandbox -a --ask-for-approval --enable --disable --local-provider --add-dir -C --cd --remote --remote-auth-token-env");
 const CODEX_SWITCHES = words("--oss --full-auto --approve-for-me --strict-config --yolo --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --search --no-alt-screen");
 const CLAUDE_VALUES = words("--model --fallback-model --effort --permission-mode --agent --agents --settings --setting-sources --system-prompt --system-prompt-file --append-system-prompt --append-system-prompt-file --system-prompt-snapshot --max-budget-usd --max-turns --session-name --name -n --teammate-mode --autocompact --debug-file --plugin-dir --plugin-url --remote-control-session-name-prefix --json-schema");
@@ -31,6 +32,7 @@ const CLAUDE_LISTS = words("--add-dir --allowedTools --allowed-tools --disallowe
 const CLAUDE_SWITCHES = words("--dangerously-skip-permissions --allow-dangerously-skip-permissions --strict-mcp-config --chrome --no-chrome --ide --disable-slash-commands --verbose --ax-screen-reader --bare --brief --restricted --safe-mode --exclude-dynamic-system-prompt-sections");
 const CLAUDE_OPTIONAL_VALUES = words("--debug -d --prompt-suggestions --remote-control");
 const NON_INTERACTIVE_COMMANDS = words("exec e review login logout mcp mcp-server app-server app completion debug apply fork cloud features update upgrade install doctor auth setup-token agents attach auto-mode gateway import logs plugin plugins project respawn rm stop kill ultrareview remote-control sandbox queue archive delete migrate-rollouts unarchive exec-server help");
+const DISPLAY_ONLY_OPTIONS = words("--help -h --version -V -v");
 
 /** Replace selection operands and omit the initial user prompt, preserving
  * repeated/ordered configuration flags and their exact string values. */
@@ -39,7 +41,10 @@ export function resumeArguments(launch: LaunchConfiguration, id: string): string
   const codex = launch.provider === "codex";
   const values = codex ? CODEX_VALUES : CLAUDE_VALUES;
   const switches = codex ? CODEX_SWITCHES : CLAUDE_SWITCHES;
-  const result = codex ? ["resume", id] : ["--resume", id];
+  const result = codex ? [] : ["--resume", id];
+  // A trailing `-- PROMPT` leaves no positional prompt to infer among the
+  // preceding option values. A terminal `--` alone does not establish this.
+  const explicitPromptTail = launch.args.length >= 2 && launch.args.at(-2) === "--";
   let selection = false;
   let selectionOperand = false;
   let promptSeen = false;
@@ -49,17 +54,20 @@ export function resumeArguments(launch: LaunchConfiguration, id: string): string
     const equal = arg.indexOf("=");
     const name = equal > 0 ? arg.slice(0, equal) : arg;
     const inline = equal > 0;
+    if (DISPLAY_ONLY_OPTIONS.has(name) || (!codex && (name === "--print" || name === "-p"))) return null;
     if (codex && arg === "resume" && !selection && !promptSeen) {
       selection = true;
       selectionOperand = true;
+      result.push("resume", id);
       continue;
     }
-    if (codex && (name === "--last" || name === "--all" || name === "--include-non-interactive") && !inline) continue;
+    if (codex && (name === "--last" || name === "--all" || name === "--include-non-interactive")) continue;
     if (!codex && (name === "--resume" || name === "-r" || name === "--from-pr")) {
       if (!inline && launch.args[i + 1] !== undefined && !launch.args[i + 1]!.startsWith("-")) i++;
       continue;
     }
-    if (!codex && (name === "--continue" || name === "-c" || name === "--fork-session") && !inline) continue;
+    if (!codex && (name === "--continue" || name === "-c" || name === "--fork-session")) continue;
+    if (!codex && arg.startsWith("-r") && !arg.startsWith("--") && arg.length > 2) continue;
     if (!codex && name === "--session-id") {
       if (!inline && ++i >= launch.args.length) return null;
       continue;
@@ -72,7 +80,12 @@ export function resumeArguments(launch: LaunchConfiguration, id: string): string
       }
       continue;
     }
-    if (values.has(name)) {
+    if (codex && arg.startsWith("-i") && !arg.startsWith("--") && arg.length > 2) continue;
+    const shortName = arg.slice(0, 2);
+    const attachedValue = /^-[A-Za-z].+/.test(arg) && values.has(shortName);
+    if (attachedValue) {
+      result.push(arg);
+    } else if (values.has(name)) {
       result.push(arg);
       if (!inline) {
         if (++i >= launch.args.length) return null;
@@ -91,7 +104,19 @@ export function resumeArguments(launch: LaunchConfiguration, id: string): string
     } else if (switches.has(name) && !inline) {
       result.push(arg);
     } else if (arg.startsWith("-")) {
-      return null;
+      if (!/^--?[A-Za-z][A-Za-z0-9_-]*(?:=.*)?$/s.test(arg)) return null;
+      result.push(arg);
+      if (!inline && launch.args[i + 1] !== undefined && !launch.args[i + 1]!.startsWith("-")) {
+        // `--future value` could also be a boolean followed by the one-off
+        // prompt. Never silently discard the value or replay that prompt.
+        // With an explicit prompt tail, retain the opaque value group exactly.
+        if (!explicitPromptTail || selectionOperand) return null;
+        while (launch.args[i + 1] !== undefined && !launch.args[i + 1]!.startsWith("-")) {
+          const value = launch.args[++i]!;
+          if (codex && !selection && (value === "resume" || NON_INTERACTIVE_COMMANDS.has(value))) return null;
+          result.push(value);
+        }
+      }
     } else {
       if (selectionOperand) { selectionOperand = false; continue; }
       // Non-interactive subcommands must not be converted into interactive
@@ -100,6 +125,7 @@ export function resumeArguments(launch: LaunchConfiguration, id: string): string
       promptSeen = true;
     }
   }
+  if (codex && !selection) result.push("resume", id);
   return result;
 }
 

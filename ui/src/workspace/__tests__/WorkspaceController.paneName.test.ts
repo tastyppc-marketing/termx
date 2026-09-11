@@ -5,9 +5,8 @@
  * - which is right until two panes are the same profile in the same repo. Then
  * only the user can say which is which, so they can.
  *
- * RUNTIME ONLY, deliberately: a name is keyed by session id, and session ids
- * do not survive a restart. Written to the layout file it would come back
- * attached to whatever session inherited the id, or to no pane at all.
+ * Explicit names belong to layout panes. Saving and restoring the workspace
+ * must retain them, including when an ended terminal is restarted in place.
  *
  * ONE rule, in one place. The pane header, the rail row and the rail's hover
  * preview all read `paneTitles`, so a name typed into a pane header has to
@@ -15,14 +14,15 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { SessionAttachment, SessionAttachmentCallbacks } from "../../host/client";
-import type { SessionInfo } from "../../host/protocol";
+import type { JsonValue, SessionInfo } from "../../host/protocol";
 import { createLayoutStore } from "../../state/store";
-import type { Layout } from "../../state/layout";
+import { parseLayout, type Layout } from "../../state/layout";
+import { reconcile } from "../../state/reconcile";
+import { LayoutPersistence } from "../LayoutPersistence";
 import {
   WorkspaceController,
   type WorkspaceAttachmentHub,
   type WorkspaceHostClient,
-  type WorkspacePersistence,
 } from "../WorkspaceController";
 
 function session(id: number, cwd: string | null = "C:\\work\\project"): SessionInfo {
@@ -62,7 +62,7 @@ function layout(tabTitle: string | null = null): Layout {
   };
 }
 
-function harness(options: { tabTitle?: string | null } = {}) {
+function harness(options: { tabTitle?: string | null; initialLayout?: Layout; sessions?: SessionInfo[] } = {}) {
   let onClosed: ((event: { sessionId: number }) => void) | null = null;
   const client: WorkspaceHostClient = {
     createSession: vi.fn(async () => session(50)),
@@ -74,13 +74,10 @@ function harness(options: { tabTitle?: string | null } = {}) {
     },
     onError: () => () => undefined,
   };
-  const persistence: WorkspacePersistence = {
-    getSnapshot: () => ({ saving: false, error: null }),
-    subscribe: () => () => undefined,
-    record: () => undefined,
-    flush: async () => undefined,
-    dispose: vi.fn(),
-  };
+  const saved: JsonValue[] = [];
+  const persistence = new LayoutPersistence({
+    setLayout: vi.fn(async (value) => { saved.push(structuredClone(value)); }),
+  });
   const attachments: WorkspaceAttachmentHub = {
     sendInput: vi.fn(() => true),
     getSnapshot: () => ({ sessions: {} }),
@@ -100,15 +97,18 @@ function harness(options: { tabTitle?: string | null } = {}) {
     onError: () => () => undefined,
     close: vi.fn(),
   };
+  const store = createLayoutStore(options.initialLayout ?? layout(options.tabTitle ?? null));
   const controller = new WorkspaceController({
     client,
-    store: createLayoutStore(layout(options.tabTitle ?? null)),
+    store,
     persistence,
     attachments,
-    sessions: [session(1), session(2), session(3, "C:\\work\\project")],
+    sessions: options.sessions ?? [session(1), session(2), session(3, "C:\\work\\project")],
   });
   return {
     controller,
+    saved,
+    store,
     closeSession: (sessionId: number) => onClosed?.({ sessionId }),
   };
 }
@@ -213,14 +213,68 @@ describe("renamePane", () => {
     expect(seen).not.toHaveBeenCalled();
   });
 
-  it("forgets the name when the host forgets the session", () => {
-    // Ids are never reused, so this is hygiene rather than safety - but a map
-    // that only ever grows is a leak in a window left open for days.
+  it("keeps the name on an ended pane until the pane is dismissed", () => {
     const h = harness();
     h.controller.renamePane(1, "Build");
 
     h.closeSession(1);
 
-    expect(h.controller.paneTitles("tab-1")[1]).toBe("Terminal ended");
+    expect(h.controller.paneTitles("tab-1")[1]).toBe("Build");
+  });
+
+  it("saves distinct split-pane names and restores them with the workspace", async () => {
+    const h = harness({ tabTitle: "Work" });
+    h.controller.renamePane(1, "Plan");
+    h.controller.renamePane(2, "Server");
+    h.controller.renamePane(3, "Tests");
+    await h.controller.flush();
+
+    expect(h.saved.length).toBeGreaterThan(0);
+    const restored = parseLayout(JSON.parse(JSON.stringify(h.saved.at(-1))));
+    expect(restored).not.toBeNull();
+    h.controller.dispose();
+    const reopened = harness({ initialLayout: restored! });
+    expect(reopened.controller.paneTitles("tab-2")).toEqual({ 2: "Server", 3: "Tests" });
+    expect(reopened.controller.paneTitles("tab-1")[1]).toBe("Plan");
+    expect(railTitle(reopened.controller, "tab-1")).toBe("Work");
+    reopened.controller.dispose();
+  });
+
+  it("retains names across host restart and an ended pane's replacement session", async () => {
+    const h = harness();
+    h.controller.renamePane(2, "Server");
+    h.controller.renamePane(3, "Tests");
+    await h.controller.flush();
+    const restored = parseLayout(h.saved.at(-1));
+    expect(restored).not.toBeNull();
+    h.controller.dispose();
+
+    const reopened = harness({ initialLayout: reconcile(restored, []).layout, sessions: [] });
+    expect(reopened.controller.paneTitles("tab-2")).toEqual({ 2: "Server", 3: "Tests" });
+    expect(await reopened.controller.restartPane("tab-2", 2, "restart")).toBe(50);
+    expect(reopened.controller.paneTitles("tab-2")).toEqual({ 50: "Server", 3: "Tests" });
+    await reopened.controller.flush();
+    const again = harness({ initialLayout: parseLayout(reopened.saved.at(-1))!, sessions: [session(50)] });
+    expect(again.controller.paneTitles("tab-2")).toEqual({ 50: "Server", 3: "Tests" });
+    reopened.controller.dispose();
+    again.controller.dispose();
+  });
+
+  it("persists clearing a name and receives names from another window's layout", async () => {
+    const h = harness();
+    h.controller.renamePane(2, "Server");
+    await h.controller.flush();
+    expect(h.saved.length).toBeGreaterThan(0);
+    const other = harness({ initialLayout: parseLayout(h.saved.at(-1))! });
+    expect(other.controller.paneTitles("tab-2")[2]).toBe("Server");
+    h.controller.renamePane(2, "   ");
+    await h.controller.flush();
+    other.store.replaceState(parseLayout(h.saved.at(-1))!);
+    expect(other.controller.paneTitles("tab-2")[2]).toBe("powershell \u00b7 project");
+    const reopened = harness({ initialLayout: parseLayout(h.saved.at(-1))! });
+    expect(reopened.controller.paneTitles("tab-2")[2]).toBe("powershell \u00b7 project");
+    h.controller.dispose();
+    other.controller.dispose();
+    reopened.controller.dispose();
   });
 });

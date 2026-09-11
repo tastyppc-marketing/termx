@@ -44,6 +44,7 @@ export interface LayoutStore {
   createTab(opts: CreateTabOptions): Layout;
   closeTab(tabId: string): Layout;
   renameTab(tabId: string, title: string | null): Layout;
+  renamePane(sessionId: number, title: string | null): Layout;
   recolorTab(tabId: string, color: PaletteId): Layout;
   /// `windowId` names whose active tab moves; default the main window's.
   setActiveTab(tabId: string | null, windowId?: string): Layout;
@@ -394,6 +395,39 @@ function pathToPane(node: SplitNode, sessionId: number): number[] | undefined {
   return right !== undefined ? [1, ...right] : undefined;
 }
 
+function withPaneTitle(
+  node: SplitNode,
+  sessionId: number,
+  title: string | undefined,
+): SplitNode | undefined {
+  if (node.kind === "pane") {
+    if (node.sessionId !== sessionId) {
+      return undefined;
+    }
+    if (node.title === title) {
+      return node;
+    }
+    if (title !== undefined) {
+      return { ...node, title };
+    }
+    const { title: _title, ...untitled } = node;
+    return untitled;
+  }
+  const first = withPaneTitle(node.children[0], sessionId, title);
+  if (first !== undefined) {
+    return first === node.children[0]
+      ? node
+      : { ...node, children: [first, node.children[1]] };
+  }
+  const second = withPaneTitle(node.children[1], sessionId, title);
+  if (second !== undefined) {
+    return second === node.children[1]
+      ? node
+      : { ...node, children: [node.children[0], second] };
+  }
+  return undefined;
+}
+
 /// Remove the pane holding `sessionId`; the parent split collapses into the
 /// sibling. Returns null when the pane is the whole tree (caller closes the
 /// tab) or the session is not in this tree (caller treats as no-op).
@@ -592,6 +626,31 @@ export function createLayoutStore(initial?: Layout): LayoutStore {
         ...state,
         tabs: { ...state.tabs, [tabId]: { ...tab, title: nextTitle } },
       });
+    },
+
+    renamePane(sessionId, title) {
+      let nextTitle: string | undefined;
+      if (title !== null) {
+        const normalized = title.trim();
+        if (normalized.length > MAX_NAME_LENGTH) {
+          return state;
+        }
+        nextTitle = normalized.length === 0 ? undefined : normalized;
+      }
+      for (const [tabId, tab] of Object.entries(state.tabs)) {
+        const split = withPaneTitle(tab.split, sessionId, nextTitle);
+        if (split === undefined) {
+          continue;
+        }
+        if (split === tab.split) {
+          return state;
+        }
+        return commit({
+          ...state,
+          tabs: { ...state.tabs, [tabId]: { ...tab, split } },
+        });
+      }
+      return state;
     },
 
     recolorTab(tabId, color) {
