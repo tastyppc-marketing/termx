@@ -558,31 +558,6 @@ export function SplitLayout({
       data-pane-count={paneSessionIds.length}
       data-maximized={maximized || undefined}
     >
-      {maximized ? (
-        <div className="split-maximized-bar" aria-label="Maximized pane controls">
-          <span className="split-maximized-bar__label">Maximized</span>
-          <select
-            aria-label="Switch pane"
-            title="Switch pane"
-            value={maximizedSessionId}
-            onChange={(event) => {
-              const sessionId = Number(event.currentTarget.value);
-              pendingFocusRef.current = sessionId;
-              maximizePane(sessionId);
-            }}
-          >
-            {paneSessionIds.map((sessionId) => (
-              <option key={sessionId} value={sessionId}>{paneLabel(sessionId)}</option>
-            ))}
-          </select>
-          <button
-            type="button"
-            aria-label="Restore split view"
-            title="Restore split view (Ctrl+Shift+Enter)"
-            onClick={() => restoreSplit(true)}
-          >Restore split view</button>
-        </div>
-      ) : null}
       <div className="split-layout__panes" ref={containerRef}>
       {allRects.panes.map(({ sessionId, box }) => {
         const state = paneStates[sessionId] ?? MISSING_PANE;
@@ -838,6 +813,31 @@ export function SplitLayout({
         );
       })}
       </div>
+      {maximized ? (
+        <div className="split-maximized-bar" aria-label="Maximized pane controls">
+          <span className="split-maximized-bar__label">Maximized</span>
+          <select
+            aria-label="Switch pane"
+            title="Switch pane"
+            value={maximizedSessionId}
+            onChange={(event) => {
+              const sessionId = Number(event.currentTarget.value);
+              pendingFocusRef.current = sessionId;
+              maximizePane(sessionId);
+            }}
+          >
+            {paneSessionIds.map((sessionId) => (
+              <option key={sessionId} value={sessionId}>{paneLabel(sessionId)}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            aria-label="Restore split view"
+            title="Restore split view (Ctrl+Shift+Enter)"
+            onClick={() => restoreSplit(true)}
+          >Restore split view</button>
+        </div>
+      ) : null}
       {minimizedIds.size > 0 ? (
         <div className="split-minimized-shelf" role="toolbar" aria-label="Minimized panes">
           <span className="split-minimized-shelf__label">Minimized</span>

@@ -4,13 +4,14 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { HostClient } from "../host/client";
 import {
   xtermSearchDecorations,
   xtermTheme,
   type XtermPalette,
 } from "../theme/deriveTokens";
-import { currentThemeId, onThemeChange } from "../theme/ThemeProvider";
+import { currentThemeId, onThemeChange, useThemeId } from "../theme/ThemeProvider";
 import { themeById } from "../theme/themes";
 import { attachClipboardBindings } from "./clipboardBindings";
 import { InputMarks, type InputMark } from "./inputMarks";
@@ -538,9 +539,16 @@ export function TerminalPane(props: TerminalPaneProps) {
     presentationRef.current?.focus();
   };
 
+  // The pane paints itself in the TERMINAL's own background, taken from the
+  // same palette the xterm instance is given, so the strip xterm cannot fill
+  // (the sub-cell remainder at the bottom, and the inset) reads as part of the
+  // terminal instead of as a black frame around it (Michael, 2026-09-13).
+  const terminalBackground = xtermTheme(themeById(useThemeId())).background;
+
   return (
     <section
       className="terminal-pane"
+      style={{ "--terminal-bg": terminalBackground } as CSSProperties}
       data-testid="terminal-pane"
       aria-label="Terminal session"
       onKeyDownCapture={(event) => {

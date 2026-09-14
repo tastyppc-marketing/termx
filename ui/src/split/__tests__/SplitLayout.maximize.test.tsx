@@ -97,6 +97,15 @@ async function shortcut(target: EventTarget = window, key = "Enter", repeat = fa
   return event;
 }
 
+// The pane toolbar's maximize button also reads "Restore split view" while
+// maximized, and it now precedes the bar in the DOM, so anything meant for the
+// bar's own control has to be scoped to the bar.
+function bar(): HTMLElement {
+  const found = container.querySelector<HTMLElement>(".split-maximized-bar");
+  expect(found, "maximized bar exists").not.toBeNull();
+  return found!;
+}
+
 function picker(): HTMLSelectElement {
   const found = container.querySelector<HTMLSelectElement>("select[aria-label='Switch pane']");
   expect(found, "maximized pane picker exists").not.toBeNull();
@@ -121,7 +130,7 @@ describe("maximizing panes", () => {
     expect(second.querySelector("textarea")).toBe(terminal);
     expect(container.querySelector<HTMLElement>("[role='separator']")?.style.display).toBe("none");
 
-    await click("Restore split view");
+    await click("Restore split view", bar());
     expect(pane(1)).toBe(first);
     expect(pane(2)).toBe(second);
     expect(first.style.width).toBe("35%");
@@ -175,7 +184,7 @@ describe("maximizing panes", () => {
   it("returns focus to the selected terminal when the restore bar disappears", async () => {
     await render();
     await click("Maximize pane", pane(2));
-    const restore = button("Restore split view");
+    const restore = button("Restore split view", bar());
     restore.focus();
     await act(async () => restore.click());
     expect(document.activeElement).toBe(pane(2).querySelector("textarea"));
@@ -260,11 +269,11 @@ describe("maximizing panes", () => {
     expect(frame).not.toBeNull();
     await click("Maximize pane", pane(2));
     expect(pane(2).style.width).toBe("100%");
-    await click("Restore split view");
+    await click("Restore split view", bar());
     await click("Maximize pane", pane(1));
     expect(pane(1).style.width).toBe("100%");
     expect(pane(2).querySelector("iframe")).toBe(frame);
-    await click("Restore split view");
+    await click("Restore split view", bar());
     expect(pane(2).querySelector("iframe")).toBe(frame);
     expect(actions.restartPane).not.toHaveBeenCalled();
   });
@@ -278,5 +287,23 @@ describe("maximizing panes", () => {
     await act(async () => vi.advanceTimersByTime(30 * 60_000));
     expect([...sleep.getSnapshot()]).toEqual([]);
     expect(pane(2).querySelector("textarea")).toBe(terminal);
+  });
+
+  it("docks the maximized controls under the pane, above the minimized shelf", async () => {
+    await render();
+    await click("Minimize pane", pane(1));
+    await click("Maximize pane", pane(2));
+    const layout = container.querySelector<HTMLElement>(".split-layout")!;
+    const panes = layout.querySelector<HTMLElement>(".split-layout__panes")!;
+    const controls = bar();
+    // The bar belongs in the dead space BELOW the terminal, not above it
+    // (Michael, 2026-09-13): the maximized pane must own the top edge.
+    expect(controls.previousElementSibling).toBe(panes);
+    expect(
+      panes.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    const shelf = layout.querySelector<HTMLElement>(".split-minimized-shelf");
+    expect(shelf, "minimized shelf exists").not.toBeNull();
+    expect(controls.nextElementSibling).toBe(shelf);
   });
 });

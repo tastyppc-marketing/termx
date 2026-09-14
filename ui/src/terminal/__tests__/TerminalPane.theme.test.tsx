@@ -125,4 +125,27 @@ describe("TerminalPane theming", () => {
     expect(() => applyTheme("slate-medium")).not.toThrow();
     await act(async () => root.unmount());
   });
+
+  it("paints the pane with the live terminal background, not the app surface", async () => {
+    const { dependencies } = fixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<TerminalPane dependencies={dependencies} />);
+    });
+    const pane = container.querySelector<HTMLElement>("[data-testid='terminal-pane']")!;
+    expect(pane, "terminal pane rendered").not.toBeNull();
+    expect(pane.style.getPropertyValue("--terminal-bg"))
+      .toBe(xtermTheme(THEMES[DEFAULT_THEME_ID]).background);
+
+    await act(async () => {
+      applyTheme("paper-light");
+    });
+    expect(pane.style.getPropertyValue("--terminal-bg"))
+      .toBe(xtermTheme(THEMES["paper-light"]).background);
+
+    await act(async () => root.unmount());
+  });
 });

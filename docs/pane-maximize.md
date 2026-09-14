@@ -5,7 +5,8 @@ or press **Ctrl+Shift+Enter** with that pane focused.
 
 While maximized:
 
-- Use **Switch pane** at the top to choose another pane in the same tab.
+- Use **Switch pane** in the bar under the pane to choose another pane in the
+  same tab.
 - Use the sidebar to switch workspace tabs as usual.
 - Click **Restore split view**, or press **Ctrl+Shift+Enter**, to return to the
   split arrangement and its original sizes.
@@ -16,4 +17,4 @@ layout. A pane removed by another window returns the view to the remaining
 split arrangement. Starting a new split also reveals the split view.
 
 For plugin content that captures keyboard input inside its embedded page,
-use the controls above the pane to maximize or restore it.
+use the controls under the pane to maximize or restore it.
