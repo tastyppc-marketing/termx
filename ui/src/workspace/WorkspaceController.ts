@@ -2176,28 +2176,30 @@ export class WorkspaceController {
 
   /// A display name per pane, for the split view's own title bars.
   ///
-  /// A LONE pane is its tab, so it wears the tab's own rail title — a custom
-  /// rename included — never a parallel derivation that would contradict the
-  /// sidebar. Panes in a split all sit under one tab title, so the tab's name
-  /// cannot tell them apart — each is named by what it actually IS (profile
-  /// plus the folder it is standing in), the same derivation an unnamed tab
-  /// uses.
+  /// Its own name first. Then the TAB's name, but only for the pane the rail
+  /// row stands for — the primary — because that row already reads `tab.title`
+  /// and the two must never contradict each other about one terminal. Then the
+  /// derivation: profile plus the folder the pane is standing in.
+  ///
+  /// The primary clause is what splitting must not spend (Michael, 2026-09-13:
+  /// "it's not saving the name that I have actually put for that window ... it
+  /// then just says PowerShell, and then the name of the tab"). He names a tab
+  /// while it is one pane, that pane wears the name, and a split used to take
+  /// it away and hand back `powershell · TermX`. The terminal he named is
+  /// still the same terminal with a neighbour beside it, so it keeps the name;
+  /// its new neighbour is named by what it IS, which is what keeps two panes
+  /// of one profile in one folder apart.
   paneTitles = (tabId: string): Readonly<Record<number, string>> => {
     const tab = this.store.getState().tabs[tabId];
     if (!tab) {
       return {};
     }
-    const sessionIds = sessionIdsInTab(tab);
+    const primarySessionId = firstSessionId(tab.split);
     const titles: Record<number, string> = {};
-    const lone = sessionIds.length === 1 ? sessionIds[0] : undefined;
-    if (lone !== undefined) {
-      titles[lone] = paneTitleInSplit(tab.split, lone)
-        ?? tab.title
-        ?? derivedTitle(this.sessions.get(lone));
-      return titles;
-    }
-    for (const sessionId of sessionIds) {
+    for (const sessionId of sessionIdsInTab(tab)) {
+      const fromTab = sessionId === primarySessionId ? tab.title : null;
       titles[sessionId] = paneTitleInSplit(tab.split, sessionId)
+        ?? fromTab
         ?? derivedTitle(this.sessions.get(sessionId));
     }
     return titles;

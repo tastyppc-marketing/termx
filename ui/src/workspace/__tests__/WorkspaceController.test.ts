@@ -430,7 +430,7 @@ describe("WorkspaceController projection", () => {
     expect(tab?.attentionSince).toBeNull();
   });
 
-  it("gives a lone pane its tab's rail title, split panes their own derivations", () => {
+  it("gives a tab's rail title to the pane that row stands for, and derives the rest", () => {
     const { controller } = harness();
 
     // tab-1 holds one pane and no custom name: rail derivation, same string.
@@ -444,11 +444,15 @@ describe("WorkspaceController projection", () => {
     controller.renameTab("tab-1", "prod box");
     expect(controller.paneTitles("tab-1")).toEqual({ 1: "prod box" });
 
-    // tab-2 is a split: the tab name cannot tell the panes apart, so each
-    // keeps its own profile · folder derivation even though the tab is named.
+    // tab-2 is a split named "Split". The FIRST pane is the one the rail row
+    // stands for, so it wears the row's name — splitting beside a named tab
+    // must not take the name off the terminal that already had it. The pane
+    // beside it keeps its own profile · folder derivation, which is what tells
+    // two panes of one profile in one folder apart.
     const split = controller.paneTitles("tab-2");
     expect(Object.keys(split)).toEqual(["2", "3"]);
-    expect(split[2]).not.toBe("Split");
+    expect(split[2]).toBe("Split");
+    expect(split[3]).not.toBe("Split");
 
     expect(controller.paneTitles("no-such-tab")).toEqual({});
   });
