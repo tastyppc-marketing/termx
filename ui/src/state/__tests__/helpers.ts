@@ -81,3 +81,22 @@ export function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/// Every pane in the layout and the name it carries — the shape the pane-name
+/// invariant is checked against, so each suite that cares (the layout fuzz,
+/// the two-window fuzz) asks the question the same way.
+export function paneTitlesOf(layout: Layout): Map<number, string | undefined> {
+  const titles = new Map<number, string | undefined>();
+  const walk = (node: SplitNode): void => {
+    if (node.kind === "pane") {
+      titles.set(node.sessionId, node.title);
+      return;
+    }
+    walk(node.children[0]);
+    walk(node.children[1]);
+  };
+  for (const entry of Object.values(layout.tabs)) {
+    walk(entry.split);
+  }
+  return titles;
+}

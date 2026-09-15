@@ -20,6 +20,22 @@ it no longer takes the label away: the new neighbour gets the profile/folder
 label instead, which is what keeps two panes of the same profile in the same
 folder apart.
 
+The editor opens on what the pane is CALLED, which for an unnamed pane is the
+profile/folder label rather than a name it owns. Closing the editor without
+changing the text — losing focus to the terminal, or pressing Enter on an
+untouched field — is therefore a cancel, not a rename: committing the label
+back would pin the derivation as an explicit name, silently, since the header
+reads the same either way, and the pane would quietly stop following its
+folder. The same rule covers every name field (tabs, groups, window names),
+each of which also opens on a derived label when nothing has named it. A
+saved session's description is not a name field and still commits as typed,
+which is how a description is cleared.
+
+A name is not saved until the layout write carrying it reaches the host. A
+write that is never answered is abandoned after ten seconds so the changes
+queued behind it are written instead, and the sidebar reports the failure
+rather than showing "Saving…" for the rest of the session.
+
 The layout-v3 pane leaf accepts an optional `title` string of 1–64 characters.
 Unnamed panes omit the field, so existing layouts remain readable without a
 migration. The layout store trims names and treats a blank or null rename as

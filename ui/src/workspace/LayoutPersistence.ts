@@ -3,6 +3,25 @@ import { serializeLayout, type Layout } from "../state/layout";
 
 export const ACTIVE_TAB_PERSIST_DEBOUNCE_MS = 2_000;
 
+/**
+ * How long one layout write may go unanswered before it counts as failed.
+ *
+ * The host's request queue has no timeout of its own: a reply that never
+ * arrives leaves the promise pending for as long as the socket stays open,
+ * which on a live-but-stuck daemon is forever. Without a floor here, the write
+ * in flight never settles, every later change queues behind it unwritten, the
+ * indicator says "saving" for the rest of the session, and closing the window
+ * loses the lot — which is exactly how a pane name typed after the stall
+ * disappears with no error anywhere (Michael, 2026-09-15).
+ *
+ * Generous on purpose: this is a small atomic file write on the far side of a
+ * loopback socket, so ten seconds is already far past "slow" and only ever
+ * fires on a write that is not coming back. Nothing is cancelled — the write
+ * may still land — and the retry is the same whole-layout blob, so a late
+ * arrival and a retry cannot disagree about the result.
+ */
+export const LAYOUT_WRITE_TIMEOUT_MS = 10_000;
+
 export type LayoutChangeKind = "structural" | "active_tab";
 
 export interface LayoutPersistenceSnapshot {
@@ -114,7 +133,7 @@ export class LayoutPersistence {
   private async runWrite(current: PendingWrite, generation: number): Promise<void> {
     let failed = false;
     try {
-      await this.writer.setLayout(serializeLayout(current.layout));
+      await this.writeWithDeadline(current.layout);
       if (this.disposed) return;
       this.setSnapshot({ saving: true, error: null });
     } catch {
@@ -143,6 +162,34 @@ export class LayoutPersistence {
         this.setSnapshot({ ...this.snapshot, saving: this.inFlight !== null });
       }
     }
+  }
+
+  /**
+   * One write, with a deadline under it.
+   *
+   * The underlying call is NOT cancelled when the deadline passes — there is
+   * no way to un-send a request, and the daemon may still be writing the file.
+   * It is only stopped being waited on, so the pump can move to the layout
+   * that came after it instead of holding it hostage. A late reply is handled
+   * either way, so neither outcome leaves an unhandled rejection behind.
+   */
+  private writeWithDeadline(layout: Layout): Promise<void> {
+    const write = this.writer.setLayout(serializeLayout(layout));
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("the host did not answer the layout write"));
+      }, LAYOUT_WRITE_TIMEOUT_MS);
+      write.then(
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    });
   }
 
   private clearActiveTimer(): void {

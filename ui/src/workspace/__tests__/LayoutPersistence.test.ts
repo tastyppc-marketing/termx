@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { emptyLayout, type Layout } from "../../state/layout";
 import {
   ACTIVE_TAB_PERSIST_DEBOUNCE_MS,
+  LAYOUT_WRITE_TIMEOUT_MS,
   LayoutPersistence,
 } from "../LayoutPersistence";
 
@@ -223,6 +224,59 @@ describe("LayoutPersistence", () => {
     expect(setLayout).toHaveBeenCalledTimes(3);
     expect(setLayout.mock.calls[2]?.[0]).toMatchObject({ windowNames: { main: "Recovery" } });
     expect(persistence.getSnapshot()).toEqual({ saving: false, error: null });
+  });
+
+  /**
+   * A write that is never answered is the one failure mode with no floor
+   * under it: the socket stays open, so nothing rejects, and every later
+   * change piles up behind the write that will never finish. The user is told
+   * the workspace is "saving" for as long as the app stays open, and every
+   * name they type in the meantime is gone the moment they restart it.
+   *
+   * (Michael, 2026-09-15, third report of pane names not sticking. His host
+   * keeps a request queue with no timeout of its own, so one unanswered reply
+   * stalls every layout write behind it.)
+   */
+  it("gives up on a write that is never answered instead of losing what came after", async () => {
+    vi.useFakeTimers();
+    const hung = deferred<void>();
+    const setLayout = vi.fn()
+      .mockImplementationOnce(() => hung.promise)
+      .mockResolvedValue(undefined);
+    const persistence = new LayoutPersistence({ setLayout });
+
+    persistence.record({ ...emptyLayout(), windowNames: { main: "First" } }, "structural");
+    // The name typed while the first write hangs.
+    persistence.record({ ...emptyLayout(), windowNames: { main: "Renamed" } }, "structural");
+    expect(setLayout).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(LAYOUT_WRITE_TIMEOUT_MS);
+
+    // The newest layout is written, and the stall is reported rather than
+    // shown as an endless "saving".
+    expect(setLayout.mock.calls.at(-1)?.[0]).toMatchObject({
+      windowNames: { main: "Renamed" },
+    });
+    expect(persistence.getSnapshot().saving).toBe(false);
+    hung.resolve();
+    persistence.dispose();
+  });
+
+  it("stops flushing a write that never answers, so closing the window is not a hang", async () => {
+    vi.useFakeTimers();
+    const hung = deferred<void>();
+    const setLayout = vi.fn().mockImplementation(() => hung.promise);
+    const persistence = new LayoutPersistence({ setLayout });
+    persistence.record(emptyLayout(), "structural");
+
+    let settled = false;
+    void persistence.flush().then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(LAYOUT_WRITE_TIMEOUT_MS * 3);
+
+    expect(settled).toBe(true);
+    expect(persistence.getSnapshot().error).toBe("Unable to save the workspace layout.");
+    hung.resolve();
+    persistence.dispose();
   });
 
   it("does not write after a subscriber disposes while saving is announced", async () => {

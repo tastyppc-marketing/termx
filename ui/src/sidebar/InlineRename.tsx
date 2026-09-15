@@ -48,6 +48,23 @@ export function InlineRename({
       cancel();
       return;
     }
+    // A name the user did not change is not a name the user chose. A name
+    // field opens on what the surface is CALLED, which is not always what it
+    // is NAMED: an unnamed pane shows the name derived from its profile and
+    // folder, an unnamed tab the same, an unnamed window its active tab's.
+    // Committing that back would pin the derivation as an explicit name —
+    // silently, since the label reads the same either way — and the only
+    // thing the user would notice is that it had stopped following along.
+    // Losing focus is not an act of naming, and neither is Enter on an
+    // untouched field (Michael, 2026-09-15: pane names "not saving").
+    //
+    // Only for name fields. `allowEmpty` marks the ones that edit a stored
+    // value directly (a saved session's description), where the field opens on
+    // the value itself and writing it back is exactly what was asked.
+    if (!allowEmpty && next === value.trim()) {
+      cancel();
+      return;
+    }
     settledRef.current = true;
     onCommit(next);
   };
