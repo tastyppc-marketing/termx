@@ -1,0 +1,396 @@
+<title>TermX Rail Declutter</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #1e2127; --rail: #23262e; --row: #2a2e37; --row-hover: #30353f; --hair: #363b47; --hair-strong: #454b59;
+    --text: #d9dde6; --sub: #8e96a6; --hint: #6a7283; --accent: #6ea0ff; --accent-25: rgba(110,160,255,.25);
+    --live: #62c07c; --wait: #e69a4b; --sleep: #7a8294; --danger: #e0685f;
+    --g-fun: #4f9cff; --g-clients: #ff8a3d; --g-dev: #a78bfa;
+    --mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
+    --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); padding-inline: 16px; padding-block: 18px; }
+  .page { max-width: 1120px; margin: 0 auto; display: grid; grid-template-columns: 300px 1fr; gap: 24px; align-items: start; }
+  @media (max-width: 760px) { .page { grid-template-columns: 1fr; } }
+  h1 { font: 500 15px/1.2 var(--sans); letter-spacing: .02em; margin: 0 0 4px; }
+  .lede { color: var(--sub); font-size: 12.5px; margin: 0 0 18px; max-width: 62ch; }
+  .over { font: 500 10px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--hint); }
+
+  /* ---------- the rail (cloned from the screenshot, square + hairline) ---------- */
+  .rail-wrap { position: sticky; top: 12px; }
+  .rail { background: var(--rail); border: 1px solid var(--hair); user-select: none; font-family: var(--sans); }
+  .rail-head { display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 10px; border-bottom: 1px solid var(--hair); }
+  .rail-head .over { color: var(--sub); }
+  .rail-head button { font: 500 10px var(--mono); letter-spacing: .08em; color: var(--sub); background: none; border: 1px solid transparent; padding: 3px 6px; cursor: pointer; }
+  .rail-head button:hover, .rail-head button[aria-pressed="true"] { color: var(--text); border-color: var(--hair-strong); }
+  .band { border-bottom: 1px solid var(--hair); }
+  .band-title { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 10px; background: var(--row); }
+  .band-title .over { color: var(--accent); }
+  .group { border-bottom: 1px solid var(--hair); }
+  .group:last-child { border-bottom: 0; }
+  .g-head { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; cursor: pointer; }
+  .g-head:hover { background: var(--row-hover); }
+  .caret { width: 10px; color: var(--hint); font-size: 10px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .g-name { font: 600 11px var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--sub); flex: 1; }
+  .g-count { font: 11px var(--mono); color: var(--hint); font-variant-numeric: tabular-nums; }
+  .g-count b { color: var(--sub); font-weight: 500; }
+  .g-sum { font: 10px var(--mono); color: var(--hint); letter-spacing: .04em; }
+  .g-sum .l { color: var(--live); } .g-sum .w { color: var(--wait); }
+  .rows { padding: 0 0 4px 12px; }
+  .sub { border-left: 2px solid var(--gc, var(--hair)); margin: 2px 0 2px 8px; }
+  .sub .g-head { height: 26px; }
+  .sub .g-name { font-size: 11px; text-transform: none; letter-spacing: .04em; color: var(--text); font-weight: 500; }
+  .row { display: grid; grid-template-columns: 3px 1fr auto; column-gap: 8px; align-items: center; min-height: 34px; margin: 2px 6px 2px 0; padding-right: 8px; cursor: default; position: relative; }
+  .row:hover { background: var(--row-hover); }
+  .row .bar { align-self: stretch; background: var(--rc, var(--hair-strong)); }
+  .row .name { font-size: 13px; line-height: 1.2; padding-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .meta { font: 11px var(--mono); color: var(--hint); padding-left: 6px; }
+  .row .meta.live { color: var(--live); } .row .meta.wait { color: var(--wait); }
+  .row .st { width: 7px; height: 7px; border-radius: 50%; background: var(--sleep); justify-self: end; }
+  .row .st.live { background: var(--live); } .row .st.wait { background: var(--wait); box-shadow: 0 0 0 3px rgba(230,154,75,.18); }
+  .row .st.off { background: transparent; border: 1px solid var(--hair-strong); }
+  .row.compact { min-height: 24px; }
+  .row.compact .meta { display: none; }
+  .row .badge { position: absolute; right: 22px; top: 50%; translate: 0 -50%; font: 500 9px var(--mono); letter-spacing: .06em; color: var(--wait); border: 1px solid var(--wait); padding: 1px 4px; }
+  .shelf { display: flex; align-items: center; gap: 8px; height: 24px; margin: 2px 6px 2px 0; padding: 0 8px 0 9px; font: 11px var(--mono); color: var(--hint); border: 1px dashed var(--hair-strong); cursor: pointer; letter-spacing: .02em; }
+  .shelf:hover { color: var(--text); border-style: solid; }
+  .shelf .names { color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .shelf.open { border-style: solid; color: var(--text); }
+  .shelf-rows .row { opacity: .72; }
+  .shelf-rows .row .name::after { content: " · hidden"; color: var(--hint); font: 10px var(--mono); }
+  .unhide { font: 500 10px var(--mono); color: var(--accent); background: none; border: 0; cursor: pointer; padding: 0 4px; }
+  .rail-foot { display: flex; align-items: center; justify-content: space-between; height: 26px; padding: 0 10px; border-top: 1px solid var(--hair); font: 10px var(--mono); color: var(--hint); letter-spacing: .06em; }
+  .rail-foot button { font: inherit; color: var(--sub); background: none; border: 0; cursor: pointer; padding: 0; letter-spacing: inherit; }
+  .rail-foot button:hover { color: var(--text); }
+  .collapsed-list { padding: 4px 10px 6px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .collapsed-list span { font: 11px var(--sans); color: var(--sub); display: inline-flex; align-items: center; gap: 5px; }
+
+  /* context menu + dialog + toast (PaneFlyout recipe) */
+  .ctx { position: fixed; z-index: 20; min-width: 190px; background: var(--row); border: 1px solid var(--hair-strong); box-shadow: 0 8px 24px rgba(0,0,0,.45); padding: 4px 0; font-size: 12.5px; }
+  .ctx div { padding: 0 12px; height: 28px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; }
+  .ctx div:hover { background: var(--row-hover); }
+  .ctx div span { font: 10px var(--mono); color: var(--hint); letter-spacing: .06em; }
+  .ctx hr { border: 0; border-top: 1px solid var(--hair); margin: 4px 0; }
+  .toast { position: fixed; left: 50%; bottom: 22px; translate: -50% 0; background: var(--row); border: 1px solid var(--hair-strong); padding: 8px 12px; font-size: 12.5px; display: flex; gap: 12px; align-items: center; box-shadow: 0 8px 24px rgba(0,0,0,.45); z-index: 30; }
+  .toast button { font: 500 11px var(--mono); color: var(--accent); background: none; border: 0; cursor: pointer; letter-spacing: .06em; }
+  .dialog { border: 1px solid var(--hair-strong); background: var(--row); margin: 6px; padding: 10px 12px; }
+  .dialog .over { margin-bottom: 8px; display: block; }
+  .dialog label { display: flex; gap: 8px; align-items: center; font-size: 12.5px; min-height: 24px; }
+  .dialog label small { font: 11px var(--mono); color: var(--hint); margin-left: auto; }
+  .dialog .acts { display: flex; gap: 8px; margin-top: 8px; }
+  .btn { font: 500 11px var(--mono); letter-spacing: .06em; padding: 5px 10px; background: none; border: 1px solid var(--hair-strong); color: var(--text); cursor: pointer; }
+  .btn.primary { border-color: var(--accent); color: var(--accent); }
+  .btn:hover { background: var(--row-hover); }
+
+  /* ---------- ideas panel ---------- */
+  .ideas { display: grid; gap: 10px; }
+  .idea { border: 1px solid var(--hair); background: var(--rail); }
+  .idea > button.head { all: unset; display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; width: 100%; box-sizing: border-box; padding: 10px 12px; cursor: pointer; }
+  .idea > button.head:hover { background: var(--row-hover); }
+  .idea > button.head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .idea .n { font: 500 11px var(--mono); color: var(--hint); }
+  .idea[data-on="true"] .n { color: var(--accent); }
+  .idea .t { font-weight: 600; font-size: 13.5px; }
+  .idea .t small { display: block; font-weight: 400; color: var(--sub); font-size: 12px; margin-top: 2px; }
+  .idea .k { font: 500 10px var(--mono); letter-spacing: .08em; color: var(--hint); border: 1px solid var(--hair-strong); padding: 3px 7px; }
+  .idea[data-on="true"] .k { color: var(--accent); border-color: var(--accent); }
+  .idea[data-on="true"] { border-color: var(--hair-strong); box-shadow: inset 2px 0 0 var(--accent); }
+  .idea .body { display: none; border-top: 1px solid var(--hair); padding: 10px 12px 12px 44px; color: var(--sub); font-size: 12.5px; }
+  .idea[data-on="true"] .body { display: block; }
+  .idea .body p { margin: 0 0 8px; max-width: 62ch; }
+  .idea .body ul { margin: 0 0 8px; padding-left: 18px; }
+  .idea .body li { margin: 3px 0; }
+  .idea .body b { color: var(--text); font-weight: 500; }
+  .try { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--hair); }
+  .try .over { margin-right: 2px; }
+  .try input[type=range] { accent-color: var(--accent); width: 140px; }
+  .try output { font: 11px var(--mono); color: var(--text); }
+  .pairs { margin-top: 18px; border-top: 1px solid var(--hair); padding-top: 12px; color: var(--sub); font-size: 12.5px; max-width: 66ch; }
+  .pairs b { color: var(--text); font-weight: 500; }
+  kbd { font: 10.5px var(--mono); border: 1px solid var(--hair-strong); padding: 0 4px; color: var(--sub); }
+  @media (prefers-reduced-motion: no-preference) { .row, .shelf, .idea { transition: background 120ms ease, opacity 120ms ease; } }
+</style>
+
+<div class="page">
+  <div class="rail-wrap">
+    <div class="over" style="margin-bottom:8px">Mock rail · right-click any chat</div>
+    <div class="rail" id="rail" aria-label="Mock sidebar">
+      <div class="rail-head">
+        <span class="over" id="rail-mode">Rail · as today</span>
+        <button id="density" aria-pressed="false" title="Idea 4">Quiet rows</button>
+      </div>
+      <div id="today"></div>
+      <div id="groups"></div>
+      <div class="rail-foot">
+        <span id="foot-left">5 groups · 18 chats</span>
+        <button id="foot-hidden" hidden>show hidden</button>
+        <button id="foot-recent" hidden>recently closed</button>
+      </div>
+    </div>
+    <p class="lede" style="margin-top:8px">Sample rows only. Same shapes as your rail: group dot, tab bar colour, status line.</p>
+  </div>
+
+  <div>
+    <h1>Five ways to keep the rail clean without losing anything</h1>
+    <p class="lede">Each idea switches the mock rail on the left into that mode. Ideas 1, 2 and 5 are one family: hide, sleep and tidy all put rows on a shelf you can see and reopen, so nothing silently disappears. Ideas 3 and 4 change what a row costs on screen.</p>
+
+    <div class="ideas" id="ideas">
+      <section class="idea" data-id="hide" data-on="true">
+        <button class="head" type="button"><span class="n">1</span><span class="t">Hide, with a memory<small>Your idea. Right-click a chat and hide it. The group keeps counting it, a shelf shows how many, and the chat comes back by itself if it needs you.</small></span><span class="k">TRY</span></button>
+        <div class="body">
+          <p>Hiding a chat is only safe if three things stay true, and the mock shows each one:</p>
+          <ul>
+            <li><b>The count never lies.</b> The group header reads <b>5 · 2 hidden</b> even while the group is collapsed, so a folded client still tells you something is tucked away.</li>
+            <li><b>The shelf is a row, not a setting.</b> A dashed one-line shelf at the foot of the group says <b>2 hidden · Kittle Stuff, Listing Ad</b>. Hover lists the names; click opens them in place with an Unhide beside each.</li>
+            <li><b>Activity overrides hiding.</b> If a hidden chat rings the bell, finishes a task or exits, it resurfaces on its own with a small <b>WOKE</b> tag until you click it. You cannot forget a chat that is doing something.</li>
+          </ul>
+          <p>Global escape hatch: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> or the footer link shows every hidden chat across all groups; search always finds them.</p>
+          <div class="try"><span class="over">Try</span><button class="btn" id="wake-demo">Ring the bell on a hidden chat</button><button class="btn" id="reset-hide">Reset</button></div>
+        </div>
+      </section>
+
+      <section class="idea" data-id="sleep" data-on="false">
+        <button class="head" type="button"><span class="n">2</span><span class="t">Sleep shelf<small>Chats that have been quiet for a while tuck themselves under an "asleep" shelf per group. Anything live never sleeps. Opening one wakes it.</small></span><span class="k">TRY</span></button>
+        <div class="body">
+          <p>Most clutter is not chats you want hidden, it is chats that <b>finished</b>. Instead of you hiding them one by one, an exited or idle chat folds into the shelf after a quiet period you choose. Same shelf, same count, same wake-on-activity rule as idea 1, so the two share one mechanism: hide is "sleep now", sleep is "hide later".</p>
+          <ul>
+            <li>The shelf reads <b>asleep · 3</b> and lists names on hover.</li>
+            <li>A sleeping chat keeps its folder and profile; reopening resumes where it was (the resume path that already exists).</li>
+            <li>Per-group override: a client you are actively on can be set to "never sleep".</li>
+          </ul>
+          <div class="try"><span class="over">Quiet for</span><input type="range" id="sleep-days" min="0" max="14" value="3"><output id="sleep-out">3 days</output></div>
+        </div>
+      </section>
+
+      <section class="idea" data-id="today" data-on="false">
+        <button class="head" type="button"><span class="n">3</span><span class="t">Today band<small>Pin the two or three clients you are on today to a band at the top. Everyone else folds into one compact list underneath.</small></span><span class="k">TRY</span></button>
+        <div class="body">
+          <p>The rail today treats every client as equally important. On any given day, two are. Right-click a client group and choose <b>Pin to Today</b>; it moves into a band above the tree with its chats open. The rest of Clients collapses to a single line of names with status dots, so you still see that Jacki Short has a chat waiting, without her taking six rows.</p>
+          <ul>
+            <li>Pins clear at the end of the day or when you unpin, so the band never becomes a second tree.</li>
+            <li>The band is where a saved-session resume lands, so "start on Kittle" is one click.</li>
+          </ul>
+          <div class="try"><span class="over">Try</span><button class="btn" data-pin="kittle">Pin Kittle Stuff</button><button class="btn" data-pin="murray">Pin Murray Gardner</button><button class="btn" id="unpin-all">Unpin all</button></div>
+        </div>
+      </section>
+
+      <section class="idea" data-id="quiet" data-on="false">
+        <button class="head" type="button"><span class="n">4</span><span class="t">Quiet rows<small>Drop the "Exited" second line. A status dot on the right says the same thing in 7px, and the sub-line only appears while something is happening.</small></span><span class="k">TRY</span></button>
+        <div class="body">
+          <p>Half of the height in your screenshot is the word <b>Exited</b>. A row only needs a second line when it has news: running, waiting on you, bell rang. Everything else becomes one line with a dot: green live, orange waiting, hollow exited. Group headers gain a summary, <b>1 live · 1 waiting</b>, so a collapsed group still reports.</p>
+          <ul>
+            <li>Density is a toggle in the rail header (top left of the mock), not a setting buried in preferences.</li>
+            <li>Pairs with idea 3: the folded "everyone else" list is quiet rows by definition.</li>
+          </ul>
+          <div class="try"><span class="over">Try</span><button class="btn" id="quiet-toggle">Toggle quiet rows</button></div>
+        </div>
+      </section>
+
+      <section class="idea" data-id="tidy" data-on="false">
+        <button class="head" type="button"><span class="n">5</span><span class="t">Tidy this group, and Recently closed<small>One right-click action reviews what can go: exited chats, duplicates, chats asleep for weeks. You approve the list, and anything closed can be reopened from Recently closed.</small></span><span class="k">TRY</span></button>
+        <div class="body">
+          <p>Hiding and sleeping keep rows; sometimes you want them gone. <b>Tidy</b> on a group proposes a checklist: every exited chat, any two chats with the same name and folder, anything asleep longer than a month. Nothing closes until you press Close selected. Whatever you close lands in <b>Recently closed</b> in the rail footer with its folder, so a chat you regret closing is one click from being back, cwd and all.</p>
+          <ul>
+            <li>Recently closed keeps the last 20 and survives restarts.</li>
+            <li>Tidy never touches a live process or anything pinned to Today.</li>
+          </ul>
+          <div class="try"><span class="over">Try</span><button class="btn" id="tidy-demo">Tidy Clients</button></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="pairs">
+      <b>How they fit together.</b> One shelf mechanism serves hide (1), sleep (2) and tidy (5): a row is either in the tree, on the group's shelf, or in Recently closed, and the count in the group header always adds up to all three. Today (3) decides which groups get the full tree at all, and quiet rows (4) decide what a tree row costs. If you wanted only two of the five, take 1 and 4: they remove the most clutter with the least new behaviour.
+    </div>
+  </div>
+</div>
+
+<div class="ctx" id="ctx" hidden></div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+  // ---- sample data (shapes from the screenshot; names are examples) ----
+  const groups = [
+    { id: "fun", name: "Fun", color: "var(--g-fun)", chats: [ { id: "f1", name: "Mermaid Cove", st: "off" } ] },
+    { id: "clients", name: "Clients", color: "var(--g-clients)", subs: [
+      { id: "kerry", name: "Kerry Herdt", color: "#62c07c", chats: [ { id: "k1", name: "Kerry CRM", st: "off" } ] },
+      { id: "kittle", name: "Kittle Stuff", color: "#9aa3b5", chats: [ { id: "ki1", name: "ForeverHomeRR", st: "live", meta: "zZ", bar: "#62c07c" }, { id: "ki2", name: "Kittle Stuff", st: "off", meta: "Exited", bar: "#9aa3b5" } ] },
+      { id: "jacki", name: "Jacki Short", color: "#9aa3b5", chats: [ { id: "j1", name: "Jacki SEO", st: "wait", meta: "Waiting on you" } ] },
+      { id: "murray", name: "Murray Gardner", color: "#62c07c", chats: [ { id: "m1", name: "Listing Ad", st: "live", meta: "Running", bar: "#ff8a3d" } ] },
+      { id: "tasty", name: "TastyPPC", color: "#9aa3b5", chats: [ { id: "t1", name: "Site v3", st: "off", meta: "Exited" }, { id: "t2", name: "Share card", st: "off", meta: "Exited" }, { id: "t3", name: "Booking", st: "off", meta: "Exited" } ] },
+    ] },
+    { id: "dev", name: "Dev", color: "var(--g-dev)", chats: [ { id: "d1", name: "Sierra Form", st: "off", meta: "Exited", bar: "#4f9cff" }, { id: "d2", name: "TermX", st: "live", meta: "Running", bar: "#e0685f" }, { id: "d3", name: "Recall", st: "off", meta: "Exited" } ] },
+  ];
+  // quiet days per chat (for the sleep shelf) — examples
+  const quietDays = { f1: 9, k1: 5, ki1: 0, ki2: 4, j1: 0, m1: 0, t1: 12, t2: 2, t3: 30, d1: 6, d2: 0, d3: 1 };
+
+  const state = { mode: "hide", hidden: new Set(), woke: new Set(), openShelves: new Set(), collapsed: new Set(["fun","kerry","jacki","tasty"]), pinned: [], quiet: false, sleepDays: 3, closed: [], showHidden: false, tidyOpen: false };
+
+  const $ = (s, r = document) => r.querySelector(s);
+  const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt !== undefined) e.textContent = txt; return e; };
+
+  function allChats(g) { return g.chats ? g.chats : g.subs.flatMap(s => s.chats); }
+  function isClosed(c) { return state.closed.some(x => x.id === c.id); }
+  function asleep(c) { return state.mode === "sleep" && c.st === "off" && quietDays[c.id] >= state.sleepDays && state.sleepDays > 0; }
+  function onShelf(c) { return !isClosed(c) && ((state.hidden.has(c.id) && !state.woke.has(c.id)) || asleep(c)); }
+
+  function row(c, compact) {
+    const r = el("div", "row" + (compact || state.quiet ? " compact" : ""));
+    r.dataset.chat = c.id;
+    if (c.bar) r.style.setProperty("--rc", c.bar);
+    r.append(el("div", "bar"));
+    const mid = el("div");
+    mid.append(el("div", "name", c.name));
+    if (!state.quiet || c.st !== "off") { const m = el("div", "meta " + c.st, state.quiet && c.st === "off" ? "" : (c.meta || (c.st === "off" ? "Exited" : ""))); if (m.textContent) mid.append(m); }
+    r.append(mid);
+    r.append(el("span", "st " + c.st));
+    if (state.woke.has(c.id)) r.append(el("span", "badge", "WOKE"));
+    r.addEventListener("contextmenu", (e) => { e.preventDefault(); openCtx(e, c); });
+    r.addEventListener("click", () => { if (state.woke.has(c.id)) { state.woke.delete(c.id); state.hidden.delete(c.id); render(); toast(`${c.name} is back in the tree.`); } });
+    return r;
+  }
+
+  function shelf(container, chats, label) {
+    if (!chats.length) return;
+    const key = label + chats.map(c => c.id).join(",");
+    const s = el("div", "shelf" + (state.openShelves.has(label) ? " open" : ""));
+    s.append(el("span", "", `${label} · ${chats.length}`));
+    s.append(el("span", "names", chats.map(c => c.name).join(", ")));
+    s.title = chats.map(c => c.name).join("\n");
+    s.addEventListener("click", () => { state.openShelves.has(label) ? state.openShelves.delete(label) : state.openShelves.add(label); render(); });
+    container.append(s);
+    if (state.openShelves.has(label)) {
+      const wrap = el("div", "shelf-rows");
+      for (const c of chats) {
+        const r = row(c, true);
+        const u = el("button", "unhide", label === "asleep" ? "wake" : "unhide");
+        u.addEventListener("click", (e) => { e.stopPropagation(); state.hidden.delete(c.id); if (label === "asleep") quietDays[c.id] = 0; render(); toast(`${c.name} ${label === "asleep" ? "woke up" : "is back"}.`); });
+        r.append(u); wrap.append(r);
+      }
+      container.append(wrap);
+    }
+  }
+
+  function groupHead(g, level) {
+    const h = el("div", "g-head");
+    const open = !state.collapsed.has(g.id);
+    h.append(el("span", "caret", open ? "⌄" : "›"));
+    const d = el("span", "dot"); d.style.background = g.color; h.append(d);
+    h.append(el("span", "g-name", g.name));
+    const chats = allChats(g).filter(c => !isClosed(c));
+    const hid = chats.filter(onShelf).length;
+    const live = chats.filter(c => c.st === "live").length, wait = chats.filter(c => c.st === "wait").length;
+    if (state.quiet) { const s = el("span", "g-sum"); s.innerHTML = `${live ? `<span class="l">${live} live</span>` : ""}${live && wait ? " · " : ""}${wait ? `<span class="w">${wait} waiting</span>` : ""}`; h.append(s); }
+    const cnt = el("span", "g-count"); cnt.innerHTML = hid ? `${chats.length} · <b>${hid} ${state.mode === "sleep" && !state.hidden.size ? "asleep" : "hidden"}</b>` : `${chats.length}`; h.append(cnt);
+    h.addEventListener("click", () => { open ? state.collapsed.add(g.id) : state.collapsed.delete(g.id); render(); });
+    h.addEventListener("contextmenu", (e) => { e.preventDefault(); openCtx(e, null, g); });
+    return h;
+  }
+
+  function renderGroup(g, level = 0) {
+    const box = el("div", level ? "sub" : "group");
+    if (level) box.style.setProperty("--gc", g.color);
+    box.append(groupHead(g, level));
+    if (state.collapsed.has(g.id)) return box;
+    const rows = el("div", "rows");
+    if (g.subs) {
+      const pinnedIds = new Set(state.pinned);
+      const foldables = g.subs.filter(s => !pinnedIds.has(s.id));
+      if (state.mode === "today" && state.pinned.length) {
+        // everyone else folds into one compact list
+        const list = el("div", "collapsed-list");
+        for (const s of foldables) { const chats = allChats(s).filter(c => !isClosed(c)); const sp = el("span"); const d = el("i", "st " + (chats.some(c => c.st === "wait") ? "wait" : chats.some(c => c.st === "live") ? "live" : "off")); d.style.cssText = "display:inline-block;width:7px;height:7px;border-radius:50%"; sp.append(d, document.createTextNode(`${s.name} ${chats.length}`)); list.append(sp); }
+        rows.append(list);
+      } else {
+        for (const s of foldables) rows.append(renderGroup(s, 1));
+      }
+    } else {
+      const chats = g.chats.filter(c => !isClosed(c));
+      for (const c of chats.filter(c => !onShelf(c))) rows.append(row(c));
+      shelf(rows, chats.filter(c => state.hidden.has(c.id) && !state.woke.has(c.id) && !asleep(c)), "hidden");
+      shelf(rows, chats.filter(asleep), "asleep");
+    }
+    box.append(rows);
+    return box;
+  }
+
+  function render() {
+    const gs = $("#groups"); gs.replaceChildren();
+    if (state.tidyOpen) gs.append(tidyDialog());
+    for (const g of groups) gs.append(renderGroup(g));
+    const today = $("#today"); today.replaceChildren();
+    if (state.mode === "today" && state.pinned.length) {
+      const band = el("div", "band"); const t = el("div", "band-title"); t.append(el("span", "over", "Today")); band.append(t);
+      for (const id of state.pinned) { const s = groups[1].subs.find(x => x.id === id); state.collapsed.delete(id); band.append(renderGroup(s, 1)); }
+      today.append(band);
+    }
+    const total = groups.flatMap(allChats).filter(c => !isClosed(c)).length;
+    const hiddenCount = groups.flatMap(allChats).filter(c => !isClosed(c) && onShelf(c)).length;
+    $("#foot-left").textContent = `${groups.length + 5} groups · ${total} chats${hiddenCount ? ` · ${hiddenCount} on shelves` : ""}`;
+    $("#foot-hidden").hidden = !hiddenCount; $("#foot-recent").hidden = !state.closed.length;
+    $("#foot-recent").textContent = `recently closed · ${state.closed.length}`;
+    $("#density").setAttribute("aria-pressed", String(state.quiet));
+    $("#rail-mode").textContent = { hide: "Rail · hide with a memory", sleep: "Rail · sleep shelf", today: "Rail · today band", quiet: "Rail · quiet rows", tidy: "Rail · tidy + recently closed" }[state.mode];
+    for (const s of document.querySelectorAll(".idea")) s.dataset.on = String(s.dataset.id === state.mode);
+  }
+
+  // ---- context menu ----
+  function openCtx(e, chat, group) {
+    const m = $("#ctx"); m.replaceChildren(); m.hidden = false;
+    const item = (label, key, fn) => { const d = el("div"); d.append(el("span", "", ""), el("span", "", key)); d.firstChild.textContent = label; d.firstChild.className = ""; d.addEventListener("click", () => { closeCtx(); fn(); }); m.append(d); };
+    if (chat) {
+      item(state.hidden.has(chat.id) ? "Unhide" : "Hide", "H", () => { state.hidden.has(chat.id) ? state.hidden.delete(chat.id) : state.hidden.add(chat.id); state.woke.delete(chat.id); if (state.mode !== "hide" && state.mode !== "sleep") state.mode = "hide"; render(); toast(state.hidden.has(chat.id) ? `${chat.name} hidden · shelf shows it` : `${chat.name} is back.`, state.hidden.has(chat.id) ? () => { state.hidden.delete(chat.id); render(); } : null); });
+      item("Sleep now", "", () => { quietDays[chat.id] = 99; chat.st = "off"; state.mode = "sleep"; render(); toast(`${chat.name} is asleep.`); });
+      m.append(el("hr"));
+      item("Close", "Ctrl+Shift+W", () => { state.closed.unshift(chat); state.mode = "tidy"; render(); toast(`${chat.name} closed · in Recently closed`, () => { state.closed = state.closed.filter(x => x.id !== chat.id); render(); }); });
+    } else if (group) {
+      if (group.subs) item("Tidy this group…", "", () => { state.mode = "tidy"; state.tidyOpen = true; render(); });
+      else if (groups[1].subs.includes(group)) item(state.pinned.includes(group.id) ? "Unpin from Today" : "Pin to Today", "", () => { togglePin(group.id); });
+      item(state.collapsed.has(group.id) ? "Expand" : "Collapse", "", () => { state.collapsed.has(group.id) ? state.collapsed.delete(group.id) : state.collapsed.add(group.id); render(); });
+    }
+    const w = m.offsetWidth || 190, h = m.offsetHeight || 120;
+    m.style.left = Math.min(e.clientX, innerWidth - w - 8) + "px"; m.style.top = Math.min(e.clientY, innerHeight - h - 8) + "px";
+  }
+  function closeCtx() { $("#ctx").hidden = true; }
+  addEventListener("pointerdown", (e) => { if (!$("#ctx").contains(e.target)) closeCtx(); }, true);
+  addEventListener("keydown", (e) => { if (e.key === "Escape") closeCtx(); if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "h") { e.preventDefault(); showAllHidden(); } });
+
+  function togglePin(id) { const i = state.pinned.indexOf(id); i >= 0 ? state.pinned.splice(i, 1) : state.pinned.length < 3 && state.pinned.push(id); state.mode = "today"; render(); }
+  function showAllHidden() { for (const g of groups) { for (const c of allChats(g)) if (state.hidden.has(c.id)) { state.openShelves.add("hidden"); } } render(); toast("Every hidden chat is on its shelf now."); }
+
+  // ---- tidy dialog ----
+  function tidyDialog() {
+    const d = el("div", "dialog"); d.append(el("span", "over", "Tidy Clients · nothing closes until you say so"));
+    const cands = groups[1].subs.flatMap(s => s.chats).filter(c => !isClosed(c) && c.st === "off").map(c => ({ c, why: quietDays[c.id] >= 30 ? "asleep 30d" : "exited" }));
+    const boxes = [];
+    for (const { c, why } of cands) { const l = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.id = "tidy-" + c.id; cb.checked = true; boxes.push([cb, c]); l.append(cb, document.createTextNode(c.name), el("small", "", why)); d.append(l); }
+    if (!cands.length) d.append(el("label", "", "Nothing to tidy."));
+    const acts = el("div", "acts");
+    const go = el("button", "btn primary", "Close selected"); go.addEventListener("click", () => { let n = 0; for (const [cb, c] of boxes) if (cb.checked) { state.closed.unshift(c); n++; } state.tidyOpen = false; render(); toast(`${n} closed · all in Recently closed`, () => { state.closed = []; render(); }); });
+    const no = el("button", "btn", "Cancel"); no.addEventListener("click", () => { state.tidyOpen = false; render(); });
+    acts.append(go, no); d.append(acts); return d;
+  }
+
+  // ---- toast ----
+  let toastTimer;
+  function toast(msg, undo) { const t = $("#toast"); t.replaceChildren(el("span", "", msg)); if (undo) { const b = el("button", "", "UNDO"); b.addEventListener("click", () => { undo(); t.hidden = true; }); t.append(b); } t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 3200); }
+
+  // ---- idea panel wiring ----
+  for (const s of document.querySelectorAll(".idea > button.head")) s.addEventListener("click", () => { state.mode = s.parentElement.dataset.id; if (state.mode === "quiet") state.quiet = true; render(); });
+  $("#density").addEventListener("click", () => { state.quiet = !state.quiet; render(); });
+  $("#quiet-toggle").addEventListener("click", () => { state.quiet = !state.quiet; render(); });
+  $("#wake-demo").addEventListener("click", () => { const c = groups[1].subs[1].chats[1]; if (!state.hidden.has(c.id)) state.hidden.add(c.id); state.woke.add(c.id); c.st = "wait"; c.meta = "Bell rang"; state.collapsed.delete("kittle"); render(); toast("Kittle Stuff rang the bell · it resurfaced with a WOKE tag"); });
+  $("#reset-hide").addEventListener("click", () => { state.hidden.clear(); state.woke.clear(); state.openShelves.clear(); const c = groups[1].subs[1].chats[1]; c.st = "off"; c.meta = "Exited"; render(); });
+  $("#sleep-days").addEventListener("input", (e) => { state.sleepDays = +e.target.value; $("#sleep-out").textContent = state.sleepDays ? `${state.sleepDays} day${state.sleepDays > 1 ? "s" : ""}` : "off"; state.mode = "sleep"; state.collapsed.delete("tasty"); render(); });
+  for (const b of document.querySelectorAll("[data-pin]")) b.addEventListener("click", () => togglePin(b.dataset.pin));
+  $("#unpin-all").addEventListener("click", () => { state.pinned = []; render(); });
+  $("#tidy-demo").addEventListener("click", () => { state.mode = "tidy"; state.tidyOpen = true; state.collapsed.delete("tasty"); render(); });
+  $("#foot-hidden").addEventListener("click", showAllHidden);
+  $("#foot-recent").addEventListener("click", () => { if (!state.closed.length) return; const c = state.closed.shift(); render(); toast(`Reopened ${c.name} in its folder.`); });
+
+  // open the clients group and Kittle by default, hide one chat so the shelf shows at rest
+  state.hidden.add("t3");
+  render();
+</script>
