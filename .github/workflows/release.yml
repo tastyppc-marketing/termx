@@ -25,15 +25,8 @@ jobs:
       - name: Install UI deps
         run: npm ci
         working-directory: ui
-      - name: Gates
-        shell: pwsh
-        run: |
-          Push-Location ui
-          npx tsc -p tsconfig.app.json --noEmit --incremental false; if ($LASTEXITCODE) { exit 1 }
-          npx vitest run; if ($LASTEXITCODE) { exit 1 }
-          Pop-Location
-          cargo test --workspace; if ($LASTEXITCODE) { exit 1 }
-          Push-Location ui/src-tauri; cargo test; if ($LASTEXITCODE) { exit 1 }; Pop-Location
+      # bundle.externalBin makes the sidecars a build prerequisite: tauri-build
+      # refuses to compile the Tauri crate (tests included) until they exist.
       - name: Build host binaries
         # termx-output is a second bin target of the termx-host package, not a package of its own.
         run: cargo build --release -p termx-host --bin termx-host --bin termx-output
@@ -43,6 +36,15 @@ jobs:
           New-Item -ItemType Directory -Force ui/src-tauri/binaries | Out-Null
           Copy-Item target/release/termx-host.exe ui/src-tauri/binaries/termx-host-x86_64-pc-windows-msvc.exe
           Copy-Item target/release/termx-output.exe ui/src-tauri/binaries/termx-output-x86_64-pc-windows-msvc.exe
+      - name: Gates
+        shell: pwsh
+        run: |
+          Push-Location ui
+          npx tsc -p tsconfig.app.json --noEmit --incremental false; if ($LASTEXITCODE) { exit 1 }
+          npx vitest run; if ($LASTEXITCODE) { exit 1 }
+          Pop-Location
+          cargo test --workspace; if ($LASTEXITCODE) { exit 1 }
+          Push-Location ui/src-tauri; cargo test; if ($LASTEXITCODE) { exit 1 }; Pop-Location
       - name: Build installer
         run: npx tauri build
         working-directory: ui

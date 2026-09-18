@@ -162,20 +162,32 @@ fn pid_is_termx_host(_pid: u32) -> Option<bool> {
     None
 }
 
+/// File names a sidecar may carry beside the UI exe: the bare name in a
+/// hand-assembled portable folder, then the target-triple names the Tauri
+/// bundler gives `externalBin` entries (tauri.conf.json) inside the installer.
+fn sidecar_names(stem: &str) -> [String; 3] {
+    [
+        format!("{stem}.exe"),
+        format!("{stem}-x86_64-pc-windows-msvc.exe"),
+        format!("{stem}-x86_64-pc-windows-gnu.exe"),
+    ]
+}
+
+/// First candidate name for `stem` that exists as a file in `dir`.
+fn find_sidecar(dir: &Path, stem: &str) -> Option<PathBuf> {
+    sidecar_names(stem)
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Locate `termx-host.exe`: bundled sidecar beside the UI first, then the
 /// workspace `target/{debug,release}` artifact for dev. Never searches PATH.
 pub fn resolve_host_exe() -> Result<PathBuf, String> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for name in [
-                "termx-host.exe",
-                "termx-host-x86_64-pc-windows-msvc.exe",
-                "termx-host-x86_64-pc-windows-gnu.exe",
-            ] {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
+            if let Some(found) = find_sidecar(dir, "termx-host") {
+                return Ok(found);
             }
         }
     }
@@ -216,6 +228,21 @@ pub fn resolve_host_exe() -> Result<PathBuf, String> {
     }
 
     Err("termx-host.exe not found beside the UI executable (dev builds also probe workspace target/{debug,release})".into())
+}
+
+/// Locate `termx-output.exe` the same way as the host: the installer ships it
+/// under its target-triple name beside the UI exe. No caller yet; the daemon
+/// restart and PATH exposure work will consume it.
+#[allow(dead_code)]
+pub fn resolve_output_exe() -> Result<PathBuf, String> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(found) = find_sidecar(dir, "termx-output") {
+                return Ok(found);
+            }
+        }
+    }
+    Err("termx-output.exe not found beside the UI executable".into())
 }
 
 fn spawn_host(host_exe: &Path, data_dir: &Path) -> Result<(), String> {
@@ -350,6 +377,29 @@ mod tests {
         assert_eq!(v["port"], 4242);
         assert_eq!(v["token"], "abc");
         assert!(v.as_object().unwrap().keys().all(|k| k == "port" || k == "token"));
+    }
+
+    #[test]
+    fn output_sidecar_resolves_under_its_bundled_triple_name() {
+        // The NSIS bundle installs externalBin entries under their target
+        // triple names; a hand-assembled portable folder uses the bare name.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(find_sidecar(tmp.path(), "termx-output").is_none());
+        let bundled = tmp.path().join("termx-output-x86_64-pc-windows-msvc.exe");
+        std::fs::write(&bundled, b"x").unwrap();
+        assert_eq!(find_sidecar(tmp.path(), "termx-output"), Some(bundled));
+        assert!(
+            find_sidecar(tmp.path(), "termx-host").is_none(),
+            "candidate names are per sidecar"
+        );
+        assert_eq!(
+            sidecar_names("termx-output"),
+            [
+                "termx-output.exe",
+                "termx-output-x86_64-pc-windows-msvc.exe",
+                "termx-output-x86_64-pc-windows-gnu.exe"
+            ]
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod artifacts;
 mod bootstrap;
 mod chat_feed;
+mod cleanup;
 mod file_view;
 mod folders;
 mod llm_sessions;
@@ -25,6 +26,13 @@ pub fn run() {
         // machine needs to be TOLD, so it can drop the socket before the freeze
         // and reconnect on wake instead of waiting on a corpse.
         .setup(|app| {
+            // The NSIS pre-install hook renames running sidecars to *.old
+            // instead of killing them; sweep those leftovers on every launch.
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    cleanup::remove_stale_binaries(dir);
+                }
+            }
             power::start(app.handle().clone());
             Ok(())
         })
@@ -51,6 +59,8 @@ pub fn run() {
             pane_agent_status::compact_conversation_captures,
             updates::check_for_updates,
             updates::open_update_release,
+            updates::download_update,
+            updates::install_update,
             llm_sessions::list_llm_sessions,
             llm_sessions::generate_session_note,
             llm_sessions::generate_session_bundle,

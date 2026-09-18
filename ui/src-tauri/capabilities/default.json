@@ -33,6 +33,8 @@
     "allow-compact-conversation-captures",
     "allow-check-for-updates",
     "allow-open-update-release",
+    "allow-download-update",
+    "allow-install-update",
     "allow-list-llm-sessions",
     "allow-generate-session-note",
     "allow-generate-session-bundle",

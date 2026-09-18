@@ -18,6 +18,8 @@ fn main() {
                 "compact_conversation_captures",
                 "check_for_updates",
                 "open_update_release",
+                "download_update",
+                "install_update",
                 "list_llm_sessions",
                 "generate_session_note",
                 "generate_session_bundle",
