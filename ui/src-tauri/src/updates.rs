@@ -241,10 +241,17 @@ fn download_args(tag: &str, asset_name: &str, dir: &Path) -> Vec<String> {
     .collect()
 }
 
-/// NSIS argv: `/S` is silent; `/D=<dir>` must be LAST and unquoted, even when
-/// the directory contains spaces.
+/// NSIS argv for Tauri's template: `/S` silent, `/UPDATE` skips the
+/// uninstall-previous step and the WebView2 check, `/R` relaunches TermX once
+/// the files are in place (the template's own `.onInstSuccess`), and `/D=<dir>`
+/// must be LAST and unquoted, even when the directory contains spaces.
 fn installer_args(install_dir: &Path) -> Vec<String> {
-    vec!["/S".to_owned(), format!("/D={}", install_dir.display())]
+    vec![
+        "/S".to_owned(),
+        "/UPDATE".to_owned(),
+        "/R".to_owned(),
+        format!("/D={}", install_dir.display()),
+    ]
 }
 
 /// Compare the file's SHA-256 with the release body's digest. A mismatch or an
@@ -579,6 +586,8 @@ termx-sha256: {}",
             args,
             vec![
                 "/S".to_owned(),
+                "/UPDATE".to_owned(),
+                "/R".to_owned(),
                 "/D=C:\\Users\\me\\AppData\\Local\\Programs\\TermX".to_owned()
             ]
         );

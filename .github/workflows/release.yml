@@ -63,10 +63,11 @@ jobs:
           Add-Content RELEASE-NOTES.md "`ntermx-sha256: $hash"
           # Clean slate: extract silently into a temp dir and inspect.
           $probe = Join-Path $env:RUNNER_TEMP "termx-probe"
-          Start-Process -FilePath (Resolve-Path $out) -ArgumentList "/S", "/D=$probe" -Wait
+          Start-Process -FilePath (Resolve-Path $out) -ArgumentList "/P", "/NS", "/D=$probe" -Wait
           $bad = Get-ChildItem $probe -Recurse | Where-Object { $_.Name -in @("portable.flag") -or $_.Extension -in @(".json", ".jsonl") -or ($_.PSIsContainer -and $_.Name -eq "data") }
           if ($bad) { $bad | ForEach-Object { Write-Host $_.FullName }; throw "installer carries state" }
-          foreach ($f in @("TermX.exe", "termx-host-x86_64-pc-windows-msvc.exe", "termx-output-x86_64-pc-windows-msvc.exe")) {
+          # Tauri installs the main binary under its crate name and the sidecars without the triple suffix.
+          foreach ($f in @("termx-ui.exe", "termx-host.exe", "termx-output.exe")) {
             if (-not (Test-Path (Join-Path $probe $f))) { throw "missing $f in installer" }
           }
           "asset=$out" >> $env:GITHUB_OUTPUT
