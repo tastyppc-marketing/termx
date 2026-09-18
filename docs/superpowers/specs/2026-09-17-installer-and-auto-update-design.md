@@ -335,3 +335,45 @@ that says exactly that, and the status bar pill's error text says it too when
   root, open a tab there; publish `0.3.1` optional → pill, banner, Later,
   relaunch installs; publish `0.3.2` forced with a host change → modal lists
   sessions, Update now, terminals restart, version shows `0.3.2` in About.
+
+## Implementation notes (2026-09-17)
+
+Facts confirmed by building the installer and installing it in passive mode
+on 2026-09-17. Where they differ from the text above, the code and these
+notes are right.
+
+- Tauri installs the main exe as `termx-ui.exe` (the crate name), not
+  `TermX.exe`. The sidecars install WITHOUT the target-triple suffix, as
+  `termx-host.exe` and `termx-output.exe`. The installed folder holds exactly
+  those three plus `uninstall.exe`; no data, no JSON. `bootstrap.rs` tries the
+  bare name first and the triple names after it, so both layouts resolve.
+- Per-user install under `%LOCALAPPDATA%\Programs\TermX` by default (NSIS
+  `currentUser` mode), as designed.
+- The NSIS pre-install hook (`ui/src-tauri/nsis/hooks.nsh`) renames the
+  installed names `termx-host.exe` and `termx-output.exe` to `.old`. There is
+  no post-install hook: relaunch after a silent update uses the Tauri NSIS
+  template's own `/R` flag. TermX runs the installer as
+  `/S /UPDATE /R /D=<install dir>`. The UI deletes `termx-host*.old` and
+  `termx-output*.old` beside itself at startup (`cleanup.rs`).
+- Release asset `TermX-Setup-<version>-x64.exe`, tag `v<version>`, body
+  lines `termx-update: force`, `termx-host: changed`, `termx-sha256: <hex>`.
+  The sha256 line is appended by CI; the other two are written by
+  `tools/release.ps1`.
+- `cargo test` and `cargo build` in `ui/src-tauri` require the sidecar files
+  at `ui/src-tauri/binaries/termx-host-x86_64-pc-windows-msvc.exe` and
+  `ui/src-tauri/binaries/termx-output-x86_64-pc-windows-msvc.exe`. Build them
+  at the repo root with `cargo build --release -p termx-host --bin termx-host --bin termx-output`
+  (termx-output is a second bin of the termx-host package, not a package) and
+  copy from `target/release/`. The folder is gitignored. CI stages them before
+  running the gates for this reason.
+- `tools/release.ps1` refuses a dirty tree, refuses unless the current branch
+  is `main`, refuses an existing tag (local or on origin), and runs
+  `tools/version.ps1` plus the version-sync vitest before committing
+  `chore(release): vX.Y.Z`, tagging and pushing. CI then builds, probes the
+  installer in passive mode (`/P /NS /D=<temp>`) and publishes.
+- Snooze: "Later" stores `updates.snoozedVersion` and only suppresses the
+  launch auto-install of that version. There is no 24 h expiry in the code,
+  and the banner stays visible for the rest of the session.
+- The status-bar pill's error label is always "Updates unavailable"; the
+  specific message (for example the gh sign-in text) is in its tooltip with
+  "Click to retry". The forced modal shows the message inline.

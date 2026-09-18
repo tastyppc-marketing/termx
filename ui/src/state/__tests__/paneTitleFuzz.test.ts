@@ -59,7 +59,7 @@ describe("a pane keeps its name through any sequence of layout operations", () =
   const SEQUENCES = 240;
   const STEPS = 24;
 
-  it(`holds every pane's name across ${SEQUENCES} random sequences`, () => {
+  it(`holds every pane's name across ${SEQUENCES} random sequences`, { timeout: 30_000 }, () => {
     for (let seed = 1; seed <= SEQUENCES; seed++) {
       const random = mulberry32(seed);
       const pick = <T>(items: readonly T[]): T | undefined =>

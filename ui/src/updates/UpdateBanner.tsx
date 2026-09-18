@@ -9,6 +9,8 @@ import "./updates.css";
 
 export interface UpdateBannerProps {
   update: UpdateState;
+  /** The version "Later" was pressed on; the banner stays hidden for it. */
+  snoozedVersion: string | null;
   onInstall(): void;
   /** "Later": snooze this version until a newer one appears. */
   onLater(): void;
@@ -16,8 +18,8 @@ export interface UpdateBannerProps {
   onNotes(): void;
 }
 
-export function UpdateBanner({ update, onInstall, onLater, onNotes }: UpdateBannerProps) {
-  if (update.kind !== "ready" || update.result.forced) {
+export function UpdateBanner({ update, snoozedVersion, onInstall, onLater, onNotes }: UpdateBannerProps) {
+  if (update.kind !== "ready" || update.result.forced || update.result.latestVersion === snoozedVersion) {
     return null;
   }
   return (

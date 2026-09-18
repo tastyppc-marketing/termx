@@ -4,6 +4,16 @@ A stable, Warp-like terminal manager for Windows. Sessions live in a tiny Rust
 daemon (`termx-host`) and survive UI crashes; the UI (Tauri, Milestone 2) is
 disposable by design.
 
+## Install
+
+Download the newest `TermX-Setup-<version>-x64.exe` from
+https://github.com/tastyppc-marketing/termx/releases (the repository is
+private, so sign in to GitHub with an invited account first) and run it. The
+installer is unsigned: when Windows shows "Windows protected your PC", click
+"More info", then "Run anyway". It installs per-user under
+`%LOCALAPPDATA%\Programs\TermX` with no admin prompt. Run `gh auth login`
+once so TermX can fetch later updates by itself; see `docs/updates.md`.
+
 ## Status
 
 - [x] M1 — host core: ConPTY sessions, authenticated localhost WebSocket,

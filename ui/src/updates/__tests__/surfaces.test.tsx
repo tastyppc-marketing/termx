@@ -21,10 +21,15 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
 describe("UpdateBanner", () => {
+  it("stays hidden for the version Later was pressed on", async () => {
+    const update: UpdateState = { kind: "ready", result, installerPath: "C:\\x.exe" };
+    await act(async () => root.render(<UpdateBanner update={update} snoozedVersion="0.3.0" onInstall={vi.fn()} onLater={vi.fn()} onNotes={vi.fn()} />));
+    expect(host.textContent).toBe("");
+  });
   it("shows for a ready optional update and offers Install / Later", async () => {
     const onInstall = vi.fn(); const onLater = vi.fn(); const onNotes = vi.fn();
     const update: UpdateState = { kind: "ready", result, installerPath: "C:\\x.exe" };
-    await act(async () => root.render(<UpdateBanner update={update} onInstall={onInstall} onLater={onLater} onNotes={onNotes} />));
+    await act(async () => root.render(<UpdateBanner snoozedVersion={null} update={update} onInstall={onInstall} onLater={onLater} onNotes={onNotes} />));
     expect(host.textContent).toContain("TermX 0.3.0 is ready");
     expect(host.querySelector('[role="status"]')).not.toBeNull();
     await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="update-later"]')!.click());
@@ -35,11 +40,11 @@ describe("UpdateBanner", () => {
     expect(onNotes).toHaveBeenCalledOnce();
   });
   it("renders nothing while downloading, for forced results, or when current", async () => {
-    await act(async () => root.render(<UpdateBanner update={{ kind: "downloading", result }} onInstall={vi.fn()} onLater={vi.fn()} onNotes={vi.fn()} />));
+    await act(async () => root.render(<UpdateBanner snoozedVersion={null} update={{ kind: "downloading", result }} onInstall={vi.fn()} onLater={vi.fn()} onNotes={vi.fn()} />));
     expect(host.textContent).toBe("");
-    await act(async () => root.render(<UpdateBanner update={{ kind: "ready", result: { ...result, forced: true }, installerPath: "x" }} onInstall={vi.fn()} onLater={vi.fn()} onNotes={vi.fn()} />));
+    await act(async () => root.render(<UpdateBanner snoozedVersion={null} update={{ kind: "ready", result: { ...result, forced: true }, installerPath: "x" }} onInstall={vi.fn()} onLater={vi.fn()} onNotes={vi.fn()} />));
     expect(host.textContent).toBe("");
-    await act(async () => root.render(<UpdateBanner update={{ kind: "checked", result: { ...result, status: "current" } }} onInstall={vi.fn()} onLater={vi.fn()} onNotes={vi.fn()} />));
+    await act(async () => root.render(<UpdateBanner snoozedVersion={null} update={{ kind: "checked", result: { ...result, status: "current" } }} onInstall={vi.fn()} onLater={vi.fn()} onNotes={vi.fn()} />));
     expect(host.textContent).toBe("");
   });
 });

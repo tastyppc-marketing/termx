@@ -1664,7 +1664,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         onRetry={() => connection?.retryNow()}
       />
       <ThemeProvider themeId={settings.theme} />
-      <UpdateBanner update={updates.update} onInstall={installUpdate} onLater={updates.snooze} onNotes={() => void updates.open()} />
+      <UpdateBanner update={updates.update} snoozedVersion={uiSnapshot.updates?.snoozedVersion ?? null} onInstall={installUpdate} onLater={updates.snooze} onNotes={() => void updates.open()} />
       <HostRestartBanner open={hostRestartDue} liveCount={liveSessionCountNow} onRestart={restartHost} error={hostRestartError} />
       <div className="app-workspace">
         {/* Hidden from the View menu, and only ever from there: the bar the

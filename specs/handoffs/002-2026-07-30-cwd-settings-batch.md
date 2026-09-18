@@ -1794,3 +1794,10 @@ Click-test: name a tab, split it → the first pane's header keeps the tab name,
 - **Menubar**: Settings stays a direct item (tests rely on it); About lives in a new "Help" menu; App.menubar test label list updated.
 - **Open**: docs agent (RELEASE.md rewrite, docs/updates.md, README Install, spec implementation notes) → commit when it reports. First release: Michael runs `powershell -NoProfile -File tools\release.ps1 -Version 0.3.0 [-Notes <file>]` FROM `main` (script refuses other branches; local main == feat branch tip now) then watches Actions; the workflow needs no secrets (uses github.token). Michael's click-test per spec. Scratch leftovers my hooks refuse to delete: `<scratchpad>\rel-test`, `bare.git`, `lec.ps1`, `termx-probe`.
 - Ibrahim (IbrahimAhmed2594) invited (write), pending acceptance.
+
+### later-45g (2026-09-17 18:05) — DONE: docs committed; "Later" now hides the banner; fuzz test given a 30 s budget
+
+- Docs: `docs/RELEASE.md` (rewritten around the pipeline), `docs/updates.md` (new), README Install section, spec "Implementation notes" (installed names: termx-ui.exe / termx-host.exe / termx-output.exe; Later = snooze only; status label "Updates unavailable" with detail in tooltip).
+- Fix: `UpdateBanner` takes `snoozedVersion` and hides for it (test added); App passes `uiSnapshot.updates?.snoozedVersion`.
+- Flake root cause: `paneTitleFuzz.test.ts` ran 5.8 s under full-suite load vs vitest's 5 s default (1.4 s solo) → explicit `{ timeout: 30_000 }`. This is the "one-off failure" flagged on 09-15.
+- Final gate: tsc 0; vitest 168 files / 2571 tests. NEXT = Michael: (1) Ibrahim accepts the invite; (2) `git checkout main` (== feat tip) then `powershell -NoProfile -File tools\release.ps1 -Version 0.3.0` and watch Actions; (3) click-test per spec.
