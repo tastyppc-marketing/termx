@@ -44,7 +44,12 @@ describe("SETTINGS_SECTIONS", () => {
     const byId = Object.fromEntries(
       SETTINGS_SECTIONS.map((section) => [section.id, section.fields]),
     );
-    expect(byId.general).toEqual(["onWindowClose", "sleepHiddenTerminals"]);
+    expect(byId.general).toEqual([
+      "workspaceRoot",
+      "updatePolicy",
+      "onWindowClose",
+      "sleepHiddenTerminals",
+    ]);
     expect(byId.appearance).toEqual(["theme", "sideRail", "statusBar"]);
     expect(byId.terminal).toEqual([
       "defaultProfile",

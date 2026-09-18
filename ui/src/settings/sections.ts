@@ -35,7 +35,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "general",
     label: "General",
-    fields: ["onWindowClose", "sleepHiddenTerminals"],
+    fields: ["workspaceRoot", "updatePolicy", "onWindowClose", "sleepHiddenTerminals"],
   },
   {
     id: "appearance",

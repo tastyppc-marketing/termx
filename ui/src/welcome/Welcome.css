@@ -1,0 +1,105 @@
+/* First-run welcome. Same backdrop and dialog tokens as CloseGuard, one
+   step wider for the folder row. */
+
+.welcome-backdrop {
+  position: fixed;
+  z-index: 200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 62%);
+  backdrop-filter: blur(3px);
+}
+
+.welcome {
+  width: min(480px, calc(100% - 32px));
+  padding: 20px;
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
+}
+
+.welcome:focus {
+  outline: none;
+}
+
+.welcome__title {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.welcome__body {
+  margin: 0 0 16px;
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.welcome__row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  margin-bottom: 16px;
+}
+
+.welcome__path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+.welcome__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.welcome__choose,
+.welcome__actions button {
+  min-height: 34px;
+  padding: 0 16px;
+  font: inherit;
+  color: var(--text-main);
+  cursor: pointer;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.welcome__actions .welcome__primary {
+  color: var(--bg);
+  font-weight: 600;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.welcome__actions .welcome__primary:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.welcome__hint {
+  margin: 16px 0 0;
+  color: var(--text-hint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.welcome__hint code {
+  font-family: var(--font-mono, monospace);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome__choose,
+  .welcome__actions button {
+    transition: none;
+  }
+}

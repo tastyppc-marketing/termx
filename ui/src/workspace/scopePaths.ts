@@ -74,12 +74,18 @@ export function dropScope(state: ScopePathsState, key: ScopeKey): ScopePathsStat
  * Ordered cwd candidates for a plain new tab under a non-ask policy. The
  * chain always ends with null (host default dir) so creation can never fail
  * on a stale path alone; callers try candidates in order.
+ *
+ * The workspace root (Settings > General) sits just before that final null
+ * under every policy: it is where a terminal opens when nothing about the
+ * tab or group has decided otherwise, never a stronger claim than a folder
+ * the user has already been working in.
  */
 export function newTabCwdCandidates(
   state: ScopePathsState,
   key: ScopeKey,
   policy: Exclude<NewTabPolicy, "ask-searcher" | "ask-native">,
   activeTabCwd: string | null,
+  workspaceRoot: string | null,
 ): ReadonlyArray<string | null> {
   const chain: Array<string | null> = [];
   if (policy === "active-tab") {
@@ -88,7 +94,7 @@ export function newTabCwdCandidates(
   if (policy === "active-tab" || policy === "group-active") {
     chain.push(state.active[key] ?? null);
   }
-  chain.push(state.seeds[key] ?? null, null);
+  chain.push(state.seeds[key] ?? null, workspaceRoot, null);
   const seen = new Set<string>();
   return chain.filter((candidate) => {
     if (candidate === null) {

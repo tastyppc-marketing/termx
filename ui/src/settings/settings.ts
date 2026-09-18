@@ -61,7 +61,19 @@ export const SSH_PASSWORD_POLICIES = ["store", "never"] as const;
 
 export type SshPasswordPolicy = (typeof SSH_PASSWORD_POLICIES)[number];
 
+/** "auto": optional updates install at the next launch. "ask": offer only. */
+export const UPDATE_POLICIES = ["auto", "ask"] as const;
+
+export type UpdatePolicy = (typeof UPDATE_POLICIES)[number];
+
+/** Longest workspace root honoured; anything longer parses as "not set". */
+export const WORKSPACE_ROOT_MAX = 1024;
+
 export interface TermxSettings {
+  /** Folder every new terminal starts in when nothing else decides. Null until the user picks one. */
+  readonly workspaceRoot: string | null;
+  /** "auto": optional updates download in the background and install at the next launch. "ask": offer only. Forced updates ignore this. */
+  readonly updatePolicy: UpdatePolicy;
   /** Where a plain "new tab" opens. Default: follow the group's CDs. */
   readonly newTabPolicy: NewTabPolicy;
   /** Inject the OSC 9;9 prompt hook into spawned shells (cd tracking). */
@@ -131,6 +143,8 @@ export const TERMINAL_FONT_SIZE_MIN = 8;
 export const TERMINAL_FONT_SIZE_MAX = 32;
 
 export const DEFAULT_SETTINGS: TermxSettings = {
+  workspaceRoot: null,
+  updatePolicy: "auto",
   newTabPolicy: "group-active",
   shellIntegration: true,
   defaultProfile: "powershell",
@@ -214,6 +228,18 @@ function isSshPasswordPolicy(value: unknown): value is SshPasswordPolicy {
   return (SSH_PASSWORD_POLICIES as readonly unknown[]).includes(value);
 }
 
+function isUpdatePolicy(value: unknown): value is UpdatePolicy {
+  return (UPDATE_POLICIES as readonly unknown[]).includes(value);
+}
+
+function parseWorkspaceRoot(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= WORKSPACE_ROOT_MAX
+    ? value
+    : null;
+}
+
 /** Parse settings text (null = missing file). Never throws. */
 export function parseSettings(text: string | null): TermxSettings {
   if (text === null) {
@@ -230,6 +256,10 @@ export function parseSettings(text: string | null): TermxSettings {
   }
   const record = raw as Record<string, unknown>;
   return {
+    workspaceRoot: parseWorkspaceRoot(record.workspaceRoot),
+    updatePolicy: isUpdatePolicy(record.updatePolicy)
+      ? record.updatePolicy
+      : DEFAULT_SETTINGS.updatePolicy,
     newTabPolicy: isNewTabPolicy(record.newTabPolicy)
       ? record.newTabPolicy
       : DEFAULT_SETTINGS.newTabPolicy,

@@ -13,6 +13,8 @@ import { SettingsStore, loadSettingsStore } from "../SettingsStore";
  * change-of-one-field update (the maxGroupDepth-swallow bug class).
  */
 const ALTERNATE_SETTINGS: TermxSettings = {
+  workspaceRoot: "C:\Alt",
+  updatePolicy: "ask",
   newTabPolicy: "ask-native",
   shellIntegration: false,
   defaultProfile: "cmd",
@@ -53,6 +55,8 @@ describe("parseSettings", () => {
 
   it("round-trips a full settings object", () => {
     const settings = {
+      workspaceRoot: "C:\Work",
+      updatePolicy: "ask",
       newTabPolicy: "ask-searcher",
       shellIntegration: false,
       defaultProfile: "cmd",
@@ -113,6 +117,8 @@ describe("parseSettings", () => {
       }),
     );
     expect(parsed).toEqual({
+      workspaceRoot: DEFAULT_SETTINGS.workspaceRoot,
+      updatePolicy: DEFAULT_SETTINGS.updatePolicy,
       newTabPolicy: DEFAULT_SETTINGS.newTabPolicy,
       shellIntegration: DEFAULT_SETTINGS.shellIntegration,
       defaultProfile: "cmd",
@@ -644,5 +650,38 @@ describe("loadSettingsStore", () => {
     store.update({ defaultProfile: "cmd" });
     await store.flush();
     expect(save).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("workspaceRoot and updatePolicy", () => {
+  it("default to null and auto", () => {
+    expect(DEFAULT_SETTINGS.workspaceRoot).toBeNull();
+    expect(DEFAULT_SETTINGS.updatePolicy).toBe("auto");
+  });
+  it("round-trip a chosen root and policy", () => {
+    const text = serializeSettings({
+      ...DEFAULT_SETTINGS,
+      workspaceRoot: "C:\Work",
+      updatePolicy: "ask",
+    });
+    const parsed = parseSettings(text);
+    expect(parsed.workspaceRoot).toBe("C:\Work");
+    expect(parsed.updatePolicy).toBe("ask");
+  });
+  it("reject junk without touching the rest", () => {
+    const parsed = parseSettings(
+      JSON.stringify({
+        workspaceRoot: 42,
+        updatePolicy: "yolo",
+        theme: DEFAULT_SETTINGS.theme,
+      }),
+    );
+    expect(parsed.workspaceRoot).toBeNull();
+    expect(parsed.updatePolicy).toBe("auto");
+  });
+  it("caps an absurd root at 1024 chars by falling back to null", () => {
+    expect(
+      parseSettings(JSON.stringify({ workspaceRoot: "x".repeat(1025) })).workspaceRoot,
+    ).toBeNull();
   });
 });

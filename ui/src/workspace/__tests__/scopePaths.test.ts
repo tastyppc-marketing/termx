@@ -59,7 +59,7 @@ describe("scopePaths", () => {
   it("group-active candidates: active, then seed, then null", () => {
     let state = seedScope(EMPTY_SCOPE_PATHS, "g1", "C:\\Seed");
     state = reportScopeCwd(state, "g1", "C:\\Active");
-    expect(newTabCwdCandidates(state, "g1", "group-active", null)).toEqual([
+    expect(newTabCwdCandidates(state, "g1", "group-active", null, null)).toEqual([
       "C:\\Active",
       "C:\\Seed",
       null,
@@ -68,7 +68,7 @@ describe("scopePaths", () => {
 
   it("active-tab candidates lead with the focused tab's cwd", () => {
     const state = reportScopeCwd(EMPTY_SCOPE_PATHS, "g1", "C:\\Active");
-    expect(newTabCwdCandidates(state, "g1", "active-tab", "C:\\Focused")).toEqual([
+    expect(newTabCwdCandidates(state, "g1", "active-tab", "C:\\Focused", null)).toEqual([
       "C:\\Focused",
       "C:\\Active",
       null,
@@ -78,7 +78,7 @@ describe("scopePaths", () => {
   it("first-terminal candidates ignore the active path", () => {
     let state = seedScope(EMPTY_SCOPE_PATHS, "g1", "C:\\Seed");
     state = reportScopeCwd(state, "g1", "C:\\Active");
-    expect(newTabCwdCandidates(state, "g1", "first-terminal", null)).toEqual([
+    expect(newTabCwdCandidates(state, "g1", "first-terminal", null, null)).toEqual([
       "C:\\Seed",
       null,
     ]);
@@ -87,13 +87,33 @@ describe("scopePaths", () => {
   it("deduplicates case-insensitively and always ends with null", () => {
     let state = seedScope(EMPTY_SCOPE_PATHS, "g1", "c:\\dev");
     state = reportScopeCwd(state, "g1", "C:\\DEV");
-    expect(newTabCwdCandidates(state, "g1", "group-active", null)).toEqual([
+    expect(newTabCwdCandidates(state, "g1", "group-active", null, null)).toEqual([
       "C:\\DEV",
       null,
     ]);
-    expect(newTabCwdCandidates(EMPTY_SCOPE_PATHS, "gX", "group-active", null)).toEqual([
+    expect(newTabCwdCandidates(EMPTY_SCOPE_PATHS, "gX", "group-active", null, null)).toEqual([
       null,
     ]);
+  });
+
+  it("every policy falls back on the workspace root before the host default", () => {
+    const state = reportScopeCwd(EMPTY_SCOPE_PATHS, "g1", "C:\\Active");
+    expect(
+      newTabCwdCandidates(state, "g1", "group-active", null, "C:\\Root"),
+    ).toEqual(["C:\\Active", "C:\\Root", null]);
+    expect(
+      newTabCwdCandidates(EMPTY_SCOPE_PATHS, "g1", "first-terminal", null, "C:\\Root"),
+    ).toEqual(["C:\\Root", null]);
+    expect(
+      newTabCwdCandidates(EMPTY_SCOPE_PATHS, "g1", "active-tab", null, "C:\\Root"),
+    ).toEqual(["C:\\Root", null]);
+  });
+
+  it("dedupes the root against an equal active path", () => {
+    const state = reportScopeCwd(EMPTY_SCOPE_PATHS, "g1", "c:\\root");
+    expect(
+      newTabCwdCandidates(state, "g1", "group-active", null, "C:\\ROOT"),
+    ).toEqual(["c:\\root", null]);
   });
 });
 

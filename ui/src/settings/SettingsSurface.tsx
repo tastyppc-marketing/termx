@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import type { FolderPicker } from "../native/dialog";
 import type { PluginSurface } from "../plugins/manifest";
 import type { PluginNative } from "../plugins/native";
 import type { PluginsStore } from "../plugins/registry";
@@ -35,6 +36,7 @@ import {
   type SummaryDisplay,
   type SummaryEngine,
   type TermxSettings,
+  type UpdatePolicy,
 } from "./settings";
 import { useSettings } from "./useSettings";
 import "./SettingsSurface.css";
@@ -71,6 +73,12 @@ export interface SettingsSurfaceProps {
    * it rather than on General with a hunt to follow.
    */
   section?: SettingsSectionId;
+  /**
+   * Native folder picker for the workspace root. Omitted where no dialog can
+   * open (tests, plain browser): the Choose button then renders disabled
+   * rather than throwing on click.
+   */
+  pickFolder?: FolderPicker;
 }
 
 interface LadderOption<T> {
@@ -104,6 +112,19 @@ const POLICY_OPTIONS: ReadonlyArray<LadderOption<NewTabPolicy>> = [
     value: "ask-native",
     label: "Ask every time — system dialog",
     hint: "Opens the Windows folder browser for each new terminal.",
+  },
+];
+
+const UPDATE_POLICY_OPTIONS: ReadonlyArray<LadderOption<UpdatePolicy>> = [
+  {
+    value: "auto",
+    label: "Install at next launch",
+    hint: "Downloads in the background; installs when you next open TermX.",
+  },
+  {
+    value: "ask",
+    label: "Ask me",
+    hint: "Shows the update and waits for you to click Install.",
   },
 ];
 
@@ -242,6 +263,7 @@ export function SettingsSurface({
   onClose,
   plugins,
   section,
+  pickFolder,
 }: SettingsSurfaceProps) {
   const settings = useSettings(store);
   const rootRef = useRef<HTMLElement | null>(null);
@@ -367,6 +389,7 @@ export function SettingsSurface({
                   field={field}
                   settings={settings}
                   onChange={store.update}
+                  {...(pickFolder ? { pickFolder } : {})}
                 />
               </div>
             ))
@@ -417,12 +440,69 @@ function SettingsControl({
   field,
   settings,
   onChange,
+  pickFolder,
 }: {
   field: keyof TermxSettings;
   settings: TermxSettings;
   onChange(patch: Partial<TermxSettings>): void;
+  pickFolder?: FolderPicker;
 }) {
   switch (field) {
+    case "workspaceRoot":
+      return (
+        <div>
+          <div className="settings-row">
+            <span className="settings-row__label">Workspace folder</span>
+            <span
+              className="settings-row__value"
+              data-testid="workspace-root-value"
+            >
+              {settings.workspaceRoot ?? "Not set"}
+            </span>
+            <button
+              type="button"
+              className="settings-row__button"
+              disabled={!pickFolder}
+              onClick={() => {
+                void pickFolder?.({
+                  title: "Choose your workspace folder",
+                  ...(settings.workspaceRoot
+                    ? { defaultPath: settings.workspaceRoot }
+                    : {}),
+                }).then((picked) => {
+                  if (picked) {
+                    onChange({ workspaceRoot: picked });
+                  }
+                });
+              }}
+            >
+              Choose…
+            </button>
+            {settings.workspaceRoot ? (
+              <button
+                type="button"
+                className="settings-row__button"
+                onClick={() => onChange({ workspaceRoot: null })}
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
+          <p className="settings-section__note">
+            New terminals open here unless a tab or group already has a folder.
+          </p>
+        </div>
+      );
+    case "updatePolicy":
+      return (
+        <RadioLadder
+          name="updatePolicy"
+          title="Optional updates"
+          options={UPDATE_POLICY_OPTIONS}
+          value={settings.updatePolicy}
+          onPick={(value) => onChange({ updatePolicy: value })}
+        />
+      );
     case "onWindowClose":
       return (
         <RadioLadder

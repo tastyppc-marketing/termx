@@ -15,12 +15,19 @@ import {
 
 export interface SettingsStoreOptions {
   initial?: TermxSettings;
+  /** True when no settings file existed at load (a first run). Default false. */
+  wasCreated?: boolean;
   /** Persist serialized settings; omitted = in-memory only (tests, fallback). */
   save?: (text: string) => Promise<void>;
   onSaveError?: (error: unknown) => void;
 }
 
 export class SettingsStore {
+  /**
+   * Whether this store was built from a missing file rather than a saved
+   * one. The first-run welcome keys off it; nothing else should.
+   */
+  readonly wasCreated: boolean;
   private current: TermxSettings;
   private readonly save?: (text: string) => Promise<void>;
   private readonly onSaveError?: (error: unknown) => void;
@@ -29,6 +36,7 @@ export class SettingsStore {
 
   constructor(options: SettingsStoreOptions = {}) {
     this.current = options.initial ?? DEFAULT_SETTINGS;
+    this.wasCreated = options.wasCreated ?? false;
     if (options.save) {
       this.save = options.save;
     }
@@ -63,17 +71,31 @@ export class SettingsStore {
     for (const listener of [...this.listeners]) {
       listener();
     }
+    this.enqueueSave(next);
+  };
+
+  /**
+   * Persist the current settings as they are, changed or not. `update`
+   * ignores no-op patches by design, so this is the one way to make sure the
+   * file exists (the welcome screen's Skip: the file's presence is what stops
+   * the screen from returning). Notifies nobody; the value did not change.
+   */
+  touch = (): void => {
+    this.enqueueSave(this.current);
+  };
+
+  private enqueueSave(settings: TermxSettings): void {
     const save = this.save;
     if (!save) {
       return;
     }
-    const text = serializeSettings(next);
+    const text = serializeSettings(settings);
     this.saveChain = this.saveChain
       .then(() => save(text))
       .catch((error) => {
         this.onSaveError?.(error);
       });
-  };
+  }
 
   /** Awaits all queued saves (tests and teardown). */
   flush = (): Promise<void> => this.saveChain;
@@ -96,6 +118,7 @@ export async function loadSettingsStore(options: {
   }
   return new SettingsStore({
     initial: parseSettings(text),
+    wasCreated: text === null,
     ...(options.save ? { save: options.save } : {}),
     ...(options.onSaveError ? { onSaveError: options.onSaveError } : {}),
   });
