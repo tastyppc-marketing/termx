@@ -146,6 +146,24 @@ export function workspaceMenu(deps: WorkspaceMenuDeps): readonly MenuRow[] {
   ];
 }
 
+export interface HelpMenuDeps {
+  openAbout(): void;
+}
+
+/**
+ * "About TermX…": the row the Settings menu ends on. Always enabled, never
+ * bound to a key, so it prints nothing in the shortcut column.
+ */
+export function aboutRow(deps: HelpMenuDeps): MenuItemModel {
+  return {
+    kind: "item",
+    id: "about",
+    label: "About TermX…",
+    disabled: false,
+    onSelect: () => deps.openAbout(),
+  };
+}
+
 /** The chrome toggles the View menu owns, by settings field. */
 export type ViewToggleField = "sideRail" | "conversationsRail" | "statusBar";
 

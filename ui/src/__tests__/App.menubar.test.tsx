@@ -240,7 +240,7 @@ describe("App — the menubar in the header", () => {
       [...container.querySelectorAll(".menubar__item")].map(
         (item) => item.textContent?.replace("▾", "").trim(),
       ),
-    ).toEqual(["Workspace", "View", "Plugins", "Settings"]);
+    ).toEqual(["Workspace", "View", "Plugins", "Settings", "Help"]);
   });
 });
 

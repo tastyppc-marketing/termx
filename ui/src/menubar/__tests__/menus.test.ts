@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   EXISTING_SHORTCUTS,
+  aboutRow,
   viewMenu,
   workspaceMenu,
   type MenuItemModel,
@@ -168,6 +169,18 @@ describe("workspaceMenu", () => {
     // reason to grey it: there is nothing it needs that is not already there.
     expect(byId(noSave, "new-window").disabled).toBe(false);
     expect(byId(noSave, "rename-window").disabled).toBe(false);
+  });
+});
+
+describe("aboutRow", () => {
+  it("is an always-enabled row with no invented shortcut that opens About", () => {
+    const openAbout = vi.fn();
+    const row = aboutRow({ openAbout });
+    expect(row).toMatchObject({ kind: "item", id: "about", label: "About TermX…", disabled: false });
+    expect(row.shortcut).toBeUndefined();
+    expect(row.state).toBeUndefined();
+    row.onSelect();
+    expect(openAbout).toHaveBeenCalledOnce();
   });
 });
 

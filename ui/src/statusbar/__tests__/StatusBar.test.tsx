@@ -57,6 +57,7 @@ describe("StatusBar", () => {
     await render(<StatusBar cwd={null} profile={null} sshHost={null} onCheckUpdates={onCheckUpdates}
       onOpenUpdate={onOpenUpdate} update={{ kind: "checked", result: {
         status: "available", currentVersion: "0.2.0", latestVersion: "0.3.0", releaseTag: "v0.3.0",
+        forced: false, hostChanged: false, sha256: null, assetName: null, notesUrl: null,
       } }} />);
     const button = container.querySelector<HTMLButtonElement>('[data-testid="status-bar-update"]')!;
     expect(button.textContent).toContain("Update 0.3.0"); await click(button);
@@ -66,6 +67,27 @@ describe("StatusBar", () => {
     expect(button.textContent).toBe("Updates unavailable");
     expect(button.title).toContain("GitHub could not be reached");
     await click(button); expect(onCheckUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("names the downloaded update as ready and hands its click to the installer", async () => {
+    const onCheckUpdates = vi.fn(); const onOpenUpdate = vi.fn();
+    const result = { status: "available" as const, currentVersion: "0.2.0", latestVersion: "0.3.0", releaseTag: "v0.3.0",
+      forced: false, hostChanged: false, sha256: "a".repeat(64), assetName: "TermX-Setup-0.3.0-x64.exe", notesUrl: null };
+    await render(<StatusBar cwd={null} profile={null} sshHost={null} onCheckUpdates={onCheckUpdates}
+      onOpenUpdate={onOpenUpdate} update={{ kind: "ready", result, installerPath: "C:\\x.exe" }} />);
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="status-bar-update"]')!;
+    expect(button.textContent).toBe("Update 0.3.0 ready");
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(onOpenUpdate).toHaveBeenCalledOnce(); expect(onCheckUpdates).not.toHaveBeenCalled();
+    await render(<StatusBar cwd={null} profile={null} sshHost={null} onCheckUpdates={onCheckUpdates}
+      onOpenUpdate={onOpenUpdate} update={{ kind: "downloading", result }} />);
+    expect(button.textContent).toBe("Downloading 0.3.0…");
+    expect(button.disabled).toBe(true);
+    await render(<StatusBar cwd={null} profile={null} sshHost={null} onCheckUpdates={onCheckUpdates}
+      onOpenUpdate={onOpenUpdate} update={{ kind: "installing", result }} />);
+    expect(button.textContent).toBe("Installing…");
+    expect(button.disabled).toBe(true);
   });
   it("shows the focused pane's working directory in full", async () => {
     const cwd = "C:\\Users\\mjfos\\code\\seo-service-builder\\output\\fetterplaceco";

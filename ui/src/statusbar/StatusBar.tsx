@@ -59,12 +59,23 @@ export function StatusBar({ cwd, profile, sshHost, onOpenCwd, model, appVersion,
   );
 
   const available = update?.kind === "checked" && update.result.status === "available";
+  const ready = update?.kind === "ready";
+  const busy = update?.kind === "checking" || update?.kind === "downloading" || update?.kind === "installing";
   const updateLabel = update?.kind === "checking" ? "Checking updates…"
     : update?.kind === "error" ? "Updates unavailable"
+    : update?.kind === "downloading" ? `Downloading ${update.result.latestVersion}…`
+    : update?.kind === "ready" ? `Update ${update.result.latestVersion} ready`
+    : update?.kind === "installing" ? "Installing…"
     : update?.kind === "checked" ? update.result.status === "available"
       ? `Update ${update.result.latestVersion}`
       : update.result.status === "no-release" ? "No published release" : "Up to date"
     : "Check updates";
+  const updateTitle = update?.kind === "error" ? `${update.message}. Click to retry.`
+    : ready ? "Install the update and reopen TermX"
+    : available ? "Download the update"
+    : update?.kind === "downloading" ? "Downloading the installer"
+    : update?.kind === "installing" ? "Installing the update"
+    : "Check GitHub for a TermX update";
   return (
     <footer className="status-bar" data-testid="status-bar">
       {cwd !== null && onOpenCwd ? <button
@@ -93,11 +104,10 @@ export function StatusBar({ cwd, profile, sshHost, onOpenCwd, model, appVersion,
       {chips}
       {appVersion ? <span className="status-bar__version" data-testid="status-bar-version">TermX {appVersion}</span> : null}
       {onCheckUpdates || onOpenUpdate ? <button type="button"
-        className={`status-bar__action${available ? " status-bar__action--update" : ""}`}
-        data-testid="status-bar-update" disabled={update?.kind === "checking"}
-        title={update?.kind === "error" ? `${update.message}. Click to retry.`
-          : available ? "Open the GitHub release to download the update" : "Check GitHub for a TermX update"}
-        onClick={available ? onOpenUpdate : onCheckUpdates}>{updateLabel}</button> : null}
+        className={`status-bar__action${available || ready ? " status-bar__action--update" : ""}`}
+        data-testid="status-bar-update" disabled={busy}
+        title={updateTitle}
+        onClick={available || ready ? onOpenUpdate : onCheckUpdates}>{updateLabel}</button> : null}
     </footer>
   );
 }

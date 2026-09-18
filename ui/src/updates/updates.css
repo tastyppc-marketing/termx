@@ -1,0 +1,165 @@
+/* Update surfaces: optional banner, forced modal, host-restart banner, About. */
+
+.update-banner,
+.host-restart-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  color: var(--text-main);
+  font-size: 12px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  border-bottom: 1px solid var(--border);
+}
+
+.host-restart-banner {
+  background: color-mix(in srgb, var(--danger-border) 14%, var(--surface-2));
+}
+
+.update-banner__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.update-banner__actions button,
+.host-restart-banner__button,
+.forced-update__actions button,
+.about-dialog__actions button {
+  min-height: 28px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.update-banner__install,
+.host-restart-banner__button,
+.forced-update__primary {
+  color: var(--bg);
+  font-weight: 600;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.forced-update__primary:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.update-banner__later,
+.about-dialog__close {
+  color: var(--text-main);
+  background: transparent;
+  border: 1px solid var(--border);
+}
+
+.update-banner__later:hover,
+.about-dialog__close:hover {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+.update-link {
+  padding: 0 4px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid transparent;
+  text-decoration: underline;
+}
+
+.host-restart-banner__error {
+  color: var(--text-sub);
+}
+
+.forced-update-backdrop,
+.about-backdrop {
+  position: fixed;
+  z-index: 210;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 62%);
+  backdrop-filter: blur(3px);
+}
+
+.forced-update,
+.about-dialog {
+  width: min(440px, calc(100% - 32px));
+  padding: 20px;
+  color: var(--text-main);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
+}
+
+.forced-update h2,
+.about-dialog h2 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.forced-update__body {
+  margin: 0 0 12px;
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.forced-update__sessions ul {
+  max-height: 140px;
+  margin: 0 0 12px;
+  padding-left: 20px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.forced-update__error {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
+}
+
+.forced-update__actions,
+.about-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  align-items: center;
+}
+
+.about-dialog__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0 0 16px;
+  font-size: 12px;
+}
+
+.about-dialog__facts dt {
+  color: var(--text-sub);
+}
+
+.about-dialog__facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-banner__actions button,
+  .host-restart-banner__button,
+  .forced-update__actions button,
+  .about-dialog__actions button {
+    transition: none;
+  }
+}

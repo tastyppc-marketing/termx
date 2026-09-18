@@ -111,6 +111,25 @@ export interface UiStateV1 {
    * `false`.
    */
   readonly hostsCollapsed?: boolean;
+  /**
+   * What the updater remembers across launches. Absent — or unparseable —
+   * means nothing is snoozed and no host restart is owed, which is the state
+   * of a fresh install. Each field is parsed on its own; an empty record is
+   * dropped rather than stored.
+   */
+  readonly updates?: UpdatesState;
+}
+
+export interface UpdatesState {
+  /** Epoch ms of the last completed check. */
+  readonly lastCheckAt?: number;
+  /** The version "Later" was last pressed on; the banner hides it. */
+  readonly snoozedVersion?: string;
+  /**
+   * A host-changing update was installed and the daemon still has to be
+   * restarted to finish it. Only `true` is ever stored, like `hostsCollapsed`.
+   */
+  readonly pendingHostRestart?: boolean;
 }
 
 export const MIN_SIDEBAR_WIDTH = 200;
@@ -369,6 +388,71 @@ function parseHostsCollapsed(value: unknown): boolean | undefined {
   return value === true ? true : undefined;
 }
 
+const MAX_SNOOZED_VERSION_LENGTH = 32;
+
+/**
+ * Per field: `lastCheckAt` must be a finite number, `snoozedVersion` a short
+ * non-empty string, `pendingHostRestart` a literal `true`. Anything else drops
+ * that field, and a record with nothing left drops as a whole.
+ */
+function parseUpdates(value: unknown): UpdatesState | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const next: { -readonly [K in keyof UpdatesState]: UpdatesState[K] } = {};
+  if (typeof record.lastCheckAt === "number" && Number.isFinite(record.lastCheckAt)) {
+    next.lastCheckAt = record.lastCheckAt;
+  }
+  if (
+    typeof record.snoozedVersion === "string" &&
+    record.snoozedVersion.length > 0 &&
+    record.snoozedVersion.length <= MAX_SNOOZED_VERSION_LENGTH
+  ) {
+    next.snoozedVersion = record.snoozedVersion;
+  }
+  if (record.pendingHostRestart === true) {
+    next.pendingHostRestart = true;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+/** Drop the `updates` record when a mutation emptied it. */
+function withUpdates(state: UiStateV1, updates: UpdatesState): UiStateV1 {
+  if (Object.keys(updates).length > 0) {
+    return { ...state, updates };
+  }
+  const next: { -readonly [K in keyof UiStateV1]: UiStateV1[K] } = { ...state };
+  delete next.updates;
+  return next;
+}
+
+/** "Later" on an optional update. Same-ref when that version is already snoozed. */
+export function setUpdateSnooze(state: UiStateV1, version: string): UiStateV1 {
+  if (state.updates?.snoozedVersion === version) {
+    return state;
+  }
+  return withUpdates(state, { ...state.updates, snoozedVersion: version });
+}
+
+/**
+ * Mark (or clear) the daemon restart a host-changing install leaves behind.
+ * Clearing DELETES the field, the same shape as a machine that never owed one.
+ */
+export function setPendingHostRestart(state: UiStateV1, pending: boolean): UiStateV1 {
+  const current = state.updates?.pendingHostRestart === true;
+  if (current === pending) {
+    return state;
+  }
+  const updates: { -readonly [K in keyof UpdatesState]: UpdatesState[K] } = { ...state.updates };
+  if (pending) {
+    updates.pendingHostRestart = true;
+  } else {
+    delete updates.pendingHostRestart;
+  }
+  return withUpdates(state, updates);
+}
+
 /**
  * Fold the Hosts section away, or open it again. Expanding DELETES the field
  * rather than storing `false`: both mean the same thing, and the shorter one
@@ -563,6 +647,7 @@ export function parseUiState(text: string | null): UiStateV1 {
   const sshPanes = parseSshPanes(record.sshPanes);
   const slashCommands = parseSlashCommands(record.slashCommands);
   const hostsCollapsed = parseHostsCollapsed(record.hostsCollapsed);
+  const updates = parseUpdates(record.updates);
   return {
     scopePaths: {
       seeds: parsePathRecord(scopePathsRaw.seeds),
@@ -576,6 +661,7 @@ export function parseUiState(text: string | null): UiStateV1 {
     ...(sshPanes ? { sshPanes } : {}),
     ...(slashCommands ? { slashCommands } : {}),
     ...(hostsCollapsed ? { hostsCollapsed } : {}),
+    ...(updates ? { updates } : {}),
   };
 }
 

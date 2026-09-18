@@ -32,8 +32,10 @@ import {
   workspaceMenu,
   type MenuRow,
   type ViewToggleField,
+  aboutRow,
 } from "./menubar/menus";
 import { PluginsMenu, type PluginsMenuRow } from "./menubar/PluginsMenu";
+import { pickFolder as pickNativeFolder } from "./native/dialog";
 import { tauriListDirs } from "./native/folders";
 import { tauriOpenFolder } from "./native/openFolder";
 import {
@@ -78,6 +80,8 @@ import {
 import { SettingsStore } from "./settings/SettingsStore";
 import { useSettings } from "./settings/useSettings";
 import { ThemeProvider } from "./theme/ThemeProvider";
+import { Welcome } from "./welcome/Welcome";
+import { shouldShowWelcome } from "./welcome/shouldShowWelcome";
 import {
   Sidebar,
   type SidebarConversations,
@@ -102,6 +106,11 @@ import {
 import { StatusBar } from "./statusbar/StatusBar";
 import { useFocusedPaneStatus } from "./statusbar/useFocusedPaneStatus";
 import { useUpdates } from "./updates/useUpdates";
+import { UpdateBanner } from "./updates/UpdateBanner";
+import { ForcedUpdateModal } from "./updates/ForcedUpdateModal";
+import { HostRestartBanner } from "./updates/HostRestartBanner";
+import { AboutDialog } from "./updates/AboutDialog";
+import { needsHostRestart } from "./updates/hostRestart";
 import { ViewerHost, type ViewerApi } from "./viewer/ViewerHost";
 import {
   bootstrapWorkspace,
@@ -371,6 +380,19 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const [featuresOpen, setFeaturesOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  // First-run welcome (workspace root). Decided once at mount: a fresh
+  // settings file, nothing already running, no root chosen. Later launches
+  // find the file (Start writes it, Skip touches it) and never show it again.
+  const [welcomeOpen, setWelcomeOpen] = useState(() => {
+    const liveSessionCount = Object.values(snapshot.paneStates).filter(
+      (pane) => pane.status === "live",
+    ).length;
+    return shouldShowWelcome({
+      settingsWasCreated: settingsStore.wasCreated,
+      liveSessionCount,
+      workspaceRoot: settings.workspaceRoot,
+    });
+  });
   const [folderSearch, setFolderSearch] = useState<FolderSearchTarget | null>(null);
   const [conversationsFull, setConversationsFull] = useState(false);
   const [outputsOpen, setOutputsOpen] = useState(false);
@@ -593,7 +615,44 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
   const paneStatus=useFocusedPaneStatus(controller,focusedSessionId,
     focusedSessionId !== null && focusedPaneLive ? controller.sessionPid?.(focusedSessionId) ?? null : null,
     settings.statusBar);
-  const updates=useUpdates(settings.statusBar);
+  const updates=useUpdates({
+    policy: settings.updatePolicy,
+    snoozedVersion: uiSnapshot.updates?.snoozedVersion ?? null,
+    onSnooze: (version) => controller.setUpdateSnooze(version),
+    // A host-changing install: flag the restart the new UI must finish, then
+    // stop the daemon so the installer can replace its exe.
+    onHostChangeInstall: async () => {
+      controller.setPendingHostRestart(true);
+      await controller.stopHostForUpdate();
+    },
+  });
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const liveSessionCountNow = Object.values(snapshot.paneStates).filter((pane) => pane.status === "live").length;
+  const hostRestartDue = needsHostRestart({
+    uiVersion: updates.version ?? "",
+    hostVersion: snapshot.hostVersion ?? null,
+    hostChanged: uiSnapshot.updates?.pendingHostRestart === true,
+  });
+  const [hostRestartError, setHostRestartError] = useState<string | null>(null);
+  const hostRestartStarted = useRef(false);
+  const restartHost = () => {
+    if (hostRestartStarted.current) return;
+    hostRestartStarted.current = true;
+    setHostRestartError(null);
+    controller.restartHost().catch((error: unknown) => {
+      hostRestartStarted.current = false;
+      setHostRestartError(error instanceof Error ? error.message : String(error));
+    });
+  };
+  // With nothing live there is nothing to lose: finish the update by itself.
+  useEffect(() => {
+    if (hostRestartDue && liveSessionCountNow === 0) restartHost();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostRestartDue, liveSessionCountNow]);
+  const installUpdate = () => {
+    if (updates.update.kind === "ready") void updates.install();
+    else if (updates.update.kind === "checked" || updates.update.kind === "error") void updates.download();
+  };
   const [changingDirectory,setChangingDirectory]=useState(false);
   const statusFocusedId=useRef(focusedSessionId);
   statusFocusedId.current=focusedSessionId;
@@ -1557,6 +1616,12 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         setSettingsOpen(true);
       },
     },
+    {
+      kind: "menu",
+      id: "help",
+      label: "Help",
+      rows: [aboutRow({ openAbout: () => setAboutOpen(true) })],
+    },
   ];
 
   const commitSave = (result: {
@@ -1599,6 +1664,8 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         onRetry={() => connection?.retryNow()}
       />
       <ThemeProvider themeId={settings.theme} />
+      <UpdateBanner update={updates.update} onInstall={installUpdate} onLater={updates.snooze} onNotes={() => void updates.open()} />
+      <HostRestartBanner open={hostRestartDue} liveCount={liveSessionCountNow} onRestart={restartHost} error={hostRestartError} />
       <div className="app-workspace">
         {/* Hidden from the View menu, and only ever from there: the bar the
             toggle lives on stays on screen, so the rail can always come back. */}
@@ -1727,6 +1794,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
         {settingsOpen ? (
           <SettingsSurface
             store={settingsStore}
+            pickFolder={pickNativeFolder}
             onClose={() => setSettingsOpen(false)}
             {...(settingsSection ? { section: settingsSection } : {})}
             {...(settingsPlugins ? { plugins: settingsPlugins } : {})}
@@ -1807,6 +1875,29 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           onCancel={() => setAlreadyOpen(null)}
         />
         <CloseGuard open={closeGuardOpen} onDecide={handleCloseDecision} />
+        <ForcedUpdateModal
+          update={updates.update}
+          sessionTitles={[...snapshot.ungroupedTabs, ...snapshot.groups.flatMap((group) => group.tabs ?? [])]
+            .filter((tab) => tab.status === "live").map((tab) => tab.title)}
+          onInstall={installUpdate}
+          onNotes={() => void updates.open()}
+        />
+        <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} uiVersion={updates.version} hostVersion={snapshot.hostVersion ?? null} />
+        <Welcome
+          open={welcomeOpen}
+          pickFolder={pickNativeFolder}
+          onStart={(root) => {
+            settingsStore.update({ workspaceRoot: root });
+            setWelcomeOpen(false);
+            void controller.createTab({ groupId: null, profile: null });
+          }}
+          onSkip={() => {
+            // Skip must still write the settings file, or the screen would
+            // return on every launch; `update` ignores no-op patches.
+            settingsStore.touch();
+            setWelcomeOpen(false);
+          }}
+        />
         {savePrompt ? (
           <SaveSessionDialog
             open
@@ -1868,7 +1959,7 @@ function ReadyWorkspace({ workspace }: { workspace: BootstrappedWorkspace }) {
           appVersion={updates.version}
           update={updates.update}
           onCheckUpdates={() => void updates.check()}
-          onOpenUpdate={() => void updates.open()}
+          onOpenUpdate={installUpdate}
           changingDirectory={changingDirectory}
           directoryDisabledReason={directoryDisabledReason}
           onChangeDirectory={() => {

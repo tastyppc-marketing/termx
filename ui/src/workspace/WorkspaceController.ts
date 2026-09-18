@@ -54,6 +54,8 @@ import {
   UiStateStore,
   touchRecentFolder,
   updateScopePaths,
+  setPendingHostRestart,
+  setUpdateSnooze,
 } from "./uiState";
 import {
   canMoveItem,
@@ -109,6 +111,10 @@ export type WorkspaceHostClient = Pick<
    */
   probeSession?(sessionId: number): Promise<import("../host/client").SessionProbe>;
   changeDirectory?: HostClient["changeDirectory"];
+  /** The daemon's own version from the auth handshake; absent on fakes. */
+  readonly version?: string;
+  /** Ask the daemon to stop (ends every live session). Absent on fakes. */
+  shutdown?(): void;
 };
 
 export interface WorkspaceAttachmentHub {
@@ -345,6 +351,8 @@ export interface WorkspaceSnapshot {
   activeSessionId: number | null;
   persistence: LayoutPersistenceSnapshot;
   notice: string | null;
+  /** The connected daemon's version, null when the client does not report one. */
+  hostVersion?: string | null;
   /** All window ids in the layout, main first (menus' "Move to <window>").
    * Optional so existing fixtures keep type-checking; the controller always
    * sets it, and absent reads as "just the main window". */
@@ -1379,6 +1387,7 @@ export class WorkspaceController {
       activeSessionId: activeTab ? firstSessionId(activeTab.split) : null,
       persistence,
       notice: this.notice,
+      hostVersion: this.client.version ?? null,
       windowIds: windowIds(layout),
       focusRequest: this.pluginFocusRequest,
     };
@@ -1558,6 +1567,7 @@ export class WorkspaceController {
       key,
       policy,
       policy === "active-tab" ? this.activeTabCwdInScope(key) : null,
+      settings.workspaceRoot,
     );
     try {
       const created = await this.createSessionDownChain(profile, candidates);
@@ -1603,6 +1613,7 @@ export class WorkspaceController {
       key,
       policy,
       policy === "active-tab" ? this.activeTabCwdInScope(key) : null,
+      settings.workspaceRoot,
     );
     try {
       const created = await this.createSessionDownChain(profile, candidates);
@@ -1640,12 +1651,20 @@ export class WorkspaceController {
     toNewWindow = false,
   ): Promise<void> => {
     this.setNotice(null);
-    const profile =
-      target.profile ?? this.settings.getSnapshot().defaultProfile;
+    const settings = this.settings.getSnapshot();
+    const profile = target.profile ?? settings.defaultProfile;
     try {
       const created = await pickFolderAndCreateSession(
         { client: this.client, pickFolder: this.pickFolder },
-        { profile, picker: { title: "Open folder for new terminal" } },
+        {
+          profile,
+          picker: {
+            title: "Open folder for new terminal",
+            ...(settings.workspaceRoot
+              ? { defaultPath: settings.workspaceRoot }
+              : {}),
+          },
+        },
       );
       if (created) {
         await this.addSessionTab(created, target.groupId, toNewWindow);
@@ -3588,6 +3607,41 @@ export class WorkspaceController {
    * be blocked by it, and the open paths await `pluginPanes.flush()` directly,
    * where a failure has somewhere to go.
    */
+  /** "Later" on an optional update: remember the version so it is not auto-installed. */
+  setUpdateSnooze = (version: string): void => {
+    this.uiState.update((state) => setUpdateSnooze(state, version));
+  };
+
+  /** A host-changing update is about to install: remember that the daemon still needs a restart. */
+  setPendingHostRestart = (pending: boolean): void => {
+    this.uiState.update((state) => setPendingHostRestart(state, pending));
+  };
+
+  /**
+   * Stop the daemon so an installer can replace its exe. Live sessions end.
+   * Flushes first: the layout write goes through the socket shutdown removes.
+   */
+  stopHostForUpdate = async (): Promise<void> => {
+    await this.flush();
+    this.client.shutdown?.();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  };
+
+  /**
+   * Finish a host-changing update: stop the old daemon, start the one installed
+   * beside this UI, clear the pending flag, and reload so every client
+   * reconnects to the new daemon. Layout lives host-side, so nothing is lost
+   * but the live sessions themselves.
+   */
+  restartHost = async (): Promise<void> => {
+    await this.stopHostForUpdate();
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("bootstrap_host");
+    this.setPendingHostRestart(false);
+    await this.uiState.flush?.();
+    window.location.reload();
+  };
+
   flush = async (): Promise<void> => {
     await this.persistence.flush();
     await this.flushPluginPanes();
