@@ -1,0 +1,75 @@
+# Builds the NSIS installer and publishes a GitHub release whenever a v* tag
+# lands (pushed by tools/release.ps1). The release body is RELEASE-NOTES.md
+# from the tagged commit with `termx-sha256: <hex>` appended, which is the
+# line the in-app updater requires before it will install anything.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: ui/package-lock.json }
+      - name: Version from tag must match manifests
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $conf = (Get-Content -Raw ui/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          if ($conf -ne $tag) { throw "tag $tag != tauri.conf.json $conf" }
+      - name: Install UI deps
+        run: npm ci
+        working-directory: ui
+      - name: Gates
+        shell: pwsh
+        run: |
+          Push-Location ui
+          npx tsc -p tsconfig.app.json --noEmit --incremental false; if ($LASTEXITCODE) { exit 1 }
+          npx vitest run; if ($LASTEXITCODE) { exit 1 }
+          Pop-Location
+          cargo test --workspace; if ($LASTEXITCODE) { exit 1 }
+          Push-Location ui/src-tauri; cargo test; if ($LASTEXITCODE) { exit 1 }; Pop-Location
+      - name: Build host binaries
+        # termx-output is a second bin target of the termx-host package, not a package of its own.
+        run: cargo build --release -p termx-host --bin termx-host --bin termx-output
+      - name: Stage sidecars
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ui/src-tauri/binaries | Out-Null
+          Copy-Item target/release/termx-host.exe ui/src-tauri/binaries/termx-host-x86_64-pc-windows-msvc.exe
+          Copy-Item target/release/termx-output.exe ui/src-tauri/binaries/termx-output-x86_64-pc-windows-msvc.exe
+      - name: Build installer
+        run: npx tauri build
+        working-directory: ui
+      - name: Sign (no-op until a certificate exists)
+        shell: pwsh
+        run: 'Write-Host "SIGN_COMMAND not configured; installer is unsigned"'
+      - name: Rename, digest, clean-slate check
+        id: pack
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          $src = Get-ChildItem ui/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $out = "TermX-Setup-$v-x64.exe"
+          Copy-Item $src.FullName $out
+          $hash = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+          Add-Content RELEASE-NOTES.md "`ntermx-sha256: $hash"
+          # Clean slate: extract silently into a temp dir and inspect.
+          $probe = Join-Path $env:RUNNER_TEMP "termx-probe"
+          Start-Process -FilePath (Resolve-Path $out) -ArgumentList "/S", "/D=$probe" -Wait
+          $bad = Get-ChildItem $probe -Recurse | Where-Object { $_.Name -in @("portable.flag") -or $_.Extension -in @(".json", ".jsonl") -or ($_.PSIsContainer -and $_.Name -eq "data") }
+          if ($bad) { $bad | ForEach-Object { Write-Host $_.FullName }; throw "installer carries state" }
+          foreach ($f in @("TermX.exe", "termx-host-x86_64-pc-windows-msvc.exe", "termx-output-x86_64-pc-windows-msvc.exe")) {
+            if (-not (Test-Path (Join-Path $probe $f))) { throw "missing $f in installer" }
+          }
+          "asset=$out" >> $env:GITHUB_OUTPUT
+      - name: Publish release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        shell: pwsh
+        run: |
+          gh release create "${{ github.ref_name }}" --title "TermX ${{ github.ref_name }}" --notes-file RELEASE-NOTES.md "${{ steps.pack.outputs.asset }}"
