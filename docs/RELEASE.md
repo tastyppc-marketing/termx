@@ -100,6 +100,23 @@ ends in `termx-sha256: <hex>`. Confirm with:
 gh release view v0.3.0 --repo tastyppc-marketing/termx --json assets,body
 ```
 
+### If the build fails
+
+No release exists until the last CI step runs, so a failed build leaves
+nothing for installs to pick up. Fix the cause on `main` (the version
+manifests and `RELEASE-NOTES.md` are already in place from the release
+commit), then move the tag to the fixed commit and push it again. Deleting
+a tag that never produced a release is safe; never delete one that did.
+
+```powershell
+git push origin :refs/tags/v0.3.0
+git tag -d v0.3.0
+git commit -am "fix: <what CI caught>"
+git tag -a v0.3.0 -m "TermX 0.3.0"
+git push origin main
+git push origin v0.3.0
+```
+
 ## What CI does
 
 `.github/workflows/release.yml` runs on every pushed `v*` tag, on

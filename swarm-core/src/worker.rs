@@ -470,7 +470,7 @@ impl Worker {
             .spawn(move || {
                 // Independent of Worker/open/shutdown future ownership, and
                 // retained through the join and queued-response cleanup below.
-                let _lifetime = lifetime;
+                let lifetime = lifetime;
                 let result = thread.join().map_err(|_| WorkerError::Panicked);
                 let queued = {
                     let mut state = lock(&shared);
@@ -482,6 +482,11 @@ impl Worker {
                     std::mem::take(&mut state.queue)
                 };
                 drop(queued);
+                // Release the lifetime BEFORE proving exit. A caller resuming
+                // from shutdown() re-claims the authority at once; if this
+                // copy were still alive, that claim would see the lock file
+                // held and fail with Busy (seen on a loaded CI runner).
+                drop(lifetime);
                 let _ = exit_tx.send(result);
             });
         // Even cancelled open futures close admission; no detached waiting worker.

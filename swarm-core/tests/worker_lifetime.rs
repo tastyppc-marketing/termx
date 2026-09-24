@@ -224,3 +224,39 @@ async fn normal_shutdown_releases_lifetime_without_retained_client_keeping_it_al
         "a live idle SQLite owner must retain its lifetime"
     );
 }
+
+/// A lifetime whose release takes real time, so a shutdown that resolves
+/// before the reaper has dropped its copy is caught every run, not only on a
+/// loaded machine.
+struct SlowProbe {
+    released: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl Drop for SlowProbe {
+    fn drop(&mut self) {
+        std::thread::sleep(Duration::from_millis(150));
+        if let Some(sender) = self.released.lock().unwrap().take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_shutdown_has_already_released_the_lifetime() {
+    let path = support::retained_db("life-shutdown-released");
+    let (sender, mut signal) = oneshot::channel();
+    let guard = Arc::new(SlowProbe {
+        released: Mutex::new(Some(sender)),
+    });
+    let worker = Worker::open_with_lifetime(path, WorkerConfig::default(), guard.clone())
+        .await
+        .unwrap();
+    drop(guard);
+    worker.shutdown().await.unwrap();
+    // The broker re-claims its authority the moment shutdown resolves; the
+    // reaper must have dropped the last lifetime copy before signalling exit.
+    assert!(
+        signal.try_recv().is_ok(),
+        "shutdown resolved while the reaper still held the lifetime"
+    );
+}
