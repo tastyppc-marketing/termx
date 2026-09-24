@@ -89,6 +89,18 @@ if (-not $Notes) {
   [void](Read-Host)
 }
 
+# --- Say out loud what kind of release this is, so nobody has to guess --------
+$kind = if ($Force) {
+  "REQUIRED update (-Force): every older install must update before it can continue"
+} else {
+  "optional update: older installs see a banner with Install and Later"
+}
+Write-Host ""
+Write-Host "==> $tag is an $kind"
+if ($hostChanged) { Write-Host "==> host daemon changed: the update restarts the daemon after installing" }
+Write-Host "==> marker lines at the top of RELEASE-NOTES.md: $(if ($header) { $header -join ' | ' } else { '(none)' })"
+Write-Host ""
+
 # --- Commit, tag, push ---------------------------------------------------------
 git add -A
 if ($LASTEXITCODE -ne 0) { throw "git add failed" }
@@ -100,4 +112,5 @@ git push origin main
 if ($LASTEXITCODE -ne 0) { throw "git push origin main failed" }
 git push origin $tag
 if ($LASTEXITCODE -ne 0) { throw "git push origin $tag failed" }
-Write-Host "Pushed $tag. Watch: https://github.com/tastyppc-marketing/termx/actions"
+Write-Host "Pushed $tag ($kind)."
+Write-Host "Watch: https://github.com/tastyppc-marketing/termx/actions"

@@ -61,9 +61,36 @@ Then it does the following, in order:
 5. Commits `chore(release): v<version>`, creates the annotated tag, pushes
    `main` and then the tag.
 
-`-Force` adds `termx-update: force` to the notes. Every older install then
-has to update before work can continue, so use it only for releases that an
-older UI cannot safely run against.
+### Optional or required: the two commands
+
+An **optional** update (the default). Older installs see a banner with
+Install and Later, and installs on the "auto" policy pick it up silently at
+the next launch:
+
+```powershell
+git checkout main
+git pull --ff-only
+powershell -NoProfile -File tools\release.ps1 -Version 0.3.1
+```
+
+A **required** update. Add `-Force`. The script writes `termx-update: force`
+as the first line of the notes, and every older install then shows a
+blocking dialog that installs the update before TermX continues. Later is
+not offered, the update policy is ignored, and any newer forced release also
+forces installs that skipped this one:
+
+```powershell
+git checkout main
+git pull --ff-only
+powershell -NoProfile -File tools\release.ps1 -Version 0.3.2 -Force
+```
+
+Use `-Force` when an older UI cannot safely run against the new daemon or
+the new release fixes something that must not stay in the field. The script
+prints `REQUIRED update (-Force)` or `optional update` before it commits, so
+the kind of release is never a guess. To confirm after the build, the
+release body on GitHub starts with `termx-update: force` for a required
+release and lacks that line for an optional one.
 
 Watch the build at https://github.com/tastyppc-marketing/termx/actions. When
 it finishes, the release exists with the installer attached and a body that
